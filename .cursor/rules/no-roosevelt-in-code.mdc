@@ -1,0 +1,157 @@
+---
+alwaysApply: true
+description: Prohibition of Rooseveltian language in code and technical content
+---
+
+# No Roosevelt Language in Code
+
+## Strict Prohibition
+
+**ABSOLUTELY NO Roosevelt persona in:**
+- Source code (Python, JavaScript, TypeScript, etc.)
+- Log statements (logger.info, console.log, etc.)
+- Code comments and docstrings
+- Variable/function/class names
+- Error messages
+- Debug output
+- Technical documentation files
+
+## Banned Phrases in Code
+
+**Never use in code:**
+- BULLY!
+- By George!
+- Roosevelt
+- cavalry
+- Rough Riders
+- trust busting / trust-busting
+- Square Deal
+- charge forward / charging forward
+- Big Stick
+- mounted and ready
+- saddled and ready
+
+## Professional Alternatives
+
+### Logging Statements
+
+```python
+# ❌ WRONG
+logger.info("🏇 BULLY! Messaging service initialized!")
+logger.info("🔍 ROOSEVELT: Searching for documents")
+logger.info("⚡ By George! Processing complete!")
+
+# ✅ CORRECT
+logger.info("Messaging service initialized")
+logger.info("Searching for documents")
+logger.info("Processing complete")
+```
+
+### Comments
+
+```python
+# ❌ WRONG
+# BULLY! This function charges forward with data processing
+# Roosevelt's trust-busting connection manager
+# By George! This is a well-organized cavalry charge
+
+# ✅ CORRECT
+# Process incoming data and return validated results
+# Centralized database connection manager
+# Efficient parallel processing implementation
+```
+
+### Console Logging (Frontend)
+
+```javascript
+// ❌ WRONG
+console.log('🏇 ROOSEVELT: Loading conversation from localStorage');
+console.log('💬 BULLY! Connected to room');
+console.log('📦 ROOSEVELT: Archiving entry');
+
+// ✅ CORRECT
+console.log('Loading conversation from localStorage');
+console.log('Connected to room');
+console.log('Archiving entry');
+```
+
+### Function/Class Names
+
+```python
+# ❌ WRONG
+def roosevelt_trust_bust_connection():
+    pass
+
+class RoughRiderService:
+    pass
+
+# ✅ CORRECT
+def cleanup_connections():
+    pass
+
+class ConnectionService:
+    pass
+```
+
+## Emoji Usage in Logs
+
+**Keep emojis for visual categorization, remove Roosevelt language:**
+
+```python
+# ✅ GOOD - Emoji for category, professional text
+logger.info("🔍 Searching documents")
+logger.info("✅ Service initialized")  
+logger.info("❌ Failed to process request")
+logger.info("🔄 Reloading configuration")
+
+# ❌ BAD - Emoji + Roosevelt language
+logger.info("🏇 BULLY! Charging forward!")
+logger.info("🎯 ROOSEVELT: Starting process")
+```
+
+## Quick Cleanup Patterns
+
+When cleaning up existing code, replace:
+
+1. `BULLY!` → (remove entirely, keep rest of message)
+2. `ROOSEVELT:` → (remove entirely, keep rest of message)
+3. `By George!` → (remove entirely)
+4. `cavalry charge` → `operation` or `process`
+5. `charging forward` → `processing` or `starting`
+6. `mounted and ready` → `initialized` or `ready`
+7. `saddled and ready` → `initialized` or `ready`
+8. `trust busting` → `cleanup` or `optimization`
+
+## Why This Matters
+
+1. **Professionalism**: Logs may be viewed by clients, stakeholders, or other developers
+2. **Searchability**: Technical terms are easier to search than personality phrases
+3. **Internationalization**: Roosevelt references don't translate well
+4. **Clarity**: Professional language is clearer and more direct
+5. **Maintenance**: Future developers expect standard technical language
+
+## Exception
+
+Roosevelt persona IS allowed in:
+- Conversations with the user (agent responses)
+- Cursor rule files (for instructing the agent)
+- Historical documentation in `docs/historical_summaries/`
+
+Roosevelt persona is NOT allowed in:
+- Any production code files
+- Any log statements
+- Any comments or docstrings
+- Any technical documentation
+
+## Agent Behavior
+
+When writing new code:
+- Use professional, clear technical language
+- Keep emojis for categorization (optional)
+- Remove all Roosevelt references
+- Write logs that could appear in production systems
+
+When updating existing code:
+- Clean up Roosevelt language when you touch a file
+- Don't need to clean entire codebase at once
+- Focus on files you're actively modifying

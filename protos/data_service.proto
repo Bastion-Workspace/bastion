@@ -1,0 +1,404 @@
+syntax = "proto3";
+
+package dataservice;
+
+// ==================== Data Service ====================
+service DataService {
+  // Workspace operations
+  rpc CreateWorkspace(CreateWorkspaceRequest) returns (WorkspaceResponse);
+  rpc ListWorkspaces(ListWorkspacesRequest) returns (WorkspaceListResponse);
+  rpc GetWorkspace(GetWorkspaceRequest) returns (WorkspaceResponse);
+  rpc UpdateWorkspace(UpdateWorkspaceRequest) returns (WorkspaceResponse);
+  rpc DeleteWorkspace(DeleteWorkspaceRequest) returns (DeleteResponse);
+  
+  // Database operations
+  rpc CreateDatabase(CreateDatabaseRequest) returns (DatabaseResponse);
+  rpc ListDatabases(ListDatabasesRequest) returns (DatabaseListResponse);
+  rpc GetDatabase(GetDatabaseRequest) returns (DatabaseResponse);
+  rpc DeleteDatabase(DeleteDatabaseRequest) returns (DeleteResponse);
+  
+  // Table operations
+  rpc CreateTable(CreateTableRequest) returns (TableResponse);
+  rpc ListTables(ListTablesRequest) returns (TableListResponse);
+  rpc GetTable(GetTableRequest) returns (TableResponse);
+  rpc DeleteTable(DeleteTableRequest) returns (DeleteResponse);
+  rpc GetTableData(GetTableDataRequest) returns (TableDataResponse);
+  rpc InsertRow(InsertRowRequest) returns (RowResponse);
+  rpc UpdateRow(UpdateRowRequest) returns (RowResponse);
+  rpc UpdateCell(UpdateCellRequest) returns (RowResponse);
+  rpc DeleteRow(DeleteRowRequest) returns (DeleteResponse);
+  
+  // Import operations
+  rpc PreviewImport(PreviewImportRequest) returns (PreviewImportResponse);
+  rpc ExecuteImport(ExecuteImportRequest) returns (ImportJobResponse);
+  rpc GetImportStatus(GetImportStatusRequest) returns (ImportJobResponse);
+  
+  // Query operations
+  rpc ExecuteSQLQuery(SQLQueryRequest) returns (QueryResultResponse);
+  rpc ExecuteNaturalLanguageQuery(NLQueryRequest) returns (QueryResultResponse);
+  
+  // Transformation operations
+  rpc ApplyFilter(FilterRequest) returns (TransformResultResponse);
+  rpc ApplyAggregation(AggregationRequest) returns (TransformResultResponse);
+  rpc ApplyJoin(JoinRequest) returns (TransformResultResponse);
+  
+  // Visualization operations
+  rpc GenerateVisualization(VisualizationRequest) returns (VisualizationResponse);
+  rpc ListVisualizations(ListVisualizationsRequest) returns (VisualizationListResponse);
+  
+  // Styling operations
+  rpc CreateStylingRule(CreateStylingRuleRequest) returns (StylingRuleResponse);
+  rpc GetStylingRules(GetStylingRulesRequest) returns (StylingRulesResponse);
+  rpc ApplyStylingToData(ApplyStylingRequest) returns (StyledDataResponse);
+  
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ==================== Common Messages ====================
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+  string service_name = 2;
+  string version = 3;
+}
+
+message DeleteResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// ==================== Workspace Messages ====================
+message CreateWorkspaceRequest {
+  string user_id = 1;
+  string name = 2;
+  string description = 3;
+  string icon = 4;
+  string color = 5;
+}
+
+message ListWorkspacesRequest {
+  string user_id = 1;
+}
+
+message GetWorkspaceRequest {
+  string workspace_id = 1;
+}
+
+message UpdateWorkspaceRequest {
+  string workspace_id = 1;
+  string name = 2;
+  string description = 3;
+  string icon = 4;
+  string color = 5;
+  bool is_pinned = 6;
+}
+
+message DeleteWorkspaceRequest {
+  string workspace_id = 1;
+}
+
+message WorkspaceResponse {
+  string workspace_id = 1;
+  string user_id = 2;
+  string name = 3;
+  string description = 4;
+  string icon = 5;
+  string color = 6;
+  bool is_pinned = 7;
+  string metadata_json = 8;
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+message WorkspaceListResponse {
+  repeated WorkspaceResponse workspaces = 1;
+  int32 total_count = 2;
+}
+
+// ==================== Database Messages ====================
+message CreateDatabaseRequest {
+  string workspace_id = 1;
+  string name = 2;
+  string description = 3;
+  string source_type = 4;
+}
+
+message ListDatabasesRequest {
+  string workspace_id = 1;
+}
+
+message GetDatabaseRequest {
+  string database_id = 1;
+}
+
+message DeleteDatabaseRequest {
+  string database_id = 1;
+}
+
+message DatabaseResponse {
+  string database_id = 1;
+  string workspace_id = 2;
+  string name = 3;
+  string description = 4;
+  string source_type = 5;
+  int32 table_count = 6;
+  int64 total_rows = 7;
+  string created_at = 8;
+  string metadata_json = 9;
+  string updated_at = 10;
+}
+
+message DatabaseListResponse {
+  repeated DatabaseResponse databases = 1;
+  int32 total_count = 2;
+}
+
+// ==================== Table Messages ====================
+message CreateTableRequest {
+  string database_id = 1;
+  string name = 2;
+  string description = 3;
+  string schema_json = 4;
+}
+
+message ListTablesRequest {
+  string database_id = 1;
+}
+
+message TableListResponse {
+  repeated TableResponse tables = 1;
+  int32 total_count = 2;
+}
+
+message GetTableRequest {
+  string table_id = 1;
+}
+
+message DeleteTableRequest {
+  string table_id = 1;
+}
+
+message GetTableDataRequest {
+  string table_id = 1;
+  int32 offset = 2;
+  int32 limit = 3;
+}
+
+message InsertRowRequest {
+  string table_id = 1;
+  string row_data_json = 2;
+}
+
+message UpdateRowRequest {
+  string table_id = 1;
+  string row_id = 2;
+  string row_data_json = 3;
+}
+
+message UpdateCellRequest {
+  string table_id = 1;
+  string row_id = 2;
+  string column_name = 3;
+  string value_json = 4;
+}
+
+message DeleteRowRequest {
+  string table_id = 1;
+  string row_id = 2;
+}
+
+message TableResponse {
+  string table_id = 1;
+  string database_id = 2;
+  string name = 3;
+  string description = 4;
+  int32 row_count = 5;
+  string schema_json = 6;
+  string styling_rules_json = 7;
+  string metadata_json = 8;
+  string created_at = 9;
+  string updated_at = 10;
+}
+
+message TableDataResponse {
+  string table_id = 1;
+  repeated RowResponse rows = 2;
+  int32 total_rows = 3;
+  string schema_json = 4;
+}
+
+message RowResponse {
+  string row_id = 1;
+  string row_data_json = 2;
+  int32 row_index = 3;
+  string row_color = 4;
+}
+
+// ==================== Import Messages ====================
+message PreviewImportRequest {
+  string workspace_id = 1;
+  string file_path = 2;
+  string file_type = 3;
+  int32 preview_rows = 4;
+}
+
+message PreviewImportResponse {
+  repeated string column_names = 1;
+  repeated string inferred_types = 2;
+  string preview_data_json = 3;
+  int32 estimated_rows = 4;
+}
+
+message ExecuteImportRequest {
+  string workspace_id = 1;
+  string database_id = 2;
+  string table_name = 3;
+  string file_path = 4;
+  string field_mapping_json = 5;
+}
+
+message ImportJobResponse {
+  string job_id = 1;
+  string status = 2;
+  int32 rows_processed = 3;
+  int32 rows_total = 4;
+  string error_log = 5;
+  string started_at = 6;
+  string completed_at = 7;
+  string workspace_id = 8;
+  string database_id = 9;
+  string table_id = 10;
+  string source_file = 11;
+  int32 progress_percent = 12;
+}
+
+message GetImportStatusRequest {
+  string job_id = 1;
+}
+
+// ==================== Query Messages ====================
+message SQLQueryRequest {
+  string table_id = 1;
+  string sql_query = 2;
+  int32 limit = 3;
+}
+
+message NLQueryRequest {
+  string workspace_id = 1;
+  string natural_language_query = 2;
+  bool include_documents = 3;
+}
+
+message QueryResultResponse {
+  string query_id = 1;
+  repeated string column_names = 2;
+  string results_json = 3;
+  int32 result_count = 4;
+  int32 execution_time_ms = 5;
+  string generated_sql = 6;
+  string error_message = 7;
+}
+
+// ==================== Transformation Messages ====================
+message FilterRequest {
+  string table_id = 1;
+  string filter_json = 2;
+}
+
+message AggregationRequest {
+  string table_id = 1;
+  string aggregation_json = 2;
+}
+
+message JoinRequest {
+  string left_table_id = 1;
+  string right_table_id = 2;
+  string join_config_json = 3;
+}
+
+message TransformResultResponse {
+  string transformation_id = 1;
+  string result_preview_json = 2;
+  int32 result_rows = 3;
+}
+
+// ==================== Visualization Messages ====================
+message VisualizationRequest {
+  string workspace_id = 1;
+  string table_id = 2;
+  string name = 3;
+  string viz_type = 4;
+  string config_json = 5;
+  string color_scheme = 6;
+  string created_by = 7;
+}
+
+message ListVisualizationsRequest {
+  string workspace_id = 1;
+}
+
+message VisualizationResponse {
+  string visualization_id = 1;
+  string workspace_id = 2;
+  string table_id = 3;
+  string name = 4;
+  string viz_type = 5;
+  string config_json = 6;
+  string color_scheme = 7;
+  bool is_pinned = 8;
+  string created_at = 9;
+}
+
+message VisualizationListResponse {
+  repeated VisualizationResponse visualizations = 1;
+  int32 total_count = 2;
+}
+
+// ==================== Styling Messages ====================
+message CreateStylingRuleRequest {
+  string table_id = 1;
+  string rule_name = 2;
+  string rule_type = 3;
+  string target_column = 4;
+  string condition_json = 5;
+  string color = 6;
+  string background_color = 7;
+  int32 priority = 8;
+  string created_by = 9;
+}
+
+message GetStylingRulesRequest {
+  string table_id = 1;
+}
+
+message ApplyStylingRequest {
+  string table_id = 1;
+  string data_json = 2;
+}
+
+message StylingRuleResponse {
+  string rule_id = 1;
+  string table_id = 2;
+  string rule_name = 3;
+  string rule_type = 4;
+  string target_column = 5;
+  string condition_json = 6;
+  string color = 7;
+  string background_color = 8;
+  int32 priority = 9;
+  bool is_active = 10;
+}
+
+message StylingRulesResponse {
+  repeated StylingRuleResponse rules = 1;
+  int32 total_count = 2;
+}
+
+message StyledDataResponse {
+  string styled_data_json = 1;
+  repeated StylingRuleResponse applied_rules = 2;
+}
+
+

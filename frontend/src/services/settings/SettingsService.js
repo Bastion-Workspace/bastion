@@ -1,0 +1,71 @@
+import ApiServiceBase from '../base/ApiServiceBase';
+
+class SettingsService extends ApiServiceBase {
+  // Settings methods
+  getSettings = async () => {
+    return this.get('/api/settings');
+  }
+
+  getSettingsByCategory = async (category) => {
+    return this.get(`/api/settings/${category}`);
+  }
+
+  setSettingValue = async (key, { value, description = '', category = 'general' }) => {
+    return this.put(`/api/settings/${encodeURIComponent(key)}`, {
+      key,
+      value,
+      description,
+      category
+    });
+  }
+
+  updateSetting = async (key, value) => {
+    return this.post('/api/settings', { key, value });
+  }
+
+  // Model management methods
+  getAvailableModels = async () => {
+    return this.get('/api/models/available');
+  }
+
+  getEnabledModels = async () => {
+    return this.get('/api/models/enabled');
+  }
+
+  setEnabledModels = async (modelIds) => {
+    return this.post('/api/models/enabled', { model_ids: modelIds });
+  }
+
+  getCurrentModel = async () => {
+    return this.get('/api/models/current');
+  }
+
+  selectModel = async (modelName) => {
+    return this.post('/api/models/select', { model_name: modelName });
+  }
+
+
+  // User timezone methods
+  getUserTimezone = async () => {
+    return this.get('/api/settings/user/timezone');
+  }
+
+  setUserTimezone = async (timezoneData) => {
+    return this.put('/api/settings/user/timezone', timezoneData);
+  }
+
+  // Prompt settings methods
+  getPromptSettings = async () => {
+    return this.get('/api/settings/prompt');
+  }
+
+  updatePromptSettings = async (settings) => {
+    return this.post('/api/settings/prompt', settings);
+  }
+
+  getPromptOptions = async () => {
+    return this.get('/api/settings/prompt/options');
+  }
+}
+
+export default new SettingsService();

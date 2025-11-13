@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package vector_service;
+
+// Vector Service - Embedding generation and caching ONLY
+// (Qdrant operations handled by caller)
+service VectorService {
+  // Embedding Generation
+  rpc GenerateEmbedding(EmbeddingRequest) returns (EmbeddingResponse);
+  rpc GenerateBatchEmbeddings(BatchEmbeddingRequest) returns (BatchEmbeddingResponse);
+  
+  // Cache Management
+  rpc ClearEmbeddingCache(ClearCacheRequest) returns (ClearCacheResponse);
+  rpc GetCacheStats(CacheStatsRequest) returns (CacheStatsResponse);
+  
+  // Health Check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ============================================================================
+// Embedding Generation Messages
+// ============================================================================
+
+message EmbeddingRequest {
+  string text = 1;
+  string model = 2;  // Optional, defaults to service config
+}
+
+message EmbeddingResponse {
+  repeated float embedding = 1;
+  int32 token_count = 2;
+  string model = 3;
+  bool from_cache = 4;  // Indicates if result came from cache
+}
+
+message BatchEmbeddingRequest {
+  repeated string texts = 1;
+  string model = 2;  // Optional
+  int32 batch_size = 3;  // Optional, for parallel processing
+}
+
+message BatchEmbeddingResponse {
+  repeated EmbeddingVector embeddings = 1;
+  int32 total_tokens = 2;
+  string model = 3;
+  int32 cache_hits = 4;  // How many came from cache
+  int32 cache_misses = 5;  // How many were generated
+}
+
+message EmbeddingVector {
+  repeated float vector = 1;
+  int32 index = 2;
+  int32 token_count = 3;
+  bool from_cache = 4;
+}
+
+// ============================================================================
+// Cache Management Messages
+// ============================================================================
+
+message ClearCacheRequest {
+  bool clear_embeddings = 1;  // Clear embedding cache
+  string content_hash = 2;     // Optional: clear specific hash
+}
+
+message ClearCacheResponse {
+  bool success = 1;
+  int32 entries_cleared = 2;
+  string error = 3;
+}
+
+message CacheStatsRequest {}
+
+message CacheStatsResponse {
+  int64 embedding_cache_size = 1;
+  int64 embedding_cache_hits = 2;
+  int64 embedding_cache_misses = 3;
+  float cache_hit_rate = 4;
+  int32 ttl_seconds = 5;
+}
+
+// ============================================================================
+// Health Check Messages
+// ============================================================================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;  // "healthy", "degraded", "unhealthy"
+  bool openai_available = 2;
+  string service_version = 3;
+  map<string, string> details = 4;
+}

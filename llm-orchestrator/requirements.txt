@@ -1,0 +1,33 @@
+# gRPC dependencies (latest stable - install in correct order)
+grpcio==1.76.0
+grpcio-tools==1.76.0
+grpcio-health-checking==1.76.0
+grpcio-reflection==1.76.0
+
+# LangGraph and LangChain (match backend versions)
+langgraph==0.6.3
+langgraph-checkpoint-postgres>=2.0.0
+langchain==0.3.27
+langchain-core==0.3.72
+langchain-openai==0.3.28
+langchain-community==0.3.27
+langsmith==0.4.13
+
+# Database
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+sqlalchemy==2.0.36
+
+# Async support
+aiohttp>=3.11.11
+httpx==0.28.1
+aiofiles==24.1.0
+
+# Data validation (match backend versions)
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# Utilities
+python-dotenv==1.0.1
+numpy==1.26.4
+

@@ -1,0 +1,207 @@
+# Streaming JSON Format - Web API Standards
+
+**CRITICAL:** All streaming responses to web frontends MUST use valid JSON, not Python dict representations.
+
+## The Golden Rule
+
+**ALWAYS use `json.dumps()` to serialize data before streaming to the frontend.**
+
+### Why This Matters
+
+JavaScript's `JSON.parse()` requires valid JSON with double quotes:
+```json
+{"type": "status", "content": "..."}  ✅ Valid JSON
+```
+
+Python's string representation uses single quotes and won't parse:
+```python
+{'type': 'status', 'content': '...'}  ❌ Invalid for JavaScript
+```
+
+## Centralized Formatting Function
+
+### Location: `/opt/bastion/backend/api/grpc_orchestrator_proxy.py`
+
+The **single source of truth** for SSE message formatting:
+
+```python
+def format_sse_message(data: Dict[str, Any]) -> str:
+    """
+    Centralized SSE message formatter - converts Python dict to proper JSON format
+    
+    This ensures all streaming responses use valid JSON with double quotes,
+    not Python dict repr with single quotes.
+    
+    Args:
+        data: Dictionary to serialize
+        
+    Returns:
+        SSE-formatted message with proper JSON
+    """
+    json_str = json.dumps(data)
+    return f"data: {json_str}\n\n"
+```
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    LLM Orchestrator Service                  │
+│                    (Python on port 50051)                    │
+│                                                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
+│  │Research Agent│  │  Chat Agent  │  │ Future Agent │     │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘     │
+│         │                  │                  │              │
+│         └──────────────────┴──────────────────┘              │
+│                            │                                 │
+│                      gRPC Protobuf                          │
+│                  (orchestrator_pb2.ChatChunk)               │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│              Backend: grpc_orchestrator_proxy.py             │
+│                                                              │
+│            ┌────────────────────────────────┐               │
+│            │   format_sse_message()         │               │
+│            │   - Converts dict → JSON       │               │
+│            │   - Adds SSE formatting        │               │
+│            │   - Used by ALL agents         │               │
+│            └────────────────────────────────┘               │
+│                            │                                 │
+│                   Server-Sent Events                        │
+│              data: {"type": "status", ...}                  │
+└────────────────────────────┬────────────────────────────────┘
+                             │
+                             ▼
+┌─────────────────────────────────────────────────────────────┐
+│                     React Frontend                           │
+│                  (JavaScript in browser)                     │
+│                                                              │
+│                   JSON.parse() ✅                            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Usage Pattern
+
+### ✅ CORRECT: Use centralized formatter
+
+```python
+# In grpc_orchestrator_proxy.py or similar streaming endpoint
+from backend.api.grpc_orchestrator_proxy import format_sse_message
+
+async def stream_response():
+    # Convert gRPC chunk to SSE
+    yield format_sse_message({
+        'type': 'status',
+        'content': chunk.message,
+        'agent': chunk.agent_name,
+        'timestamp': chunk.timestamp
+    })
+    
+    yield format_sse_message({
+        'type': 'content',
+        'content': final_response
+    })
+    
+    yield format_sse_message({
+        'type': 'done',
+        'conversation_id': conv_id
+    })
+```
+
+### ❌ WRONG: Manual string formatting
+
+```python
+# DON'T DO THIS - produces invalid JSON with single quotes
+yield f"data: {{'type': 'status', 'content': '{message}'}}\n\n"
+
+# DON'T DO THIS - error-prone escaping
+yield f'data: {{"type": "status", "content": "{message}"}}\n\n'
+
+# DON'T DO THIS - Python repr
+yield f"data: {str(data_dict)}\n\n"
+```
+
+## Standard Message Types
+
+All streaming responses should use these standard types:
+
+```python
+# Status update (progress, intermediate steps)
+{'type': 'status', 'content': '...', 'agent': 'agent_name', 'timestamp': '...'}
+
+# Content chunk (main response)
+{'type': 'content', 'content': '...', 'agent': 'agent_name'}
+
+# Completion signal
+{'type': 'complete', 'content': '...', 'agent': 'agent_name'}
+
+# Error notification
+{'type': 'error', 'content': '...', 'agent': 'agent_name'}
+
+# Final done event
+{'type': 'done', 'conversation_id': '...'}
+```
+
+## Adding New Agent Streaming
+
+When creating a new agent that streams responses:
+
+1. **Agent returns gRPC ChatChunk** (in llm-orchestrator)
+   ```python
+   yield orchestrator_pb2.ChatChunk(
+       type="status",
+       message="Processing...",
+       agent_name="my_new_agent"
+   )
+   ```
+
+2. **Proxy converts to JSON** (in backend - automatic!)
+   ```python
+   # Already handled by grpc_orchestrator_proxy.py
+   # Just yields through existing format_sse_message()
+   ```
+
+3. **Frontend receives valid JSON** (automatic!)
+   ```javascript
+   // Just works with JSON.parse()
+   const data = JSON.parse(line.slice(6)); // Remove "data: "
+   ```
+
+## Why Centralized?
+
+✅ **Single source of truth** - one function handles all JSON serialization  
+✅ **Automatic escaping** - `json.dumps()` handles quotes, newlines, unicode  
+✅ **Type safety** - Dict[str, Any] parameter ensures correctness  
+✅ **Future-proof** - add new message types in one place  
+✅ **No duplicate code** - all agents benefit from same formatter  
+✅ **Standard compliance** - follows SSE and JSON specifications
+
+## Testing Streaming
+
+When testing new agents, verify JSON format:
+
+```bash
+# Good - can parse as JSON
+data: {"type": "status", "content": "Starting research..."}
+
+# Bad - can't parse as JSON
+data: {'type': 'status', 'content': 'Starting research...'}
+```
+
+Check browser console for parse errors:
+```javascript
+⚠️ Failed to parse stream data: SyntaxError: Expected property name or '}' in JSON
+```
+
+If you see this error, you're sending Python dict repr instead of JSON!
+
+## Remember
+
+**Anytime data crosses a service boundary to a web frontend, serialize to JSON using `format_sse_message()`.**
+
+This is not negotiable - it's a requirement of the web standards and JavaScript's JSON parser.
+
+**By George, proper JSON formatting ensures smooth cavalry charges between backend and frontend!** 🏇

@@ -1,0 +1,406 @@
+/* Global CSS Variables for Theme Support */
+:root {
+  /* Light theme variables */
+  --bg-primary: #ffffff;
+  --bg-secondary: #f5f5f5;
+  --bg-tertiary: #fafafa;
+  --text-primary: #212121;
+  --text-secondary: #757575;
+  --text-disabled: #bdbdbd;
+  --border-primary: #e0e0e0;
+  --border-secondary: #bdbdbd;
+  --shadow-light: rgba(0, 0, 0, 0.1);
+  --shadow-medium: rgba(0, 0, 0, 0.2);
+  --shadow-heavy: rgba(0, 0, 0, 0.3);
+  --overlay-light: rgba(0, 0, 0, 0.04);
+  --overlay-medium: rgba(0, 0, 0, 0.08);
+  --overlay-heavy: rgba(0, 0, 0, 0.12);
+  
+  /* Roosevelt's Compact Font Sizes */
+  --font-size-xs: 0.7rem;    /* 11.2px */
+  --font-size-sm: 0.8rem;    /* 12.8px */
+  --font-size-base: 0.875rem; /* 14px instead of 16px */
+  --font-size-md: 0.95rem;   /* 15.2px */
+  --font-size-lg: 1.0rem;    /* 16px */
+  --font-size-xl: 1.125rem;  /* 18px */
+}
+
+/* Dark theme variables */
+.dark-mode {
+  --bg-primary: #1e1e1e;
+  --bg-secondary: #2d2d2d;
+  --bg-tertiary: #424242;
+  --text-primary: #ffffff;
+  --text-secondary: #b3b3b3;
+  --text-disabled: #666666;
+  --border-primary: #424242;
+  --border-secondary: #616161;
+  --shadow-light: rgba(0, 0, 0, 0.3);
+  --shadow-medium: rgba(0, 0, 0, 0.5);
+  --shadow-heavy: rgba(0, 0, 0, 0.7);
+  --overlay-light: rgba(255, 255, 255, 0.08);
+  --overlay-medium: rgba(255, 255, 255, 0.16);
+  --overlay-heavy: rgba(255, 255, 255, 0.24);
+}
+
+/* Smooth transitions for theme switching */
+* {
+  transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease, box-shadow 0.3s ease;
+}
+
+/* ROOSEVELT'S COMPACT UI - Global Font Size Overrides */
+body {
+  font-size: var(--font-size-base) !important;
+  line-height: 1.4;
+  /* Safe area support for iOS notch/home indicator */
+  padding-top: constant(safe-area-inset-top);
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: constant(safe-area-inset-bottom);
+  padding-bottom: env(safe-area-inset-bottom);
+}
+
+/* MUI Component Overrides for Compact Layout */
+.MuiTypography-body1 {
+  font-size: var(--font-size-base) !important;
+}
+
+.MuiTypography-body2 {
+  font-size: var(--font-size-sm) !important;
+}
+
+.MuiTypography-caption {
+  font-size: var(--font-size-xs) !important;
+}
+
+.MuiTypography-h6 {
+  font-size: var(--font-size-lg) !important;
+}
+
+.MuiListItemText-primary {
+  font-size: var(--font-size-sm) !important;
+}
+
+.MuiListItemText-secondary {
+  font-size: var(--font-size-xs) !important;
+}
+
+.MuiChip-label {
+  font-size: var(--font-size-xs) !important;
+}
+
+.MuiButton-root {
+  font-size: var(--font-size-sm) !important;
+}
+
+.MuiInputBase-input {
+  font-size: var(--font-size-base) !important;
+}
+
+.MuiFormLabel-root {
+  font-size: var(--font-size-sm) !important;
+}
+
+/* File Tree Compact Spacing */
+.MuiListItem-root {
+  padding-top: 2px !important;
+  padding-bottom: 2px !important;
+  min-height: 32px !important;
+}
+
+.MuiListItemButton-root {
+  min-height: 32px !important;
+  padding-top: 4px !important;
+  padding-bottom: 4px !important;
+}
+
+/* Custom scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-secondary);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* Focus styles for accessibility */
+*:focus {
+  outline: 2px solid #1976d2;
+  outline-offset: 2px;
+}
+
+/* Dark mode specific focus styles */
+.dark-mode *:focus {
+  outline-color: #90caf9;
+}
+
+/* Custom utility classes */
+.bg-primary {
+  background-color: var(--bg-primary);
+}
+
+.bg-secondary {
+  background-color: var(--bg-secondary);
+}
+
+.bg-tertiary {
+  background-color: var(--bg-tertiary);
+}
+
+.text-primary {
+  color: var(--text-primary);
+}
+
+.text-secondary {
+  color: var(--text-secondary);
+}
+
+.border-primary {
+  border-color: var(--border-primary);
+}
+
+.border-secondary {
+  border-color: var(--border-secondary);
+}
+
+/* RSS Article Content Styling */
+.rss-article-content {
+  overflow: hidden;
+}
+
+.rss-article-content img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 10px 0;
+  border-radius: 4px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.rss-article-content figure {
+  margin: 15px 0;
+  text-align: center;
+}
+
+.rss-article-content figure img {
+  margin: 0;
+}
+
+.rss-article-content figcaption {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 5px;
+  font-style: italic;
+}
+
+/* Ensure buttons remain visible */
+.rss-article-content + div {
+  position: relative;
+  z-index: 10;
+}
+
+/* Animation classes */
+.fade-in {
+  animation: fadeIn 0.3s ease-in;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.slide-in {
+  animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(-20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* Loading spinner */
+.loading-spinner {
+  border: 2px solid var(--border-primary);
+  border-top: 2px solid #1976d2;
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  animation: spin 1s linear infinite;
+}
+
+.dark-mode .loading-spinner {
+  border-top-color: #90caf9;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Card hover effects */
+.card-hover {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px var(--shadow-medium);
+}
+
+/* Button hover effects */
+.btn-hover {
+  transition: all 0.2s ease;
+}
+
+.btn-hover:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px var(--shadow-light);
+}
+
+/* Text selection */
+::selection {
+  background-color: #1976d2;
+  color: white;
+}
+
+.dark-mode ::selection {
+  background-color: #90caf9;
+  color: #000;
+}
+
+/* Markdown Content Styles - ROOSEVELT'S NEWLINE FIX */
+.markdown-content {
+  line-height: 1.6;
+  word-break: break-word;
+  white-space: normal !important; /* Let remarkBreaks handle line breaks */
+}
+
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4,
+.markdown-content h5,
+.markdown-content h6 {
+  margin-top: 16px;
+  margin-bottom: 8px;
+  font-weight: 600;
+  display: block !important;
+  width: 100% !important;
+  clear: both;
+}
+
+.markdown-content p {
+  margin-bottom: 12px;
+  display: block;
+  width: 100%;
+}
+
+/* Ensure proper spacing between paragraphs and headers */
+.markdown-content p + h1,
+.markdown-content p + h2,
+.markdown-content p + h3,
+.markdown-content p + h4,
+.markdown-content p + h5,
+.markdown-content p + h6 {
+  margin-top: 24px !important;
+}
+
+.markdown-content ul,
+.markdown-content ol {
+  margin-bottom: 12px;
+  padding-left: 20px;
+}
+
+.markdown-content li {
+  margin-bottom: 4px;
+}
+
+.markdown-content blockquote {
+  margin: 16px 0;
+  padding: 8px 16px;
+  border-left: 4px solid #1976d2;
+  background-color: rgba(25, 118, 210, 0.04);
+  border-radius: 0 4px 4px 0;
+  font-style: italic;
+  color: #757575;
+}
+
+.markdown-content pre {
+  margin: 8px 0;
+  border-radius: 4px;
+  overflow: auto;
+  background-color: rgba(0, 0, 0, 0.05);
+  padding: 12px;
+  white-space: pre-wrap; /* Code blocks should preserve whitespace */
+}
+
+.markdown-content code {
+  font-family: 'Consolas', 'Monaco', 'Andale Mono', monospace;
+  background-color: rgba(0, 0, 0, 0.1);
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 0.9em;
+}
+
+.markdown-content a {
+  color: #1976d2;
+  text-decoration: none;
+}
+
+.markdown-content a:hover {
+  text-decoration: underline;
+  color: #1565c0;
+}
+
+/* Dark mode markdown styles */
+.dark-mode .markdown-content blockquote {
+  border-left-color: #90caf9;
+  background-color: rgba(144, 202, 249, 0.1);
+  color: #b3b3b3;
+}
+
+.dark-mode .markdown-content pre {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+
+.dark-mode .markdown-content code {
+  background-color: rgba(255, 255, 255, 0.15);
+}
+
+.dark-mode .markdown-content a {
+  color: #90caf9;
+}
+
+.dark-mode .markdown-content a:hover {
+  color: #64b5f6;
+}
+
+/* Print styles */
+@media print {
+  * {
+    background: white !important;
+    color: black !important;
+    box-shadow: none !important;
+  }
+} 

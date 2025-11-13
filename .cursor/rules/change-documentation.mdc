@@ -1,0 +1,71 @@
+---
+alwaysApply: true
+description: Guidelines for documenting changes and updates
+---
+
+# Change Documentation Policy
+
+## No Summary Documents
+
+**Do NOT create:**
+- Summary documents after completing changes
+- Detailed "what we accomplished" files
+- Implementation recap documents
+- Step-by-step change logs in separate files
+
+**Exception:**
+- Update `CHANGELOG.md` with one-line entries for significant changes
+
+## CHANGELOG.md Format
+
+When making significant changes, add a single line to CHANGELOG.md:
+
+```markdown
+## [Unreleased]
+- Feature: Added messaging system with real-time chat
+- Fix: Resolved database connection pool issues
+- Refactor: Reorganized documentation into subdirectories
+- Update: Rewrote README with comprehensive feature list
+```
+
+## What Qualifies for CHANGELOG
+
+**Add entries for:**
+- New features or capabilities
+- Bug fixes that affect users
+- Breaking changes
+- Major refactorings
+- API changes
+- Configuration changes
+
+**Don't add entries for:**
+- Code cleanup without user impact
+- Documentation updates (unless major)
+- Internal refactorings that don't change behavior
+- Minor tweaks or adjustments
+
+## Entry Format
+
+Keep entries to one line:
+- Start with category: `Feature:`, `Fix:`, `Refactor:`, `Update:`, `Breaking:`
+- Use present tense, imperative mood
+- Be specific but concise
+- No Roosevelt persona in changelog entries
+
+**Good entries:**
+- `Feature: Added RSS feed management with background polling`
+- `Fix: Resolved vector search timeout issues`
+- `Update: Upgraded to LangGraph 0.6.3 with state persistence`
+
+**Bad entries:**
+- `BULLY! We added an amazing new feature!` (too casual, no details)
+- `Fixed some stuff in the backend that was broken` (not specific)
+- `Implemented the messaging system with WebSocket support and real-time presence tracking and encryption` (too long)
+
+## Communication with User
+
+After completing changes:
+- **Do**: Tell user what you did in conversation
+- **Don't**: Create summary documents
+- **Do**: Update CHANGELOG.md if significant
+- **Don't**: Write detailed recaps

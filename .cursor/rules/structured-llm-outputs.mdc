@@ -1,0 +1,116 @@
+---
+alwaysApply: true
+description: Structured LLM outputs with Pydantic validation for agent communication
+---
+
+# Structured LLM Outputs - Type Safety Best Practices
+
+Use **structured outputs with Pydantic validation** for all LLM agent communication.
+
+## No String Matching for Agent Decisions
+
+**ABSOLUTELY NO:**
+- String matching for parsing LLM responses (`if "permission" in response.lower()`)
+- Regex magic for extracting structured data
+- Manual JSON parsing without validation
+- Crude substring detection for agent decisions
+
+**ALWAYS USE:**
+- Pydantic models for all agent response structures
+- JSON Schema enforcement in LLM prompts
+- Type-safe parsing with proper error handling
+- Structured data flow between agents
+
+## Pydantic Models for Agent Communication
+
+### Core Response Models
+All agent responses MUST use structured Pydantic models from [backend/models/agent_response_models.py](mdc:backend/models/agent_response_models.py):
+
+- **`ResearchTaskResult`**: Research agent structured outputs
+- **`OrchestratorDecision`**: Orchestrator routing decisions  
+- **`ChatResponse`**: Chat agent responses
+- **`CodingResponse`**: Coding agent task results
+- **`DirectResponse`**: Direct agent query results
+- **`PermissionRequest`**: Formal permission requests
+
+### LLM Prompt Requirements
+
+**ALL agent prompts MUST include structured output instructions:**
+
+```
+STRUCTURED OUTPUT REQUIRED:
+You MUST respond with valid JSON matching this schema:
+{
+    "task_status": "complete|incomplete|permission_required|error",
+    "response": "Your natural language response",
+    "metadata": {
+        "tools_used": ["tool1", "tool2"],
+        "confidence": 0.8,
+        "sources": ["source1", "source2"]
+    }
+}
+```
+
+### Agent Implementation Pattern
+
+**When implementing agents:**
+
+1. **Define Pydantic model** for the agent's response structure
+2. **Include JSON schema** in the agent's system prompt  
+3. **Parse response with Pydantic** - never use string matching
+4. **Handle validation errors** gracefully with fallbacks
+5. **Store structured data** in agent_results for other agents
+
+### Example Implementation
+
+```python
+# ✅ CORRECT: Structured output with Pydantic
+from models.agent_response_models import ResearchTaskResult
+
+# Parse LLM response
+try:
+    structured_result = ResearchTaskResult.parse_raw(llm_response)
+    state["agent_results"] = {
+        "structured_response": structured_result.dict(),
+        "task_status": structured_result.task_status,
+        "permission_needed": structured_result.task_status == "permission_required"
+    }
+except ValidationError as e:
+    logger.error(f"❌ Failed to parse structured response: {e}")
+    # Fallback to basic parsing
+```
+
+```python
+# ❌ WRONG: String matching hanky-panky
+if "permission to search the web" in response.lower():
+    needs_permission = True
+```
+
+### Inter-Agent Communication
+
+**When agents communicate through state:**
+
+- **Store structured data** in `state["agent_results"]["structured_response"]`
+- **Check structured fields** like `task_status`, `permission_needed`, `confidence`
+- **Use typed data** instead of parsing natural language responses
+- **Validate incoming data** with Pydantic models
+
+### Benefits of Structured Outputs
+
+1. **Type Safety**: Catch errors at parse time, not runtime
+2. **Clear Contracts**: Explicit interfaces between agents  
+3. **Better Testing**: Mock structured data easily
+4. **Maintainability**: Change schemas without breaking string parsing
+5. **Reliability**: No more ambiguous natural language parsing
+6. **Performance**: Skip expensive regex and string operations
+
+## Trust but Verify
+
+Trust the LLM's intelligence, but verify with strong types.
+
+- LLMs make semantic decisions about task completion
+- Pydantic ensures the data structure is valid
+- Agent logic uses typed fields for decisions
+- No crude string matching override LLM intelligence
+
+**Remember: A well-typed codebase ensures every data structure knows its role and executes it perfectly.**

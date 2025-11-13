@@ -1,0 +1,45 @@
+# SearXNG Configuration for Codex Knowledge Base
+# Enhanced configuration with multiple search engines including Google
+
+use_default_settings:
+  engines:
+    keep_only:
+      - google
+      - bing  
+      - duckduckgo
+      - startpage
+
+general:
+  instance_name: "Codex Search"
+  debug: false
+  secret_key: "__SEARXNG_SECRET__"
+  
+server:
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "__SEARXNG_SECRET__"
+  limiter: false  # Disable rate limiting for API usage
+  image_proxy: true
+
+search:
+  safe_search: 0  # No safe search filtering
+  autocomplete: "google"  # Use Google for autocomplete suggestions
+  default_lang: "en"
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: false
+  default_theme: simple
+  default_locale: en
+
+# Network settings for container environment
+outgoing:
+  request_timeout: 5.0
+  pool_connections: 20
+  pool_maxsize: 20
+  
+# Minimal logging for production
+logging:
+  level: WARNING 

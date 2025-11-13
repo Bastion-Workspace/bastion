@@ -1,0 +1,2 @@
+"""Vector Service - Models Module"""
+

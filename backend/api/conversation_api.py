@@ -1,0 +1,401 @@
+from fastapi import APIRouter, Depends, HTTPException
+from typing import List
+from datetime import datetime
+
+from models.conversation_models import (
+    CreateConversationRequest,
+    CreateMessageRequest,
+    ConversationResponse,
+    ConversationListResponse,
+    MessageListResponse,
+    MessageResponse,
+    UpdateConversationRequest,
+)
+from utils.auth_middleware import get_current_user
+from models.api_models import AuthenticatedUserResponse
+import logging
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+@router.get("/api/conversations/{conversation_id}/checkpoints")
+async def list_conversation_checkpoints(conversation_id: str, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
+    try:
+        logger.info(f"🧭 Listing checkpoints for conversation: {conversation_id}")
+        from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
+        checkpointer = await get_postgres_checkpointer()
+        if not checkpointer.is_initialized:
+            raise HTTPException(status_code=500, detail="LangGraph checkpointer not initialized")
+        import asyncpg
+        from config import settings
+        from services.orchestrator_utils import normalize_thread_id
+        normalized_thread_id = normalize_thread_id(current_user.user_id, conversation_id)
+        connection_string = f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+        conn = await asyncpg.connect(connection_string)
+        try:
+            rows = await conn.fetch(
+                """
+                SELECT checkpoint_id, parent_checkpoint_id, created_at, type
+                FROM checkpoints
+                WHERE thread_id = $1
+                ORDER BY created_at DESC, checkpoint_id DESC
+                """,
+                normalized_thread_id
+            )
+        finally:
+            await conn.close()
+        checkpoints = [
+            {
+                "checkpoint_id": r["checkpoint_id"],
+                "parent_checkpoint_id": r["parent_checkpoint_id"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "type": r["type"]
+            }
+            for r in rows
+        ]
+        return {"success": True, "conversation_id": conversation_id, "checkpoints": checkpoints}
+    except Exception as e:
+        logger.error(f"❌ Failed to list checkpoints: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/conversations", response_model=ConversationListResponse)
+async def list_conversations(skip: int = 0, limit: int = 50, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
+    try:
+        logger.info(f"💬 Listing conversations from LangGraph checkpoints (skip={skip}, limit={limit})")
+        from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
+        checkpointer = await get_postgres_checkpointer()
+        if not checkpointer.is_initialized:
+            logger.error("❌ LangGraph checkpointer not initialized")
+            raise HTTPException(status_code=500, detail="LangGraph checkpointer not initialized")
+        conversations = []
+        try:
+            import asyncpg
+            from config import settings
+            connection_string = f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+            conn = await asyncpg.connect(connection_string)
+            try:
+                rows = await conn.fetch(
+                    """
+                        WITH latest_checkpoints AS (
+                            SELECT DISTINCT ON (c.thread_id) 
+                                c.thread_id,
+                                c.checkpoint,
+                                c.checkpoint_id
+                            FROM checkpoints c
+                            WHERE c.checkpoint -> 'channel_values' ->> 'user_id' = $1
+                            ORDER BY c.thread_id, c.checkpoint_id DESC
+                        )
+                        SELECT 
+                            lc.thread_id,
+                            COALESCE(
+                                (lc.checkpoint -> 'channel_values' ->> 'conversation_title'),
+                                'New Conversation'
+                            ) as title,
+                            (lc.checkpoint -> 'channel_values' ->> 'conversation_created_at') as created_at,
+                            (lc.checkpoint -> 'channel_values' ->> 'conversation_updated_at') as updated_at,
+                            (lc.checkpoint -> 'channel_values' ->> 'is_pinned')::boolean as is_pinned,
+                            (lc.checkpoint -> 'channel_values' ->> 'is_archived')::boolean as is_archived,
+                            (lc.checkpoint -> 'channel_values' -> 'conversation_tags') as tags,
+                            (lc.checkpoint -> 'channel_values' ->> 'conversation_description') as description,
+                            COALESCE(
+                                (CASE 
+                                    WHEN lc.checkpoint ? 'channel_data' AND lc.checkpoint -> 'channel_data' ? 'messages' 
+                                    THEN jsonb_array_length(lc.checkpoint -> 'channel_data' -> 'messages')
+                                    WHEN lc.checkpoint -> 'channel_versions' ? 'messages' 
+                                    THEN 2
+                                    ELSE 0
+                                END),
+                                0
+                            ) as message_count,
+                            COALESCE(
+                                (lc.checkpoint -> 'channel_values' ->> 'conversation_updated_at')::timestamp,
+                                (lc.checkpoint -> 'channel_values' ->> 'conversation_created_at')::timestamp,
+                                NOW()
+                            ) as sort_timestamp
+                        FROM latest_checkpoints lc
+                        WHERE (
+                            (lc.checkpoint -> 'channel_values' ->> 'conversation_title') IS NOT NULL
+                            OR (lc.checkpoint -> 'channel_values' ->> 'latest_response') IS NOT NULL
+                            OR (lc.checkpoint -> 'channel_values' ->> 'user_id') IS NOT NULL
+                        )
+                        ORDER BY sort_timestamp DESC
+                        LIMIT $2 OFFSET $3
+                """, current_user.user_id, limit, skip)
+                from models.conversation_models import ConversationSummary
+                for row in rows:
+                    if row['thread_id']:
+                        conversation = ConversationSummary(
+                            conversation_id=row['thread_id'],
+                            user_id=current_user.user_id,
+                            title=row['title'] or "Untitled Conversation",
+                            description=row['description'],
+                            is_pinned=row['is_pinned'] or False,
+                            is_archived=row['is_archived'] or False,
+                            tags=row['tags'] if row['tags'] else [],
+                            metadata_json={},
+                            message_count=row['message_count'] or 0,
+                            last_message_at=row['updated_at'],
+                            manual_order=None,
+                            order_locked=False,
+                            created_at=row['created_at'] or datetime.now().isoformat(),
+                            updated_at=row['updated_at'] or datetime.now().isoformat()
+                        )
+                        conversations.append(conversation)
+            finally:
+                await conn.close()
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to query LangGraph checkpoints for conversation list: {e}")
+            conversations = []
+        from models.conversation_models import ConversationListResponse as ConvList
+        result = ConvList(
+            conversations=conversations,
+            total_count=len(conversations),
+            has_more=len(conversations) == limit,
+            folders=[]
+        )
+        logger.info(f"✅ Retrieved {len(result.conversations)} conversations from LangGraph checkpoints")
+        return result
+    except Exception as e:
+        logger.error(f"❌ Failed to list conversations: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/conversations/{conversation_id}", response_model=ConversationResponse)
+async def get_conversation(conversation_id: str, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
+    try:
+        logger.info(f"💬 Getting conversation: {conversation_id}")
+        from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
+        checkpointer = await get_postgres_checkpointer()
+        if not checkpointer.is_initialized:
+            logger.error("❌ LangGraph checkpointer not initialized")
+            raise HTTPException(status_code=500, detail="LangGraph checkpointer not initialized")
+        conversation_dict = None
+        try:
+            import asyncpg
+            from config import settings
+            connection_string = f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+            conn = await asyncpg.connect(connection_string)
+            try:
+                from services.orchestrator_utils import normalize_thread_id
+                normalized_thread_id = normalize_thread_id(current_user.user_id, conversation_id)
+                row = await conn.fetchrow(
+                    """
+                    SELECT DISTINCT ON (c.thread_id) 
+                        c.thread_id,
+                        c.checkpoint,
+                        c.checkpoint_id
+                    FROM checkpoints c
+                    WHERE c.thread_id = $1 
+                    AND c.checkpoint -> 'channel_values' ->> 'user_id' = $2
+                    ORDER BY c.thread_id, c.checkpoint_id DESC
+                    LIMIT 1
+                """, normalized_thread_id, current_user.user_id)
+                if row:
+                    checkpoint_data = row['checkpoint']
+                    if isinstance(checkpoint_data, str):
+                        import json
+                        try:
+                            checkpoint_data = json.loads(checkpoint_data)
+                        except json.JSONDecodeError as e:
+                            logger.error(f"❌ Failed to parse checkpoint JSON: {e}")
+                            checkpoint_data = {}
+                    elif checkpoint_data is None:
+                        checkpoint_data = {}
+                    channel_values = checkpoint_data.get('channel_values', {})
+                    conversation_dict = {
+                        "conversation_id": conversation_id,
+                        "user_id": current_user.user_id,
+                        "title": channel_values.get('conversation_title', 'New Conversation'),
+                        "description": channel_values.get('conversation_description'),
+                        "is_pinned": channel_values.get('is_pinned', False),
+                        "is_archived": channel_values.get('is_archived', False),
+                        "tags": channel_values.get('conversation_tags', []),
+                        "metadata_json": {},
+                        "message_count": len(channel_values.get('messages', [])),
+                        "last_message_at": channel_values.get('conversation_updated_at'),
+                        "manual_order": None,
+                        "order_locked": False,
+                        "created_at": channel_values.get('conversation_created_at', datetime.now().isoformat()),
+                        "updated_at": channel_values.get('conversation_updated_at', datetime.now().isoformat()),
+                        "messages": []
+                    }
+                    logger.info(f"✅ Found conversation in LangGraph checkpoint: {conversation_id}")
+                else:
+                    logger.info(f"💬 Conversation {conversation_id} not found in LangGraph checkpoints")
+            finally:
+                await conn.close()
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to query LangGraph checkpoints for conversation {conversation_id}: {e}")
+        if not conversation_dict:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        from models.conversation_models import ConversationDetail
+        conversation_detail = ConversationDetail(
+            conversation_id=conversation_dict["conversation_id"],
+            user_id=conversation_dict["user_id"],
+            title=conversation_dict["title"],
+            description=conversation_dict.get("description"),
+            is_pinned=conversation_dict.get("is_pinned", False),
+            is_archived=conversation_dict.get("is_archived", False),
+            tags=conversation_dict.get("tags", []),
+            metadata_json=conversation_dict.get("metadata_json", {}),
+            message_count=conversation_dict.get("message_count", 0),
+            last_message_at=conversation_dict.get("last_message_at"),
+            manual_order=conversation_dict.get("manual_order"),
+            order_locked=conversation_dict.get("order_locked", False),
+            created_at=conversation_dict["created_at"],
+            updated_at=conversation_dict["updated_at"],
+            messages=conversation_dict.get("messages", [])
+        )
+        logger.info(f"✅ Retrieved conversation from LangGraph checkpoint: {conversation_id}")
+        return ConversationResponse(conversation=conversation_detail)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to get conversation: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/conversations/{conversation_id}")
+async def update_conversation(conversation_id: str, request: UpdateConversationRequest, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
+    try:
+        logger.info(f"💬 Updating conversation: {conversation_id} for user: {current_user.user_id}")
+        import asyncpg
+        from config import settings
+        from services.orchestrator_utils import normalize_thread_id
+        normalized_thread_id = normalize_thread_id(current_user.user_id, conversation_id)
+        connection_string = f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+        conn = await asyncpg.connect(connection_string)
+        try:
+            try:
+                row = await conn.fetchrow(
+                    """
+                    SELECT DISTINCT ON (c.thread_id)
+                        c.thread_id,
+                        c.checkpoint,
+                        c.checkpoint_id
+                    FROM checkpoints c
+                    WHERE c.thread_id = $1 
+                      AND c.checkpoint -> 'channel_values' ->> 'user_id' = $2
+                    ORDER BY c.thread_id, c.checkpoint_id DESC
+                    LIMIT 1
+                    """,
+                    normalized_thread_id,
+                    current_user.user_id,
+                )
+                thread_id_used = normalized_thread_id
+                if not row:
+                    row = await conn.fetchrow(
+                        """
+                        SELECT DISTINCT ON (c.thread_id)
+                            c.thread_id,
+                            c.checkpoint,
+                            c.checkpoint_id
+                        FROM checkpoints c
+                        WHERE c.thread_id = $1 
+                          AND c.checkpoint -> 'channel_values' ->> 'user_id' = $2
+                        ORDER BY c.thread_id, c.checkpoint_id DESC
+                        LIMIT 1
+                        """,
+                        conversation_id,
+                        current_user.user_id,
+                    )
+                    if row:
+                        thread_id_used = conversation_id
+                if row:
+                    checkpoint_data = row["checkpoint"]
+                    if isinstance(checkpoint_data, str):
+                        import json
+                        try:
+                            checkpoint_data = json.loads(checkpoint_data)
+                        except Exception:
+                            checkpoint_data = {}
+                    elif checkpoint_data is None:
+                        checkpoint_data = {}
+                    channel_values = checkpoint_data.get("channel_values", {})
+                    if request.title is not None:
+                        channel_values["conversation_title"] = request.title
+                    if request.description is not None:
+                        channel_values["conversation_description"] = request.description
+                    if request.is_pinned is not None:
+                        channel_values["is_pinned"] = request.is_pinned
+                    if request.is_archived is not None:
+                        channel_values["is_archived"] = request.is_archived
+                    if request.tags is not None:
+                        channel_values["conversation_tags"] = request.tags
+                    channel_values["conversation_updated_at"] = datetime.now().isoformat()
+                    checkpoint_data["channel_values"] = channel_values
+                    await conn.execute(
+                        """
+                        UPDATE checkpoints
+                        SET checkpoint = $1
+                        WHERE thread_id = $2
+                          AND checkpoint -> 'channel_values' ->> 'user_id' = $3
+                        """,
+                        checkpoint_data,
+                        thread_id_used,
+                        current_user.user_id,
+                    )
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to update LangGraph checkpoint JSON: {e}")
+            # Legacy compatibility update (same connection)
+            updates = []
+            values = []
+            if request.title is not None:
+                updates.append("title = $%d" % (len(values) + 1))
+                values.append(request.title)
+            if request.description is not None:
+                updates.append("description = $%d" % (len(values) + 1))
+                values.append(request.description)
+            if request.is_pinned is not None:
+                updates.append("is_pinned = $%d" % (len(values) + 1))
+                values.append(request.is_pinned)
+            if request.is_archived is not None:
+                updates.append("is_archived = $%d" % (len(values) + 1))
+                values.append(request.is_archived)
+            if request.tags is not None:
+                updates.append("tags = $%d" % (len(values) + 1))
+                values.append(request.tags)
+            if request.manual_order is not None:
+                updates.append("manual_order = $%d" % (len(values) + 1))
+                values.append(request.manual_order)
+            if request.order_locked is not None:
+                updates.append("order_locked = $%d" % (len(values) + 1))
+                values.append(request.order_locked)
+            if updates:
+                set_clause = ", ".join(updates)
+                values.extend([conversation_id, current_user.user_id])
+                await conn.execute(
+                    f"""
+                    UPDATE conversations
+                    SET {set_clause}, updated_at = NOW()
+                    WHERE conversation_id = ${len(values) - 1} AND user_id = ${len(values)}
+                    """,
+                    *values,
+                )
+        finally:
+            await conn.close()
+        # WebSocket notification best-effort
+        try:
+            from utils.websocket_manager import get_websocket_manager
+            websocket_manager = get_websocket_manager()
+            if websocket_manager:
+                await websocket_manager.send_to_session(
+                    session_id=current_user.user_id,
+                    message={
+                        "type": "conversation_updated",
+                        "data": {"conversation_id": conversation_id},
+                    },
+                )
+        except Exception as e:
+            logger.debug(f"WebSocket notify failed (non-fatal): {e}")
+        return {"status": "success"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to update conversation {conversation_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+

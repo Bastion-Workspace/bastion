@@ -1,0 +1,135 @@
+---
+globs: backend/services/langgraph_agents/*.py,backend/services/langgraph_*.py
+description: Agent completion and state management best practices
+---
+
+# Agent Completion Logic - Trust the LLM
+
+Trust LLM intelligence for completion decisions and use proper state management between agents.
+
+## No Override LLM Decisions Rule
+
+### LLM Handles Semantic Logic
+
+**LLMs MUST decide:**
+- When a task is complete vs incomplete
+- When additional resources are needed  
+- What type of response to provide
+- Whether permission is required
+
+**Code MUST NOT:**
+- Override LLM completion decisions with string matching
+- Use hardcoded rules to determine task status
+- Second-guess the LLM's semantic understanding
+- Apply crude heuristics over LLM intelligence
+
+### Proper Completion Flow
+
+```python
+# ✅ CORRECT: Trust LLM completion judgment
+structured_result = ResearchTaskResult.parse_raw(llm_response)
+
+if structured_result.task_status == TaskStatus.COMPLETE:
+    state["is_complete"] = True
+elif structured_result.task_status == TaskStatus.PERMISSION_REQUIRED:
+    state["requires_user_input"] = True
+    # Create pending operation for permission
+```
+
+```python
+# ❌ WRONG: Override LLM with string matching
+if "permission to search" in response.lower():
+    state["is_complete"] = False  # Overriding LLM decision!
+else:
+    state["is_complete"] = True   # Assuming completion
+```
+
+## Agent State Management
+
+### State Consistency Rules
+
+**NEVER set contradictory state:**
+- `is_complete=True` AND `requires_user_input=True` 
+- `task_status="complete"` with pending operations
+- Multiple completion flags in same state update
+
+**State transitions MUST be explicit:**
+```python
+# Clear previous state before setting new state
+state.pop("is_complete", None)
+state.pop("requires_user_input", None)
+
+# Set ONE clear state based on LLM decision
+if task_complete:
+    state["is_complete"] = True
+elif needs_permission:
+    state["requires_user_input"] = True
+```
+
+### Orchestrator vs Agent Responsibilities
+
+**Agents decide:**
+- What response to provide
+- Whether they can complete the task
+- What additional resources are needed
+- Whether to request permission
+
+**Orchestrator manages:**
+- State transitions based on agent outputs
+- Routing between agents  
+- Pending operation creation
+- Workflow coordination
+
+### LangGraph Termination Logic
+
+**Proper termination checking:**
+
+```python
+def _should_continue_or_end(self, state: ConversationState) -> str:
+    # Check explicit completion flag from agent
+    if state.get("is_complete", False):
+        return "end"
+    
+    # Check if waiting for user input
+    if state.get("requires_user_input", False):
+        return "continue"  # Route to smart_router for next input
+    
+    # Check error conditions
+    if state.get("error_state"):
+        return "end"
+    
+    # Default: end to prevent loops
+    return "end"
+```
+
+### Permission Request Flow
+
+**When LLM requests permission:**
+
+1. **Agent** returns `task_status="permission_required"`
+2. **Orchestrator** creates pending operation
+3. **Orchestrator** sets `requires_user_input=True`
+4. **LangGraph** routes to smart_router for next user input
+5. **Intent Classifier** detects permission grant
+6. **Orchestrator** executes approved operation
+
+**NEVER:**
+- Set `is_complete=True` when requesting permission
+- Create contradictory state flags
+- Override the LLM's permission request logic
+
+## Trust and Validation
+
+**Trust the LLM's intelligence about:**
+- Semantic understanding of user queries
+- Task completion assessment
+- Resource requirement evaluation
+- Permission necessity judgment
+
+**Validate the LLM's output for:**
+- Proper JSON structure
+- Required field presence
+- Enum value correctness
+- Type safety compliance
+
+**Remember: "The LLM is the cavalry officer making tactical decisions - our job is to provide proper equipment and follow orders, not second-guess the battle plan!"**

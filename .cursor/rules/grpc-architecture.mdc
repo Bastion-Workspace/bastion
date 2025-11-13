@@ -1,0 +1,1177 @@
+# gRPC Microservices Architecture
+
+This document outlines the gRPC communication patterns and architectural standards for **ALL** gRPC microservices in the system.
+
+**These patterns are EXTENSIBLE** - they apply to the current services (backend, llm-orchestrator) and any future gRPC services you add (document processor, specialized agents, external integrations, etc.).
+
+## Current Architecture Overview
+
+The system currently uses **bidirectional gRPC communication** between two services (but can scale to N services):
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Frontend (React)                      │
+│                    SSE Streaming                         │
+└───────────────────────┬─────────────────────────────────┘
+                        │ HTTP/SSE
+                        ▼
+┌─────────────────────────────────────────────────────────┐
+│                Backend (FastAPI)                         │
+│                                                          │
+│  ┌─────────────────────────────────────────────┐        │
+│  │   gRPC Orchestrator Proxy                   │        │
+│  │   - Converts HTTP → gRPC                    │        │
+│  │   - Converts gRPC → SSE (JSON)              │        │
+│  └────────────┬────────────────────────────────┘        │
+│               │ gRPC Client (port 50051)                 │
+│               │                                          │
+│  ┌────────────┴────────────────────────────────┐        │
+│  │   gRPC Tool Service (port 50052)            │        │
+│  │   - Document search                         │        │
+│  │   - Web search and crawl                    │        │
+│  │   - Query expansion                         │        │
+│  │   - Cache operations                        │        │
+│  └─────────────────────────────────────────────┘        │
+└────────────────────────┬────────────────────────────────┘
+                         │ gRPC Server
+                         ▼
+┌─────────────────────────────────────────────────────────┐
+│          LLM Orchestrator (Python/LangGraph)             │
+│                                                          │
+│  ┌─────────────────────────────────────────────┐        │
+│  │   gRPC Orchestrator Service (port 50051)    │        │
+│  │   - StreamChat (streaming responses)        │        │
+│  │   - HITL permission flows                   │        │
+│  │   - Task management                         │        │
+│  └─────────────────────────────────────────────┘        │
+│                                                          │
+│  ┌─────────────────────────────────────────────┐        │
+│  │   Backend Tool Client                       │        │
+│  │   - Calls backend gRPC tool service         │        │
+│  │   - Document search, web operations         │        │
+│  └─────────────────────────────────────────────┘        │
+└─────────────────────────────────────────────────────────┘
+```
+
+## Shared Protocol Buffers
+
+### Single Source of Truth
+
+**ALL** proto files live in: **`/opt/bastion/protos/`**
+
+```
+/opt/bastion/protos/
+├── orchestrator.proto    # LLM Orchestrator service API
+├── tool_service.proto    # Backend tool service API
+├── vector_service.proto  # Vector Service (embeddings) API
+└── README.md            # Proto documentation
+```
+
+**NEVER duplicate proto files.** All services generate code from this shared directory during Docker build.
+
+### Proto Files
+
+#### `orchestrator.proto`
+
+Defines the **LLM Orchestrator Service** that the backend calls:
+
+- **`StreamChat`** - Primary streaming chat interface (returns stream of `ChatChunk`)
+- **`StartTask`** - Async task processing
+- **`GetTaskStatus`** - Task status queries
+- **`ApprovePermission`** - HITL permission approval
+- **`GetPendingPermissions`** - List pending permissions
+- **`HealthCheck`** - Service health
+
+**Key Message Types:**
+- `ChatRequest` - User query with conversation context
+- `ChatChunk` - Streaming response chunks with type/message/metadata
+- `TaskRequest`/`TaskResponse` - Async task management
+- `PermissionApproval` - HITL permission handling
+
+#### `tool_service.proto`
+
+Defines the **Backend Tool Service** that the orchestrator calls:
+
+- **`SearchDocuments`** - Semantic search over local documents
+- **`GetRecentDocuments`** - Recent document listing
+- **`SearchWeb`** - Web search only
+- **`SearchAndCrawl`** - Combined search + content extraction
+- **`ExpandQuery`** - Query enhancement with synonyms
+- **`GetCachedResult`** - Cache retrieval
+- **`StoreCachedResult`** - Cache storage
+
+**Key Message Types:**
+- `DocumentSearchRequest` - Query with similarity threshold
+- `DocumentResult` - Document metadata and content preview
+- `WebSearchRequest` - Web search parameters
+- `WebSearchResult` - Search result with title/url/snippet/score
+- `QueryExpansionRequest` - Query enhancement
+
+#### `vector_service.proto`
+
+Defines the **Vector Service** for embedding generation and caching:
+
+- **`GenerateEmbedding`** - Generate embedding for single text
+- **`GenerateBatchEmbeddings`** - Generate embeddings for multiple texts (parallel processing)
+- **`ClearEmbeddingCache`** - Clear cached embeddings
+- **`GetCacheStats`** - Get cache performance metrics
+- **`HealthCheck`** - Service health
+
+**Key Message Types:**
+- `EmbeddingRequest` - Text and model configuration
+- `EmbeddingResponse` - Vector embedding with token count and cache status
+- `BatchEmbeddingRequest` - Multiple texts for batch processing
+- `BatchEmbeddingResponse` - List of embeddings with cache statistics
+- `EmbeddingVector` - Individual embedding with metadata
+- `CacheStatsResponse` - Cache hit/miss rates and TTL info
+
+**Design Pattern: Embedding-Only Service**
+- Service generates and caches embeddings ONLY
+- Caller handles Qdrant storage and search operations
+- Enables gradual migration via feature flag
+- Reduces service complexity and coupling
+
+## Port Allocation
+
+**Standard port assignments:**
+
+| Service               | Port  | Protocol | Purpose                          |
+|-----------------------|-------|----------|----------------------------------|
+| LLM Orchestrator      | 50051 | gRPC     | Main orchestration service       |
+| Backend Tool Service  | 50052 | gRPC     | Tool/data access for orchestrator|
+| Vector Service        | 50053 | gRPC     | Embedding generation and caching |
+
+**Port allocation strategy for new services:**
+
+- Use **5005X range** for internal gRPC services (50051, 50052, 50053, etc.)
+- Increment from 50054 onwards for each new service
+- Document each port in this table and in `docker-compose.yml`
+- Reserve ports in advance to avoid conflicts
+
+**Example future services:**
+
+| Service                    | Port  | Protocol | Purpose                              |
+|----------------------------|-------|----------|--------------------------------------|
+| Document Processor Service | 50054 | gRPC     | Dedicated document ingestion/parsing |
+| Agent Coordinator Service  | 50055 | gRPC     | Multi-agent coordination and routing |
+| Analytics Service          | 50056 | gRPC     | Usage analytics and metrics          |
+
+## Adding New gRPC Services
+
+### Step-by-Step Guide
+
+When adding a new gRPC microservice to the system, follow this pattern:
+
+#### 1. Define Proto File
+
+Create a new `.proto` file in `/opt/bastion/protos/`:
+
+```protobuf
+// protos/document_processor.proto
+syntax = "proto3";
+
+package document_processor;
+
+service DocumentProcessorService {
+  rpc ProcessDocument(DocumentRequest) returns (ProcessedDocument);
+  rpc GetProcessingStatus(StatusRequest) returns (StatusResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message DocumentRequest {
+  string document_id = 1;
+  string document_type = 2;
+  bytes content = 3;
+  map<string, string> metadata = 4;
+}
+
+message ProcessedDocument {
+  string document_id = 1;
+  repeated string extracted_text = 2;
+  map<string, string> metadata = 3;
+}
+// ... more messages
+```
+
+**ALWAYS include:**
+- `HealthCheck` RPC for monitoring
+- Clear message documentation
+- Metadata maps for extensibility
+
+#### 2. Create Service Directory
+
+```bash
+mkdir -p document-processor/{service,config,models}
+touch document-processor/{Dockerfile,requirements.txt,main.py,README.md}
+```
+
+**Directory structure:**
+
+```
+document-processor/
+├── service/
+│   ├── __init__.py
+│   ├── grpc_service.py      # Service implementation
+│   └── processor_logic.py   # Business logic
+├── config/
+│   └── settings.py          # Configuration
+├── models/
+│   └── models.py            # Pydantic models
+├── Dockerfile               # Container definition
+├── requirements.txt         # Dependencies
+├── main.py                  # Entry point
+└── README.md               # Documentation
+```
+
+#### 3. Implement Service
+
+```python
+# document-processor/service/grpc_service.py
+import grpc
+from concurrent import futures
+import logging
+from protos import document_processor_pb2, document_processor_pb2_grpc
+
+logger = logging.getLogger(__name__)
+
+class DocumentProcessorService(document_processor_pb2_grpc.DocumentProcessorServiceServicer):
+    """Document processing gRPC service"""
+    
+    async def ProcessDocument(self, request, context):
+        """Process incoming document"""
+        try:
+            logger.info(f"Processing document: {request.document_id}")
+            
+            # Your business logic here
+            processed = await self._process_document(request)
+            
+            return document_processor_pb2.ProcessedDocument(
+                document_id=request.document_id,
+                extracted_text=processed.text,
+                metadata=processed.metadata
+            )
+        except Exception as e:
+            logger.error(f"Processing failed: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return document_processor_pb2.ProcessedDocument()
+    
+    async def HealthCheck(self, request, context):
+        """Health check endpoint"""
+        return document_processor_pb2.HealthCheckResponse(
+            status="healthy",
+            service_name="document-processor"
+        )
+```
+
+#### 4. Create Dockerfile
+
+```dockerfile
+# document-processor/Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY document-processor/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy shared protos from root (CRITICAL)
+COPY protos /app/protos
+
+# Copy service code
+COPY document-processor /app
+
+# Generate gRPC code from protos
+RUN python -m grpc_tools.protoc \
+    -I/app \
+    --python_out=/app \
+    --grpc_python_out=/app \
+    /app/protos/document_processor.proto
+
+# Expose gRPC port
+EXPOSE 50053
+
+# Run service
+CMD ["python", "main.py"]
+```
+
+**Key points:**
+- Use **root context** to access shared protos
+- Generate gRPC code during build
+- Expose allocated port (50053 in this example)
+
+#### 5. Add to docker-compose.yml
+
+```yaml
+services:
+  # ... existing services ...
+
+  document-processor:
+    build:
+      context: .  # ← ROOT CONTEXT (access shared protos)
+      dockerfile: ./document-processor/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-document-processor
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Service Configuration
+      - SERVICE_NAME=document-processor
+      - GRPC_PORT=50053
+      - LOG_LEVEL=INFO
+      
+      # Database (if needed)
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=bastion_knowledge_base
+      - POSTGRES_USER=bastion_user
+      - POSTGRES_PASSWORD=bastion_secure_password
+      
+      # Service dependencies (if calling other services)
+      - BACKEND_TOOL_SERVICE_HOST=backend
+      - BACKEND_TOOL_SERVICE_PORT=50052
+    ports:
+      - "50053:50053"  # gRPC port
+    networks:
+      - default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(5); s.connect((\"localhost\", 50053)); s.close()' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+```
+
+#### 6. Create Client for Other Services
+
+Other services that need to call your new service should create a client:
+
+```python
+# llm-orchestrator/clients/document_processor_client.py
+import grpc
+import os
+import logging
+from protos import document_processor_pb2, document_processor_pb2_grpc
+
+logger = logging.getLogger(__name__)
+
+class DocumentProcessorClient:
+    """Client for calling document processor gRPC service"""
+    
+    def __init__(self):
+        host = os.getenv('DOCUMENT_PROCESSOR_HOST', 'document-processor')
+        port = os.getenv('DOCUMENT_PROCESSOR_PORT', '50053')
+        self.channel = grpc.aio.insecure_channel(f'{host}:{port}')
+        self.stub = document_processor_pb2_grpc.DocumentProcessorServiceStub(self.channel)
+    
+    async def process_document(self, document_id: str, content: bytes):
+        """Process a document"""
+        try:
+            request = document_processor_pb2.DocumentRequest(
+                document_id=document_id,
+                content=content
+            )
+            
+            response = await self.stub.ProcessDocument(request)
+            
+            return {
+                'document_id': response.document_id,
+                'text': list(response.extracted_text),
+                'metadata': dict(response.metadata)
+            }
+        except grpc.RpcError as e:
+            logger.error(f"Document processing failed: {e.code()} - {e.details()}")
+            raise
+    
+    async def check_health(self):
+        """Check service health"""
+        try:
+            request = document_processor_pb2.HealthCheckRequest()
+            response = await self.stub.HealthCheck(request)
+            return response.status == "healthy"
+        except:
+            return False
+```
+
+#### 7. Update Service Discovery Environment Variables
+
+Add environment variables to services that will call the new service:
+
+```yaml
+# docker-compose.yml
+llm-orchestrator:
+  environment:
+    # ... existing vars ...
+    - DOCUMENT_PROCESSOR_HOST=document-processor
+    - DOCUMENT_PROCESSOR_PORT=50053
+
+backend:
+  environment:
+    # ... existing vars ...
+    - DOCUMENT_PROCESSOR_HOST=document-processor
+    - DOCUMENT_PROCESSOR_PORT=50053
+```
+
+#### 8. Test the New Service
+
+```bash
+# Build and start the new service
+docker compose build document-processor
+docker compose up -d document-processor
+
+# Check health
+docker compose ps document-processor
+docker compose logs document-processor
+
+# Test connectivity from another service
+docker compose exec llm-orchestrator python -c "
+import asyncio
+from clients.document_processor_client import DocumentProcessorClient
+
+async def test():
+    client = DocumentProcessorClient()
+    healthy = await client.check_health()
+    print(f'Document Processor Health: {healthy}')
+
+asyncio.run(test())
+"
+```
+
+### Multi-Service Communication Patterns
+
+#### Hub-and-Spoke Pattern (Current)
+
+```
+         ┌─────────────────────┐
+         │   LLM Orchestrator  │ (50051)
+         └──────────┬──────────┘
+                    │
+    ┌───────────────┼───────────────┐
+    │               │               │
+    ▼               ▼               ▼
+┌────────┐   ┌─────────────┐   ┌──────────┐
+│Backend │   │Doc Processor│   │Agent Svc │
+│(50052) │   │  (50053)    │   │ (50054)  │
+└────────┘   └─────────────┘   └──────────┘
+```
+
+- **Orchestrator as hub** - Routes requests to specialized services
+- **Services don't talk to each other** - Only to orchestrator
+- **Simplest pattern** - Easy to reason about
+
+#### Mesh Pattern
+
+```
+┌─────────────┐     ┌─────────────┐
+│Orchestrator │────▶│   Backend   │
+│   (50051)   │     │   (50052)   │
+└──────┬──────┘     └──────┬──────┘
+       │                   │
+       │    ┌──────────────┘
+       │    │
+       ▼    ▼
+┌─────────────┐     ┌─────────────┐
+│Doc Processor│────▶│Vector Store │
+│   (50053)   │     │   (50055)   │
+└─────────────┘     └─────────────┘
+```
+
+- **Services call each other directly** - More flexible
+- **Requires careful dependency management** - Avoid circular deps
+- **More complex** - But allows optimization
+
+#### Chain Pattern
+
+```
+Orchestrator → Doc Processor → Vector Store → Backend → Orchestrator
+   (50051)        (50053)         (50055)      (50052)
+```
+
+- **Linear processing pipeline** - Data flows through stages
+- **Clear data flow** - Easy to understand sequence
+- **Good for workflows** - Document ingestion, processing, storage
+
+### Service Dependency Management
+
+**Best practices:**
+
+1. **Declare dependencies in docker-compose.yml:**
+   ```yaml
+   document-processor:
+     depends_on:
+       backend:
+         condition: service_started
+       postgres:
+         condition: service_healthy
+   ```
+
+2. **Implement retry logic in clients:**
+   ```python
+   async def call_with_retry(stub_method, request, max_retries=3):
+       for attempt in range(max_retries):
+           try:
+               return await stub_method(request)
+           except grpc.RpcError as e:
+               if e.code() == grpc.StatusCode.UNAVAILABLE:
+                   await asyncio.sleep(2 ** attempt)  # Exponential backoff
+                   continue
+               raise
+   ```
+
+3. **Use circuit breakers for failing services:**
+   ```python
+   class CircuitBreaker:
+       def __init__(self, failure_threshold=5, timeout=60):
+           self.failure_count = 0
+           self.failure_threshold = failure_threshold
+           self.timeout = timeout
+           self.last_failure_time = None
+           
+       async def call(self, func, *args, **kwargs):
+           if self.is_open():
+               raise Exception("Circuit breaker open")
+           
+           try:
+               result = await func(*args, **kwargs)
+               self.on_success()
+               return result
+           except Exception as e:
+               self.on_failure()
+               raise
+   ```
+
+### Monitoring Multiple Services
+
+**Add centralized health check endpoint:**
+
+```python
+# backend/api/system_health.py
+@router.get("/api/system/health")
+async def check_all_services():
+    """Check health of all gRPC services"""
+    services = {
+        'orchestrator': ('llm-orchestrator', 50051),
+        'backend': ('backend', 50052),
+        'document_processor': ('document-processor', 50053),
+    }
+    
+    health_status = {}
+    for name, (host, port) in services.items():
+        try:
+            client = create_client(host, port)
+            response = await client.HealthCheck(request)
+            health_status[name] = {
+                'status': 'healthy',
+                'host': host,
+                'port': port
+            }
+        except:
+            health_status[name] = {
+                'status': 'unhealthy',
+                'host': host,
+                'port': port
+            }
+    
+    return health_status
+```
+
+## Docker Build Pattern
+
+### Root Build Context
+
+**CRITICAL:** Both services use **root directory** (`.`) as build context to access shared protos.
+
+```yaml
+# docker-compose.yml
+llm-orchestrator:
+  build:
+    context: .  # ← ROOT CONTEXT, not ./llm-orchestrator
+    dockerfile: ./llm-orchestrator/Dockerfile
+
+backend:
+  build:
+    context: .  # ← ROOT CONTEXT, not ./backend
+    dockerfile: ./backend/Dockerfile
+```
+
+### Proto Generation in Dockerfile
+
+**Both services generate gRPC code during Docker build:**
+
+```dockerfile
+# Copy shared protos from root
+COPY protos /app/protos
+
+# Copy service-specific code
+COPY llm-orchestrator /app
+
+# Generate gRPC code from protos
+RUN python -m grpc_tools.protoc \
+    -I/app \
+    --python_out=/app \
+    --grpc_python_out=/app \
+    /app/protos/orchestrator.proto \
+    /app/protos/tool_service.proto
+```
+
+**Result:** Generated `*_pb2.py` and `*_pb2_grpc.py` files in `/app/protos/` inside container.
+
+### Generated Files
+
+**DO NOT commit generated files to git:**
+
+```gitignore
+# .gitignore
+*_pb2.py
+*_pb2_grpc.py
+*_pb2.pyi
+```
+
+Files are regenerated on every `docker compose build`.
+
+## Service Discovery
+
+### Docker Compose Service Names
+
+Services communicate using Docker Compose service names as hostnames:
+
+```python
+# Backend connecting to LLM Orchestrator
+orchestrator_host = 'llm-orchestrator'  # Docker service name
+orchestrator_port = 50051
+
+# LLM Orchestrator connecting to Backend
+backend_host = 'backend'  # Docker service name
+backend_port = 50052
+```
+
+**NEVER use:**
+- `localhost` (only works inside same container)
+- IP addresses (dynamic in Docker)
+- External hostnames (unnecessary)
+
+### Environment Variables
+
+```yaml
+# docker-compose.yml - LLM Orchestrator
+environment:
+  - BACKEND_TOOL_SERVICE_HOST=backend
+  - BACKEND_TOOL_SERVICE_PORT=50052
+
+# docker-compose.yml - Backend
+environment:
+  - GRPC_ORCHESTRATOR_HOST=llm-orchestrator
+  - GRPC_ORCHESTRATOR_PORT=50051
+```
+
+## gRPC Streaming Patterns
+
+### Orchestrator Streaming Response
+
+The orchestrator **yields** `ChatChunk` messages:
+
+```python
+# llm-orchestrator/orchestrator/grpc_service.py
+async def StreamChat(self, request: orchestrator_pb2.ChatRequest, context):
+    """Stream chat responses chunk by chunk"""
+    
+    # Yield status updates
+    yield orchestrator_pb2.ChatChunk(
+        type="status",
+        message="Starting research agent...",
+        timestamp=datetime.now().isoformat(),
+        agent_name="research_agent"
+    )
+    
+    # Yield content chunks
+    yield orchestrator_pb2.ChatChunk(
+        type="content",
+        message="I found 5 relevant documents...",
+        timestamp=datetime.now().isoformat(),
+        agent_name="research_agent"
+    )
+    
+    # Yield completion
+    yield orchestrator_pb2.ChatChunk(
+        type="complete",
+        message="Task complete",
+        timestamp=datetime.now().isoformat(),
+        agent_name="research_agent"
+    )
+```
+
+### Standard Chunk Types
+
+| Type      | Purpose                              | When to Use                        |
+|-----------|--------------------------------------|------------------------------------|
+| `status`  | Progress updates                     | Starting tasks, intermediate steps |
+| `content` | Main response content                | Actual answers, findings           |
+| `tool_call` | Tool invocation notification       | When calling backend tools         |
+| `agent_update` | Agent state changes             | Agent switching, context updates   |
+| `complete` | Task completion signal              | Final message in stream            |
+| `error`   | Error notifications                  | Failures, exceptions               |
+
+## Backend Proxy Layer
+
+### gRPC to SSE Conversion
+
+The backend wraps gRPC with FastAPI and converts to Server-Sent Events:
+
+```python
+# backend/api/grpc_orchestrator_proxy.py
+async def stream_from_grpc_orchestrator(query: str, ...):
+    """Convert gRPC stream to SSE JSON"""
+    
+    async with grpc.aio.insecure_channel(f'{host}:{port}') as channel:
+        stub = orchestrator_pb2_grpc.OrchestratorServiceStub(channel)
+        
+        grpc_request = orchestrator_pb2.ChatRequest(
+            query=query,
+            user_id=user_id,
+            conversation_id=conversation_id
+        )
+        
+        # Stream from gRPC, convert to JSON SSE
+        async for chunk in stub.StreamChat(grpc_request):
+            yield format_sse_message({
+                'type': chunk.type,
+                'content': chunk.message,
+                'timestamp': chunk.timestamp,
+                'agent_name': chunk.agent_name,
+                'tools_used': list(chunk.tools_used),
+                'metadata': dict(chunk.metadata)
+            })
+```
+
+### Centralized JSON Formatting
+
+**ALWAYS use `format_sse_message()` for streaming responses:**
+
+```python
+def format_sse_message(data: Dict[str, Any]) -> str:
+    """
+    Centralized SSE message formatter - converts Python dict to proper JSON
+    
+    This ensures all streaming responses use valid JSON with double quotes,
+    not Python dict repr with single quotes.
+    """
+    json_str = json.dumps(data)
+    return f"data: {json_str}\n\n"
+```
+
+See `.cursor/rules/streaming-json-format.mdc` for complete streaming format documentation.
+
+## Tool Callback Architecture
+
+### Orchestrator Calls Backend Tools
+
+The orchestrator uses a **gRPC client** to call backend services:
+
+```python
+# llm-orchestrator/orchestrator/backend_tool_client.py
+class BackendToolClient:
+    """Client for calling backend gRPC tool service"""
+    
+    def __init__(self):
+        host = os.getenv('BACKEND_TOOL_SERVICE_HOST', 'backend')
+        port = os.getenv('BACKEND_TOOL_SERVICE_PORT', '50052')
+        self.channel = grpc.aio.insecure_channel(f'{host}:{port}')
+        self.stub = tool_service_pb2_grpc.ToolServiceStub(self.channel)
+    
+    async def search_documents(self, query: str, max_results: int = 10):
+        """Search local documents via backend"""
+        request = tool_service_pb2.DocumentSearchRequest(
+            query=query,
+            max_results=max_results,
+            similarity_threshold=0.3
+        )
+        
+        response = await self.stub.SearchDocuments(request)
+        return [
+            {
+                'document_id': result.document_id,
+                'title': result.title,
+                'content_preview': result.content_preview,
+                'relevance_score': result.relevance_score
+            }
+            for result in response.results
+        ]
+```
+
+### Backend Implements Tool Service
+
+The backend **serves** the tool service on port 50052:
+
+```python
+# backend/services/grpc_tool_service.py
+class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
+    """Backend gRPC service for orchestrator tool calls"""
+    
+    async def SearchDocuments(self, request, context):
+        """Handle document search from orchestrator"""
+        
+        # Use DirectSearchService for semantic search
+        search_service = DirectSearchService()
+        results = await search_service.search_documents(
+            query=request.query,
+            max_results=request.max_results,
+            similarity_threshold=request.similarity_threshold
+        )
+        
+        # Convert to proto format
+        proto_results = []
+        for result in results:
+            proto_results.append(tool_service_pb2.DocumentResult(
+                document_id=result['document_id'],
+                title=result.get('title', 'Untitled'),
+                filename=result.get('filename', 'unknown'),
+                content_preview=result['content'][:500],
+                relevance_score=result['score']
+            ))
+        
+        return tool_service_pb2.DocumentSearchResponse(results=proto_results)
+```
+
+## Error Handling
+
+### gRPC Status Codes
+
+**Use appropriate gRPC status codes:**
+
+```python
+import grpc
+
+# Success - no status code needed, just return response
+return response
+
+# Not found
+context.set_code(grpc.StatusCode.NOT_FOUND)
+context.set_details('Document not found')
+return empty_response
+
+# Invalid argument
+context.set_code(grpc.StatusCode.INVALID_ARGUMENT)
+context.set_details('Query must not be empty')
+return empty_response
+
+# Internal error
+context.set_code(grpc.StatusCode.INTERNAL)
+context.set_details(f'Search failed: {str(e)}')
+return empty_response
+
+# Unavailable (service down)
+context.set_code(grpc.StatusCode.UNAVAILABLE)
+context.set_details('Backend service temporarily unavailable')
+return empty_response
+```
+
+### Client-Side Error Handling
+
+```python
+try:
+    async with grpc.aio.insecure_channel(f'{host}:{port}') as channel:
+        stub = service_stub(channel)
+        response = await stub.Method(request)
+except grpc.RpcError as e:
+    if e.code() == grpc.StatusCode.UNAVAILABLE:
+        logger.error(f"Service unavailable: {e.details()}")
+        # Implement retry or fallback
+    elif e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+        logger.error(f"Request timeout: {e.details()}")
+    else:
+        logger.error(f"gRPC error: {e.code()} - {e.details()}")
+```
+
+## Health Checks
+
+### Orchestrator Health Check
+
+```python
+async def HealthCheck(self, request, context):
+    """Simple health check endpoint"""
+    return orchestrator_pb2.HealthCheckResponse(
+        status="healthy",
+        timestamp=datetime.now().isoformat()
+    )
+```
+
+### Docker Compose Health Check
+
+```yaml
+healthcheck:
+  test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(5); s.connect((\"localhost\", 50051)); s.close()' || exit 1"]
+  interval: 30s
+  timeout: 10s
+  start_period: 40s
+  retries: 3
+```
+
+## Development Workflow
+
+### Making Proto Changes
+
+1. Edit proto file in `/opt/bastion/protos/`
+2. Rebuild affected services:
+   ```bash
+   docker compose build backend llm-orchestrator
+   ```
+3. Restart services:
+   ```bash
+   docker compose up -d backend llm-orchestrator
+   ```
+
+### Restart Single Service
+
+```bash
+# After code changes (no proto changes)
+docker compose restart llm-orchestrator  # 15 seconds
+
+# After proto changes or dependency updates
+docker compose up -d --build llm-orchestrator  # Full rebuild
+```
+
+### Testing gRPC Connectivity
+
+```python
+# llm-orchestrator/test_grpc.py
+import grpc
+from protos import orchestrator_pb2, orchestrator_pb2_grpc
+
+async def test_connection():
+    async with grpc.aio.insecure_channel('localhost:50051') as channel:
+        stub = orchestrator_pb2_grpc.OrchestratorServiceStub(channel)
+        response = await stub.HealthCheck(
+            orchestrator_pb2.HealthCheckRequest()
+        )
+        print(f"Status: {response.status}")
+```
+
+## Best Practices
+
+### Proto Design
+
+1. **Use semantic versioning** - Include version in package name for major changes
+2. **Add fields, don't remove** - Proto3 is backwards compatible if you only add
+3. **Use optional fields** - For fields that might not always be present
+4. **Include metadata maps** - `map<string, string> metadata` for extensibility
+5. **Document message purposes** - Clear comments in `.proto` files
+
+### Service Implementation
+
+1. **Async all the way** - Use `async def` for all gRPC methods
+2. **Proper error handling** - Set gRPC status codes, not just Python exceptions
+3. **Logging at boundaries** - Log at service entry/exit points
+4. **Timeout configuration** - Set reasonable deadlines for calls
+5. **Graceful degradation** - Handle service unavailability
+
+### Security Considerations
+
+**Current state: Insecure channels (development)**
+
+For production, implement:
+- TLS/SSL for gRPC channels
+- Authentication tokens in metadata
+- Authorization checks in service methods
+- Rate limiting
+- Request validation
+
+## Troubleshooting
+
+### "Connection refused" errors
+
+**Symptoms:** `StatusCode.UNAVAILABLE - failed to connect`
+
+**Causes:**
+1. Backend service not started (`docker compose ps`)
+2. Wrong hostname (use service name, not `localhost`)
+3. Wrong port (50051 for orchestrator, 50052 for backend)
+4. Health check failing (check logs)
+
+**Fix:**
+```bash
+# Check service status
+docker compose ps
+
+# Check logs
+docker compose logs backend
+docker compose logs llm-orchestrator
+
+# Restart services
+docker compose restart backend llm-orchestrator
+```
+
+### "No module named 'protos.*_pb2'" errors
+
+**Symptoms:** Import errors for generated proto files
+
+**Causes:**
+1. Proto generation failed during Docker build
+2. Build context incorrect (must be root `.`)
+3. `protoc` command incorrect in Dockerfile
+
+**Fix:**
+```bash
+# Rebuild with verbose output
+docker compose build --no-cache backend llm-orchestrator
+
+# Check for protoc errors in build log
+```
+
+### Proto field mismatch errors
+
+**Symptoms:** `Protocol message X has no "field_name" field`
+
+**Causes:**
+1. Proto file out of sync with code
+2. Old generated files cached
+3. Services built from different proto versions
+
+**Fix:**
+```bash
+# Ensure single source of truth
+ls -la protos/
+
+# Rebuild both services
+docker compose build --no-cache backend llm-orchestrator
+docker compose up -d backend llm-orchestrator
+```
+
+## Anti-Patterns to Avoid
+
+### ❌ DON'T:
+- Duplicate proto files across services
+- Use `localhost` for inter-service communication
+- Commit generated `*_pb2.py` files
+- Use string matching on message fields
+- Build from subdirectory context
+- Mix blocking and async code
+- Ignore gRPC status codes
+
+### ✅ DO:
+- Keep protos in shared `/opt/bastion/protos/`
+- Use Docker service names for hostnames
+- Let Docker build generate proto code
+- Use typed proto messages
+- Build from root context (`.`)
+- Use async/await throughout
+- Set appropriate gRPC status codes
+
+## Case Study: Vector Service Migration
+
+### Gradual Migration with Feature Flag
+
+The Vector Service demonstrates a powerful pattern for migrating existing functionality to a microservice without disruption.
+
+#### Architecture Pattern: Embedding Service Wrapper
+
+```python
+# backend/services/embedding_service_wrapper.py
+class EmbeddingServiceWrapper:
+    """
+    Compatibility layer that switches between legacy and new embedding service
+    based on USE_VECTOR_SERVICE feature flag
+    """
+    
+    async def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        if settings.USE_VECTOR_SERVICE:
+            # Route to new Vector Service via gRPC
+            return await self.vector_service_client.generate_embeddings(texts)
+        else:
+            # Use legacy EmbeddingManager (direct OpenAI)
+            return await self.embedding_manager.generate_embeddings(texts)
+```
+
+**Benefits:**
+- Zero-downtime migration
+- A/B testing capability
+- Easy rollback if issues arise
+- Gradual confidence building
+
+#### Migration Process
+
+**Phase 1: Build Infrastructure** ✅
+1. Create Vector Service with proto definition
+2. Build gRPC service implementation
+3. Add to docker-compose.yml
+4. Set `USE_VECTOR_SERVICE=false` initially
+
+**Phase 2: Migrate All Callers** ✅
+1. Create `EmbeddingServiceWrapper` compatibility layer
+2. Update all 19 backend services to use wrapper
+3. Test with feature flag OFF (legacy path)
+4. Verify all functionality works unchanged
+
+**Phase 3: Switch Flag** (Next Step)
+1. Set `USE_VECTOR_SERVICE=true` in docker-compose.yml
+2. Monitor performance and errors
+3. Compare embedding results
+4. A/B test with subset of users
+
+**Phase 4: Cleanup** (Future)
+1. Remove legacy `EmbeddingManager` code
+2. Remove feature flag
+3. Make Vector Service the only path
+4. Archive migration documentation
+
+#### Key Design Decisions
+
+**Embedding-Only Service:**
+- Vector Service generates and caches embeddings ONLY
+- Caller (backend) handles Qdrant storage and search
+- Reduces complexity and coupling
+- Leverages existing Qdrant logic
+
+**Why Not Full Vector Store?**
+- Qdrant operations tied to complex business logic
+- Metadata handling specific to application
+- Collection management requires user context
+- Gradual migration less risky
+
+**Cache Strategy:**
+- 3-hour TTL on embeddings
+- Hash-based cache keys
+- Periodic cleanup
+- Cache stats for monitoring
+
+#### Lessons Learned
+
+1. **Feature flags enable confidence** - Test new service without risk
+2. **Thin compatibility layers work** - Simple wrapper, complex migration
+3. **Proto field naming matters** - `vector` vs `embedding` caused issues
+4. **Start small, grow** - Embedding-only simpler than full vector store
+5. **Type annotations bite** - Remove them when migrating away from classes
+
+## Summary
+
+**gRPC Architecture Principles (Applies to ALL Services):**
+
+1. **Shared protos** - Single source of truth in `/opt/bastion/protos/`
+2. **Extensible by design** - Add new services following the 8-step pattern
+3. **Port allocation** - Use 5005X range (50051, 50052, 50053, ...)
+4. **Docker service discovery** - Use service names, not IPs
+5. **Root build context** - Access shared resources during build
+6. **Bidirectional communication** - Services can be both client and server
+7. **Streaming first** - Use `stream` return type for real-time updates
+8. **Proper JSON serialization** - Backend converts gRPC → SSE JSON
+9. **Clear error handling** - Use gRPC status codes
+10. **Health checks** - Every service exposes health endpoint
+11. **Communication patterns** - Choose hub-and-spoke, mesh, or chain based on needs
+12. **Circuit breakers and retry logic** - Handle service failures gracefully
+
+**This is NOT a static two-service architecture.**
+
+These patterns enable you to:
+- Add specialized processing services (document processor, image analyzer, etc.)
+- Break out complex agents into dedicated microservices
+- Scale individual services independently
+- Replace/upgrade services without touching others
+- Test services in isolation
+
+**Follow these patterns and your gRPC microservices architecture will scale from 2 to N services with maximum reliability and maintainability.**

@@ -1,0 +1,190 @@
+---
+globs: backend/services/langgraph_*.py,backend/services/*_service.py
+description: LangGraph agent architecture and service patterns
+---
+
+# Agent Architecture Patterns - Separation of Powers
+
+Follow industry-standard agent architecture with clear separation between Intent Classification, Orchestration, and Agent Execution.
+
+## Three-Tier Architecture
+
+### Three-Tier Agent System
+
+**1. Intent Classification Layer** - [backend/services/smart_intent_classifier.py](mdc:backend/services/smart_intent_classifier.py)
+- **Fast, lightweight** LLM calls for intent detection
+- **Multilingual support** for permission grants
+- **Heuristic fallbacks** for reliability
+- **Single responsibility**: What does the user want?
+
+**2. Orchestration Layer** - [backend/services/langgraph_official_orchestrator.py](mdc:backend/services/langgraph_official_orchestrator.py)  
+- **Workflow management** and state coordination
+- **Agent routing** based on intent decisions
+- **Pending operation** lifecycle management
+- **Single responsibility**: How should we handle this intent?
+
+**3. Agent Execution Layer** - [backend/services/langgraph_agents/](mdc:backend/services/langgraph_agents/)
+- **Specialized domain experts** (research, coding, chat, direct)
+- **Tool access** and execution
+- **Task completion** assessment
+- **Single responsibility**: Execute the specific task type
+
+### No Monolithic Orchestrators
+
+**ABSOLUTELY NO:**
+- Single orchestrator handling intent classification AND execution
+- Massive agents trying to do everything
+- String-based routing in orchestrators
+- Complex decision trees in single functions
+
+**ALWAYS USE:**
+- Dedicated services for each architectural concern
+- LLM-based semantic understanding where appropriate
+- Structured data flow between layers
+- Clear responsibility boundaries
+
+## LangGraph State Management
+
+### StateGraph Architecture
+
+**Use conditional routing for workflow control:**
+
+```python
+# ✅ CORRECT: Clean conditional routing
+self.graph.add_conditional_edges(
+    "smart_router",
+    get_route_decision,  # Pure function based on state
+    {
+        RouteDecision.RESEARCH_AGENT.value: "research_agent",
+        RouteDecision.CHAT_AGENT.value: "chat_agent", 
+        RouteDecision.END_CONVERSATION.value: END
+    }
+)
+```
+
+**Avoid complex routing logic in nodes:**
+
+```python
+# ❌ WRONG: Complex routing inside node
+async def _smart_router_node(self, state):
+    if some_complex_condition:
+        return await self._route_to_research(state)
+    elif another_complex_condition:
+        return await self._route_to_chat(state)
+    # ... more complexity
+```
+
+### State Flow Principles
+
+**State updates MUST be atomic:**
+- Each node updates state completely for its responsibility
+- No partial state updates that require follow-up
+- Clear state contracts between nodes
+
+**State should be additive:**
+- New nodes add their results to state
+- Previous results remain accessible
+- State history maintains conversation context
+
+**Example state flow:**
+```python
+# Intent Classifier adds decision
+state["intent_decision"] = intent_result
+
+# Orchestrator adds routing decision  
+state["orchestrator_routing_decision"] = routing_decision
+
+# Agent adds execution results
+state["agent_results"] = execution_results
+```
+
+## Agent Specialization
+
+### Research Agent Responsibilities
+- **Local-first search** across all knowledge sources
+- **Permission-based web search** when local insufficient
+- **Source citation** and result synthesis
+- **Research quality assessment**
+
+### Chat Agent Responsibilities  
+- **Conversational responses** for general queries
+- **Context maintenance** across turns
+- **Clarification requests** when needed
+- **Natural interaction** management
+
+### Coding Agent Responsibilities
+- **Code generation** and modification
+- **Technical analysis** and debugging  
+- **Architecture recommendations**
+- **Development workflow** guidance
+
+### Direct Agent Responsibilities
+- **Simple factual queries** from knowledge base
+- **Quick lookups** without complex reasoning
+- **High-confidence** direct answers
+- **Performance optimization** for simple cases
+
+## Tool Access Patterns
+
+### Centralized Tool Registry
+All tools MUST be registered in [backend/services/langgraph_tools/tool_registry.py](mdc:backend/services/langgraph_tools/tool_registry.py):
+
+```python
+# Agent gets tools from registry
+available_tools = ToolRegistry.get_tools_for_agent("research_agent")
+```
+
+**Benefits:**
+- **Consistent tool access** across agents
+- **Permission control** per agent type
+- **Tool versioning** and updates
+- **Testing** with mock tools
+
+### Agent-Specific Tool Sets
+
+**Research Agent tools:**
+- `search_local`, `search_web`, `get_document`
+- `analyze_and_ingest`, `crawl_web_content`
+- `summarize_content`, `analyze_documents`
+
+**Coding Agent tools:**
+- File system tools, code analysis tools
+- Testing and execution tools
+- Documentation tools
+
+**Never give agents tools they don't need** - follow principle of least privilege!
+
+## Performance and Scalability
+
+### Async-First Design
+All agent operations MUST be async for scalability:
+
+```python
+# ✅ CORRECT: Async agent processing
+async def process(self, state: ConversationState) -> ConversationState:
+    result = await self._execute_async_operation(state)
+    return state
+```
+
+### Stateless Agent Design
+Agents should be stateless - all context in ConversationState:
+
+```python
+# ✅ CORRECT: Stateless agent
+class ResearchAgent(BaseAgent):
+    def __init__(self):
+        # Only configuration, no instance state
+        self.config = load_config()
+    
+    async def process(self, state):
+        # All context from state parameter
+        query = self._get_latest_user_message(state)
+```
+
+### Resource Management
+- **Tool timeouts** for web operations
+- **Result caching** for expensive operations  
+- **Graceful degradation** when tools fail
+- **Memory limits** for large document processing
+
+**Remember: "A well-architected agent system is like a well-organized government - each branch has clear responsibilities and proper checks and balances!"**

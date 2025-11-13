@@ -1,0 +1,257 @@
+syntax = "proto3";
+
+package orchestrator;
+
+// Main LLM Orchestrator Service
+service OrchestratorService {
+  // Streaming chat response (primary interface)
+  rpc StreamChat(ChatRequest) returns (stream ChatChunk);
+  
+  // Async task processing
+  rpc StartTask(TaskRequest) returns (TaskResponse);
+  rpc GetTaskStatus(TaskStatusRequest) returns (TaskStatusResponse);
+  
+  // Human-in-the-Loop (HITL) support
+  rpc ApprovePermission(PermissionApproval) returns (ApprovalResponse);
+  rpc GetPendingPermissions(PermissionRequest) returns (PermissionList);
+  
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ============================================================================
+// Chat Request - Comprehensive Context
+// ============================================================================
+
+message ChatRequest {
+  // === CORE IDENTITY (Always Required) ===
+  string user_id = 1;
+  string conversation_id = 2;
+  string query = 3;
+  string session_id = 4;
+  
+  // === ROUTING CONTROL (Optional) ===
+  string agent_type = 5;  // Optional explicit agent routing: "research", "chat", "data_formatting", "auto"
+  string routing_reason = 6;  // Optional: why this agent was selected
+  
+  // === CONVERSATION HISTORY (Optional but Recommended) ===
+  repeated ConversationMessage conversation_history = 7;
+  
+  // === USER PREFERENCES (Optional) ===
+  UserPersona persona = 8;
+  
+  // === EDITOR CONTEXT (Optional - When on editor page) ===
+  ActiveEditor active_editor = 9;
+  
+  // === PIPELINE CONTEXT (Optional - When on pipeline page) ===
+  PipelineContext pipeline_context = 10;
+  
+  // === PERMISSION GRANTS (Optional - When user has granted permissions) ===
+  PermissionGrants permission_grants = 11;
+  
+  // === PENDING OPERATIONS (Optional - When operations pending) ===
+  repeated PendingOperationInfo pending_operations = 12;
+  
+  // === CONVERSATION INTELLIGENCE (Optional - For performance optimization) ===
+  ConversationIntelligence conversation_intelligence = 13;
+  
+  // === ROUTING LOCKS (Optional - When conversation locked to agent) ===
+  string locked_agent = 14;  // e.g. "wargaming_agent", "fiction_editing_agent"
+  
+  // === CHECKPOINTING (Optional - For conversation branching) ===
+  string base_checkpoint_id = 15;  // Start from this checkpoint to branch
+  
+  // === LEGACY METADATA (Deprecated - Use specific fields above) ===
+  map<string, string> metadata = 99;
+}
+
+// ============================================================================
+// Context Message Definitions
+// ============================================================================
+
+// Conversation message for history
+message ConversationMessage {
+  string role = 1;  // "user" | "assistant" | "system"
+  string content = 2;
+  string timestamp = 3;  // ISO 8601 timestamp
+  map<string, string> metadata = 4;  // Optional message-specific metadata
+}
+
+// User persona and preferences
+message UserPersona {
+  string ai_name = 1;  // e.g. "Kodex", "Claude"
+  string persona_style = 2;  // "professional" | "casual" | "technical"
+  string political_bias = 3;  // "neutral" | "liberal" | "conservative"
+  string timezone = 4;  // e.g. "America/New_York"
+  map<string, string> custom_preferences = 5;  // Extensible preferences
+}
+
+// Active editor context (for fiction editing, proofreading, etc.)
+message ActiveEditor {
+  bool is_editable = 1;
+  string filename = 2;  // e.g. "chapter1.md"
+  string language = 3;  // e.g. "markdown", "text"
+  string content = 4;  // Full file content (can be large!)
+  int32 content_length = 5;
+  EditorFrontmatter frontmatter = 6;  // Parsed YAML frontmatter
+  string editor_preference = 7;  // "prefer" | "ignore"
+}
+
+// Editor frontmatter (YAML metadata from markdown files)
+message EditorFrontmatter {
+  string type = 1;  // e.g. "fiction", "article", "notes"
+  string title = 2;
+  string author = 3;
+  repeated string tags = 4;
+  string status = 5;  // e.g. "draft", "published"
+  map<string, string> custom_fields = 6;  // Extensible frontmatter
+}
+
+// Pipeline execution context
+message PipelineContext {
+  string pipeline_preference = 1;  // "prefer" | "ignore"
+  string active_pipeline_id = 2;  // Pipeline UUID
+  string pipeline_name = 3;  // Optional: pipeline name for display
+  map<string, string> pipeline_variables = 4;  // Template variables
+}
+
+// Permission grants for HITL operations
+message PermissionGrants {
+  bool web_search_permission = 1;
+  bool web_crawl_permission = 2;
+  bool file_write_permission = 3;
+  bool external_api_permission = 4;
+  map<string, bool> custom_permissions = 5;  // Extensible permissions
+}
+
+// Pending operation information
+message PendingOperationInfo {
+  string id = 1;  // Operation UUID
+  string type = 2;  // e.g. "web_search", "file_write"
+  string summary = 3;  // Human-readable summary
+  bool permission_required = 4;
+  string status = 5;  // "pending" | "approved" | "denied"
+  string created_at = 6;  // ISO 8601 timestamp
+  map<string, string> metadata = 7;  // Operation-specific data
+}
+
+// Conversation intelligence (cached results for performance)
+message ConversationIntelligence {
+  repeated CachedResult cached_results = 1;
+  TopicContinuity topic_continuity = 2;
+  ResearchCache research_cache = 3;
+  string last_updated = 4;  // ISO 8601 timestamp
+}
+
+// Cached result from previous agent
+message CachedResult {
+  string content_hash = 1;
+  string content = 2;
+  string result_type = 3;  // "research_findings" | "chat_output" | "web_sources" | "local_documents"
+  string source_agent = 4;
+  string timestamp = 5;
+  float confidence_score = 6;  // 0.0-1.0
+  repeated string topics = 7;
+  repeated string citations = 8;
+}
+
+// Topic continuity tracking
+message TopicContinuity {
+  string current_topic = 1;
+  repeated string topic_history = 2;
+  repeated TopicTransition topic_transitions = 3;
+}
+
+// Topic transition event
+message TopicTransition {
+  string from_topic = 1;
+  string to_topic = 2;
+  string timestamp = 3;
+  string reason = 4;  // e.g. "user_initiated", "natural_flow"
+}
+
+// Research cache for avoiding redundant work
+message ResearchCache {
+  map<string, string> query_results = 1;  // query_hash -> JSON results
+  map<string, string> source_cache = 2;  // url -> cached content
+  map<string, float> coverage_scores = 3;  // pattern -> coverage score
+}
+
+// Streaming chat chunk
+message ChatChunk {
+  string type = 1;  // "status", "content", "tool_call", "agent_update", "complete", "error"
+  string message = 2;
+  string timestamp = 3;
+  map<string, string> metadata = 4;
+  string agent_name = 5;
+  repeated string tools_used = 6;
+}
+
+// Async Task Messages
+message TaskRequest {
+  string user_id = 1;
+  string conversation_id = 2;
+  string query = 3;
+  string priority = 4;  // "normal", "high", "low"
+  map<string, string> context = 5;
+}
+
+message TaskResponse {
+  string task_id = 1;
+  string status = 2;  // "queued", "running", "completed", "failed"
+  string message = 3;
+}
+
+message TaskStatusRequest {
+  string task_id = 1;
+  string user_id = 2;
+}
+
+message TaskStatusResponse {
+  string task_id = 1;
+  string status = 2;
+  string result = 3;
+  string error_message = 4;
+  map<string, string> metadata = 5;
+}
+
+// Permission (HITL) Messages
+message PermissionApproval {
+  string user_id = 1;
+  string conversation_id = 2;
+  string session_id = 3;
+  string approval_decision = 4;  // "approved", "denied"
+  string operation_type = 5;  // "web_search", "web_crawl", etc.
+}
+
+message ApprovalResponse {
+  bool success = 1;
+  string message = 2;
+  string next_action = 3;
+}
+
+message PermissionRequest {
+  string user_id = 1;
+  string conversation_id = 2;
+}
+
+message PermissionList {
+  repeated PendingPermission permissions = 1;
+}
+
+message PendingPermission {
+  string operation_type = 1;
+  string query = 2;
+  string reasoning = 3;
+  string safety_level = 4;
+  string timestamp = 5;
+}
+
+// Health Check
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;  // "healthy", "degraded", "unhealthy"
+  map<string, string> details = 2;
+}
+

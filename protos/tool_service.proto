@@ -1,0 +1,517 @@
+syntax = "proto3";
+
+package tool_service;
+
+// Tool Service - Backend exposes data access to orchestrator
+service ToolService {
+  // Document operations
+  rpc SearchDocuments(SearchRequest) returns (SearchResponse);
+  rpc GetDocument(DocumentRequest) returns (DocumentResponse);
+  rpc GetDocumentContent(DocumentRequest) returns (DocumentContentResponse);
+  
+  // RSS operations
+  rpc SearchRSSFeeds(RSSSearchRequest) returns (RSSSearchResponse);
+  rpc GetRSSArticles(RSSArticlesRequest) returns (RSSArticlesResponse);
+  
+  // RSS management operations
+  rpc AddRSSFeed(AddRSSFeedRequest) returns (AddRSSFeedResponse);
+  rpc ListRSSFeeds(ListRSSFeedsRequest) returns (ListRSSFeedsResponse);
+  rpc RefreshRSSFeed(RefreshRSSFeedRequest) returns (RefreshRSSFeedResponse);
+  rpc DeleteRSSFeed(DeleteRSSFeedRequest) returns (DeleteRSSFeedResponse);
+  
+  // Entity operations
+  rpc SearchEntities(EntitySearchRequest) returns (EntitySearchResponse);
+  rpc GetEntity(EntityRequest) returns (EntityResponse);
+  
+  // Weather operations
+  rpc GetWeatherData(WeatherRequest) returns (WeatherResponse);
+  
+  // Image generation operations
+  rpc GenerateImage(ImageGenerationRequest) returns (ImageGenerationResponse);
+  
+  // Org-mode operations
+  rpc SearchOrgFiles(OrgSearchRequest) returns (OrgSearchResponse);
+  rpc GetOrgInboxItems(OrgInboxRequest) returns (OrgInboxResponse);
+  
+  // Org Inbox management operations
+  rpc ListOrgInboxItems(ListOrgInboxItemsRequest) returns (ListOrgInboxItemsResponse);
+  rpc AddOrgInboxItem(AddOrgInboxItemRequest) returns (AddOrgInboxItemResponse);
+  rpc ToggleOrgInboxItem(ToggleOrgInboxItemRequest) returns (ToggleOrgInboxItemResponse);
+  rpc UpdateOrgInboxItem(UpdateOrgInboxItemRequest) returns (UpdateOrgInboxItemResponse);
+  rpc SetOrgInboxSchedule(SetOrgInboxScheduleRequest) returns (SetOrgInboxScheduleResponse);
+  rpc ApplyOrgInboxTags(ApplyOrgInboxTagsRequest) returns (ApplyOrgInboxTagsResponse);
+  rpc ArchiveOrgInboxDone(ArchiveOrgInboxDoneRequest) returns (ArchiveOrgInboxDoneResponse);
+  rpc AppendOrgInboxText(AppendOrgInboxTextRequest) returns (AppendOrgInboxTextResponse);
+  rpc GetOrgInboxPath(GetOrgInboxPathRequest) returns (GetOrgInboxPathResponse);
+  
+  // Web search operations
+  rpc SearchWeb(WebSearchRequest) returns (WebSearchResponse);
+  rpc CrawlWebContent(WebCrawlRequest) returns (WebCrawlResponse);
+  rpc SearchAndCrawl(SearchAndCrawlRequest) returns (SearchAndCrawlResponse);
+  
+  // Enhancement operations
+  rpc ExpandQuery(QueryExpansionRequest) returns (QueryExpansionResponse);
+  rpc SearchConversationCache(CacheSearchRequest) returns (CacheSearchResponse);
+}
+
+// Document Messages
+message SearchRequest {
+  string user_id = 1;
+  string query = 2;
+  int32 limit = 3;
+  repeated string filters = 4;
+}
+
+message SearchResponse {
+  repeated DocumentResult results = 1;
+  int32 total_count = 2;
+}
+
+message DocumentResult {
+  string document_id = 1;
+  string title = 2;
+  string filename = 3;
+  string content_preview = 4;
+  float relevance_score = 5;
+  map<string, string> metadata = 6;
+}
+
+message DocumentRequest {
+  string document_id = 1;
+  string user_id = 2;
+}
+
+message DocumentResponse {
+  string document_id = 1;
+  string title = 2;
+  string filename = 3;
+  string content_type = 4;
+  map<string, string> metadata = 5;
+}
+
+message DocumentContentResponse {
+  string document_id = 1;
+  string content = 2;
+  string format = 3;  // "text", "markdown", "html"
+}
+
+// RSS Messages
+message RSSSearchRequest {
+  string user_id = 1;
+  string query = 2;
+  int32 limit = 3;
+}
+
+message RSSSearchResponse {
+  repeated RSSFeed feeds = 1;
+  repeated RSSArticle articles = 2;
+}
+
+message RSSFeed {
+  string feed_id = 1;
+  string feed_name = 2;
+  string feed_url = 3;
+  string description = 4;
+}
+
+message RSSArticle {
+  string article_id = 1;
+  string title = 2;
+  string content = 3;
+  string url = 4;
+  string published_at = 5;
+}
+
+message RSSArticlesRequest {
+  string feed_id = 1;
+  string user_id = 2;
+  int32 limit = 3;
+}
+
+message RSSArticlesResponse {
+  repeated RSSArticle articles = 1;
+}
+
+// RSS Management Messages
+message AddRSSFeedRequest {
+  string user_id = 1;
+  string feed_url = 2;
+  string feed_name = 3;
+  string category = 4;
+  bool is_global = 5;  // If true, creates a global feed (admin only)
+}
+
+message AddRSSFeedResponse {
+  bool success = 1;
+  string feed_id = 2;
+  string feed_name = 3;
+  string message = 4;
+  optional string error = 5;
+}
+
+message ListRSSFeedsRequest {
+  string user_id = 1;
+  string scope = 2;  // "user" or "global"
+}
+
+message ListRSSFeedsResponse {
+  repeated RSSFeedDetails feeds = 1;
+  int32 count = 2;
+  bool success = 3;
+  optional string error = 4;
+}
+
+message RSSFeedDetails {
+  string feed_id = 1;
+  string feed_name = 2;
+  string feed_url = 3;
+  string category = 4;
+  bool is_global = 5;
+  string last_polled = 6;
+  int32 article_count = 7;
+}
+
+message RefreshRSSFeedRequest {
+  string user_id = 1;
+  string feed_name = 2;  // Feed name for user-friendly identification
+  string feed_id = 3;     // Optional: direct feed ID
+}
+
+message RefreshRSSFeedResponse {
+  bool success = 1;
+  string feed_id = 2;
+  string feed_name = 3;
+  string task_id = 4;  // Celery task ID
+  string message = 5;
+  optional string error = 6;
+}
+
+message DeleteRSSFeedRequest {
+  string user_id = 1;
+  string feed_name = 2;  // Feed name for user-friendly identification
+  string feed_id = 3;     // Optional: direct feed ID
+}
+
+message DeleteRSSFeedResponse {
+  bool success = 1;
+  string feed_id = 2;
+  string message = 3;
+  optional string error = 4;
+}
+
+// Entity Messages
+message EntitySearchRequest {
+  string user_id = 1;
+  string query = 2;
+  repeated string entity_types = 3;
+  int32 limit = 4;
+}
+
+message EntitySearchResponse {
+  repeated Entity entities = 1;
+}
+
+message Entity {
+  string entity_id = 1;
+  string entity_type = 2;
+  string name = 3;
+  map<string, string> properties = 4;
+}
+
+message EntityRequest {
+  string entity_id = 1;
+  string user_id = 2;
+}
+
+message EntityResponse {
+  Entity entity = 1;
+  repeated string related_documents = 2;
+}
+
+// Weather Messages
+message WeatherRequest {
+  string location = 1;
+  string user_id = 2;
+  repeated string data_types = 3;  // "current", "forecast", "alerts"
+}
+
+message WeatherResponse {
+  string location = 1;
+  string current_conditions = 2;
+  repeated string forecast = 3;
+  repeated string alerts = 4;
+  map<string, string> metadata = 5;
+}
+
+// Org-mode Messages
+message OrgSearchRequest {
+  string user_id = 1;
+  string query = 2;
+  repeated string search_types = 3;  // "todos", "headings", "content"
+  int32 limit = 4;
+}
+
+message OrgSearchResponse {
+  repeated OrgSearchResult results = 1;
+}
+
+message OrgSearchResult {
+  string document_id = 1;
+  string document_name = 2;
+  string heading = 3;
+  string content = 4;
+  int32 line_number = 5;
+  map<string, string> metadata = 6;
+}
+
+message OrgInboxRequest {
+  string user_id = 1;
+  int32 limit = 2;
+}
+
+message OrgInboxResponse {
+  repeated OrgInboxItem items = 1;
+}
+
+message OrgInboxItem {
+  string item_id = 1;
+  string title = 2;
+  string content = 3;
+  string timestamp = 4;
+  map<string, string> metadata = 5;
+}
+
+// Org Inbox Management Messages
+message ListOrgInboxItemsRequest {
+  string user_id = 1;
+}
+
+message ListOrgInboxItemsResponse {
+  bool success = 1;
+  string path = 2;
+  repeated OrgInboxItemDetails items = 3;
+  optional string error = 4;
+}
+
+message OrgInboxItemDetails {
+  int32 line_index = 1;
+  string text = 2;
+  string item_type = 3;  // "headline", "checkbox", "plain"
+  string todo_state = 4;  // "TODO", "DONE", etc.
+  repeated string tags = 5;
+  bool is_done = 6;
+}
+
+message AddOrgInboxItemRequest {
+  string user_id = 1;
+  string text = 2;
+  string kind = 3;  // "todo", "event", "contact", "checkbox"
+  optional string schedule = 4;  // org timestamp
+  optional string repeater = 5;  // +1w, .+1m, etc.
+  repeated string tags = 6;
+  map<string, string> contact_properties = 7;
+}
+
+message AddOrgInboxItemResponse {
+  bool success = 1;
+  int32 line_index = 2;
+  string message = 3;
+  optional string error = 4;
+}
+
+message ToggleOrgInboxItemRequest {
+  string user_id = 1;
+  int32 line_index = 2;
+}
+
+message ToggleOrgInboxItemResponse {
+  bool success = 1;
+  int32 updated_index = 2;
+  string new_line = 3;
+  optional string error = 4;
+}
+
+message UpdateOrgInboxItemRequest {
+  string user_id = 1;
+  int32 line_index = 2;
+  string new_text = 3;
+}
+
+message UpdateOrgInboxItemResponse {
+  bool success = 1;
+  int32 updated_index = 2;
+  string new_line = 3;
+  optional string error = 4;
+}
+
+message SetOrgInboxScheduleRequest {
+  string user_id = 1;
+  int32 line_index = 2;
+  string scheduled = 3;  // org timestamp <YYYY-MM-DD Dow>
+  optional string repeater = 4;  // +1w, .+1m
+}
+
+message SetOrgInboxScheduleResponse {
+  bool success = 1;
+  int32 updated_index = 2;
+  string scheduled_line = 3;
+  optional string error = 4;
+}
+
+message ApplyOrgInboxTagsRequest {
+  string user_id = 1;
+  int32 line_index = 2;
+  repeated string tags = 3;
+}
+
+message ApplyOrgInboxTagsResponse {
+  bool success = 1;
+  repeated string applied_tags = 2;
+  optional string error = 3;
+}
+
+message ArchiveOrgInboxDoneRequest {
+  string user_id = 1;
+}
+
+message ArchiveOrgInboxDoneResponse {
+  bool success = 1;
+  int32 archived_count = 2;
+  string message = 3;
+  optional string error = 4;
+}
+
+message AppendOrgInboxTextRequest {
+  string user_id = 1;
+  string text = 2;
+}
+
+message AppendOrgInboxTextResponse {
+  bool success = 1;
+  string message = 2;
+  optional string error = 3;
+}
+
+message GetOrgInboxPathRequest {
+  string user_id = 1;
+}
+
+message GetOrgInboxPathResponse {
+  bool success = 1;
+  string path = 2;
+  optional string error = 3;
+}
+
+// Web Search Messages
+message WebSearchRequest {
+  string query = 1;
+  int32 max_results = 2;
+  string user_id = 3;
+}
+
+message WebSearchResponse {
+  repeated WebSearchResult results = 1;
+}
+
+message WebSearchResult {
+  string title = 1;
+  string url = 2;
+  string snippet = 3;
+  float relevance_score = 4;
+}
+
+message WebCrawlRequest {
+  string url = 1;
+  string user_id = 2;
+}
+
+message WebCrawlResponse {
+  string url = 1;
+  string title = 2;
+  string content = 3;
+  string html = 4;
+  map<string, string> metadata = 5;
+}
+
+message SearchAndCrawlRequest {
+  string query = 1;
+  int32 num_results = 2;
+  string user_id = 3;
+}
+
+message SearchAndCrawlResponse {
+  repeated WebSearchResult search_results = 1;
+  repeated WebCrawlResult crawl_results = 2;
+}
+
+message WebCrawlResult {
+  string url = 1;
+  string title = 2;
+  string content = 3;
+  map<string, string> metadata = 4;
+}
+
+// Query Expansion Messages
+message QueryExpansionRequest {
+  string query = 1;
+  int32 num_variations = 2;
+  string user_id = 3;
+}
+
+message QueryExpansionResponse {
+  string original_query = 1;
+  repeated string expanded_queries = 2;
+  repeated string key_entities = 3;
+  int32 expansion_count = 4;
+}
+
+// Conversation Cache Messages
+message CacheSearchRequest {
+  string query = 1;
+  string conversation_id = 2;
+  int32 freshness_hours = 3;
+  string user_id = 4;
+}
+
+message CacheSearchResponse {
+  repeated CacheEntry entries = 1;
+  bool cache_hit = 2;
+}
+
+message CacheEntry {
+  string content = 1;
+  string timestamp = 2;
+  string agent_name = 3;
+  float relevance_score = 4;
+}
+
+// Image Generation Messages
+message ImageGenerationRequest {
+  string prompt = 1;
+  string size = 2;  // e.g., "1024x1024"
+  string format = 3;  // e.g., "png", "jpg"
+  optional int32 seed = 4;
+  int32 num_images = 5;
+  optional string negative_prompt = 6;
+  string user_id = 7;
+}
+
+message ImageGenerationResponse {
+  bool success = 1;
+  string model = 2;
+  string prompt = 3;
+  string size = 4;
+  string format = 5;
+  repeated GeneratedImage images = 6;
+  optional string error = 7;
+}
+
+message GeneratedImage {
+  string filename = 1;
+  string path = 2;
+  string url = 3;
+  int32 width = 4;
+  int32 height = 5;
+  string format = 6;
+}
+

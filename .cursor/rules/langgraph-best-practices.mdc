@@ -1,0 +1,392 @@
+---
+alwaysApply: true
+description: LangGraph agent architecture and best practices for development
+---
+
+# LangGraph Best Practices
+
+Follow these LangGraph best practices for building robust, maintainable agent systems.
+
+## Agent Architecture Principles
+
+### Single Responsibility Agents
+- Each agent handles **ONE specific domain** (research, chat, coding, weather, etc.)
+- Keep agent files under **500 lines** - split complex agents into focused modules
+- Use [backend/services/langgraph_agents/base_agent.py](mdc:backend/services/langgraph_agents/base_agent.py) as the foundation
+- Store agent logic in [backend/services/langgraph_agents/](mdc:backend/services/langgraph_agents/) directory
+
+### Structured Agent Communication
+- **ALWAYS use Pydantic models** from [backend/models/agent_response_models.py](mdc:backend/models/agent_response_models.py)
+- **NEVER use string matching** for agent decisions (`if "permission" in response.lower()`)
+- Include JSON schema in agent prompts for structured outputs
+- Parse responses with Pydantic validation, handle `ValidationError` gracefully
+
+Example structured response:
+```python
+from models.agent_response_models import ResearchTaskResult
+
+try:
+    structured_result = ResearchTaskResult.parse_raw(llm_response)
+    state["agent_results"] = structured_result.dict()
+except ValidationError as e:
+    logger.error(f"Failed to parse structured response: {e}")
+    # Graceful fallback logic
+```
+
+## LangGraph State Management
+
+### Conversation State Pattern
+- Use [backend/services/langgraph_enhanced_state.py](mdc:backend/services/langgraph_enhanced_state.py) for state definitions
+- Store cross-agent data in `state["shared_memory"]` 
+- Use `state["agent_results"]` for current agent outputs
+- Maintain conversation history in `state["messages"]`
+
+### Persistence with PostgreSQL
+- Use [backend/services/langgraph_postgres_checkpointer.py](mdc:backend/services/langgraph_postgres_checkpointer.py)
+- **NEVER implement custom memory stores** - use LangGraph's built-in checkpointing
+- Enable state persistence for conversation continuity
+
+## Human-in-the-Loop (HITL) Best Practices
+
+### Interrupt-Before Pattern
+```python
+# In orchestrator workflow definition
+workflow.add_conditional_edges(
+    "research_agent",
+    lambda state: "web_search_permission" if needs_permission(state) else "continue",
+    {
+        "web_search_permission": "web_search_permission",
+        "continue": "format_response"
+    }
+)
+
+# Add interrupt before permission nodes
+workflow.add_node("web_search_permission", self._web_search_permission_node)
+workflow = workflow.compile(
+    checkpointer=checkpointer,
+    interrupt_before=["web_search_permission"]
+)
+```
+
+### Permission Request Pattern
+- Create clear permission messages in agent responses
+- Store permission requests in `state["agent_results"]["permission_request"]`
+- Use explicit approval keywords: `["yes", "y", "ok", "proceed", "approved"]`
+- Let LangGraph's `continue()` method handle flow resumption
+
+### Resumption Logic
+```python
+# Simple resumption - let LangGraph handle the mechanics
+if has_pending_permission and user_approves:
+    input_data = {"messages": [HumanMessage(content=user_message)]}
+    # LangGraph's interrupt_before + continue handles the rest
+```
+
+## Tool Registry and Access Control
+
+### Centralized Tool Management
+- Use [backend/services/langgraph_tools/centralized_tool_registry.py](mdc:backend/services/langgraph_tools/centralized_tool_registry.py)
+- Group tools by domain in [backend/services/langgraph_tools/](mdc:backend/services/langgraph_tools/) directory
+- Provide async wrapper functions for class methods to work with registry
+
+Example tool wrapper:
+```python
+# In tool modules like web_content_tools.py
+_web_content_instance = None
+
+async def search_web(query: str, max_results: int = 5) -> str:
+    global _web_content_instance
+    if _web_content_instance is None:
+        _web_content_instance = WebContentTools()
+    return await _web_content_instance.search_web(query, max_results)
+```
+
+### Permission-Aware Tool Execution
+- Check `shared_memory["web_search_permission"]` before web tools
+- Implement graceful degradation for restricted tools
+- Use local-first search strategy (try local knowledge before web)
+
+## Orchestrator Best Practices
+
+### Single Official Orchestrator
+- Use [backend/services/langgraph_official_orchestrator.py](mdc:backend/services/langgraph_official_orchestrator.py) as the **ONLY** orchestrator
+- **NEVER create multiple competing orchestrators**
+- Route all requests through [backend/api/async_orchestrator_api.py](mdc:backend/api/async_orchestrator_api.py)
+
+### Intent Classification and Routing
+- Use structured intent analysis with `SmartQueryAnalyzer`
+- Route based on intent types: `RESEARCH`, `CHAT`, `DIRECT`, `PERMISSION_GRANT`
+- Store routing decisions in `state["intent_result"]["routing_recommendation"]`
+
+### Conditional Edge Patterns
+```python
+def _route_from_intent(self, state: Dict[str, Any]) -> str:
+    intent_result = state.get("intent_result", {})
+    routing_recommendation = intent_result.get("routing_recommendation", "chat_agent")
+    
+    # Use agent recommendations, not hardcoded logic
+    return routing_recommendation
+```
+
+## Agent Development Standards
+
+### Base Agent Extension
+- Extend [backend/services/langgraph_agents/base_agent.py](mdc:backend/services/langgraph_agents/base_agent.py)
+- Override `_process_request()` method for agent-specific logic
+- Use `self.tool_registry` for tool access
+- Implement proper error handling and logging
+
+### Prompt Engineering
+- Include system context and role definition
+- Specify structured output requirements with JSON schema
+- Provide clear examples of expected responses
+- Use Roosevelt's speaking style for consistency: "BULLY!", "By George!"
+
+### Testing and Validation
+- Test agent interactions through orchestrator API
+- Validate structured outputs with Pydantic
+- Test HITL flows with interrupt/resume cycles
+- Ensure state persistence across conversation turns
+
+## Dynamic Subgraphs - Advanced Modularity Patterns
+
+### When to Use Dynamic Subgraphs
+
+**✅ USE SUBGRAPHS FOR:**
+- **Complex multi-step workflows** with 4+ related nodes
+- **Reusable components** that multiple agents need
+- **Parallel processing** of independent workflow segments
+- **Domain isolation** where state schemas differ significantly
+- **Permission workflows** that need consistent HITL patterns
+
+**❌ DON'T USE SUBGRAPHS FOR:**
+- **Simple single-step operations** (over-engineering)
+- **Tightly coupled linear flows** (unnecessary complexity)
+- **Performance-critical paths** (avoid subgraph overhead)
+- **One-off workflows** with no reuse potential
+
+### Subgraph Implementation Patterns
+
+#### Research Workflow Subgraph
+```python
+# Modular research pipeline
+research_subgraph = StateGraph(ResearchState)
+research_subgraph.add_node("local_search", local_search_node)
+research_subgraph.add_node("permission_check", permission_check_node)
+research_subgraph.add_node("web_search", web_search_node)
+research_subgraph.add_node("synthesize_results", synthesis_node)
+
+# Add to main graph as single node
+main_graph.add_node("research_workflow", research_subgraph.compile())
+```
+
+#### Permission Management Subgraph
+```python
+# Reusable HITL permission workflow
+permission_subgraph = StateGraph(PermissionState)
+permission_subgraph.add_node("analyze_request", analyze_request_node)
+permission_subgraph.add_node("request_permission", request_permission_node)
+permission_subgraph.add_node("process_response", process_response_node)
+
+# Configure interrupt_before for HITL
+permission_graph = permission_subgraph.compile(
+    interrupt_before=["request_permission"]
+)
+```
+
+### State Management Between Graphs
+
+#### Shared State Keys
+```python
+# When parent and subgraph share state schema
+class SharedState(TypedDict):
+    messages: List[BaseMessage]
+    shared_memory: Dict[str, Any]
+    agent_results: Dict[str, Any]
+
+# Direct integration - no transformation needed
+```
+
+#### State Transformation
+```python
+# When schemas differ, implement transformation functions
+def transform_to_subgraph_state(parent_state: ParentState) -> SubgraphState:
+    return SubgraphState(
+        query=parent_state["messages"][-1].content,
+        context=parent_state["shared_memory"],
+        permissions=parent_state.get("permissions", {})
+    )
+
+def merge_subgraph_results(parent_state: ParentState, subgraph_result: SubgraphState) -> ParentState:
+    parent_state["agent_results"].update(subgraph_result.get("results", {}))
+    parent_state["shared_memory"].update(subgraph_result.get("context", {}))
+    return parent_state
+```
+
+### HITL Patterns with Subgraphs
+
+#### Cross-Subgraph Permission Flow
+```python
+# Permission requests can span subgraph boundaries
+main_graph.add_conditional_edges(
+    "research_workflow",
+    lambda state: "permission_workflow" if needs_permission(state) else "continue",
+    {
+        "permission_workflow": "permission_subgraph",
+        "continue": "format_response"
+    }
+)
+
+# Resume after permission granted
+main_graph.add_conditional_edges(
+    "permission_subgraph",
+    lambda state: "research_workflow" if permission_granted(state) else "deny_response",
+    {
+        "research_workflow": "research_workflow",
+        "deny_response": "final_response"
+    }
+)
+```
+
+### Performance Considerations
+
+#### Parallel Subgraph Execution
+```python
+# Independent subgraphs can run in parallel
+async def parallel_subgraph_execution(state):
+    research_task = research_subgraph.ainvoke(state)
+    analysis_task = analysis_subgraph.ainvoke(state)
+    
+    # Wait for both to complete
+    research_result, analysis_result = await asyncio.gather(
+        research_task, analysis_task
+    )
+    
+    # Merge results
+    return merge_parallel_results(research_result, analysis_result)
+```
+
+#### Subgraph State Optimization
+```python
+# Minimize state transfer overhead
+class OptimizedSubgraphState(TypedDict):
+    # Only include essential data for subgraph
+    query: str
+    context_summary: str  # Instead of full shared_memory
+    required_permissions: List[str]  # Instead of full permission state
+```
+
+### Error Handling in Subgraphs
+
+#### Contained Error Handling
+```python
+def subgraph_error_handler(state: SubgraphState) -> SubgraphState:
+    try:
+        # Subgraph logic here
+        result = process_subgraph_logic(state)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        logger.error(f"❌ SUBGRAPH ERROR: {e}")
+        # Return error state, don't propagate
+        return {
+            "status": "error",
+            "error_message": str(e),
+            "fallback_result": get_fallback_result(state)
+        }
+```
+
+### Subgraph Testing Strategies
+
+#### Independent Subgraph Testing
+```python
+# Test subgraphs in isolation
+async def test_research_subgraph():
+    test_state = ResearchState(
+        query="test query",
+        context={"test": "data"},
+        permissions={"web_search": True}
+    )
+    
+    result = await research_subgraph.ainvoke(test_state)
+    assert result["status"] == "completed"
+    assert "findings" in result
+```
+
+#### Integration Testing
+```python
+# Test subgraph integration with main graph
+async def test_main_graph_with_subgraphs():
+    test_input = {"messages": [HumanMessage(content="research request")]}
+    
+    # Test full flow including subgraph interactions
+    result = await main_graph.ainvoke(test_input)
+    assert result["is_complete"] == True
+```
+
+## File Organization
+
+### Agent Files
+- Keep agent implementations in [backend/services/langgraph_agents/](mdc:backend/services/langgraph_agents/)
+- Use descriptive names: `research_agent.py`, `chat_agent.py`, `coding_agent.py`
+- Split large agents (>500 lines) into focused modules
+
+### Subgraph Files
+- Create dedicated subgraph modules in [backend/services/langgraph_subgraphs/](mdc:backend/services/langgraph_subgraphs/)
+- Use clear naming: `research_subgraph.py`, `permission_subgraph.py`, `analysis_subgraph.py`
+- Include state transformation utilities in subgraph modules
+
+### Tool Files  
+- Organize tools by domain in [backend/services/langgraph_tools/](mdc:backend/services/langgraph_tools/)
+- Provide both class and async function interfaces
+- Register tools with descriptive names and clear documentation
+
+### Model Files
+- Define all Pydantic models in [backend/models/](mdc:backend/models/)
+- Use typed models for agent inputs/outputs
+- Include validation and serialization logic
+- **Create subgraph-specific state models** in [backend/models/subgraph_models.py](mdc:backend/models/subgraph_models.py)
+
+## Debugging and Monitoring
+
+### Structured Logging
+```python
+logger.info(f"🤖 AGENT: {agent_name} processing: {task_summary}")
+logger.info(f"🛑 HITL: Permission requested for: {operation_type}")  
+logger.info(f"✅ PERMISSION: User approved: {operation_type}")
+logger.error(f"❌ ERROR: {agent_name} failed: {error_details}")
+```
+
+### State Inspection
+- Log state keys and structure for debugging
+- Track agent_results and shared_memory changes
+- Monitor conversation flow and routing decisions
+
+## Anti-Patterns to Avoid
+
+### ❌ DON'T DO THESE:
+- **String matching for agent decisions** - use structured outputs
+- **Multiple orchestrators** - use one official orchestrator
+- **Custom memory stores** - use LangGraph checkpointing
+- **Manual state juggling** - let LangGraph handle flow mechanics
+- **Hardcoded routing logic** - use intent classification
+- **Monolithic agent files** - split into focused modules
+- **Unsafe tool access** - implement permission checks
+- **Overuse subgraphs** - don't create subgraphs for simple operations
+- **Complex state transformations** - prefer shared state schemas when possible
+- **Nested subgraph chains** - avoid subgraphs calling other subgraphs deeply
+
+### ✅ DO THESE INSTEAD:
+- **Structured Pydantic models** for all agent communication
+- **Single source of truth** orchestrator
+- **PostgreSQL checkpointing** for persistence
+- **LangGraph interrupt_before** for HITL
+- **Smart routing** based on query analysis
+- **Modular agent architecture** with clear responsibilities
+- **Permission-aware tool registry** with access control
+- **Strategic subgraph usage** - for complex, reusable workflows only
+- **Clear state contracts** - well-defined interfaces between graphs
+- **Parallel subgraph execution** - when workflows are independent
+
+**Remember: A well-organized LangGraph system ensures every agent knows its role and executes it perfectly.**
+
+Follow these practices and your LangGraph agents will operate with maximum efficiency and reliability.
