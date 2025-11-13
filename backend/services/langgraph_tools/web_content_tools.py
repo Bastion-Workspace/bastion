@@ -179,18 +179,48 @@ class WebContentTools:
             }
     
     async def _fetch_web_content(self, url: str) -> Dict[str, Any]:
-        """Fetch content from a web URL"""
+        """Fetch content from a web URL with improved headers and error handling"""
         try:
+            # Updated headers with more recent User-Agent and additional headers to avoid 403 errors
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive"
+                "Connection": "keep-alive",
+                "Upgrade-Insecure-Requests": "1",
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Sec-Fetch-User": "?1",
+                "Cache-Control": "max-age=0",
+                "Referer": "https://www.google.com/"  # Add referer to appear more like a real browser
             }
             
-            async with httpx.AsyncClient(timeout=30.0, headers=headers) as client:
+            # Use follow_redirects and increase timeout for slow sites
+            async with httpx.AsyncClient(
+                timeout=30.0, 
+                headers=headers,
+                follow_redirects=True,
+                verify=True
+            ) as client:
                 response = await client.get(url)
+                
+                # Check for 403 errors specifically
+                if response.status_code == 403:
+                    logger.warning(f"⚠️ Received 403 Forbidden for {url} - site may be blocking automated requests")
+                    # Try with a different User-Agent as fallback
+                    fallback_headers = headers.copy()
+                    fallback_headers["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+                    try:
+                        response = await client.get(url, headers=fallback_headers)
+                        if response.status_code == 403:
+                            # Still 403 after fallback - site is blocking us
+                            response.raise_for_status()
+                    except httpx.HTTPStatusError:
+                        # Re-raise the 403 error
+                        raise
+                
                 response.raise_for_status()
                 
                 # Extract title and content
@@ -204,6 +234,12 @@ class WebContentTools:
                     "status_code": response.status_code
                 }
                 
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                logger.error(f"❌ Failed to fetch content from {url}: 403 Forbidden - site is blocking automated requests")
+            else:
+                logger.error(f"❌ Failed to fetch content from {url}: HTTP {e.response.status_code}")
+            return None
         except Exception as e:
             logger.error(f"❌ Failed to fetch content from {url}: {e}")
             return None
@@ -245,11 +281,13 @@ class WebContentTools:
             logger.info(f"🌐 SearXNG request params: {params}")
             
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                 "Accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive"
+                "Connection": "keep-alive",
+                "X-Forwarded-For": "172.18.0.1",  # Docker bridge gateway IP for bot detection
+                "X-Real-IP": "172.18.0.1"  # Required by SearXNG bot detection
             }
             
             async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
@@ -408,12 +446,37 @@ async def search_and_crawl(query: str, max_results: int = 15, user_id: str = Non
     search_result = await tools_instance.search_web(query, max_results, True, user_id)
     if search_result.get("success"):
         urls = [result["url"] for result in search_result.get("results", [])[:max_results]]
+        logger.info(f"📥 Attempting to crawl {len(urls)} URLs from {len(search_result.get('results', []))} search results")
+        crawled_content = []
         if urls:
-            ingest_result = await tools_instance.analyze_and_ingest(urls, f"relevant to: {query}", max_results, user_id)
-            return {
-                "success": True,
-                "search_results": search_result.get("results", []),
-                "ingested_content": ingest_result.get("analyzed_urls", []),
-                "summary": f"Found {len(urls)} results and analyzed content"
-            }
-    return {"success": False, "error": "Search failed", "results": []}
+            # Try to crawl URLs directly - more efficient than going through analyze_and_ingest
+            for idx, url in enumerate(urls[:max_results], 1):
+                logger.info(f"🕷️ Crawling URL {idx}/{len(urls)}: {url[:80]}...")
+                try:
+                    content_result = await tools_instance._fetch_web_content(url)
+                    if content_result:
+                        crawled_content.append({
+                            "url": url,
+                            "title": content_result.get("title", "Unknown"),
+                            "content": content_result.get("content", ""),
+                            "html": content_result.get("content", "")  # Keep for internal use, not sent to proto
+                        })
+                        logger.info(f"✅ Successfully crawled {idx}/{len(urls)}: {url[:80]}...")
+                    else:
+                        logger.warning(f"⚠️ No content returned for {idx}/{len(urls)}: {url[:80]}...")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to crawl {idx}/{len(urls)} {url[:80]}...: {e}")
+                    # Continue with other URLs even if one fails
+                    continue
+        
+        logger.info(f"📊 Crawl summary: Attempted {len(urls)} URLs, successfully crawled {len(crawled_content)} URLs")
+        
+        # Return search results even if crawling failed - search results are still valuable
+        return {
+            "success": True,
+            "search_results": search_result.get("results", []),
+            "crawled_content": crawled_content,  # Match gRPC service expectation
+            "ingested_content": crawled_content,  # Keep for backward compatibility
+            "summary": f"Found {len(search_result.get('results', []))} search results, crawled {len(crawled_content)} URLs"
+        }
+    return {"success": False, "error": "Search failed", "search_results": [], "crawled_content": []}

@@ -64,20 +64,10 @@ class DirectSearchService:
             # Ensure embedding manager is initialized
             await self._ensure_initialized()
             
-            # Generate embedding for the query
-            query_embeddings = await self.embedding_manager.generate_embeddings([query])
-            if not query_embeddings or len(query_embeddings) == 0:
-                return {
-                    "success": False,
-                    "error": "Failed to generate query embedding",
-                    "results": [],
-                    "total_results": 0
-                }
-            
-            # Perform vector search using EmbeddingServiceWrapper's search_similar method
-            # Note: EmbeddingServiceWrapper expects query_embedding (vector), not query_text (string)
+            # Perform vector search using EmbeddingManager's search_similar method
+            # EmbeddingManager.search_similar expects query_text and handles embedding generation internally
             search_results = await self.embedding_manager.search_similar(
-                query_embedding=query_embeddings[0],
+                query_text=query,
                 limit=limit,
                 score_threshold=similarity_threshold,
                 user_id=user_id if user_id and user_id != "system" else None

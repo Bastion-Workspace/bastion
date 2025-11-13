@@ -677,6 +677,8 @@ class Crawl4AIWebTools:
             headers = {
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Accept": "application/json",
+                "X-Forwarded-For": "172.18.0.1",  # Docker bridge gateway IP for bot detection
+                "X-Real-IP": "172.18.0.1"  # Required by SearXNG bot detection
             }
             
             async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
