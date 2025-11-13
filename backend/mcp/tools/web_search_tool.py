@@ -156,7 +156,9 @@ class WebSearchTool:
                 "Accept": "application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive"
+                "Connection": "keep-alive",
+                "X-Forwarded-For": "172.18.0.1",  # Docker bridge gateway IP for bot detection
+                "X-Real-IP": "172.18.0.1"  # Required by SearXNG bot detection
             }
             
             async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:

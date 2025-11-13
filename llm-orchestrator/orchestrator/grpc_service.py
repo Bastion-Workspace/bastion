@@ -20,7 +20,8 @@ from orchestrator.agents import (
     get_org_inbox_agent,
     get_substack_agent,
     get_podcast_script_agent,
-    get_org_project_agent
+    get_org_project_agent,
+    get_entertainment_agent
 )
 from orchestrator.services import get_intent_classifier
 from langchain_core.messages import HumanMessage, AIMessage
@@ -49,6 +50,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         self.substack_agent = None
         self.podcast_script_agent = None
         self.org_project_agent = None
+        self.entertainment_agent = None
         logger.info("Initializing OrchestratorGRPCService...")
     
     def _ensure_agents_loaded(self):
@@ -101,6 +103,10 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         if self.org_project_agent is None:
             self.org_project_agent = get_org_project_agent()
             logger.info("✅ Org project agent loaded")
+        
+        if self.entertainment_agent is None:
+            self.entertainment_agent = get_entertainment_agent()
+            logger.info("✅ Entertainment agent loaded")
     
     def _extract_conversation_context(self, request: orchestrator_pb2.ChatRequest) -> dict:
         """
@@ -226,6 +232,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 "fact_checking_agent": "fact_checking",
                 "rss_agent": "rss",
                 "org_inbox_agent": "org_inbox",
+                "entertainment_agent": "entertainment",
                 
                 # Unmigrated agents - map to closest available agent
                 "fiction_editing_agent": "chat",  # Will migrate soon
@@ -243,7 +250,6 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 "pipeline_agent": "data_formatting",
                 "image_generation_agent": "chat",
                 "wargaming_agent": "chat",
-                "entertainment_agent": "research",
                 "sysml_agent": "chat",
                 "rss_agent": "chat",
                 "combined_proofread_and_analyze": "chat"
@@ -505,6 +511,47 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 feeds_processed = len(rss_operations)
                 
                 status_msg = f"RSS operation complete: {feeds_processed} operations processed"
+                
+                yield orchestrator_pb2.ChatChunk(
+                    type="complete",
+                    message=status_msg,
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="system"
+                )
+            
+            elif agent_type == "entertainment":
+                yield orchestrator_pb2.ChatChunk(
+                    type="status",
+                    message="🎬 Entertainment agent searching movies and TV shows...",
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="orchestrator"
+                )
+                
+                # Build metadata with user_id
+                entertainment_metadata = {
+                    "user_id": request.user_id,
+                    **metadata
+                }
+                
+                result = await self.entertainment_agent.process(
+                    query=request.query,
+                    metadata=entertainment_metadata,
+                    messages=messages
+                )
+                
+                yield orchestrator_pb2.ChatChunk(
+                    type="content",
+                    message=result.get("response", "No entertainment content found"),
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="entertainment_agent"
+                )
+                
+                # Include content type and confidence in complete message
+                content_type = result.get("content_type", "mixed")
+                confidence = result.get("confidence", 0.0)
+                items_count = len(result.get("items_found", []))
+                
+                status_msg = f"Entertainment search complete: {items_count} items found (type: {content_type}, confidence: {confidence:.2f})"
                 
                 yield orchestrator_pb2.ChatChunk(
                     type="complete",

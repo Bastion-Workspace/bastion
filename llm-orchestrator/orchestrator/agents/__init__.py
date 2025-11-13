@@ -15,6 +15,7 @@ from orchestrator.agents.org_inbox_agent import OrgInboxAgent, get_org_inbox_age
 from orchestrator.agents.substack_agent import SubstackAgent, get_substack_agent
 from orchestrator.agents.podcast_script_agent import PodcastScriptAgent, get_podcast_script_agent
 from orchestrator.agents.org_project_agent import OrgProjectAgent, get_org_project_agent
+from orchestrator.agents.entertainment_agent import EntertainmentAgent, get_entertainment_agent
 
 __all__ = [
     'ResearchAgent', 
@@ -39,6 +40,8 @@ __all__ = [
     'PodcastScriptAgent',
     'get_podcast_script_agent',
     'OrgProjectAgent',
-    'get_org_project_agent'
+    'get_org_project_agent',
+    'EntertainmentAgent',
+    'get_entertainment_agent'
 ]
 

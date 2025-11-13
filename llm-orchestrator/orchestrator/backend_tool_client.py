@@ -45,7 +45,12 @@ class BackendToolClient:
         """Establish connection to backend tool service"""
         if self._channel is None:
             logger.info(f"Connecting to backend tool service at {self.address}...")
-            self._channel = grpc.aio.insecure_channel(self.address)
+            # Increase message size limits for large responses (default is 4MB)
+            options = [
+                ('grpc.max_send_message_length', 100 * 1024 * 1024),  # 100 MB
+                ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100 MB
+            ]
+            self._channel = grpc.aio.insecure_channel(self.address, options=options)
             self._stub = tool_service_pb2_grpc.ToolServiceStub(self._channel)
             logger.info(f"✅ Connected to backend tool service")
     
@@ -373,7 +378,7 @@ class BackendToolClient:
                     'title': result.title,
                     'url': result.url,
                     'snippet': result.snippet,
-                    'content': result.content
+                    'content': result.snippet  # WebSearchResult doesn't have content field, use snippet
                 })
             
             return results
@@ -419,7 +424,7 @@ class BackendToolClient:
                     'url': result.url,
                     'title': result.title,
                     'content': result.content,
-                    'html': result.html,
+                    'html': result.html,  # WebCrawlResponse (singular) has html field
                     'metadata': dict(result.metadata)
                 })
             
@@ -466,7 +471,7 @@ class BackendToolClient:
                     'title': result.title,
                     'url': result.url,
                     'snippet': result.snippet,
-                    'content': result.content
+                    'content': result.snippet  # WebSearchResult doesn't have content field, use snippet
                 })
             
             crawled_content = []
@@ -475,7 +480,7 @@ class BackendToolClient:
                     'url': result.url,
                     'title': result.title,
                     'content': result.content,
-                    'html': result.html,
+                    'html': result.content,  # WebCrawlResult doesn't have html field, use content
                     'metadata': dict(result.metadata)
                 })
             

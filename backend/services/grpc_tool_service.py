@@ -59,19 +59,33 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         request: tool_service_pb2.SearchRequest,
         context: grpc.aio.ServicerContext
     ) -> tool_service_pb2.SearchResponse:
-        """Search documents by query using direct search"""
+        """Search documents by query using direct search with optional tag/category filtering"""
         try:
             logger.info(f"SearchDocuments: user={request.user_id}, query={request.query[:100]}")
+            
+            # Parse filters for tags and categories
+            tags = []
+            categories = []
+            for filter_str in request.filters:
+                if filter_str.startswith("tag:"):
+                    tags.append(filter_str[4:])
+                elif filter_str.startswith("category:"):
+                    categories.append(filter_str[9:])
+            
+            if tags or categories:
+                logger.info(f"SearchDocuments: Filtering by tags={tags}, categories={categories}")
             
             # Get search service
             search_service = await self._get_search_service()
             
-            # Perform direct search with lower threshold for better recall
+            # Perform direct search with optional tag/category filtering
             search_result = await search_service.search_documents(
                 query=request.query,
                 limit=request.limit or 10,
                 similarity_threshold=0.3,  # Lowered from 0.7 for better recall
-                user_id=request.user_id if request.user_id and request.user_id != "system" else None
+                user_id=request.user_id if request.user_id and request.user_id != "system" else None,
+                tags=tags if tags else None,
+                categories=categories if categories else None
             )
             
             if not search_result.get("success"):
@@ -116,10 +130,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             logger.info(f"GetDocument: doc_id={request.document_id}, user={request.user_id}")
             
             doc_repo = self._get_document_repo()
-            doc = await asyncio.to_thread(
-                doc_repo.get_document_by_id,
-                document_id=request.document_id
-            )
+            doc = await doc_repo.get_document_by_id(document_id=request.document_id)
             
             if not doc:
                 await context.abort(grpc.StatusCode.NOT_FOUND, "Document not found")
@@ -147,10 +158,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             logger.info(f"GetDocumentContent: doc_id={request.document_id}")
             
             doc_repo = self._get_document_repo()
-            doc = await asyncio.to_thread(
-                doc_repo.get_document_by_id,
-                document_id=request.document_id
-            )
+            doc = await doc_repo.get_document_by_id(document_id=request.document_id)
             
             if not doc:
                 await context.abort(grpc.StatusCode.NOT_FOUND, "Document not found")
@@ -1022,7 +1030,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                         url=item.get('url', ''),
                         title=item.get('title', ''),
                         content=item.get('content', ''),
-                        html=item.get('html', '')
+                        metadata={}  # WebCrawlResult doesn't have html field
                     )
                     response.results.append(crawl_result)
             
@@ -1070,7 +1078,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                             url=item.get('url', ''),
                             title=item.get('title', ''),
                             content=item.get('content', ''),
-                            html=item.get('html', '')
+                            metadata={}  # WebCrawlResult doesn't have html field, use metadata instead
                         )
                         response.crawl_results.append(crawl_result)
             
@@ -1178,8 +1186,13 @@ async def serve_tool_service(port: int = 50052):
         
         logger.info(f"Starting gRPC Tool Service on port {port}...")
         
-        # Create gRPC server
-        server = grpc.aio.server()
+        # Create gRPC server with increased message size limits
+        # Default is 4MB, increase to 100MB for large document search responses
+        options = [
+            ('grpc.max_send_message_length', 100 * 1024 * 1024),  # 100 MB
+            ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100 MB
+        ]
+        server = grpc.aio.server(options=options)
         
         # Register tool service
         tool_service = ToolServiceImplementation()
