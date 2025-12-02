@@ -60,7 +60,7 @@ class ResearchTaskResult(BaseModel):
     )
     sources_searched: List[str] = Field(
         default_factory=list,
-        description="Types of sources searched (local, calibre, entities, web)"
+        description="Types of sources searched (local, entities, web)"
     )
     permission_request: Optional[str] = Field(
         default=None,
@@ -75,6 +75,53 @@ class ResearchTaskResult(BaseModel):
     next_steps: Optional[str] = Field(
         default=None,
         description="Suggested next steps if task incomplete"
+    )
+
+
+class ResearchAssessmentResult(BaseModel):
+    """Structured output for research quality assessment - evaluating if results are sufficient"""
+    sufficient: bool = Field(
+        description="Whether the search results are sufficient to answer the query comprehensively"
+    )
+    has_relevant_info: bool = Field(
+        description="Whether the results contain relevant information"
+    )
+    missing_info: List[str] = Field(
+        default_factory=list,
+        description="List of specific information gaps that need to be filled"
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="Confidence in the assessment (0.0-1.0)"
+    )
+    reasoning: str = Field(
+        default="",
+        description="Brief explanation of the assessment decision"
+    )
+
+
+class ResearchGapAnalysis(BaseModel):
+    """Structured output for research gap analysis - identifying what information is missing"""
+    missing_entities: List[str] = Field(
+        default_factory=list,
+        description="Specific entities, people, facts, or concepts that are missing from results"
+    )
+    suggested_queries: List[str] = Field(
+        default_factory=list,
+        description="Targeted search queries that could fill the identified gaps"
+    )
+    needs_web_search: bool = Field(
+        default=False,
+        description="Whether web search would likely help fill the gaps"
+    )
+    gap_severity: Literal["minor", "moderate", "severe"] = Field(
+        default="moderate",
+        description="How significant the gaps are for answering the query"
+    )
+    reasoning: str = Field(
+        default="",
+        description="Explanation of why these gaps exist and how to fill them"
     )
 
 
@@ -577,6 +624,91 @@ class ManuscriptEdit(BaseModel):
     )
 
 
+# ==========================
+# Universal Document Edit Proposal System
+# ==========================
+
+class ContentEdit(BaseModel):
+    """Simple content-based edit proposal for bulk updates.
+    
+    Use this for:
+    - Appending content to documents
+    - Replacing entire sections
+    - Inserting content at specific positions
+    
+    Prefer EditorOperation for precise, targeted edits with validation.
+    """
+    edit_mode: Literal["append", "replace", "insert_at"] = Field(
+        description="Edit mode: append (add to end), replace (replace entire content), insert_at (insert at position)"
+    )
+    content: str = Field(description="New content to add/replace/insert")
+    insert_position: Optional[int] = Field(
+        default=None,
+        description="For insert_at mode: character position to insert at (None = append to end)"
+    )
+    note: Optional[str] = Field(
+        default=None,
+        description="Human-readable rationale for this edit, shown to user in preview"
+    )
+
+
+class DocumentEditProposal(BaseModel):
+    """Universal document edit proposal - any agent can use this.
+    
+    Supports two edit modes:
+    1. **operations**: Precise, targeted edits using EditorOperation objects (best for fiction, rules editing)
+    2. **content**: Simple bulk updates using ContentEdit (best for project docs, bulk updates)
+    
+    The frontend will show appropriate preview based on edit_type.
+    """
+    document_id: str = Field(description="Document ID to edit")
+    edit_type: Literal["operations", "content"] = Field(
+        description="Edit type: 'operations' for precise EditorOperation edits, 'content' for simple ContentEdit"
+    )
+    
+    # For operation-based edits
+    operations: Optional[List[EditorOperation]] = Field(
+        default=None,
+        description="List of EditorOperation objects (required if edit_type='operations')"
+    )
+    
+    # For content-based edits
+    content_edit: Optional[ContentEdit] = Field(
+        default=None,
+        description="ContentEdit object (required if edit_type='content')"
+    )
+    
+    # Metadata
+    agent_name: str = Field(description="Name of agent proposing this edit")
+    summary: str = Field(description="Human-readable summary of proposed changes")
+    requires_preview: bool = Field(
+        default=True,
+        description="If False and edit is small, frontend may auto-apply. If True, always show preview."
+    )
+    
+    @field_validator('operations', mode='after')
+    @classmethod
+    def validate_operations(cls, value, info):
+        """Ensure operations are provided for operation-based edits."""
+        if not info.data:
+            return value
+        edit_type = info.data.get('edit_type')
+        if edit_type == 'operations' and (not value or len(value) == 0):
+            raise ValueError("operations field is required when edit_type='operations'")
+        return value
+    
+    @field_validator('content_edit', mode='after')
+    @classmethod
+    def validate_content_edit(cls, value, info):
+        """Ensure content_edit is provided for content-based edits."""
+        if not info.data:
+            return value
+        edit_type = info.data.get('edit_type')
+        if edit_type == 'content' and not value:
+            raise ValueError("content_edit field is required when edit_type='content'")
+        return value
+
+
 # LangGraph Structured Output Functions
 # These functions return the Pydantic models directly for LangGraph's structured output system
 
@@ -914,3 +1046,102 @@ def get_document_summary_structured_output() -> DocumentSummary:
 def get_comparison_analysis_structured_output() -> ComparisonAnalysisResult:
     """Get ComparisonAnalysisResult model for LangGraph structured output"""
     return ComparisonAnalysisResult
+
+
+# ==========================
+# Electronics Agent File Routing Structures
+# ==========================
+
+class FileRouteItem(BaseModel):
+    """Individual file routing item for electronics agent content routing"""
+    content_type: Literal["current_state", "new_plans", "components", "code", "calculations", "general"] = Field(
+        description="Type of content to route"
+    )
+    target_file: str = Field(
+        description="Target filename or 'project_plan' for project plan document"
+    )
+    target_document_id: Optional[str] = Field(
+        default=None,
+        description="Document ID of target file (if known)"
+    )
+    section: str = Field(
+        description="Section name within the target file (match existing sections if updating similar content)"
+    )
+    content: str = Field(
+        description="The formatted content to save to the target file section"
+    )
+
+
+class FileRoutingPlan(BaseModel):
+    """Structured output for electronics agent file routing decisions - LangGraph compatible"""
+    routing: List[FileRouteItem] = Field(
+        default_factory=list,
+        description="List of routing decisions for content to files"
+    )
+
+
+class ContentStructure(BaseModel):
+    """Structured content extraction for electronics agent - LangGraph compatible"""
+    current_state: str = Field(
+        default="",
+        description="Information about what currently exists (formatted as reference documentation)"
+    )
+    new_plans: str = Field(
+        default="",
+        description="Recommendations and plans for what to build/do (formatted as reference documentation)"
+    )
+    components: str = Field(
+        default="",
+        description="Component specifications, part numbers, values (formatted as reference documentation)"
+    )
+    code: str = Field(
+        default="",
+        description="Code snippets, programming details, firmware requirements (formatted as reference documentation)"
+    )
+    calculations: str = Field(
+        default="",
+        description="Calculations, formulas, values, specifications (formatted as reference documentation)"
+    )
+    general: str = Field(
+        default="",
+        description="Everything else that doesn't fit the above categories (formatted as reference documentation)"
+    )
+
+
+def get_file_routing_plan_structured_output() -> FileRoutingPlan:
+    """Get FileRoutingPlan model for LangGraph structured output"""
+    return FileRoutingPlan
+
+
+def get_content_structure_structured_output() -> ContentStructure:
+    """Get ContentStructure model for LangGraph structured output"""
+    return ContentStructure
+
+
+class EmailDraft(BaseModel):
+    """Structured email draft"""
+    recipients: List[str] = Field(description="List of recipient email addresses")
+    cc: Optional[List[str]] = Field(default=[], description="List of CC email addresses")
+    bcc: Optional[List[str]] = Field(default=[], description="List of BCC email addresses")
+    subject: str = Field(description="Email subject line")
+    body_text: str = Field(description="Plain text email body")
+    body_html: Optional[str] = Field(default=None, description="HTML email body (optional)")
+    from_email: str = Field(description="Sender email address (user's verified email)")
+    from_name: str = Field(description="Sender display name")
+    confidence: float = Field(description="Agent's confidence in the draft quality (0.0-1.0)", ge=0.0, le=1.0)
+    context_sources: Optional[List[str]] = Field(default=[], description="What conversation content was used in the email")
+
+
+class EmailResponse(BaseModel):
+    """Structured output for email agent"""
+    task_status: TaskStatus = Field(description="Task completion status")
+    draft: Optional[EmailDraft] = Field(default=None, description="Email draft (if available)")
+    send_status: Literal["draft", "sent", "failed", "cancelled", "verification_required", "rate_limited"] = Field(
+        description="Current status of the email sending process"
+    )
+    message: str = Field(description="Natural language response to user")
+    error: Optional[str] = Field(default=None, description="Error message if task failed")
+    rate_limit_info: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Rate limit information (remaining emails, reset time, etc.)"
+    )

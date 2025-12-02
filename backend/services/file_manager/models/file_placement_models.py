@@ -18,8 +18,8 @@ class SourceType(str, Enum):
     UPLOAD = "upload"
     WEB_SCRAPING = "web_scraping"
     API_IMPORT = "api_import"
-    CALIBRE = "calibre"
     MANUAL = "manual"
+    AGENT_CREATED = "agent_created"
 
 
 class FilePlacementRequest(BaseModel):

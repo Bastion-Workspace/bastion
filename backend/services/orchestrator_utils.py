@@ -27,6 +27,12 @@ def build_conversation_context_for_intent_classifier(ctx, state: Dict[str, Any])
             if hasattr(msg, 'type') and msg.type == "ai":
                 last_assistant_message = msg.content
                 break
+        
+        # Store last agent response in shared_memory for intent classifier
+        if last_assistant_message and isinstance(shared_memory, dict):
+            shared_memory["last_response"] = last_assistant_message
+            logger.debug(f"📋 Stored last agent response ({len(last_assistant_message)} chars) for intent classifier context")
+        
         location_clarification_requested = False
         if last_assistant_message:
             clarification_indicators = [

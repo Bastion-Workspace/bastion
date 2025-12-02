@@ -6,12 +6,13 @@ LangGraph agent for capturing projects into inbox.org with HITL preview-confirm 
 import logging
 import json
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TypedDict
 from datetime import datetime
 from langchain_core.messages import AIMessage
 from pydantic import BaseModel, Field
 from enum import Enum
 
+from langgraph.graph import StateGraph, END
 from orchestrator.agents.base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -34,16 +35,49 @@ class OrgProjectCaptureIntent(BaseModel):
     initial_tasks: List[str] = Field(default_factory=list, description="Up to 5 starter TODO items")
 
 
+class OrgProjectState(TypedDict):
+    """State for org project agent LangGraph workflow"""
+    query: str
+    user_id: str
+    metadata: Dict[str, Any]
+    messages: List[Any]
+    shared_memory: Dict[str, Any]
+    user_message: str
+    pending: Dict[str, Any]
+    response: Dict[str, Any]
+    task_status: str
+    error: str
+
+
 class OrgProjectAgent(BaseAgent):
     """
     Org Project Agent for capturing structured projects into inbox.org
     
     Uses HITL (preview-confirm) workflow for user validation before writing
+    Uses LangGraph workflow for explicit state management
     """
     
     def __init__(self):
         super().__init__("org_project_agent")
         self._grpc_client = None
+        logger.info("🗂️ Org Project Agent ready!")
+    
+    def _build_workflow(self, checkpointer) -> StateGraph:
+        """Build LangGraph workflow for org project agent"""
+        workflow = StateGraph(OrgProjectState)
+        
+        # Add nodes
+        workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("process_capture", self._process_capture_node)
+        
+        # Entry point
+        workflow.set_entry_point("prepare_context")
+        
+        # Linear flow: prepare_context -> process_capture -> END
+        workflow.add_edge("prepare_context", "process_capture")
+        workflow.add_edge("process_capture", END)
+        
+        return workflow.compile(checkpointer=checkpointer)
     
     async def _get_grpc_client(self):
         """Get or create gRPC client for backend tools"""
@@ -52,20 +86,50 @@ class OrgProjectAgent(BaseAgent):
             self._grpc_client = await get_backend_tool_client()
         return self._grpc_client
     
-    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Process project capture request with HITL flow"""
+    async def _prepare_context_node(self, state: OrgProjectState) -> Dict[str, Any]:
+        """Prepare context: extract message and pending state"""
         try:
-            logger.info("🗂️ Org Project Agent: Starting project capture")
+            logger.info("📋 Preparing context for org project capture...")
             
-            # Extract state components
             messages = state.get("messages", [])
-            user_id = state.get("user_id")
             shared_memory = state.get("shared_memory", {})
             pending = shared_memory.get("pending_project_capture", {})
             
             # Get latest user message
             latest_message = messages[-1] if messages else None
             user_message = latest_message.content if hasattr(latest_message, 'content') else ""
+            
+            return {
+                "user_message": user_message,
+                "pending": pending or {}
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to prepare context: {e}")
+            return {
+                "user_message": "",
+                "pending": {},
+                "error": str(e)
+            }
+    
+    async def _process_capture_node(self, state: OrgProjectState) -> Dict[str, Any]:
+        """Process project capture with HITL flow - preserves all existing logic"""
+        try:
+            logger.info("🗂️ Org Project Agent: Processing project capture")
+            
+            # Extract state components
+            messages = state.get("messages", [])
+            user_id = state.get("user_id", "")
+            shared_memory = state.get("shared_memory", {})
+            pending = state.get("pending", {})
+            user_message = state.get("user_message", "")
+            
+            # Reconstruct state dict for existing methods
+            state_dict = {
+                "messages": messages,
+                "user_id": user_id,
+                "shared_memory": shared_memory
+            }
             
             # Case 0: Pending capture awaiting more details (not confirmation)
             if pending and not pending.get("awaiting_confirmation"):
@@ -89,7 +153,7 @@ class OrgProjectAgent(BaseAgent):
                     shared_memory["pending_project_capture"] = pending
                     response = self._build_preview_message(preview)
                     
-                    return {
+                    result = {
                         "messages": [AIMessage(content=response)],
                         "shared_memory": shared_memory,
                         "agent_results": {
@@ -100,6 +164,10 @@ class OrgProjectAgent(BaseAgent):
                         "requires_user_input": True,
                         "is_complete": False
                     }
+                    return {
+                        "response": result,
+                        "task_status": "permission_required"
+                    }
                 else:
                     # Request missing fields
                     question = self._build_clarification_question(intent, remaining_missing)
@@ -107,7 +175,7 @@ class OrgProjectAgent(BaseAgent):
                     shared_memory["pending_project_capture"] = pending
                     response = f"To capture this project, please provide: {', '.join(remaining_missing)}.\n{question}"
                     
-                    return {
+                    result = {
                         "messages": [AIMessage(content=response)],
                         "shared_memory": shared_memory,
                         "agent_results": {
@@ -118,15 +186,23 @@ class OrgProjectAgent(BaseAgent):
                         "requires_user_input": True,
                         "is_complete": False
                     }
+                    return {
+                        "response": result,
+                        "task_status": "incomplete"
+                    }
             
             # Case 1: Awaiting confirmation
             if pending.get("awaiting_confirmation"):
                 if self._is_confirmation(user_message):
-                    return await self._commit_project_block(state, pending, user_id)
+                    result = await self._commit_project_block(state_dict, pending, user_id)
+                    return {
+                        "response": result,
+                        "task_status": "complete"
+                    }
                 elif self._is_cancellation(user_message):
                     shared_memory.pop("pending_project_capture", None)
                     response = "Project capture cancelled."
-                    return {
+                    result = {
                         "messages": [AIMessage(content=response)],
                         "shared_memory": shared_memory,
                         "agent_results": {
@@ -136,6 +212,10 @@ class OrgProjectAgent(BaseAgent):
                         },
                         "is_complete": True
                     }
+                    return {
+                        "response": result,
+                        "task_status": "complete"
+                    }
                 else:
                     # Treat as edits
                     pending = self._merge_user_details_into_pending(pending, user_message)
@@ -144,7 +224,7 @@ class OrgProjectAgent(BaseAgent):
                     shared_memory["pending_project_capture"] = pending
                     response = self._build_preview_message(preview)
                     
-                    return {
+                    result = {
                         "messages": [AIMessage(content=response)],
                         "shared_memory": shared_memory,
                         "agent_results": {
@@ -155,13 +235,17 @@ class OrgProjectAgent(BaseAgent):
                         "requires_user_input": True,
                         "is_complete": False
                     }
+                    return {
+                        "response": result,
+                        "task_status": "permission_required"
+                    }
             
             # Case 2: Initialize new capture with smart enrichment
             intent = self._derive_initial_intent(user_message)
             
             # Use LLM to extract description and tasks
             try:
-                intent = await self._smart_enrich_intent_from_message(intent, user_message, state)
+                intent = await self._smart_enrich_intent_from_message(intent, user_message, state_dict)
             except Exception as enrich_err:
                 logger.warning(f"⚠️ Smart enrichment skipped: {enrich_err}")
             
@@ -181,7 +265,7 @@ class OrgProjectAgent(BaseAgent):
                 }
                 response = f"To capture this project, please provide: {', '.join(missing)}.\n{question}"
                 
-                return {
+                result = {
                     "messages": [AIMessage(content=response)],
                     "shared_memory": shared_memory,
                     "agent_results": {
@@ -191,6 +275,10 @@ class OrgProjectAgent(BaseAgent):
                     },
                     "requires_user_input": True,
                     "is_complete": False
+                }
+                return {
+                    "response": result,
+                    "task_status": "incomplete"
                 }
             
             # Build preview and request confirmation
@@ -207,7 +295,7 @@ class OrgProjectAgent(BaseAgent):
             shared_memory["pending_project_capture"] = pending
             response = self._build_preview_message(preview)
             
-            return {
+            result = {
                 "messages": [AIMessage(content=response)],
                 "shared_memory": shared_memory,
                 "agent_results": {
@@ -216,6 +304,79 @@ class OrgProjectAgent(BaseAgent):
                     "preview": preview
                 },
                 "requires_user_input": True,
+                "is_complete": False
+            }
+            return {
+                "response": result,
+                "task_status": "permission_required"
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Org Project Agent ERROR: {e}")
+            error_result = self._create_error_result(f"Project capture error: {str(e)}")
+            return {
+                "response": error_result,
+                "task_status": "error",
+                "error": str(e)
+            }
+    
+    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process project capture request using LangGraph workflow
+        
+        Args:
+            state: Dictionary with messages, shared_memory, user_id, etc.
+            
+        Returns:
+            Dictionary with project capture response and metadata
+        """
+        try:
+            logger.info("🗂️ Org Project Agent: Starting project capture...")
+            
+            # Extract user message
+            messages = state.get("messages", [])
+            if not messages:
+                return self._create_error_result("No user message found for project capture")
+            
+            latest_message = messages[-1] if messages else None
+            user_message = latest_message.content if hasattr(latest_message, 'content') else ""
+            
+            # Build initial state for LangGraph workflow
+            initial_state: OrgProjectState = {
+                "query": user_message,
+                "user_id": state.get("user_id", "system"),
+                "metadata": state.get("metadata", {}),
+                "messages": messages,
+                "shared_memory": state.get("shared_memory", {}),
+                "user_message": "",
+                "pending": {},
+                "response": {},
+                "task_status": "",
+                "error": ""
+            }
+            
+            # Get workflow (lazy initialization with checkpointer)
+            workflow = await self._get_workflow()
+            
+            # Get checkpoint config (handles thread_id from conversation_id/user_id)
+            config = self._get_checkpoint_config(metadata)
+            
+            # Invoke LangGraph workflow with checkpointing
+            final_state = await workflow.ainvoke(initial_state, config=config)
+            
+            # Extract response from process_capture_node result
+            # The node returns the full response dict directly
+            response = final_state.get("response")
+            if response:
+                return response
+            
+            # Fallback if response not found
+            return {
+                "messages": [AIMessage(content="Project capture failed")],
+                "agent_results": {
+                    "agent_type": self.agent_type,
+                    "is_complete": False
+                },
                 "is_complete": False
             }
             
@@ -246,7 +407,7 @@ class OrgProjectAgent(BaseAgent):
         if intent.description and intent.initial_tasks:
             return intent
         
-        chat_service = await self._get_chat_service()
+        from langchain_core.messages import SystemMessage, HumanMessage
         
         system_prompt = (
             "You are an Org Project Capture Assistant. "
@@ -264,19 +425,17 @@ class OrgProjectAgent(BaseAgent):
             "}"
         )
         
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "system", "content": schema_instructions},
-            {"role": "user", "content": f"USER MESSAGE: {user_message}"}
+        # Use centralized LLM mechanism
+        llm = self._get_llm(temperature=0.2, state=state)
+        llm_messages = [
+            SystemMessage(content=system_prompt),
+            SystemMessage(content=schema_instructions),
+            HumanMessage(content=f"USER MESSAGE: {user_message}")
         ]
         
-        response = await chat_service.openai_client.chat.completions.create(
-            messages=messages,
-            model=chat_service.model,
-            temperature=0.2
-        )
-        
-        content = (response.choices[0].message.content or "").strip()
+        response = await llm.ainvoke(llm_messages)
+        content = response.content if hasattr(response, 'content') else str(response)
+        content = content.strip()
         
         try:
             data = json.loads(content)
@@ -517,6 +676,9 @@ def get_org_project_agent() -> OrgProjectAgent:
     if _org_project_agent_instance is None:
         _org_project_agent_instance = OrgProjectAgent()
     return _org_project_agent_instance
+
+
+
 
 
 

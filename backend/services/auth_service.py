@@ -139,14 +139,16 @@ class AuthenticationService:
     
     def _generate_jwt_token(self, user_data: Dict[str, Any]) -> Tuple[str, datetime]:
         """Generate JWT token for user"""
-        expiration = datetime.utcnow() + timedelta(minutes=settings.JWT_EXPIRATION_MINUTES)
+        now = datetime.utcnow()
+        expiration = now + timedelta(minutes=settings.JWT_EXPIRATION_MINUTES)
         
+        # Convert to Unix timestamps for JWT standard compliance
         payload = {
             "user_id": user_data["user_id"],
             "username": user_data["username"],
             "role": user_data["role"],
-            "exp": expiration,
-            "iat": datetime.utcnow()
+            "exp": int(expiration.timestamp()),
+            "iat": int(now.timestamp())
         }
         
         token = jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
@@ -444,6 +446,135 @@ class AuthenticationService:
         except Exception as e:
             logger.debug(f"Cache invalidation failed: {e}")
 
+    async def refresh_token(self, token: str) -> Optional[LoginResponse]:
+        """Refresh JWT token if it's still valid or recently expired"""
+        try:
+            if not self._initialized:
+                logger.error("❌ Auth service not initialized")
+                return None
+            
+            # Decode token without verification to check expiration
+            try:
+                import jwt
+                payload = jwt.decode(
+                    token, 
+                    settings.JWT_SECRET_KEY, 
+                    algorithms=[settings.JWT_ALGORITHM],
+                    options={"verify_exp": False}  # Don't verify expiration yet
+                )
+            except jwt.InvalidTokenError as e:
+                logger.warning(f"Invalid token for refresh: {e}")
+                return None
+            
+            # Check if token is expired or will expire soon (within 5 minutes)
+            exp_timestamp = payload.get('exp')
+            if exp_timestamp:
+                current_timestamp = datetime.utcnow().timestamp()
+                time_until_expiry = exp_timestamp - current_timestamp
+                
+                # Allow refresh if token is still valid or expired within last 5 minutes
+                if time_until_expiry < -300:  # Expired more than 5 minutes ago
+                    logger.warning("Token expired too long ago for refresh")
+                    return None
+            
+            # Get user from database
+            async with self.db_pool.acquire() as conn:
+                user_row = await conn.fetchrow("""
+                    SELECT user_id, username, email, role, display_name, preferences, is_active
+                    FROM users 
+                    WHERE user_id = $1 AND is_active = true
+                """, payload["user_id"])
+                
+                if not user_row:
+                    logger.warning("User not found or inactive for token refresh")
+                    return None
+                
+                # Generate new token
+                user_data = {
+                    "user_id": user_row["user_id"],
+                    "username": user_row["username"],
+                    "email": user_row["email"],
+                    "role": user_row["role"],
+                    "display_name": user_row["display_name"]
+                }
+                
+                new_token, expiration = self._generate_jwt_token(user_data)
+                
+                # Update session in database
+                new_token_hash = hashlib.sha256(new_token.encode()).hexdigest()
+                old_token_hash = hashlib.sha256(token.encode()).hexdigest()
+                
+                # Set user context for RLS policies
+                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_row["user_id"])
+                await conn.execute("SELECT set_config('app.current_user_role', $1, true)", user_row["role"])
+                
+                # Update existing session or create new one
+                await conn.execute("""
+                    UPDATE user_sessions 
+                    SET token_hash = $1, expires_at = $2, last_accessed = $3
+                    WHERE token_hash = $4
+                """, new_token_hash, expiration, datetime.utcnow(), old_token_hash)
+                
+                # If no session was updated, create a new one
+                if await conn.fetchval("SELECT COUNT(*) FROM user_sessions WHERE token_hash = $1", new_token_hash) == 0:
+                    session_id = str(uuid.uuid4())
+                    await conn.execute("""
+                        INSERT INTO user_sessions (
+                            session_id, user_id, token_hash, expires_at
+                        ) VALUES ($1, $2, $3, $4)
+                    """, session_id, user_row["user_id"], new_token_hash, expiration)
+                
+                # Invalidate old cache
+                await self._invalidate_user_cache(old_token_hash)
+                
+                # Handle preferences properly
+                preferences = user_row["preferences"]
+                if isinstance(preferences, str):
+                    try:
+                        preferences = json.loads(preferences)
+                    except (json.JSONDecodeError, TypeError):
+                        preferences = {}
+                elif preferences is None:
+                    preferences = {}
+                
+                # Cache new session
+                try:
+                    cache_key = f"auth:user:{new_token_hash}"
+                    cached_user = AuthenticatedUserResponse(
+                        user_id=user_row["user_id"],
+                        username=user_row["username"],
+                        email=user_row["email"],
+                        role=user_row["role"],
+                        display_name=user_row["display_name"],
+                        preferences=preferences
+                    )
+                    
+                    if self.redis_client:
+                        await self.redis_client.setex(
+                            cache_key,
+                            self.cache_ttl,
+                            cached_user.model_dump_json()
+                        )
+                    
+                    expiry_time = datetime.utcnow() + timedelta(minutes=settings.JWT_EXPIRATION_MINUTES)
+                    self._emergency_session_cache[new_token_hash] = (cached_user, expiry_time)
+                except Exception as cache_e:
+                    logger.warning(f"Failed to cache refreshed session: {cache_e}")
+                
+                logger.info(f"✅ Token refreshed successfully for user: {user_row['username']}")
+                
+                return LoginResponse(
+                    access_token=new_token,
+                    user=user_data,
+                    expires_in=settings.JWT_EXPIRATION_MINUTES * 60
+                )
+                
+        except Exception as e:
+            logger.error(f"❌ Token refresh failed: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
+            return None
+    
     async def get_current_user(self, token: str) -> Optional[AuthenticatedUserResponse]:
         """Get current user from JWT token with caching"""
         try:
@@ -481,46 +612,53 @@ class AuthenticationService:
                     logger.warning("⚠️ Database session not found or expired - checking JWT token validity")
                     
                     # Check if JWT token is still valid (not expired)
-                    if payload.get('exp') and datetime.utcnow().timestamp() < payload.get('exp'):
-                        logger.info("✅ JWT token is still valid - proceeding with JWT-only authentication")
-                        
-                        # Get user details directly from JWT payload
-                        user_row = await conn.fetchrow("""
-                            SELECT user_id, username, email, role, display_name, preferences, is_active
-                            FROM users 
-                            WHERE user_id = $1 AND is_active = true
-                        """, payload["user_id"])
-                        
-                        if not user_row:
-                            logger.warning("❌ User not found or inactive")
-                            return None
-                        
-                        # Handle preferences properly
-                        preferences = user_row["preferences"]
-                        if isinstance(preferences, str):
-                            try:
-                                preferences = json.loads(preferences)
-                            except (json.JSONDecodeError, TypeError):
+                    # exp is a Unix timestamp (number) from JWT payload
+                    exp_timestamp = payload.get('exp')
+                    if exp_timestamp and isinstance(exp_timestamp, (int, float)):
+                        current_timestamp = datetime.utcnow().timestamp()
+                        if current_timestamp < exp_timestamp:
+                            logger.info("✅ JWT token is still valid - proceeding with JWT-only authentication")
+                            
+                            # Get user details directly from JWT payload
+                            user_row = await conn.fetchrow("""
+                                SELECT user_id, username, email, role, display_name, preferences, is_active
+                                FROM users 
+                                WHERE user_id = $1 AND is_active = true
+                            """, payload["user_id"])
+                            
+                            if not user_row:
+                                logger.warning("❌ User not found or inactive")
+                                return None
+                            
+                            # Handle preferences properly
+                            preferences = user_row["preferences"]
+                            if isinstance(preferences, str):
+                                try:
+                                    preferences = json.loads(preferences)
+                                except (json.JSONDecodeError, TypeError):
+                                    preferences = {}
+                            elif preferences is None:
                                 preferences = {}
-                        elif preferences is None:
-                            preferences = {}
-                        
-                        user = AuthenticatedUserResponse(
-                            user_id=user_row["user_id"],
-                            username=user_row["username"],
-                            email=user_row["email"],
-                            role=user_row["role"],
-                            display_name=user_row["display_name"],
-                            preferences=preferences
-                        )
-                        
-                        # Cache the user data
-                        await self._cache_user(token_hash, user)
-                        logger.info(f"✅ JWT-only authentication successful for user: {user.username}")
-                        
-                        return user
+                            
+                            user = AuthenticatedUserResponse(
+                                user_id=user_row["user_id"],
+                                username=user_row["username"],
+                                email=user_row["email"],
+                                role=user_row["role"],
+                                display_name=user_row["display_name"],
+                                preferences=preferences
+                            )
+                            
+                            # Cache the user data
+                            await self._cache_user(token_hash, user)
+                            logger.info(f"✅ JWT-only authentication successful for user: {user.username}")
+                            
+                            return user
+                        else:
+                            logger.warning("❌ JWT token has expired")
+                            return None
                     else:
-                        logger.warning("❌ JWT token has expired")
+                        logger.warning("❌ JWT token missing or invalid exp claim")
                         return None
                 
                 logger.info(f"✅ Session found for user: {session_row['user_id']}")
@@ -644,6 +782,7 @@ class AuthenticationService:
                     username=user_request.username,
                     email=user_request.email,
                     display_name=user_request.display_name or user_request.username,
+                    avatar_url=None,
                     role=user_request.role,
                     is_active=True,
                     created_at=now
@@ -662,7 +801,7 @@ class AuthenticationService:
                 
                 # Get users
                 rows = await conn.fetch("""
-                    SELECT user_id, username, email, role, display_name, 
+                    SELECT user_id, username, email, role, display_name, avatar_url,
                            is_active, created_at, last_login
                     FROM users 
                     ORDER BY created_at DESC
@@ -675,6 +814,7 @@ class AuthenticationService:
                         username=row["username"],
                         email=row["email"],
                         display_name=row["display_name"],
+                        avatar_url=row.get("avatar_url"),
                         role=row["role"],
                         is_active=row["is_active"],
                         created_at=row["created_at"],
@@ -708,6 +848,11 @@ class AuthenticationService:
                     values.append(update_request.display_name)
                     param_count += 1
                 
+                if update_request.avatar_url is not None:
+                    update_fields.append(f"avatar_url = ${param_count}")
+                    values.append(update_request.avatar_url)
+                    param_count += 1
+                
                 if update_request.role is not None:
                     update_fields.append(f"role = ${param_count}")
                     values.append(update_request.role)
@@ -731,7 +876,7 @@ class AuthenticationService:
                     UPDATE users 
                     SET {', '.join(update_fields)}
                     WHERE user_id = ${param_count}
-                    RETURNING user_id, username, email, role, display_name, 
+                    RETURNING user_id, username, email, role, display_name, avatar_url,
                               is_active, created_at, last_login
                 """
                 
@@ -745,6 +890,7 @@ class AuthenticationService:
                     username=row["username"],
                     email=row["email"],
                     display_name=row["display_name"],
+                    avatar_url=row.get("avatar_url"),
                     role=row["role"],
                     is_active=row["is_active"],
                     created_at=row["created_at"],
@@ -862,6 +1008,181 @@ class AuthenticationService:
                 
         except Exception as e:
             logger.error(f"❌ Session cleanup failed: {e}")
+    
+    async def send_email_verification(self, user_id: str, base_url: str = None) -> Dict[str, Any]:
+        """
+        Generate and send email verification token
+        
+        Args:
+            user_id: User ID to send verification for
+            base_url: Base URL for verification link (optional, defaults to empty)
+            
+        Returns:
+            Dict with success status and message
+        """
+        try:
+            from services.email_service import email_service
+            
+            async with self.db_pool.acquire() as conn:
+                # Get user info
+                user = await conn.fetchrow("""
+                    SELECT user_id, username, email, email_verified
+                    FROM users
+                    WHERE user_id = $1
+                """, user_id)
+                
+                if not user:
+                    return {"success": False, "message": "User not found"}
+                
+                if user["email_verified"]:
+                    return {"success": False, "message": "Email already verified"}
+                
+                # Generate verification token
+                verification_token = secrets.token_urlsafe(32)
+                expires_at = datetime.utcnow() + timedelta(hours=settings.EMAIL_VERIFICATION_EXPIRY_HOURS)
+                
+                # Store token in database
+                await conn.execute("""
+                    UPDATE users
+                    SET email_verification_token = $1,
+                        email_verification_sent_at = $2,
+                        email_verification_expires_at = $3
+                    WHERE user_id = $4
+                """, verification_token, datetime.utcnow(), expires_at, user_id)
+                
+                # Create verification URL
+                if base_url:
+                    verification_url = f"{base_url}/verify-email?token={verification_token}"
+                else:
+                    verification_url = f"/verify-email?token={verification_token}"
+                
+                # Send verification email
+                email_sent = await email_service.send_verification_email(
+                    to_email=user["email"],
+                    username=user["username"],
+                    verification_token=verification_token,
+                    verification_url=verification_url
+                )
+                
+                if email_sent:
+                    logger.info(f"✅ Verification email sent to {user['email']}")
+                    return {
+                        "success": True,
+                        "message": "Verification email sent",
+                        "email": user["email"]
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "message": "Failed to send verification email"
+                    }
+                    
+        except Exception as e:
+            logger.error(f"❌ Failed to send email verification: {e}")
+            return {"success": False, "message": f"Error: {str(e)}"}
+    
+    async def verify_email_token(self, token: str) -> Dict[str, Any]:
+        """
+        Verify email token and update user status
+        
+        Args:
+            token: Verification token from email
+            
+        Returns:
+            Dict with success status and user info
+        """
+        try:
+            async with self.db_pool.acquire() as conn:
+                # Find user with this token
+                user = await conn.fetchrow("""
+                    SELECT user_id, username, email, email_verified, email_verification_expires_at
+                    FROM users
+                    WHERE email_verification_token = $1
+                """, token)
+                
+                if not user:
+                    return {"success": False, "message": "Invalid verification token"}
+                
+                if user["email_verified"]:
+                    return {
+                        "success": True,
+                        "message": "Email already verified",
+                        "user_id": user["user_id"],
+                        "email": user["email"]
+                    }
+                
+                # Check if token expired
+                if user["email_verification_expires_at"]:
+                    if datetime.utcnow() > user["email_verification_expires_at"]:
+                        return {"success": False, "message": "Verification token has expired"}
+                
+                # Verify email
+                await conn.execute("""
+                    UPDATE users
+                    SET email_verified = TRUE,
+                        email_verification_token = NULL,
+                        updated_at = $1
+                    WHERE user_id = $2
+                """, datetime.utcnow(), user["user_id"])
+                
+                logger.info(f"✅ Email verified for user {user['user_id']}")
+                
+                return {
+                    "success": True,
+                    "message": "Email verified successfully",
+                    "user_id": user["user_id"],
+                    "email": user["email"]
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to verify email token: {e}")
+            return {"success": False, "message": f"Error: {str(e)}"}
+    
+    async def resend_verification_email(self, user_id: str, base_url: str = None) -> Dict[str, Any]:
+        """
+        Resend email verification email
+        
+        Args:
+            user_id: User ID to resend verification for
+            base_url: Base URL for verification link (optional)
+            
+        Returns:
+            Dict with success status and message
+        """
+        return await self.send_email_verification(user_id, base_url)
+    
+    async def get_email_verification_status(self, user_id: str) -> Dict[str, Any]:
+        """
+        Get email verification status for a user
+        
+        Args:
+            user_id: User ID to check
+            
+        Returns:
+            Dict with verification status and info
+        """
+        try:
+            async with self.db_pool.acquire() as conn:
+                user = await conn.fetchrow("""
+                    SELECT email, email_verified, email_verification_sent_at, email_verification_expires_at
+                    FROM users
+                    WHERE user_id = $1
+                """, user_id)
+                
+                if not user:
+                    return {"success": False, "message": "User not found"}
+                
+                return {
+                    "success": True,
+                    "email": user["email"],
+                    "email_verified": user["email_verified"],
+                    "verification_sent_at": user["email_verification_sent_at"],
+                    "verification_expires_at": user["email_verification_expires_at"]
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to get email verification status: {e}")
+            return {"success": False, "message": f"Error: {str(e)}"}
 
 
 # Global service instance

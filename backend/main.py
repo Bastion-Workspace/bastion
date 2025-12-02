@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from config import settings
 from services.service_container import service_container
+from version import __version__
 
 
 def strip_yaml_frontmatter(content: str) -> str:
@@ -96,12 +97,10 @@ chat_service = None
 knowledge_graph_service = None
 collection_analysis_service = None
 enhanced_pdf_segmentation_service = None
-free_form_notes_service = None
 category_service = None
 
 embedding_manager = None
 websocket_manager = None
-calibre_search_service = None
 
 conversation_service = None
 folder_service = None
@@ -164,8 +163,8 @@ async def lifespan(app: FastAPI):
     
     global document_service, migration_service, chat_service
     global knowledge_graph_service, collection_analysis_service, enhanced_pdf_segmentation_service
-    global free_form_notes_service, category_service, conversation_service, embedding_manager
-    global websocket_manager, calibre_search_service
+    global category_service, conversation_service, embedding_manager
+    global websocket_manager
     global folder_service
     
     try:
@@ -189,10 +188,7 @@ async def lifespan(app: FastAPI):
         knowledge_graph_service = service_container.knowledge_graph_service
         collection_analysis_service = service_container.collection_analysis_service
         enhanced_pdf_segmentation_service = service_container.enhanced_pdf_service
-        free_form_notes_service = service_container.free_form_notes_service
         category_service = service_container.category_service
-
-        calibre_search_service = service_container.calibre_search_service
 
         conversation_service = service_container.conversation_service
         embedding_manager = service_container.embedding_manager
@@ -263,6 +259,37 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"❌ Messaging Service initialization failed: {e}")
             # Don't raise here as the app can still function without messaging
+        
+        # Initialize Teams Services
+        try:
+            from services.team_service import TeamService
+            from services.team_invitation_service import TeamInvitationService
+            from services.team_post_service import TeamPostService
+            from api.teams_api import team_service, invitation_service, post_service
+            
+            # Initialize team service with messaging service
+            await team_service.initialize(
+                shared_db_pool=service_container.db_pool,
+                messaging_service=messaging_service
+            )
+            
+            # Initialize invitation service
+            await invitation_service.initialize(
+                shared_db_pool=service_container.db_pool,
+                messaging_service=messaging_service,
+                team_service=team_service
+            )
+            
+            # Initialize post service
+            await post_service.initialize(
+                shared_db_pool=service_container.db_pool,
+                team_service=team_service
+            )
+            
+            logger.info("✅ Teams Services initialized")
+        except Exception as e:
+            logger.error(f"❌ Teams Services initialization failed: {e}")
+            # Don't raise here as the app can still function without teams
 
         
         # Initialize available models from OpenRouter on startup
@@ -363,7 +390,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Codex Knowledge Base V2",
     description="A sophisticated RAG system with PostgreSQL-backed document storage and knowledge graph integration",
-    version="2.0.0",
+    version=__version__,
     lifespan=lifespan
 )
 
@@ -550,6 +577,11 @@ from api.conversation_api import router as conversation_router
 app.include_router(conversation_router)
 logger.info("✅ Conversation API routes registered")
 
+# Include Conversation Sharing API routes
+from api.conversation_sharing_api import router as conversation_sharing_router
+app.include_router(conversation_sharing_router)
+logger.info("✅ Conversation Sharing API routes registered")
+
 @app.post("/api/conversations", response_model=ConversationResponse)
 async def create_conversation(request: CreateConversationRequest, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     """Create a new conversation"""
@@ -635,6 +667,11 @@ from api.messaging_api import router as messaging_router
 app.include_router(messaging_router)
 logger.info("✅ BULLY! Messaging API routes registered")
 
+# Teams API
+from api.teams_api import router as teams_router
+app.include_router(teams_router)
+logger.info("✅ Teams API routes registered")
+
 # Include Data Workspace API routes
 from api.data_workspace_api import router as data_workspace_router
 app.include_router(data_workspace_router)
@@ -648,6 +685,11 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ Failed to register Audio API routes: {e}")
 
+# Include Projects API routes
+from api.projects_api import router as projects_router
+app.include_router(projects_router)
+logger.info("✅ Projects API routes registered")
+
 # Include HITL Orchestrator API routes
 # HITL orchestrator API removed - using official orchestrator
 logger.info("✅ Legacy HITL Orchestrator API removed")
@@ -659,7 +701,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "Codex Knowledge Base V2",
-        "version": "2.0.0",
+        "version": __version__,
         "storage": "PostgreSQL"
     }
 
@@ -672,7 +714,7 @@ async def root():
         "description": "A sophisticated RAG system with PostgreSQL-backed document storage",
         "docs": "/docs",
         "health": "/health",
-        "version": "2.0.0"
+        "version": __version__
     }
 
 
@@ -923,140 +965,211 @@ Conversation update endpoint moved to api/conversation_api.py
 
 @app.get("/api/conversations/{conversation_id}/messages", response_model=MessageListResponse)
 async def get_conversation_messages(conversation_id: str, skip: int = 0, limit: int = 100, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
-    """Get messages for a conversation using LangGraph checkpoints (pure LangGraph approach)"""
+    """
+    Get messages for a conversation - MIGRATION-COMPATIBLE APPROACH
+    
+    Priority order (consistent with orchestrator migration):
+    1. Conversation database (primary source - populated by backend proxy)
+    2. LangGraph checkpoints (fallback for legacy conversations)
+    
+    This ensures new orchestrator conversations work correctly while maintaining
+    backward compatibility with old conversations that only have checkpoints.
+    """
     try:
-        logger.info(f"💬 Getting messages for conversation: {conversation_id} (LangGraph checkpoints)")
+        # Check read permission
+        from utils.auth_middleware import validate_conversation_access
+        has_access = await validate_conversation_access(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            required_permission="read"
+        )
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have access to this conversation")
         
-        # ROOSEVELT'S PURE LANGGRAPH APPROACH: Read directly from LangGraph checkpoints
-        from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
-        checkpointer = await get_postgres_checkpointer()
+        logger.info(f"💬 Getting messages for conversation: {conversation_id}")
         
-        if not checkpointer.is_initialized:
-            logger.error("❌ LangGraph checkpointer not initialized")
-            raise HTTPException(status_code=500, detail="LangGraph checkpointer not initialized")
-        
-        # ROOSEVELT'S THREAD_ID FIX: Use normalized thread_id for proper conversation lookup
-        from services.orchestrator_utils import normalize_thread_id
-        normalized_thread_id = normalize_thread_id(current_user.user_id, conversation_id)
-        
-        # Get conversation state from LangGraph checkpoint
-        config = {"configurable": {"thread_id": normalized_thread_id}}
         messages = []
+        messages_from_checkpoint = False  # Track if we got messages from checkpoint
+        messages_from_database = False  # Track if we got messages from database
         
+        # PRIORITY 1: Read from conversation database (primary source for orchestrator conversations)
         try:
-            # Try to get current state with all messages using the actual checkpointer instance
-            if checkpointer.checkpointer and not checkpointer.using_fallback:
-                actual_checkpointer = checkpointer.checkpointer
-                if hasattr(actual_checkpointer, 'aget_tuple'):
-                    checkpoint_tuple = await actual_checkpointer.aget_tuple(config)
+            from services.conversation_service import ConversationService
+            conversation_service = ConversationService()
+            conversation_service.set_current_user(current_user.user_id)
+            
+            db_messages_result = await conversation_service.get_conversation_messages(
+                conversation_id=conversation_id,
+                user_id=current_user.user_id,
+                skip=skip,
+                limit=limit
+            )
+            
+            # ConversationService returns dict with "messages" key
+            if db_messages_result and "messages" in db_messages_result:
+                db_messages = db_messages_result.get("messages", [])
+                if db_messages:
+                    logger.info(f"✅ Retrieved {len(db_messages)} messages from conversation database (primary source)")
+                    
+                    # Convert database messages to API format
+                    for msg in db_messages:
+                        messages.append({
+                            "message_id": msg.get("message_id"),
+                            "conversation_id": conversation_id,
+                            "message_type": msg.get("message_type", "user"),
+                            "role": msg.get("message_type", "user"),
+                            "content": msg.get("content", ""),
+                            "sequence_number": msg.get("sequence_number", 0),
+                            "created_at": msg.get("created_at").isoformat() if hasattr(msg.get("created_at"), "isoformat") else str(msg.get("created_at")),
+                            "updated_at": msg.get("updated_at").isoformat() if hasattr(msg.get("updated_at"), "isoformat") else str(msg.get("updated_at")),
+                            "metadata_json": msg.get("metadata_json", {}),
+                            "citations": msg.get("metadata_json", {}).get("citations", []) if isinstance(msg.get("metadata_json"), dict) else [],
+                            "edit_history": []
+                        })
+                    messages_from_database = True
                 else:
-                    logger.warning("⚠️ aget_tuple method not available on checkpointer")
-                    checkpoint_tuple = None
-                        
-                if checkpoint_tuple and checkpoint_tuple.checkpoint:
-                    # Extract messages from checkpoint state
-                    checkpoint_state = checkpoint_tuple.checkpoint
-                    # ROOSEVELT'S POSTGRESQL JSON FIX: Handle both dict and JSON string formats
-                    if isinstance(checkpoint_state, str):
-                        import json
-                        try:
-                            checkpoint_state = json.loads(checkpoint_state)
-                        except json.JSONDecodeError as e:
-                            logger.error(f"❌ Failed to parse checkpoint state JSON: {e}")
-                            checkpoint_state = {}
-                    elif checkpoint_state is None:
-                        checkpoint_state = {}
+                    logger.info(f"📚 No messages in conversation database, will try checkpoints as fallback")
+            else:
+                logger.debug(f"📚 Conversation database query returned no messages")
+        except Exception as db_error:
+            logger.warning(f"⚠️ Failed to load messages from conversation database: {db_error}")
+        
+        # PRIORITY 2: Fallback to LangGraph checkpoints (for legacy conversations)
+        if not messages_from_database:
+            logger.info(f"📚 Falling back to LangGraph checkpoints for conversation {conversation_id}")
+            try:
+                from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
+                checkpointer = await get_postgres_checkpointer()
+                
+                if not checkpointer.is_initialized:
+                    logger.warning("⚠️ LangGraph checkpointer not initialized, skipping checkpoint fallback")
+                else:
+                    # ROOSEVELT'S THREAD_ID FIX: Use normalized thread_id for proper conversation lookup
+                    from services.orchestrator_utils import normalize_thread_id
+                    normalized_thread_id = normalize_thread_id(current_user.user_id, conversation_id)
                     
-                    state_data = checkpoint_state.get("channel_values", {})
-                    logger.info(f"🔍 Checkpoint state keys: {list(state_data.keys())}")
-                    logger.info(f"🔍 Checkpoint state data: {state_data}")
+                    # Get conversation state from LangGraph checkpoint
+                    config = {"configurable": {"thread_id": normalized_thread_id}}
                     
-                    if "messages" in state_data:
-                        langgraph_messages = state_data["messages"]
-                        logger.info(f"✅ Found {len(langgraph_messages)} messages in LangGraph checkpoint")
-                        
-                        # ROOSEVELT'S DEBUG LOGGING: Log message types for debugging
-                        for i, msg in enumerate(langgraph_messages):
-                            msg_type = "unknown"
-                            if hasattr(msg, '__class__'):
-                                msg_type = str(msg.__class__)
-                            elif hasattr(msg, 'type'):
-                                msg_type = msg.type
-                            logger.debug(f"🔍 Message {i}: type={msg_type}, content_length={len(msg.content) if hasattr(msg, 'content') else 0}")
-                        
-                        # Convert LangGraph messages to API format
-                        for i, msg in enumerate(langgraph_messages):
-                            if hasattr(msg, 'content'):
-                                # ROOSEVELT'S MESSAGE TYPE FIX: Proper LangGraph message type detection
-                                message_type = "user"
-                                role = "user"
+                    # Try to get current state with all messages using the actual checkpointer instance
+                    if checkpointer.checkpointer and not checkpointer.using_fallback:
+                        actual_checkpointer = checkpointer.checkpointer
+                        if hasattr(actual_checkpointer, 'aget_tuple'):
+                            checkpoint_tuple = await actual_checkpointer.aget_tuple(config)
+                        else:
+                            logger.warning("⚠️ aget_tuple method not available on checkpointer")
+                            checkpoint_tuple = None
+                            
+                        if checkpoint_tuple and checkpoint_tuple.checkpoint:
+                            # Extract messages from checkpoint state
+                            checkpoint_state = checkpoint_tuple.checkpoint
+                            # ROOSEVELT'S POSTGRESQL JSON FIX: Handle both dict and JSON string formats
+                            if isinstance(checkpoint_state, str):
+                                import json
+                                try:
+                                    checkpoint_state = json.loads(checkpoint_state)
+                                except json.JSONDecodeError as e:
+                                    logger.error(f"❌ Failed to parse checkpoint state JSON: {e}")
+                                    checkpoint_state = {}
+                            elif checkpoint_state is None:
+                                checkpoint_state = {}
+                            
+                            state_data = checkpoint_state.get("channel_values", {})
+                            logger.info(f"🔍 Checkpoint state keys: {list(state_data.keys())}")
+                            logger.info(f"🔍 Checkpoint state data: {state_data}")
+                            
+                            if "messages" in state_data:
+                                langgraph_messages = state_data["messages"]
+                                logger.info(f"✅ Found {len(langgraph_messages)} messages in LangGraph checkpoint")
                                 
-                                # Check for HumanMessage (user messages)
-                                if hasattr(msg, '__class__') and 'HumanMessage' in str(msg.__class__):
-                                    message_type = "user"
-                                    role = "user"
-                                # Check for AIMessage (assistant messages)  
-                                elif hasattr(msg, '__class__') and 'AIMessage' in str(msg.__class__):
-                                    message_type = "assistant"
-                                    role = "assistant"
-                                # Fallback to type attribute if available
-                                elif hasattr(msg, 'type'):
-                                    if msg.type == "human":
+                                # ROOSEVELT'S DEBUG LOGGING: Log message types for debugging
+                                for i, msg in enumerate(langgraph_messages):
+                                    msg_type = "unknown"
+                                    if hasattr(msg, '__class__'):
+                                        msg_type = str(msg.__class__)
+                                    elif hasattr(msg, 'type'):
+                                        msg_type = msg.type
+                                    logger.debug(f"🔍 Message {i}: type={msg_type}, content_length={len(msg.content) if hasattr(msg, 'content') else 0}")
+                                
+                                # Convert LangGraph messages to API format
+                                for i, msg in enumerate(langgraph_messages):
+                                    if hasattr(msg, 'content'):
+                                        # ROOSEVELT'S MESSAGE TYPE FIX: Proper LangGraph message type detection
                                         message_type = "user"
                                         role = "user"
-                                    elif msg.type == "ai":
-                                        message_type = "assistant"
-                                        role = "assistant"
-                                
-                                # ROOSEVELT'S CITATION FIX: Extract citations from THIS MESSAGE's additional_kwargs
-                                citations = []
-                                if hasattr(msg, 'additional_kwargs') and isinstance(msg.additional_kwargs, dict):
-                                    citations = msg.additional_kwargs.get("citations", [])
-                                    if citations:
-                                        logger.info(f"🔗 EXTRACTED {len(citations)} CITATIONS from message {i} additional_kwargs")
-                                
-                                # Build metadata from additional_kwargs
-                                metadata_json = {}
-                                if hasattr(msg, 'additional_kwargs') and isinstance(msg.additional_kwargs, dict):
-                                    metadata_json = {
-                                        "citations": citations,
-                                        "research_mode": msg.additional_kwargs.get("research_mode"),
-                                        "timestamp": msg.additional_kwargs.get("timestamp")
-                                    }
-                                
-                                messages.append({
-                                    "message_id": f"lg_{conversation_id}_{i}",
-                                    "conversation_id": conversation_id,
-                                    "message_type": message_type,
-                                    "role": role,
-                                    "content": msg.content,
-                                    "sequence_number": i,
-                                    "created_at": datetime.now().isoformat(),
-                                    "updated_at": datetime.now().isoformat(),
-                                    "metadata_json": metadata_json if metadata_json.get("citations") else {},
-                                    "citations": citations,
-                                    "edit_history": []
-                                })
+                                        
+                                        # Check for HumanMessage (user messages)
+                                        if hasattr(msg, '__class__') and 'HumanMessage' in str(msg.__class__):
+                                            message_type = "user"
+                                            role = "user"
+                                        # Check for AIMessage (assistant messages)  
+                                        elif hasattr(msg, '__class__') and 'AIMessage' in str(msg.__class__):
+                                            message_type = "assistant"
+                                            role = "assistant"
+                                        # Fallback to type attribute if available
+                                        elif hasattr(msg, 'type'):
+                                            if msg.type == "human":
+                                                message_type = "user"
+                                                role = "user"
+                                            elif msg.type == "ai":
+                                                message_type = "assistant"
+                                                role = "assistant"
+                                        
+                                        # ROOSEVELT'S CITATION FIX: Extract citations from THIS MESSAGE's additional_kwargs
+                                        citations = []
+                                        if hasattr(msg, 'additional_kwargs') and isinstance(msg.additional_kwargs, dict):
+                                            citations = msg.additional_kwargs.get("citations", [])
+                                            if citations:
+                                                logger.info(f"🔗 EXTRACTED {len(citations)} CITATIONS from message {i} additional_kwargs")
+                                        
+                                        # Build metadata from additional_kwargs
+                                        metadata_json = {}
+                                        if hasattr(msg, 'additional_kwargs') and isinstance(msg.additional_kwargs, dict):
+                                            metadata_json = {
+                                                "citations": citations,
+                                                "research_mode": msg.additional_kwargs.get("research_mode"),
+                                                "timestamp": msg.additional_kwargs.get("timestamp")
+                                            }
+                                        
+                                        messages.append({
+                                            "message_id": f"lg_{conversation_id}_{i}",
+                                            "conversation_id": conversation_id,
+                                            "message_type": message_type,
+                                            "role": role,
+                                            "content": msg.content,
+                                            "sequence_number": i,
+                                            "created_at": datetime.now().isoformat(),
+                                            "updated_at": datetime.now().isoformat(),
+                                            "metadata_json": metadata_json if metadata_json.get("citations") else {},
+                                            "citations": citations,
+                                            "edit_history": []
+                                        })
+                                messages_from_checkpoint = True  # Mark that we got messages from checkpoint
+                            else:
+                                logger.info(f"⚠️ No messages found in checkpoint state for {conversation_id}")
+                        else:
+                            logger.info(f"⚠️ No checkpoint found for conversation {conversation_id}")
                     else:
-                        logger.info(f"⚠️ No messages found in checkpoint state for {conversation_id}")
+                        logger.warning("⚠️ aget_tuple method not available on checkpointer")
+            except Exception as checkpoint_error:
+                # This is normal for new conversations that don't have checkpoints yet
+                if "aget_tuple" in str(checkpoint_error) or "get_next_version" in str(checkpoint_error):
+                    logger.debug(f"🔧 LangGraph checkpointer API issue (expected for new conversations): {checkpoint_error}")
                 else:
-                    logger.info(f"⚠️ No checkpoint found for conversation {conversation_id}")
-            else:
-                logger.warning("⚠️ aget_tuple method not available on checkpointer")
-                
-        except Exception as checkpoint_error:
-            # This is normal for new conversations that don't have checkpoints yet
-            if "aget_tuple" in str(checkpoint_error) or "get_next_version" in str(checkpoint_error):
-                logger.debug(f"🔧 LangGraph checkpointer API issue (expected for new conversations): {checkpoint_error}")
-            else:
-                logger.warning(f"⚠️ Failed to read from LangGraph checkpoint: {checkpoint_error}")
-            # Fallback to empty messages rather than failing
-            messages = []
+                    logger.warning(f"⚠️ Failed to read from LangGraph checkpoint: {checkpoint_error}")
         
         total_count = len(messages)
-        has_more = False  # Since we're getting all messages from checkpoint
+        has_more = False  # Since we're getting all messages from checkpoint or database
         
-        logger.info(f"✅ Retrieved {total_count} messages from LangGraph checkpoint for conversation {conversation_id}")
+        # Determine source for logging
+        if messages_from_checkpoint and total_count > 0:
+            source = "checkpoint"
+        elif total_count > 0:
+            source = "database"
+        else:
+            source = "none"
+        
+        logger.info(f"✅ Retrieved {total_count} messages for conversation {conversation_id} (source: {source})")
         return MessageListResponse(
             messages=messages, 
             total_count=total_count,
@@ -1072,6 +1185,16 @@ async def get_conversation_messages(conversation_id: str, skip: int = 0, limit: 
 async def add_message_to_conversation(conversation_id: str, request: CreateMessageRequest, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     """Add a message to a conversation"""
     try:
+        # Check comment permission
+        from utils.auth_middleware import validate_conversation_access
+        has_access = await validate_conversation_access(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            required_permission="comment"
+        )
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have permission to add messages to this conversation")
+        
         logger.info(f"💬 Adding message to conversation: {conversation_id}")
         
         # Set the current user for this operation
@@ -1086,6 +1209,40 @@ async def add_message_to_conversation(conversation_id: str, request: CreateMessa
         )
         
         logger.info(f"✅ Message added to conversation {conversation_id}")
+        
+        # Broadcast message to all conversation participants
+        try:
+            from services.conversation_sharing_service import get_conversation_sharing_service
+            from utils.websocket_manager import get_websocket_manager
+            
+            sharing_service = await get_conversation_sharing_service()
+            participants = await sharing_service.get_conversation_participants(
+                conversation_id=conversation_id,
+                user_id=current_user.user_id
+            )
+            
+            websocket_manager = get_websocket_manager()
+            if websocket_manager and participants:
+                for participant in participants:
+                    if participant["user_id"] != current_user.user_id:  # Don't notify sender
+                        try:
+                            await websocket_manager.send_to_session(
+                                message={
+                                    "type": "participant_message",
+                                    "data": {
+                                        "conversation_id": conversation_id,
+                                        "sender_id": current_user.user_id,
+                                        "message_id": message.get("message_id"),
+                                        "content": message.get("content", "")[:100]  # Preview
+                                    }
+                                },
+                                session_id=participant["user_id"]
+                            )
+                        except Exception as ws_error:
+                            logger.debug(f"Failed to notify participant {participant['user_id']}: {ws_error}")
+        except Exception as collab_error:
+            logger.debug(f"Collaboration notification failed (non-fatal): {collab_error}")
+        
         return MessageResponse(message=message)
         
     except Exception as e:
@@ -2663,10 +2820,15 @@ async def reprocess_document(doc_id: str, current_user: AuthenticatedUserRespons
             else:
                 raise HTTPException(status_code=404, detail="Original file not found - cannot reprocess")
         else:
-            # Re-process the existing file
+            # Re-process the existing file, preserving original user_id/collection type
             doc_type = document_service._detect_document_type(doc_info.filename)
-            asyncio.create_task(document_service._process_document_async(doc_id, file_path, doc_type))
-            logger.info(f"📄 Re-processing file: {file_path}")
+            asyncio.create_task(document_service._process_document_async(
+                doc_id, 
+                file_path, 
+                doc_type, 
+                user_id=doc_info.user_id  # Preserve original collection type
+            ))
+            logger.info(f"📄 Re-processing file: {file_path} (user_id={doc_info.user_id}, collection={'global' if not doc_info.user_id else 'user'})")
         
         logger.info(f"✅ Document {doc_id} queued for re-processing")
         return {
@@ -2821,14 +2983,75 @@ async def reprocess_user_document(doc_id: str, current_user: AuthenticatedUserRe
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def check_document_access(
+    doc_id: str,
+    current_user: AuthenticatedUserResponse,
+    required_permission: str = "read"
+) -> DocumentInfo:
+    """
+    Check if user has access to a document
+    
+    Args:
+        doc_id: Document ID
+        current_user: Current authenticated user
+        required_permission: "read", "write", or "delete"
+        
+    Returns:
+        DocumentInfo if access granted
+        
+    Raises:
+        HTTPException: 403 if access denied, 404 if not found
+    """
+    doc_info = await document_service.get_document(doc_id)
+    if not doc_info:
+        raise HTTPException(status_code=404, detail="Document not found")
+    
+    # Admin has full access
+    if current_user.role == "admin":
+        return doc_info
+    
+    collection_type = getattr(doc_info, 'collection_type', 'user')
+    doc_user_id = getattr(doc_info, 'user_id', None)
+    doc_team_id = getattr(doc_info, 'team_id', None)
+    
+    # Global collection: read-only for users, write for admins
+    if collection_type == 'global':
+        if required_permission in ['write', 'delete']:
+            raise HTTPException(status_code=403, detail="Only admins can modify global documents")
+        return doc_info  # Anyone can read global docs
+    
+    # Team collection: check team membership
+    if doc_team_id:
+        from api.teams_api import team_service
+        role = await team_service.check_team_access(doc_team_id, current_user.user_id)
+        if not role:
+            raise HTTPException(status_code=403, detail="Not a team member")
+        
+        # Check permission based on team role
+        if required_permission == 'delete':
+            if role != 'admin':
+                raise HTTPException(status_code=403, detail="Only team admins can delete team documents")
+        
+        return doc_info
+    
+    # User collection: only owner has access
+    if doc_user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    
+    return doc_info
+
+
 @app.get("/api/documents/{doc_id}/pdf")
-async def get_document_pdf(doc_id: str):
-    """Serve the original PDF file for a document - **BULLY!** Now with folder-aware file paths!"""
+async def get_document_pdf(
+    doc_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Serve the original PDF file for a document"""
     try:
         logger.info(f"📄 Serving PDF file for document: {doc_id}")
         
-        # Get document info
-        doc_info = await document_service.get_document(doc_id)
+        # SECURITY: Check access authorization
+        doc_info = await check_document_access(doc_id, current_user, "read")
         if not doc_info:
             raise HTTPException(status_code=404, detail="Document not found")
         
@@ -2838,10 +3061,20 @@ async def get_document_pdf(doc_id: str):
         
         # **ROOSEVELT FIX**: Use folder service to get correct file path
         from pathlib import Path
+        import os
+        
         filename = getattr(doc_info, 'filename', None)
         user_id = getattr(doc_info, 'user_id', None)
         folder_id = getattr(doc_info, 'folder_id', None)
         collection_type = getattr(doc_info, 'collection_type', 'user')
+        
+        # SECURITY: Sanitize filename to prevent path traversal
+        if filename:
+            safe_filename = os.path.basename(filename)
+            if not safe_filename or safe_filename in ('.', '..'):
+                logger.error(f"Invalid filename in document metadata: {filename}")
+                raise HTTPException(status_code=500, detail="Invalid file metadata")
+            filename = safe_filename
         
         file_path = None
         
@@ -2855,6 +3088,18 @@ async def get_document_pdf(doc_id: str):
                     collection_type=collection_type
                 )
                 file_path = Path(file_path_str)
+                
+                # SECURITY: Verify resolved path is within uploads directory
+                try:
+                    uploads_base = Path(settings.UPLOAD_DIR).resolve()
+                    file_path_resolved = file_path.resolve()
+                    
+                    if not str(file_path_resolved).startswith(str(uploads_base)):
+                        logger.error(f"Path traversal attempt detected in document: {doc_id} -> {file_path_resolved}")
+                        raise HTTPException(status_code=403, detail="Access denied")
+                except Exception as e:
+                    logger.error(f"Path validation error for document {doc_id}: {e}")
+                    raise HTTPException(status_code=403, detail="Access denied")
                 
                 if not file_path.exists():
                     logger.warning(f"⚠️ PDF not found at computed path: {file_path}")
@@ -2894,16 +3139,22 @@ async def get_document_pdf(doc_id: str):
 
 
 @app.delete("/api/documents/{doc_id}")
-async def delete_document(doc_id: str):
+async def delete_document(
+    doc_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
     """Delete a document and all its embeddings"""
     try:
         logger.info(f"🗑️  Deleting document: {doc_id}")
+        
+        # SECURITY: Check delete authorization
+        await check_document_access(doc_id, current_user, "delete")
         
         success = await document_service.delete_document(doc_id)
         if not success:
             raise HTTPException(status_code=404, detail="Document not found")
         
-        logger.info(f"✅ Document {doc_id} deleted successfully")
+        logger.info(f"✅ Document {doc_id} deleted successfully by user {current_user.user_id}")
         return {"status": "success", "message": f"Document {doc_id} deleted successfully"}
         
     except HTTPException:
@@ -3358,298 +3609,6 @@ async def create_default_folders(
 
 
 
-
-
-# ===== FREE FORM NOTES ENDPOINTS =====
-
-@app.post("/api/notes")
-async def create_note(request: dict, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
-    """Create a new free-form note"""
-    try:
-        logger.info(f"📝 Creating new free-form note for user {current_user.user_id}")
-        
-        from models.api_models import FreeFormNoteRequest
-        note_request = FreeFormNoteRequest(**request)
-        
-        # Set current user for the service
-        free_form_notes_service.set_current_user(current_user.user_id)
-        note = await free_form_notes_service.create_note(note_request)
-        
-        logger.info(f"✅ Note created successfully: {note.note_id}")
-        return note.dict()
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to create note: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/notes/categories")
-async def get_note_categories(current_user: AuthenticatedUserResponse = Depends(get_current_user)):
-    """Get all note categories and tags"""
-    try:
-        logger.info(f"📝 Getting note categories and tags for user {current_user.user_id}")
-        
-        # Set current user for the service
-        free_form_notes_service.set_current_user(current_user.user_id)
-        result = await free_form_notes_service.get_categories_and_tags()
-        
-        logger.info(f"✅ Retrieved {len(result['categories'])} categories and {len(result['tags'])} tags")
-        return result
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to get note categories: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/notes/tags")
-async def get_note_tags(current_user: AuthenticatedUserResponse = Depends(get_current_user)):
-    """Get all note tags"""
-    try:
-        logger.info(f"📝 Getting note tags for user {current_user.user_id}")
-        
-        # Set current user for the service
-        free_form_notes_service.set_current_user(current_user.user_id)
-        tags = await free_form_notes_service.get_note_tags()
-        
-        logger.info(f"✅ Retrieved {len(tags)} tags")
-        return {"tags": tags}
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to get note tags: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/notes/statistics")
-async def get_notes_statistics(current_user: AuthenticatedUserResponse = Depends(get_current_user)):
-    """Get statistics about notes"""
-    try:
-        logger.info(f"📝 Getting notes statistics for user {current_user.user_id}")
-        
-        # Set current user for the service
-        free_form_notes_service.set_current_user(current_user.user_id)
-        stats = await free_form_notes_service.get_statistics()
-        
-        logger.info(f"✅ Retrieved notes statistics")
-        return stats.dict()
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to get notes statistics: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/notes/search")
-async def search_notes(request: dict, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
-    """Search notes using vector similarity"""
-    try:
-        logger.info(f"📝 Searching notes with vector similarity for user {current_user.user_id}")
-        
-        from models.api_models import SearchNotesRequest
-        search_request = SearchNotesRequest(**request)
-        
-        # Set current user for the service
-        free_form_notes_service.set_current_user(current_user.user_id)
-        result = await free_form_notes_service.search_notes(search_request)
-        
-        logger.info(f"✅ Found {len(result.notes)} matching notes")
-        return result.dict()
-        
-    except Exception as e:
-        logger.error(f"❌ Note search failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/notes")
-async def get_notes(
-    skip: int = 0,
-    limit: int = 100,
-    category: str = None,
-    tag: str = None,
-    search: str = None,
-    current_user: AuthenticatedUserResponse = Depends(get_current_user)
-):
-    """Get all notes with optional filtering"""
-    try:
-        logger.info(f"📝 Getting notes for user {current_user.user_id} with filters: category={category}, tag={tag}, search={search}")
-        
-        from models.api_models import NotesFilterRequest
-        filter_request = NotesFilterRequest(
-            skip=skip,
-            limit=limit,
-            category=category,
-            tags=[tag] if tag else None,
-            search_query=search
-        )
-        
-        # Set current user for the service
-        free_form_notes_service.set_current_user(current_user.user_id)
-        result = await free_form_notes_service.get_notes(filter_request)
-        
-        logger.info(f"✅ Retrieved {len(result.notes)} notes for user {current_user.user_id}")
-        return result.dict()
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to get notes: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/notes/{note_id}")
-async def get_note(note_id: str, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
-    """Get a specific note by ID"""
-    try:
-        logger.info(f"📝 Getting note: {note_id} for user {current_user.user_id}")
-        
-        # Set current user for the service
-        free_form_notes_service.set_current_user(current_user.user_id)
-        note = await free_form_notes_service.get_note(note_id)
-        if not note:
-            raise HTTPException(status_code=404, detail="Note not found")
-        
-        logger.info(f"✅ Note retrieved: {note_id}")
-        return note.dict()
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Failed to get note: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.put("/api/notes/{note_id}")
-async def update_note(note_id: str, request: dict, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
-    """Update an existing note"""
-    try:
-        logger.info(f"📝 Updating note: {note_id} for user {current_user.user_id}")
-        
-        from models.api_models import FreeFormNoteRequest
-        update_request = FreeFormNoteRequest(**request)
-        
-        # Set current user for the service
-        free_form_notes_service.set_current_user(current_user.user_id)
-        note = await free_form_notes_service.update_note(note_id, update_request)
-        if not note:
-            raise HTTPException(status_code=404, detail="Note not found")
-        
-        logger.info(f"✅ Note updated successfully: {note_id}")
-        return note.dict()
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Failed to update note: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.delete("/api/notes/{note_id}")
-async def delete_note(note_id: str, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
-    """Delete a note"""
-    try:
-        logger.info(f"📝 Deleting note: {note_id} for user {current_user.user_id}")
-        
-        # Set current user for the service
-        free_form_notes_service.set_current_user(current_user.user_id)
-        success = await free_form_notes_service.delete_note(note_id)
-        if not success:
-            raise HTTPException(status_code=404, detail="Note not found")
-        
-        logger.info(f"✅ Note deleted successfully: {note_id}")
-        return {"status": "success", "message": f"Note {note_id} deleted successfully"}
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Failed to delete note: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/notes/export")
-async def export_notes(current_user: AuthenticatedUserResponse = Depends(get_current_user)):
-    """Export all notes as a ZIP file"""
-    try:
-        from fastapi.responses import Response
-        from datetime import datetime
-        
-        logger.info(f"📝 Exporting all notes to ZIP for user {current_user.user_id}")
-        
-        # Set current user for the service
-        free_form_notes_service.set_current_user(current_user.user_id)
-        zip_data = await free_form_notes_service.export_notes_to_zip()
-        
-        return Response(
-            content=zip_data,
-            media_type="application/zip",
-            headers={
-                "Content-Disposition": f"attachment; filename=codex-notes-export-{current_user.user_id}-{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.zip"
-            }
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to export notes: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/api/conversations/{conversation_id}/messages/{message_id}/save-as-note")
-async def save_message_as_note(
-    conversation_id: str, 
-    message_id: str, 
-    current_user: AuthenticatedUserResponse = Depends(get_current_user)
-):
-    """Save a chat message as a note"""
-    try:
-        logger.info(f"📝 Saving message {message_id} from conversation {conversation_id} as note for user {current_user.user_id}")
-        
-        # Use shared conversation service
-        global conversation_service
-        conversation_service.set_current_user(current_user.user_id)
-        
-        # Get the message (this will verify user owns the conversation)
-        messages, _ = await conversation_service.get_conversation_messages(conversation_id, skip=0, limit=1000)
-        target_message = None
-        
-        for msg in messages:
-            if msg.message_id == message_id:
-                target_message = msg
-                break
-        
-        if not target_message:
-            raise HTTPException(status_code=404, detail="Message not found")
-        
-        # Generate a title from the message content (first 50 chars)
-        content_preview = target_message.content.strip()
-        title = content_preview[:50] + "..." if len(content_preview) > 50 else content_preview
-        
-        # Add prefix based on message type
-        if target_message.message_type.value == 'user':
-            title = f"🗣️ Query: {title}"
-        else:
-            title = f"🤖 Response: {title}"
-        
-        # Create note request
-        from models.api_models import FreeFormNoteRequest
-        note_request = FreeFormNoteRequest(
-            title=title,
-            content=target_message.content,
-            note_date=target_message.created_at.date() if target_message.created_at else None,
-            tags=["chat-saved", f"conversation-{conversation_id[:8]}", target_message.message_type.value],
-            category="Chat Research"
-        )
-        
-        # Set current user for notes service and create the note
-        free_form_notes_service.set_current_user(current_user.user_id)
-        note = await free_form_notes_service.create_note(note_request)
-        
-        logger.info(f"✅ Message saved as note: {note.note_id}")
-        
-        return {
-            "success": True,
-            "note": note.dict(),
-            "message": "Message saved as note successfully"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Failed to save message as note: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ===== UNIVERSAL CATEGORY ENDPOINTS =====
@@ -4461,136 +4420,20 @@ async def update_pdf_text_block(request: dict):
 
 
 
-
-
-# ========== CALIBRE INTEGRATION ENDPOINTS ==========
-
-@app.get("/api/calibre/status")
-async def get_calibre_status():
-    """Get Calibre library status and information"""
-    try:
-        if not calibre_search_service:
-            raise HTTPException(status_code=503, detail="Calibre service not available")
-        
-        library_info = await calibre_search_service.get_library_info()
-        return library_info
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to get Calibre status: {e}")
-        raise HTTPException(status_code=500, detail=f"Status check failed: {str(e)}")
-
-
-@app.post("/api/calibre/search")
-async def search_calibre_library(request: dict):
-    """Search Calibre library for books"""
-    try:
-        if not calibre_search_service:
-            raise HTTPException(status_code=503, detail="Calibre service not available")
-        
-        query = request.get("query", "")
-        limit = request.get("limit", 20)
-        include_metadata = request.get("include_metadata", True)
-        
-        if not query:
-            raise HTTPException(status_code=400, detail="Query parameter is required")
-        
-        results = await calibre_search_service.search_calibre_only(
-            query=query,
-            limit=limit
-        )
-        
-        return {
-            "results": results,
-            "total_found": len(results),
-            "query": query,
-            "library_available": calibre_search_service.is_available()
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Calibre search failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
-
-
-@app.post("/api/calibre/settings/toggle")
-async def toggle_calibre_integration(
-    request: dict,
-    current_user: AuthenticatedUserResponse = Depends(require_admin())
-):
-    """Toggle Calibre integration on/off"""
-    try:
-        if not calibre_search_service:
-            raise HTTPException(status_code=503, detail="Calibre service not available")
-        
-        enabled = request.get("enabled", False)
-        
-        success = await calibre_search_service.toggle_calibre_integration(enabled)
-        
-        if success:
-            return {
-                "success": True,
-                "enabled": enabled,
-                "message": f"Calibre integration {'enabled' if enabled else 'disabled'}"
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Failed to toggle Calibre integration")
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to toggle Calibre integration: {e}")
-        raise HTTPException(status_code=500, detail=f"Toggle failed: {str(e)}")
-
-
-@app.post("/api/calibre/settings/update")
-async def update_calibre_settings(
-    request: dict,
-    current_user: AuthenticatedUserResponse = Depends(require_admin())
-):
-    """Update Calibre settings"""
-    try:
-        if not calibre_search_service:
-            raise HTTPException(status_code=503, detail="Calibre service not available")
-        
-        settings_dict = request.get("settings", {})
-        
-        success = await calibre_search_service.update_calibre_settings(settings_dict)
-        
-        if success:
-            return {
-                "success": True,
-                "message": "Calibre settings updated successfully"
-            }
-        else:
-            raise HTTPException(status_code=500, detail="Failed to update Calibre settings")
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to update Calibre settings: {e}")
-        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
-
-
-@app.get("/api/calibre/filters")
-async def get_calibre_filters():
-    """Get available Calibre library filters"""
-    try:
-        if not calibre_search_service:
-            raise HTTPException(status_code=503, detail="Calibre service not available")
-        
-        filters = await calibre_search_service.get_book_filters()
-        return filters
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to get Calibre filters: {e}")
-        raise HTTPException(status_code=500, detail=f"Filters retrieval failed: {str(e)}")
-
-
 # ... existing code ...
 
 @app.get("/api/documents/{doc_id}/content")
-async def get_document_content(doc_id: str, request: Request):
+async def get_document_content(
+    doc_id: str,
+    request: Request,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
     """Get document content by ID"""
     try:
         logger.info(f"📄 API: Getting content for document {doc_id}")
         
-        # Get document info first
-        document = await document_service.get_document(doc_id)
+        # SECURITY: Check read authorization
+        document = await check_document_access(doc_id, current_user, "read")
         
         if not document:
             raise HTTPException(status_code=404, detail="Document not found")
@@ -4776,11 +4619,18 @@ async def get_document_content(doc_id: str, request: Request):
 
 
 @app.put("/api/documents/{doc_id}/content")
-async def update_document_content(doc_id: str, request: Request, current_user: AuthenticatedUserResponse = Depends(require_admin())):
+async def update_document_content(
+    doc_id: str,
+    request: Request,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
     """Update a text-based document's content on disk and re-embed chunks.
     Supports .txt, .md, .org. Non-text or binary docs are rejected.
     """
     try:
+        # SECURITY: Check write authorization
+        await check_document_access(doc_id, current_user, "write")
+        
         body = await request.json()
         new_content = body.get("content")
         if new_content is None:

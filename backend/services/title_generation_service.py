@@ -20,12 +20,10 @@ class TitleGenerationService:
         self._initialize_client()
     
     def _initialize_client(self):
-        """Initialize OpenRouter client"""
+        """Initialize OpenRouter client with automatic reasoning support"""
         try:
-            self.openrouter_client = AsyncOpenAI(
-                base_url="https://openrouter.ai/api/v1",
-                api_key=settings.OPENROUTER_API_KEY,
-            )
+            from utils.openrouter_client import get_openrouter_client
+            self.openrouter_client = get_openrouter_client()
             logger.info("✅ Title Generation Service - OpenRouter client initialized")
         except Exception as e:
             logger.error(f"❌ Failed to initialize OpenRouter client: {e}")

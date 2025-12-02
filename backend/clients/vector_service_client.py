@@ -38,8 +38,13 @@ class VectorServiceClient:
         try:
             logger.info(f"Connecting to Vector Service at {self.service_url}")
             
-            # Create insecure channel
-            self.channel = grpc.aio.insecure_channel(self.service_url)
+            # Create insecure channel with increased message size limits
+            # Default is 4MB, increase to 100MB for large batch embedding responses
+            options = [
+                ('grpc.max_send_message_length', 100 * 1024 * 1024),  # 100 MB
+                ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100 MB
+            ]
+            self.channel = grpc.aio.insecure_channel(self.service_url, options=options)
             self.stub = vector_service_pb2_grpc.VectorServiceStub(self.channel)
             
             # Test connection

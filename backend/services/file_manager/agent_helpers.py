@@ -149,38 +149,3 @@ async def place_manual_file(
         logger.error(f"❌ Failed to place manual file: {e}")
         raise
 
-
-async def place_calibre_book(
-    content: str,
-    title: str,
-    author: str,
-    user_id: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    description: Optional[str] = None
-) -> str:
-    """Place a Calibre book in the appropriate folder"""
-    try:
-        file_manager = await get_file_manager()
-        
-        request = FilePlacementRequest(
-            content=content,
-            title=title,
-            source_type=SourceType.CALIBRE,
-            source_metadata={
-                "imported_from": "calibre",
-                "book_type": "imported"
-            },
-            author=author,
-            tags=tags or [],
-            description=description,
-            user_id=user_id,
-            process_immediately=True
-        )
-        
-        response = await file_manager.place_file(request)
-        logger.info(f"✅ Calibre book placed: {response.document_id}")
-        return response.document_id
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to place Calibre book: {e}")
-        raise

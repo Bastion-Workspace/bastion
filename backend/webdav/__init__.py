@@ -10,7 +10,7 @@ Components:
 - config: WebDAV server configuration
 """
 
-__version__ = "1.0.0"
+from version import __version__
 
 
 

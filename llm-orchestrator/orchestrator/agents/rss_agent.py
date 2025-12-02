@@ -6,13 +6,30 @@ LangGraph agent for RSS feed management through natural language commands
 import logging
 import re
 import uuid
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TypedDict
 from urllib.parse import urlparse
 from langchain_core.messages import AIMessage
 
+from langgraph.graph import StateGraph, END
 from orchestrator.agents.base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
+
+
+class RSSState(TypedDict):
+    """State for RSS agent LangGraph workflow"""
+    query: str
+    user_id: str
+    metadata: Dict[str, Any]
+    messages: List[Any]
+    shared_memory: Dict[str, Any]
+    user_message: str
+    pending_operations: List[Dict[str, Any]]
+    rss_operations: List[Dict[str, Any]]
+    execution_results: List[Dict[str, Any]]
+    response: Dict[str, Any]
+    task_status: str
+    error: str
 
 
 class RSSAgent(BaseAgent):
@@ -20,11 +37,34 @@ class RSSAgent(BaseAgent):
     RSS Agent for chat-based RSS feed management
     
     Handles RSS feed operations through natural language commands
+    Uses LangGraph workflow for explicit state management
     """
     
     def __init__(self):
         super().__init__("rss_agent")
         self._grpc_client = None
+        logger.info("📰 RSS Agent ready!")
+    
+    def _build_workflow(self, checkpointer) -> StateGraph:
+        """Build LangGraph workflow for RSS agent"""
+        workflow = StateGraph(RSSState)
+        
+        # Add nodes
+        workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("parse_or_update_operations", self._parse_or_update_operations_node)
+        workflow.add_node("execute_operations", self._execute_operations_node)
+        workflow.add_node("format_response", self._format_response_node)
+        
+        # Entry point
+        workflow.set_entry_point("prepare_context")
+        
+        # Linear flow: prepare_context -> parse_or_update_operations -> execute_operations -> format_response -> END
+        workflow.add_edge("prepare_context", "parse_or_update_operations")
+        workflow.add_edge("parse_or_update_operations", "execute_operations")
+        workflow.add_edge("execute_operations", "format_response")
+        workflow.add_edge("format_response", END)
+        
+        return workflow.compile(checkpointer=checkpointer)
     
     async def _get_grpc_client(self):
         """Get or create gRPC client for backend tools"""
@@ -33,29 +73,51 @@ class RSSAgent(BaseAgent):
             self._grpc_client = await get_backend_tool_client()
         return self._grpc_client
     
-    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Process RSS management commands from chat
-        """
+    async def _prepare_context_node(self, state: RSSState) -> Dict[str, Any]:
+        """Prepare context: extract message and check for pending operations"""
         try:
-            logger.info("📰 RSS Agent: Starting RSS management processing")
+            logger.info("📋 Preparing context for RSS management...")
             
-            # Extract user message from state
             messages = state.get("messages", [])
             if not messages:
-                return self._create_error_result("No user message found for RSS processing")
+                return {
+                    "error": "No user message found for RSS processing",
+                    "task_status": "error"
+                }
             
             # Get the latest user message
             latest_message = messages[-1]
             user_message = latest_message.content if hasattr(latest_message, 'content') else str(latest_message)
-            user_id = state.get("user_id")
-            
-            logger.info(f"📰 RSS Agent: Processing message: {user_message[:100]}...")
             
             # Check if this is a metadata response for pending RSS operations
             shared_memory = state.get("shared_memory", {})
             rss_metadata_request = shared_memory.get("rss_metadata_request", {})
             pending_operations = rss_metadata_request.get("pending_operations", [])
+            
+            logger.info(f"📰 RSS Agent: Processing message: {user_message[:100]}...")
+            
+            return {
+                "user_message": user_message,
+                "pending_operations": pending_operations or []
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to prepare context: {e}")
+            return {
+                "user_message": "",
+                "pending_operations": [],
+                "error": str(e),
+                "task_status": "error"
+            }
+    
+    async def _parse_or_update_operations_node(self, state: RSSState) -> Dict[str, Any]:
+        """Parse RSS commands or update operations with metadata"""
+        try:
+            logger.info("📝 Parsing or updating RSS operations...")
+            
+            user_message = state.get("user_message", "")
+            user_id = state.get("user_id", "")
+            pending_operations = state.get("pending_operations", [])
             
             if pending_operations:
                 # This is a metadata response - update operations with user's metadata
@@ -68,19 +130,140 @@ class RSSAgent(BaseAgent):
                 rss_operations = await self._parse_rss_commands(user_message, user_id)
             
             if not rss_operations:
-                return self._create_response(
-                    success=True,
-                    response="No RSS operations detected in your message. Try commands like 'Add RSS feed: <url>' or 'List my RSS feeds'."
-                )
+                return {
+                    "rss_operations": [],
+                    "task_status": "complete"
+                }
+            
+            return {
+                "rss_operations": rss_operations
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to parse/update operations: {e}")
+            return {
+                "rss_operations": [],
+                "error": str(e),
+                "task_status": "error"
+            }
+    
+    async def _execute_operations_node(self, state: RSSState) -> Dict[str, Any]:
+        """Execute RSS operations"""
+        try:
+            logger.info("⚙️ Executing RSS operations...")
+            
+            rss_operations = state.get("rss_operations", [])
+            user_id = state.get("user_id", "")
+            
+            if not rss_operations:
+                return {
+                    "execution_results": [],
+                    "task_status": "complete"
+                }
             
             # Execute RSS operations
             results = await self._execute_rss_operations(rss_operations, user_id)
             
+            return {
+                "execution_results": results
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to execute operations: {e}")
+            return {
+                "execution_results": [],
+                "error": str(e),
+                "task_status": "error"
+            }
+    
+    async def _format_response_node(self, state: RSSState) -> Dict[str, Any]:
+        """Format response from execution results"""
+        try:
+            logger.info("📝 Formatting RSS response...")
+            
+            rss_operations = state.get("rss_operations", [])
+            execution_results = state.get("execution_results", [])
+            user_message = state.get("user_message", "")
+            
+            if not rss_operations:
+                response = self._create_response(
+                    success=True,
+                    response="No RSS operations detected in your message. Try commands like 'Add RSS feed: <url>' or 'List my RSS feeds'."
+                )
+            else:
             # Create structured response
-            response = self._create_rss_response(results, user_message)
+                response = self._create_rss_response(execution_results, user_message)
             
             logger.info("✅ RSS Agent: Completed RSS management processing")
-            return response
+            
+            return {
+                "response": response,
+                "task_status": "complete"
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to format response: {e}")
+            return {
+                "response": self._create_error_result(f"RSS management failed: {str(e)}"),
+                "task_status": "error",
+                "error": str(e)
+            }
+    
+    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process RSS management commands using LangGraph workflow
+        
+        Args:
+            state: Dictionary with messages, shared_memory, user_id, etc.
+            
+        Returns:
+            Dictionary with RSS management response and metadata
+        """
+        try:
+            logger.info("📰 RSS Agent: Starting RSS management processing...")
+            
+            # Extract user message
+            messages = state.get("messages", [])
+            if not messages:
+                return self._create_error_result("No user message found for RSS processing")
+            
+            latest_message = messages[-1]
+            user_message = latest_message.content if hasattr(latest_message, 'content') else str(latest_message)
+            
+            # Build initial state for LangGraph workflow
+            initial_state: RSSState = {
+                "query": user_message,
+                "user_id": state.get("user_id", "system"),
+                "metadata": state.get("metadata", {}),
+                "messages": messages,
+                "shared_memory": state.get("shared_memory", {}),
+                "user_message": "",
+                "pending_operations": [],
+                "rss_operations": [],
+                "execution_results": [],
+                "response": {},
+                "task_status": "",
+                "error": ""
+            }
+            
+            # Get workflow (lazy initialization with checkpointer)
+            workflow = await self._get_workflow()
+            
+            # Get checkpoint config (handles thread_id from conversation_id/user_id)
+            config = self._get_checkpoint_config(metadata)
+            
+            # Invoke LangGraph workflow with checkpointing
+            final_state = await workflow.ainvoke(initial_state, config=config)
+            
+            # Return response from final state
+            return final_state.get("response", {
+                "messages": [AIMessage(content="RSS management failed")],
+                "agent_results": {
+                    "agent_type": self.agent_type,
+                    "is_complete": False
+                },
+                "is_complete": False
+            })
             
         except Exception as e:
             logger.error(f"❌ RSS Agent ERROR: {e}")

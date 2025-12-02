@@ -8,8 +8,7 @@ from .agent_helpers import (
     place_chat_response,
     place_code_file,
     place_web_content,
-    place_manual_file,
-    place_calibre_book
+    place_manual_file
 )
 
 __all__ = [
@@ -18,6 +17,5 @@ __all__ = [
     "place_chat_response",
     "place_code_file", 
     "place_web_content",
-    "place_manual_file",
-    "place_calibre_book"
+    "place_manual_file"
 ]

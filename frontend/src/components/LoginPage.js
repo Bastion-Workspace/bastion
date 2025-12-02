@@ -15,11 +15,11 @@ import {
 import {
   Visibility,
   VisibilityOff,
-  Person,
-  Security
+  Person
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import { useAuth } from '../contexts/AuthContext';
+import { useTheme } from '../contexts/ThemeContext';
 
 const LoginPage = () => {
   const [username, setUsername] = useState('');
@@ -29,6 +29,7 @@ const LoginPage = () => {
   const [error, setError] = useState('');
   
   const { login, isAuthenticated } = useAuth();
+  const { darkMode } = useTheme();
   const navigate = useNavigate();
   const location = useLocation();
   
@@ -86,7 +87,9 @@ const LoginPage = () => {
           sx={{ 
             p: 4, 
             borderRadius: 2,
-            background: 'linear-gradient(145deg, #ffffff 0%, #f5f5f5 100%)'
+            background: darkMode 
+              ? 'linear-gradient(145deg, #1e1e1e 0%, #2d2d2d 100%)'
+              : 'linear-gradient(145deg, #ffffff 0%, #f5f5f5 100%)'
           }}
         >
           {/* Header */}
@@ -96,19 +99,20 @@ const LoginPage = () => {
               animate={{ scale: 1 }}
               transition={{ delay: 0.2, duration: 0.3 }}
             >
-              <Security 
-                sx={{ 
-                  fontSize: 60, 
-                  color: 'primary.main', 
-                  mb: 2 
-                }} 
+              <Box
+                component="img"
+                src={darkMode ? "/images/bastion-dark.png" : "/images/bastion.png"}
+                alt="Bastion"
+                sx={{
+                  height: 60,
+                  width: 'auto',
+                  mb: 2,
+                  objectFit: 'contain'
+                }}
               />
             </motion.div>
-            <Typography variant="h4" component="h1" gutterBottom sx={{ fontWeight: 600 }}>
-              Codex Knowledge Base
-            </Typography>
             <Typography variant="body1" color="text.secondary">
-              Sign in to access your personal knowledge repository
+              Sign in to your ultimate workspace
             </Typography>
           </Box>
 
@@ -144,6 +148,14 @@ const LoginPage = () => {
                   </InputAdornment>
                 ),
               }}
+              InputLabelProps={{
+                sx: {
+                  '&.MuiInputLabel-shrink': {
+                    transform: 'translate(14px, -11px) scale(0.75)',
+                    transformOrigin: 'top left'
+                  }
+                }
+              }}
               sx={{ mb: 2 }}
             />
             
@@ -169,6 +181,14 @@ const LoginPage = () => {
                     </IconButton>
                   </InputAdornment>
                 ),
+              }}
+              InputLabelProps={{
+                sx: {
+                  '&.MuiInputLabel-shrink': {
+                    transform: 'translate(14px, -11px) scale(0.75)',
+                    transformOrigin: 'top left'
+                  }
+                }
               }}
               sx={{ mb: 3 }}
             />
@@ -199,15 +219,6 @@ const LoginPage = () => {
                 'Sign In'
               )}
             </Button>
-          </Box>
-
-          {/* Default Credentials Info */}
-          <Box sx={{ mt: 3, p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
-            <Typography variant="body2" color="text.secondary" align="center">
-              <strong>Default Admin Credentials:</strong><br />
-              Username: admin<br />
-              Password: admin123
-            </Typography>
           </Box>
         </Paper>
       </motion.div>

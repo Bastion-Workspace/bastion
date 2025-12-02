@@ -32,7 +32,6 @@ class SourceType(str, Enum):
     """Types of research sources"""
     DOCUMENT = "document"
     WEB_PAGE = "web_page"
-    CALIBRE_BOOK = "calibre_book"
     ENTITY = "entity"
     SEARCH_RESULT = "search_result"
     CITATION = "citation"

@@ -11,10 +11,12 @@ from fastapi import APIRouter, HTTPException, Depends, WebSocket, WebSocketDisco
 from pydantic import BaseModel, Field
 
 from services.messaging.messaging_service import messaging_service
+from services.messaging.messaging_attachment_service import messaging_attachment_service
 from utils.auth_middleware import get_current_user
 from models.api_models import AuthenticatedUserResponse
 from utils.websocket_manager import get_websocket_manager
 from config import settings
+from fastapi import File, UploadFile
 
 logger = logging.getLogger(__name__)
 
@@ -334,6 +336,120 @@ async def delete_message(
     except Exception as e:
         logger.error(f"❌ Failed to delete message: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete message")
+
+
+# =====================
+# ATTACHMENT ENDPOINTS
+# =====================
+
+@router.post("/rooms/{room_id}/messages/{message_id}/attachments")
+async def upload_message_attachment(
+    room_id: str,
+    message_id: str,
+    file: UploadFile = File(...),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Upload an attachment for a message"""
+    try:
+        if not settings.MESSAGING_ENABLED:
+            raise HTTPException(status_code=503, detail="Messaging is not enabled")
+        
+        # Initialize attachment service if needed
+        await messaging_attachment_service.initialize()
+        
+        attachment = await messaging_attachment_service.upload_attachment(
+            room_id=room_id,
+            message_id=message_id,
+            file=file,
+            user_id=current_user.user_id
+        )
+        
+        return attachment
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to upload attachment: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload attachment")
+
+
+@router.get("/attachments/{attachment_id}")
+async def get_attachment(
+    attachment_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get attachment metadata"""
+    try:
+        if not settings.MESSAGING_ENABLED:
+            raise HTTPException(status_code=503, detail="Messaging is not enabled")
+        
+        await messaging_attachment_service.initialize()
+        
+        attachment = await messaging_attachment_service.get_attachment(
+            attachment_id=attachment_id,
+            user_id=current_user.user_id
+        )
+        
+        if not attachment:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        
+        return attachment
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get attachment: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get attachment")
+
+
+@router.get("/attachments/{attachment_id}/file")
+async def serve_attachment_file(
+    attachment_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Serve attachment file"""
+    try:
+        if not settings.MESSAGING_ENABLED:
+            raise HTTPException(status_code=503, detail="Messaging is not enabled")
+        
+        await messaging_attachment_service.initialize()
+        
+        return await messaging_attachment_service.serve_attachment_file(
+            attachment_id=attachment_id,
+            user_id=current_user.user_id
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to serve attachment: {e}")
+        raise HTTPException(status_code=500, detail="Failed to serve attachment")
+
+
+@router.get("/messages/{message_id}/attachments")
+async def get_message_attachments(
+    message_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get all attachments for a message"""
+    try:
+        if not settings.MESSAGING_ENABLED:
+            raise HTTPException(status_code=503, detail="Messaging is not enabled")
+        
+        await messaging_attachment_service.initialize()
+        
+        attachments = await messaging_attachment_service.get_message_attachments(
+            message_id=message_id,
+            user_id=current_user.user_id
+        )
+        
+        return {"attachments": attachments, "total": len(attachments)}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get message attachments: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get attachments")
 
 
 # =====================

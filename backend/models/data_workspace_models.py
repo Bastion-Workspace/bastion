@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+from enum import Enum
 
 
 # Workspace Models
@@ -19,6 +20,12 @@ class UpdateWorkspaceRequest(BaseModel):
     is_pinned: Optional[bool] = None
 
 
+class WorkspacePermission(str, Enum):
+    READ = "read"
+    WRITE = "write"
+    ADMIN = "admin"
+
+
 class WorkspaceResponse(BaseModel):
     workspace_id: str
     user_id: str
@@ -30,6 +37,10 @@ class WorkspaceResponse(BaseModel):
     metadata_json: str
     created_at: str
     updated_at: str
+    updated_by: Optional[str] = None
+    permission_level: Optional[str] = None  # User's permission level (if shared)
+    is_shared: Optional[bool] = False  # Whether workspace is shared with user
+    share_type: Optional[str] = None  # 'user', 'team', or 'public' if shared
 
 
 # Database Models
@@ -49,6 +60,8 @@ class DatabaseResponse(BaseModel):
     table_count: int
     total_rows: int
     created_at: str
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
 
 
 # Table Models
@@ -73,6 +86,8 @@ class TableResponse(BaseModel):
     row_count: int
     table_schema_json: str
     styling_rules_json: str
+    created_by: Optional[str] = None
+    updated_by: Optional[str] = None
 
 
 class RowData(BaseModel):
@@ -140,6 +155,7 @@ class ImportJobResponse(BaseModel):
     error_log: Optional[str]
     started_at: Optional[str]
     completed_at: Optional[str]
+    created_by: Optional[str] = None
     progress_percent: int
 
 
@@ -254,4 +270,26 @@ class ApplyStylingRequest(BaseModel):
 class StyledDataResponse(BaseModel):
     styled_data: List[Dict[str, Any]]
     applied_rules: List[StylingRuleResponse]
+
+
+# Sharing Models
+class ShareWorkspaceRequest(BaseModel):
+    shared_with_user_id: Optional[str] = None  # None for team/public share
+    shared_with_team_id: Optional[str] = None  # None for user/public share
+    permission_level: WorkspacePermission = WorkspacePermission.READ
+    is_public: bool = False
+    expires_at: Optional[datetime] = None
+
+
+class WorkspaceShareResponse(BaseModel):
+    share_id: str
+    workspace_id: str
+    shared_by_user_id: str
+    shared_with_user_id: Optional[str]
+    shared_with_team_id: Optional[str]
+    permission_level: str
+    is_public: bool
+    expires_at: Optional[str]
+    created_at: str
+    access_count: int
 

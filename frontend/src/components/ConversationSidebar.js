@@ -40,11 +40,15 @@ import {
   DragIndicator,
   Lock,
   LockOpen,
+  Share,
+  People,
 } from '@mui/icons-material';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd';
 import apiService from '../services/apiService';
+import conversationService from '../services/conversation/ConversationService';
+import ConversationShareDialog from './ConversationShareDialog';
 
 const ConversationSidebar = ({ 
   currentConversationId, 
@@ -61,6 +65,7 @@ const ConversationSidebar = ({
   const [editDialog, setEditDialog] = useState({ open: false, conversation: null });
   const [deleteDialog, setDeleteDialog] = useState({ open: false, conversation: null });
   const [deleteAllDialog, setDeleteAllDialog] = useState({ open: false });
+  const [shareDialog, setShareDialog] = useState({ open: false, conversation: null });
   const [orderLocked, setOrderLocked] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   
@@ -69,7 +74,29 @@ const ConversationSidebar = ({
   // Fetch conversations with search and filtering
   const { data: conversationsData, isLoading, error } = useQuery(
     ['conversations', searchQuery],
-    () => apiService.listConversations(0, 100),
+    async () => {
+      const [ownedConversations, sharedConversations] = await Promise.all([
+        apiService.listConversations(0, 100),
+        conversationService.getSharedConversations(0, 100).catch(() => ({ conversations: [] }))
+      ]);
+      
+      // Merge conversations, marking shared ones
+      const allConversations = [
+        ...(ownedConversations?.conversations || []).map(conv => ({ ...conv, is_shared: false })),
+        ...(sharedConversations?.conversations || []).map(conv => ({ ...conv, is_shared: true }))
+      ];
+      
+      // Remove duplicates (in case user owns a conversation they also have shared)
+      const uniqueConversations = Array.from(
+        new Map(allConversations.map(conv => [conv.conversation_id, conv])).values()
+      );
+      
+      return {
+        conversations: uniqueConversations,
+        total_count: uniqueConversations.length,
+        has_more: false
+      };
+    },
     {
       refetchOnWindowFocus: true,
       refetchOnMount: true,
@@ -279,6 +306,11 @@ const ConversationSidebar = ({
       conversationId: conversation.conversation_id,
       updates: { is_archived: !conversation.is_archived }
     });
+    handleCloseContextMenu();
+  };
+
+  const handleShareConversation = () => {
+    setShareDialog({ open: true, conversation: contextMenu.conversation });
     handleCloseContextMenu();
   };
 
@@ -614,6 +646,9 @@ const ConversationSidebar = ({
                                       {conversation.is_pinned && (
                                         <PushPin sx={{ fontSize: 14, color: 'primary.main', ml: 0.5 }} />
                                       )}
+                                      {conversation.is_shared && (
+                                        <People sx={{ fontSize: 14, color: 'secondary.main', ml: 0.5 }} />
+                                      )}
                                     </Box>
                                     
                                     <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -691,6 +726,10 @@ const ConversationSidebar = ({
         <MenuItem onClick={handleEditConversation}>
           <Edit sx={{ mr: 1 }} />
           Edit
+        </MenuItem>
+        <MenuItem onClick={handleShareConversation}>
+          <Share sx={{ mr: 1 }} />
+          Share
         </MenuItem>
         <MenuItem onClick={handleTogglePin}>
           <PushPin sx={{ mr: 1 }} />
@@ -814,6 +853,18 @@ const ConversationSidebar = ({
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Share Dialog */}
+      <ConversationShareDialog
+        open={shareDialog.open}
+        onClose={() => {
+          setShareDialog({ open: false, conversation: null });
+          // Refresh conversation list to show any new shares
+          queryClient.invalidateQueries(['conversations']);
+        }}
+        conversationId={shareDialog.conversation?.conversation_id}
+        conversationTitle={shareDialog.conversation?.title}
+      />
     </>
   );
 };

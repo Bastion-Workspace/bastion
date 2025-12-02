@@ -59,18 +59,36 @@ class DirectSearchService:
             Dict containing search results and metadata
         """
         try:
-            logger.info(f"🔍 Direct search query: '{query}' with {limit} results")
+            if tags or categories:
+                logger.info(f"🔍 Direct search with TAG FILTERING: query='{query}', tags={tags}, categories={categories}, limit={limit}")
+            else:
+                logger.info(f"🔍 Direct search query: '{query}' with {limit} results")
             
             # Ensure embedding manager is initialized
             await self._ensure_initialized()
             
-            # Perform vector search using EmbeddingManager's search_similar method
-            # EmbeddingManager.search_similar expects query_text and handles embedding generation internally
+            # Generate embeddings for the query
+            # EmbeddingServiceWrapper handles embedding generation via vector service or local
+            query_embeddings = await self.embedding_manager.generate_embeddings([query])
+            if not query_embeddings or len(query_embeddings) == 0:
+                logger.error("Failed to generate query embeddings")
+                return {
+                    "success": False,
+                    "error": "Failed to generate query embedding",
+                    "results": [],
+                    "total_results": 0
+                }
+            
+            # Perform vector search using EmbeddingServiceWrapper's search_similar method
+            # Note: EmbeddingServiceWrapper expects query_embedding (vector), not query_text (string)
+            # Support tag and category filtering for metadata-based searches
             search_results = await self.embedding_manager.search_similar(
-                query_text=query,
+                query_embedding=query_embeddings[0],
                 limit=limit,
                 score_threshold=similarity_threshold,
-                user_id=user_id if user_id and user_id != "system" else None
+                user_id=user_id if user_id and user_id != "system" else None,
+                filter_category=categories[0] if categories and len(categories) > 0 else None,
+                filter_tags=tags if tags else None
             )
             
             # Format results (already filtered by threshold in search_similar)

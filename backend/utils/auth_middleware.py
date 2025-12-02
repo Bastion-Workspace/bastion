@@ -57,7 +57,6 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             "/api/agents",
             "/api/models",
             "/api/admin",
-            "/api/calibre",
             "/api/v2",
             "/api/resilient-embedding",
             "/api/research-plans",
@@ -76,6 +75,7 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             "/health",
             "/api/auth/login",
             "/api/auth/logout",
+            "/api/auth/refresh",  # Refresh endpoint allows expired tokens
             "/docs",
             "/openapi.json",
             "/api/files",  # Static file serving
@@ -108,6 +108,9 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             
             token = authorization.split(" ")[1]
             
+            # Special handling for refresh endpoint - allow expired tokens
+            is_refresh_endpoint = path == "/api/auth/refresh"
+            
             # Verify token and get user
             try:
                 # Check if auth service is initialized
@@ -121,19 +124,37 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
                 
                 logger.info(f"🔍 Validating token for path: {path}")
                 logger.info(f"🔍 Token received: {token[:50]}...")
-                current_user = await auth_service.get_current_user(token)
-                if not current_user:
-                    logger.warning(f"❌ Invalid or expired token for path: {path}")
-                    logger.info(f"🔍 Token validation failed - token: {token[:50]}...")
-                    from fastapi.responses import JSONResponse
-                    return JSONResponse(
-                        status_code=401,
-                        content={"detail": "Invalid or expired token"}
-                    )
                 
-                # Add user to request state
-                request.state.current_user = current_user
-                logger.debug(f"✅ Authentication successful for user: {current_user.username} on path: {path}")
+                # For refresh endpoint, skip user validation (refresh_token handles it)
+                if is_refresh_endpoint:
+                    # Just verify token format, don't check expiration
+                    try:
+                        import jwt
+                        from config import settings
+                        jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.JWT_ALGORITHM], options={"verify_exp": False})
+                        logger.debug("✅ Refresh endpoint - token format valid, allowing request")
+                    except Exception as e:
+                        logger.warning(f"❌ Invalid token format for refresh: {e}")
+                        from fastapi.responses import JSONResponse
+                        return JSONResponse(
+                            status_code=401,
+                            content={"detail": "Invalid token"}
+                        )
+                else:
+                    # Normal authentication flow
+                    current_user = await auth_service.get_current_user(token)
+                    if not current_user:
+                        logger.warning(f"❌ Invalid or expired token for path: {path}")
+                        logger.info(f"🔍 Token validation failed - token: {token[:50]}...")
+                        from fastapi.responses import JSONResponse
+                        return JSONResponse(
+                            status_code=401,
+                            content={"detail": "Invalid or expired token"}
+                        )
+                    
+                    # Add user to request state
+                    request.state.current_user = current_user
+                    logger.debug(f"✅ Authentication successful for user: {current_user.username} on path: {path}")
                 
             except Exception as e:
                 logger.error(f"❌ Authentication error for path {path}: {e}")
@@ -223,3 +244,70 @@ async def get_current_user_id(
 ) -> str:
     """Dependency to get current user ID"""
     return current_user.user_id
+
+
+async def validate_conversation_access(
+    user_id: str,
+    conversation_id: str,
+    required_permission: str = "read"
+) -> bool:
+    """
+    Validate if user has access to a conversation
+    
+    Permission hierarchy: read < comment < edit
+    - read: Can view conversation
+    - comment: Can view and add messages
+    - edit: Can view, add messages, and modify conversation settings
+    
+    Args:
+        user_id: User ID to check
+        conversation_id: Conversation ID to check access for
+        required_permission: Required permission level (read, comment, edit)
+        
+    Returns:
+        True if user has required access, False otherwise
+    """
+    try:
+        from services.conversation_sharing_service import get_conversation_sharing_service
+        
+        sharing_service = await get_conversation_sharing_service()
+        return await sharing_service._has_conversation_access(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            required_permission=required_permission
+        )
+    except Exception as e:
+        logger.error(f"Failed to validate conversation access: {e}")
+        return False
+
+
+def require_conversation_access(required_permission: str = "read"):
+    """
+    Dependency factory to require conversation access
+    
+    Usage:
+        @app.get("/api/conversations/{conversation_id}/messages")
+        async def get_messages(
+            conversation_id: str,
+            current_user: AuthenticatedUserResponse = Depends(get_current_user),
+            _: None = Depends(require_conversation_access("read"))
+        ):
+            ...
+    """
+    async def access_checker(
+        conversation_id: str,
+        current_user: AuthenticatedUserResponse = Depends(get_current_user)
+    ) -> None:
+        has_access = await validate_conversation_access(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            required_permission=required_permission
+        )
+        if not has_access:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Insufficient permissions. {required_permission} access required."
+            )
+        return None
+    
+    return access_checker

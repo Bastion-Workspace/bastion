@@ -5,23 +5,58 @@ Generates images from user prompts using OpenRouter image models via backend gRP
 
 import json
 import logging
-from typing import Dict, Any, Optional
-from langchain_core.messages import AIMessage
+from typing import Dict, Any, Optional, List, TypedDict
+from langchain_core.messages import AIMessage, HumanMessage
 
+from langgraph.graph import StateGraph, END
 from orchestrator.agents.base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
+
+
+class ImageGenerationState(TypedDict):
+    """State for image generation agent LangGraph workflow"""
+    query: str
+    user_id: str
+    metadata: Dict[str, Any]
+    messages: List[Any]
+    shared_memory: Dict[str, Any]
+    persona: Optional[Dict[str, Any]]
+    prompt: str
+    generation_params: Dict[str, Any]
+    response: Dict[str, Any]
+    task_status: str
+    error: str
 
 
 class ImageGenerationAgent(BaseAgent):
     """
     Image Generation Agent
     Generates images from user prompts using configured OpenRouter image models
+    Uses LangGraph workflow for explicit state management
     """
     
     def __init__(self):
         super().__init__("image_generation_agent")
         self._grpc_client = None
+        logger.info("🎨 Image Generation Agent ready!")
+    
+    def _build_workflow(self, checkpointer) -> StateGraph:
+        """Build LangGraph workflow for image generation agent"""
+        workflow = StateGraph(ImageGenerationState)
+        
+        # Add nodes
+        workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("generate_image", self._generate_image_node)
+        
+        # Entry point
+        workflow.set_entry_point("prepare_context")
+        
+        # Linear flow: prepare_context -> generate_image -> END
+        workflow.add_edge("prepare_context", "generate_image")
+        workflow.add_edge("generate_image", END)
+        
+        return workflow.compile(checkpointer=checkpointer)
     
     async def _get_grpc_client(self):
         """Get or create gRPC client for backend tools"""
@@ -30,13 +65,16 @@ class ImageGenerationAgent(BaseAgent):
             self._grpc_client = await get_grpc_tool_client()
         return self._grpc_client
     
-    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Process image generation request"""
+    async def _prepare_context_node(self, state: ImageGenerationState) -> Dict[str, Any]:
+        """Prepare context: extract prompt and generation parameters"""
         try:
-            # Extract user prompt from messages
-            messages = state.get("messages", []) or []
-            user_prompt = ""
+            logger.info("📋 Preparing context for image generation...")
             
+            messages = state.get("messages", []) or []
+            shared_memory = state.get("shared_memory", {}) or {}
+            
+            # Extract user prompt from messages
+            user_prompt = ""
             for msg in reversed(messages):
                 # Check LangChain message objects
                 content = getattr(msg, "content", None)
@@ -51,31 +89,59 @@ class ImageGenerationAgent(BaseAgent):
                     break
             
             user_prompt = user_prompt.strip()
-            if not user_prompt:
-                return self._create_error_result("No prompt provided for image generation")
             
             # Extract optional parameters from shared_memory
-            sm = state.get("shared_memory", {}) or {}
-            gen_params = (sm.get("image_generation_params") or {}) if isinstance(sm, dict) else {}
-            size = str(gen_params.get("size", "1024x1024"))
-            fmt = str(gen_params.get("format", "png"))
-            seed = gen_params.get("seed")
-            num_images = int(gen_params.get("num_images", 1))
-            negative_prompt = gen_params.get("negative_prompt")
+            gen_params = (shared_memory.get("image_generation_params") or {}) if isinstance(shared_memory, dict) else {}
+            generation_params = {
+                "size": str(gen_params.get("size", "1024x1024")),
+                "format": str(gen_params.get("format", "png")),
+                "seed": gen_params.get("seed"),
+                "num_images": int(gen_params.get("num_images", 1)),
+                "negative_prompt": gen_params.get("negative_prompt")
+            }
+            
+            return {
+                "prompt": user_prompt,
+                "generation_params": generation_params
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to prepare context: {e}")
+            return {
+                "prompt": "",
+                "generation_params": {},
+                "error": str(e)
+            }
+    
+    async def _generate_image_node(self, state: ImageGenerationState) -> Dict[str, Any]:
+        """Generate image using gRPC tool"""
+        try:
+            logger.info("🎨 Generating image...")
+            
+            prompt = state.get("prompt", "").strip()
+            if not prompt:
+                return {
+                    "response": self._create_error_result("No prompt provided for image generation"),
+                    "task_status": "error"
+                }
+            
+            generation_params = state.get("generation_params", {})
+            persona = state.get("persona")
             
             # Call backend gRPC tool for image generation
             grpc_client = await self._get_grpc_client()
             
-            logger.info(f"🎨 Generating {num_images} image(s) with prompt: {user_prompt[:100]}...")
+            num_images = generation_params.get("num_images", 1)
+            logger.info(f"🎨 Generating {num_images} image(s) with prompt: {prompt[:100]}...")
             
             # Call GenerateImage gRPC method
             tool_result_json = await grpc_client.generate_image(
-                prompt=user_prompt,
-                size=size,
-                format=fmt,
-                seed=seed,
+                prompt=prompt,
+                size=generation_params.get("size", "1024x1024"),
+                format=generation_params.get("format", "png"),
+                seed=generation_params.get("seed"),
                 num_images=num_images,
-                negative_prompt=negative_prompt
+                negative_prompt=generation_params.get("negative_prompt")
             )
             
             tool_result = json.loads(tool_result_json) if isinstance(tool_result_json, str) else tool_result_json
@@ -83,7 +149,10 @@ class ImageGenerationAgent(BaseAgent):
             if not tool_result.get("success"):
                 error_msg = tool_result.get("error", "Unknown error")
                 logger.error(f"❌ Image generation failed: {error_msg}")
-                return self._create_error_result(f"Image generation failed: {error_msg}")
+                return {
+                    "response": self._create_error_result(f"Image generation failed: {error_msg}"),
+                    "task_status": "error"
+                }
             
             # Extract image URLs from result
             images = tool_result.get("images", [])
@@ -94,7 +163,7 @@ class ImageGenerationAgent(BaseAgent):
             response_text = self._format_completion_message(
                 len(images), 
                 urls_text, 
-                state.get("persona")
+                persona
             )
             
             logger.info(f"✅ Successfully generated {len(images)} image(s)")
@@ -102,13 +171,14 @@ class ImageGenerationAgent(BaseAgent):
             # Build structured response
             structured = {
                 "task_status": "complete",
-                "prompt": user_prompt,
+                "prompt": prompt,
                 "model_used": tool_result.get("model", "unknown"),
                 "images": images,
                 "message": response_text,
             }
             
             return {
+                "response": {
                 "messages": [AIMessage(content=response_text)],
                 "agent_results": {
                     "agent_type": "image_generation_agent",
@@ -118,10 +188,80 @@ class ImageGenerationAgent(BaseAgent):
                 },
                 "is_complete": True,
                 "shared_memory": state.get("shared_memory", {})
+                },
+                "task_status": "complete"
             }
         
         except Exception as e:
-            logger.error(f"❌ ImageGenerationAgent failed: {e}")
+            logger.error(f"❌ Image generation failed: {e}")
+            return {
+                "response": self._create_error_result(f"Image generation failed: {str(e)}"),
+                "task_status": "error",
+                "error": str(e)
+            }
+    
+    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process image generation request using LangGraph workflow
+        
+        Args:
+            state: Dictionary with messages, shared_memory, user_id, persona, etc.
+            
+        Returns:
+            Dictionary with image generation response and metadata
+        """
+        try:
+            logger.info("🎨 Image Generation Agent: Starting image generation...")
+            
+            # Extract user message
+            messages = state.get("messages", []) or []
+            user_prompt = ""
+            for msg in reversed(messages):
+                content = getattr(msg, "content", None)
+                role = getattr(msg, "type", None)
+                if content and (role == "human" or role is None):
+                    user_prompt = str(content)
+                    break
+                if isinstance(msg, dict) and msg.get("role") == "user":
+                    user_prompt = str(msg.get("content") or "")
+                    break
+            
+            # Build initial state for LangGraph workflow
+            initial_state: ImageGenerationState = {
+                "query": user_prompt,
+                "user_id": state.get("user_id", "system"),
+                "metadata": state.get("metadata", {}),
+                "messages": messages,
+                "shared_memory": state.get("shared_memory", {}),
+                "persona": state.get("persona"),
+                "prompt": "",
+                "generation_params": {},
+                "response": {},
+                "task_status": "",
+                "error": ""
+            }
+            
+            # Get workflow (lazy initialization with checkpointer)
+            workflow = await self._get_workflow()
+            
+            # Get checkpoint config (handles thread_id from conversation_id/user_id)
+            config = self._get_checkpoint_config(metadata)
+            
+            # Invoke LangGraph workflow with checkpointing
+            final_state = await workflow.ainvoke(initial_state, config=config)
+            
+            # Return response from final state
+            return final_state.get("response", {
+                "messages": [AIMessage(content="Image generation failed")],
+                "agent_results": {
+                    "agent_type": self.agent_type,
+                    "is_complete": False
+                },
+                "is_complete": False
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Image Generation Agent failed: {e}")
             return self._create_error_result(f"Image generation failed: {str(e)}")
     
     def _format_completion_message(

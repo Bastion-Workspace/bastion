@@ -20,7 +20,7 @@ async def get_shared_db_pool() -> asyncpg.Pool:
     global _shared_db_pool
     
     async with _pool_lock:
-        if _shared_db_pool is None or _shared_db_pool.is_closed():
+        if _shared_db_pool is None or _shared_db_pool.is_closing():
             logger.info("🔧 Creating global shared database pool...")
             
             try:
@@ -48,7 +48,7 @@ async def close_shared_db_pool():
     global _shared_db_pool
     
     async with _pool_lock:
-        if _shared_db_pool and not _shared_db_pool.is_closed():
+        if _shared_db_pool and not _shared_db_pool.is_closing():
             await _shared_db_pool.close()
             _shared_db_pool = None
             logger.info("✅ Global shared database pool closed")

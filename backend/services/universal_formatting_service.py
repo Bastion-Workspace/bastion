@@ -81,13 +81,9 @@ class UniversalFormattingService:
     async def _llm_analyze_formatting_need(self, agent_type: str, user_query: str, agent_response: str) -> Optional[Dict[str, Any]]:
         """Use LLM to intelligently analyze formatting needs"""
         try:
-            from openai import AsyncOpenAI
-            from config import settings
+            from utils.openrouter_client import get_openrouter_client
             
-            client = AsyncOpenAI(
-                api_key=settings.OPENROUTER_API_KEY,
-                base_url="https://openrouter.ai/api/v1"
-            )
+            client = get_openrouter_client()
             
             # Build context-aware prompt
             prompt = f"""Analyze if this agent response would benefit from structured formatting.

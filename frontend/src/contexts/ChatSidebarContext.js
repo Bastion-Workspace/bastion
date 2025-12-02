@@ -4,6 +4,16 @@ import { useLocation } from 'react-router-dom';
 import apiService from '../services/apiService';
 import BackgroundJobService from '../services/backgroundJobService';
 
+// Format agent type to display name
+const formatAgentName = (agentType) => {
+  if (!agentType) return 'AI';
+  const formatted = agentType
+    .split('_')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+  return formatted;
+};
+
 const ChatSidebarContext = createContext();
 
 export const useChatSidebar = () => {
@@ -16,6 +26,8 @@ export const useChatSidebar = () => {
 
 export const ChatSidebarProvider = ({ children }) => {
   const location = useLocation();
+  // Note: EditorProvider is a child of ChatSidebarProvider, so we can't use useEditor() here
+  // We'll check localStorage directly with strict validation instead
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(420);
   const [isFullWidth, setIsFullWidth] = useState(false);
@@ -24,11 +36,11 @@ export const ChatSidebarProvider = ({ children }) => {
     try {
       const saved = localStorage.getItem('chatSidebarCurrentConversation');
       const conversationId = saved && saved !== 'null' ? saved : null;
-      console.log('💾 ROOSEVELT: Page refresh - loading conversation from localStorage:', conversationId);
+      console.log('💾 Page refresh - loading conversation from localStorage:', conversationId);
       if (conversationId) {
-        console.log('🔄 ROOSEVELT: Will restore conversation automatically on page load');
+        console.log('🔄 Will restore conversation automatically on page load');
       } else {
-        console.log('🆕 ROOSEVELT: No saved conversation - starting fresh');
+        console.log('🆕 No saved conversation - starting fresh');
       }
       return conversationId;
     } catch (error) {
@@ -55,7 +67,17 @@ export const ChatSidebarProvider = ({ children }) => {
   });
   
   // Active preference: what actually gets sent to the backend (context-aware)
-  const [editorPreference, setEditorPreference] = useState('ignore');
+  // Initialize based on current location - if on documents page, use user preference, otherwise 'ignore'
+  const [editorPreference, setEditorPreference] = useState(() => {
+    // Use location from useLocation hook (available in component)
+    try {
+      const pathname = typeof window !== 'undefined' ? window.location.pathname : '';
+      const onDocumentsPage = pathname.startsWith('/documents');
+      return onDocumentsPage ? (localStorage.getItem('userEditorPreference') || 'prefer') : 'ignore';
+    } catch {
+      return 'ignore';
+    }
+  });
 
   // **ROOSEVELT'S SMART PREFERENCE SYSTEM**: 
   // User preferences persist across navigation, but active preferences are context-aware
@@ -213,10 +235,10 @@ export const ChatSidebarProvider = ({ children }) => {
     try {
       if (currentConversationId) {
         localStorage.setItem('chatSidebarCurrentConversation', currentConversationId);
-        console.log('💾 ROOSEVELT: Persisted conversation to localStorage:', currentConversationId);
+        console.log('💾 Persisted conversation to localStorage:', currentConversationId);
       } else {
         localStorage.removeItem('chatSidebarCurrentConversation');
-        console.log('💾 ROOSEVELT: Cleared conversation from localStorage');
+        console.log('💾 Cleared conversation from localStorage');
       }
     } catch (error) {
       console.error('Failed to persist current conversation to localStorage:', error);
@@ -293,7 +315,7 @@ export const ChatSidebarProvider = ({ children }) => {
             }
             
             // For conversation restoration, always use database messages
-            console.log('✅ ROOSEVELT RESTORATION: Loading messages from database:', {
+            console.log('✅ Loading messages from database:', {
               messageCount: normalizedMessages.length,
               conversationId: currentConversationId
             });
@@ -1040,7 +1062,8 @@ export const ChatSidebarProvider = ({ children }) => {
         jobId: streamingJobId,
         metadata: {
           streaming: true,
-          job_id: streamingJobId
+          job_id: streamingJobId,
+          agent_type: null
         }
       };
       
@@ -1050,29 +1073,67 @@ export const ChatSidebarProvider = ({ children }) => {
       const token = localStorage.getItem('auth_token'); // Match apiService token key
       console.log('🔑 Using auth_token for streaming:', token ? 'TOKEN_PRESENT' : 'NO_TOKEN');
       
-      // Attach active editor payload if .md and frontmatter.type is editor-enabled and preference is 'prefer'
+      // Attach active editor payload ONLY if an editable markdown file is actually open in an editor tab
+      // CRITICAL: Be very strict - check localStorage with strict validation
+      // Note: EditorProvider is a child of ChatSidebarProvider, so we check localStorage directly
       let activeEditorPayload = null;
       try {
+        // Get editor state from localStorage (updated by DocumentViewer when editor is open)
         const editorCtx = JSON.parse(localStorage.getItem('editor_ctx_cache') || 'null');
-        if (editorCtx && editorCtx.isEditable && editorCtx.filename && editorCtx.filename.toLowerCase().endsWith('.md')) {
+        
+        // STRICT VALIDATION: Must have ALL of these conditions met:
+        // 1. editorCtx exists
+        // 2. isEditable is EXACTLY true (not truthy, not undefined)
+        // 3. filename exists and ends with .md
+        // 4. content exists (not empty/null)
+        // 5. frontmatter.type is in allowed list
+        const hasValidEditorState = editorCtx && 
+                                    editorCtx.isEditable === true && 
+                                    editorCtx.filename && 
+                                    editorCtx.filename.toLowerCase().endsWith('.md') &&
+                                    editorCtx.content &&
+                                    editorCtx.content.trim().length > 0;
+        
+        if (hasValidEditorState) {
+          // All validation passed - editor is actually open and editable
           const fmType = (editorCtx.frontmatter && editorCtx.frontmatter.type || '').toLowerCase().trim();
-          const allowedTypes = ['fiction','non-fiction','nonfiction','article','rules','outline','character','style','sysml','podcast','substack','blog'];
+          const allowedTypes = ['fiction','non-fiction','nonfiction','article','rules','outline','character','style','sysml','podcast','substack','blog','electronics','project'];
+          
           if (allowedTypes.includes(fmType)) {
             activeEditorPayload = {
               is_editable: true,
               filename: editorCtx.filename,
               language: 'markdown',
-              content: editorCtx.content || '',
-              content_length: editorCtx.contentLength || 0,
+              content: editorCtx.content,
+              content_length: editorCtx.contentLength || editorCtx.content.length,
               frontmatter: editorCtx.frontmatter || {},
               cursor_offset: typeof editorCtx.cursorOffset === 'number' ? editorCtx.cursorOffset : -1,
               selection_start: typeof editorCtx.selectionStart === 'number' ? editorCtx.selectionStart : -1,
               selection_end: typeof editorCtx.selectionEnd === 'number' ? editorCtx.selectionEnd : -1,
               canonical_path: editorCtx.canonicalPath || null,
             };
+            console.log('✅ Editor tab is open and editable - sending active_editor:', editorCtx.filename);
+          } else {
+            console.log('🚫 Editor open but frontmatter.type not in allowed list:', fmType);
+            activeEditorPayload = null;
           }
+        } else {
+          // Editor is NOT open or NOT editable - be very explicit about why
+          if (!editorCtx) {
+            console.log('🚫 NO EDITOR STATE IN CACHE - no editor tab is open');
+          } else if (editorCtx.isEditable !== true) {
+            console.log('🚫 EDITOR NOT EDITABLE (isEditable=' + editorCtx.isEditable + ') - viewing PDF or document, not editing');
+          } else if (!editorCtx.filename || !editorCtx.filename.toLowerCase().endsWith('.md')) {
+            console.log('🚫 NO VALID MARKDOWN FILE - filename:', editorCtx.filename);
+          } else if (!editorCtx.content || !editorCtx.content.trim()) {
+            console.log('🚫 NO EDITOR CONTENT - editor state exists but content is empty');
+          }
+          // CRITICAL: Explicitly set to null - never send stale data
+          activeEditorPayload = null;
         }
       } catch (e) {
+        console.error('❌ Error checking editor state:', e);
+        // On any error, don't send active_editor
         activeEditorPayload = null;
       }
       
@@ -1118,23 +1179,66 @@ export const ChatSidebarProvider = ({ children }) => {
                 console.log('🌊 Stream data:', data);
 
                 if (data.type === 'status') {
-                  // Update message with status
-                  setMessages(prev => prev.map(msg => 
-                    msg.id === streamingMessage.id 
-                      ? { ...msg, content: `${data.message}` }
-                      : msg
-                  ));
+                  // Update message with status and capture agent_type if available
+                  setMessages(prev => prev.map(msg => {
+                    if (msg.id === streamingMessage.id) {
+                      const currentMetadata = msg.metadata || {};
+                      const updateData = { content: `${data.message}` };
+                      // Check for agent info in various field names: agent_type, agent, node
+                      const agentType = data.agent_type || data.agent || data.node;
+                      if (agentType) {
+                        updateData.metadata = { ...currentMetadata, agent_type: agentType };
+                        // If content is empty, show formatted agent name
+                        if (!data.message || data.message.trim() === '') {
+                          updateData.content = formatAgentName(agentType);
+                        }
+                      }
+                      return { ...msg, ...updateData };
+                    }
+                    return msg;
+                  }));
                 } else if (data.type === 'tool_status') {
                   // ROOSEVELT'S TOOL STATUS STREAMING: Handle tool execution status updates
                   const statusIcon = data.status_type === 'tool_start' ? '🔧' :
                                    data.status_type === 'tool_complete' ? '✅' : '❌';
                   const statusMessage = `${statusIcon} ${data.message}`;
                   
-                  setMessages(prev => prev.map(msg => 
-                    msg.id === streamingMessage.id 
-                      ? { ...msg, content: statusMessage, isToolStatus: true }
-                      : msg
-                  ));
+                  setMessages(prev => prev.map(msg => {
+                    if (msg.id === streamingMessage.id) {
+                      const currentMetadata = msg.metadata || {};
+                      const updateData = { content: statusMessage, isToolStatus: true };
+                      // Check for agent info in various field names: agent_type, agent, node
+                      const agentType = data.agent_type || data.agent || data.node;
+                      if (agentType) {
+                        updateData.metadata = { ...currentMetadata, agent_type: agentType };
+                      }
+                      return { ...msg, ...updateData };
+                    }
+                    return msg;
+                  }));
+                } else if (data.type === 'progress') {
+                  // Handle progress messages that may include agent/node information
+                  setMessages(prev => prev.map(msg => {
+                    if (msg.id === streamingMessage.id) {
+                      const currentMetadata = msg.metadata || {};
+                      const updateData = {};
+                      // Check for agent info in various field names: agent_type, agent, node
+                      const agentType = data.agent_type || data.agent || data.node;
+                      if (agentType) {
+                        updateData.metadata = { ...currentMetadata, agent_type: agentType };
+                        // If content is empty, show formatted agent name
+                        if (!msg.content || msg.content.trim() === '') {
+                          updateData.content = formatAgentName(agentType);
+                        }
+                      }
+                      // Update with progress message if provided
+                      if (data.message) {
+                        updateData.content = data.message;
+                      }
+                      return { ...msg, ...updateData };
+                    }
+                    return msg;
+                  }));
                 } else if (data.type === 'content_stream') {
                   // Real-time streaming content
                   accumulatedContent += data.content;

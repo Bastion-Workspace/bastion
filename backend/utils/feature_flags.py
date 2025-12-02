@@ -33,14 +33,14 @@ class FeatureFlagService:
     
     def __init__(self):
         self._flags: Dict[str, any] = {
-            # Phase 1: OFF - New service runs in parallel only
-            FeatureFlag.USE_GRPC_ORCHESTRATOR: False,
-            FeatureFlag.GRPC_ORCHESTRATOR_PERCENTAGE: 0,  # 0-100
+            # Phase 4: Always enabled - gRPC orchestrator is primary path
+            FeatureFlag.USE_GRPC_ORCHESTRATOR: True,
+            FeatureFlag.GRPC_ORCHESTRATOR_PERCENTAGE: 100,  # 100% traffic to gRPC orchestrator
             
             # Phase 2: Enable tool callbacks
             FeatureFlag.USE_GRPC_TOOL_SERVICE: False,
             
-            # Always allow fallback for safety
+            # Always allow fallback for safety (though should never be needed)
             FeatureFlag.GRPC_FALLBACK_TO_LOCAL: True,
         }
         
@@ -81,27 +81,11 @@ class FeatureFlagService:
         """
         Determine if request should use gRPC orchestrator
         
-        Supports gradual rollout based on percentage
+        Always returns True - gRPC orchestrator is the primary and only path.
+        Fallback backend orchestrator is deprecated.
         """
-        if not self.is_enabled(FeatureFlag.USE_GRPC_ORCHESTRATOR):
-            return False
-        
-        percentage = self.get_percentage(FeatureFlag.GRPC_ORCHESTRATOR_PERCENTAGE)
-        
-        # 0% = nobody, 100% = everyone
-        if percentage == 0:
-            return False
-        if percentage == 100:
-            return True
-        
-        # Gradual rollout: hash user_id to get consistent routing
-        if user_id:
-            user_hash = hash(user_id) % 100
-            return user_hash < percentage
-        
-        # No user_id: use percentage directly
-        import random
-        return random.randint(0, 99) < percentage
+        # Always use gRPC orchestrator - it's the primary path
+        return True
 
 
 # Global feature flag service instance

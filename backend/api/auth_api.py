@@ -4,7 +4,12 @@ Extracted from main.py to improve modularity
 """
 
 import logging
-from fastapi import APIRouter, HTTPException, Depends
+import os
+import re
+import uuid
+from pathlib import Path
+from fastapi import APIRouter, HTTPException, Depends, Request, File, UploadFile
+from fastapi.responses import FileResponse
 from models.api_models import (
     LoginRequest, LoginResponse, UserCreateRequest, UserUpdateRequest,
     PasswordChangeRequest, UserResponse, UsersListResponse, AuthenticatedUserResponse
@@ -52,6 +57,30 @@ async def logout(current_user: AuthenticatedUserResponse = Depends(get_current_u
 async def get_current_user_info(current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     """Get current user information"""
     return current_user
+
+
+@router.post("/refresh", response_model=LoginResponse)
+async def refresh_token(request: Request):
+    """Refresh JWT token"""
+    try:
+        # Extract token from Authorization header
+        authorization = request.headers.get("Authorization")
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(status_code=401, detail="Authentication required")
+        
+        token = authorization.split(" ")[1]
+        
+        result = await auth_service.refresh_token(token)
+        if not result:
+            raise HTTPException(status_code=401, detail="Token refresh failed")
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Token refresh failed: {e}")
+        raise HTTPException(status_code=500, detail="Token refresh failed")
 
 
 # User management endpoints (admin only)
@@ -177,3 +206,192 @@ async def delete_user(
     except Exception as e:
         logger.error(f"❌ User deletion failed: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete user")
+
+
+@router.post("/users/{user_id}/avatar")
+async def upload_user_avatar(
+    user_id: str,
+    file: UploadFile = File(...),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Upload avatar image for a user"""
+    try:
+        # Users can only upload their own avatar unless they're admin
+        if current_user.user_id != user_id and current_user.role != "admin":
+            raise HTTPException(status_code=403, detail="Can only upload your own avatar")
+        
+        # Validate file
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+        
+        # Validate file type
+        if not file.content_type or not file.content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="File must be an image")
+        
+        # Validate file size (max 5MB)
+        content = await file.read()
+        file_size = len(content)
+        max_size = 5 * 1024 * 1024  # 5MB
+        if file_size > max_size:
+            raise HTTPException(status_code=400, detail="File size must be less than 5MB")
+        
+        # Sanitize filename
+        sanitized_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', file.filename)
+        
+        # Create user avatars directory
+        uploads_base = Path(os.getenv("UPLOAD_DIR", "/opt/bastion/uploads"))
+        avatars_dir = uploads_base / "Users" / user_id / "avatars"
+        avatars_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Generate unique filename
+        file_ext = Path(sanitized_filename).suffix
+        unique_filename = f"avatar_{uuid.uuid4()}{file_ext}"
+        file_path = avatars_dir / unique_filename
+        
+        # Save file
+        with open(file_path, "wb") as f:
+            f.write(content)
+        
+        # Update user's avatar_url in database
+        avatar_url = f"/api/auth/users/{user_id}/avatar/{unique_filename}"
+        update_request = UserUpdateRequest(avatar_url=avatar_url)
+        result = await auth_service.update_user(user_id, update_request)
+        
+        if not result:
+            # Cleanup file if update failed
+            if file_path.exists():
+                file_path.unlink()
+            raise HTTPException(status_code=500, detail="Failed to update avatar URL")
+        
+        return {
+            "avatar_url": avatar_url,
+            "message": "Avatar uploaded successfully"
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to upload user avatar: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload avatar")
+
+
+@router.get("/users/{user_id}/avatar/{filename}")
+async def get_user_avatar(
+    user_id: str,
+    filename: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Serve user avatar image"""
+    try:
+        # Users can view any user's avatar
+        uploads_base = Path(os.getenv("UPLOAD_DIR", "/opt/bastion/uploads"))
+        file_path = uploads_base / "Users" / user_id / "avatars" / filename
+        
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="Avatar not found")
+        
+        # Determine media type
+        import mimetypes
+        media_type, _ = mimetypes.guess_type(str(file_path))
+        if not media_type:
+            media_type = "image/jpeg"
+        
+        return FileResponse(
+            path=str(file_path),
+            media_type=media_type,
+            filename=filename
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to serve user avatar: {e}")
+        raise HTTPException(status_code=500, detail="Failed to serve avatar")
+
+
+# Email verification endpoints
+@router.post("/verify-email")
+async def verify_email(token: str, request: Request):
+    """Verify email address using verification token"""
+    try:
+        result = await auth_service.verify_email_token(token)
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("message", "Verification failed"))
+        
+        return {
+            "message": result.get("message", "Email verified successfully"),
+            "user_id": result.get("user_id"),
+            "email": result.get("email")
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Email verification failed: {e}")
+        raise HTTPException(status_code=500, detail="Email verification failed")
+
+
+@router.post("/resend-verification")
+async def resend_verification(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+    request: Request = None
+):
+    """Resend email verification email"""
+    try:
+        # Get base URL from request
+        base_url = None
+        if request:
+            base_url = f"{request.url.scheme}://{request.url.netloc}"
+        
+        result = await auth_service.resend_verification_email(current_user.user_id, base_url)
+        
+        if not result.get("success"):
+            raise HTTPException(status_code=400, detail=result.get("message", "Failed to resend verification email"))
+        
+        return {
+            "message": result.get("message", "Verification email sent"),
+            "email": result.get("email")
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Resend verification failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to resend verification email")
+
+
+@router.get("/email-status")
+async def get_email_status(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get email verification status and rate limit info"""
+    try:
+        status = await auth_service.get_email_verification_status(current_user.user_id)
+        
+        if not status.get("success"):
+            raise HTTPException(status_code=400, detail=status.get("message", "Failed to get email status"))
+        
+        # Get rate limit info
+        from services.email_rate_limiter import EmailRateLimiter
+        from services.service_container import service_container
+        
+        if not service_container.is_initialized:
+            await service_container.initialize()
+        
+        rate_limiter = EmailRateLimiter(service_container.db_pool)
+        rate_limit_info = await rate_limiter.check_rate_limit(current_user.user_id)
+        
+        return {
+            "email": status.get("email"),
+            "email_verified": status.get("email_verified", False),
+            "verification_sent_at": status.get("verification_sent_at"),
+            "verification_expires_at": status.get("verification_expires_at"),
+            "rate_limit_info": rate_limit_info
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Get email status failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get email status")

@@ -1,0 +1,723 @@
+# Agent Tools Reference
+
+## Tool Architecture Overview
+
+**BULLY!** Agents have access to two types of tools:
+
+1. **Backend gRPC Tools** (`orchestrator/tools/`) - Require backend services via gRPC
+2. **Pure Utility Functions** (`orchestrator/utils/`) - Stateless functions, no backend needed
+
+## Tool Location Guidelines
+
+### When to Use `orchestrator/tools/`
+- Tools that call backend services via gRPC
+- Tools that need database access
+- Tools that require user authentication
+- Tools that interact with external APIs
+
+**Pattern**: Import from `orchestrator.tools.*` modules
+
+### When to Use `orchestrator/utils/`
+- Pure Python functions with no side effects
+- String manipulation utilities
+- Content generation helpers
+- Filename/title/description generators
+- Stateless transformation functions
+
+**Pattern**: Import from `orchestrator.utils.*` modules
+
+## Available Tools by Category
+
+### Document Tools (`orchestrator/tools/document_tools.py`)
+**Backend gRPC tools for document operations**
+
+- `search_documents_structured(query, user_id, limit)` - Semantic vector search
+- `get_document_content_tool(document_id, user_id)` - Get full document content
+- `search_by_tags_tool(tags, user_id, limit)` - Search by document tags
+- `search_within_document_tool(document_id, query, search_type, context_window, user_id)` - Search for terms within a specific document
+
+**Usage**:
+```python
+from orchestrator.tools.document_tools import search_documents_structured, get_document_content_tool
+
+results = await search_documents_structured(query="circuit design", user_id=user_id, limit=20)
+content = await get_document_content_tool(document_id, user_id)
+```
+
+### Segment Search Tools (`orchestrator/tools/segment_search_tools.py`)
+**Universal tools for finding relevant SEGMENTS within documents**
+
+These tools search for specific sections/segments within documents, not just documents themselves. This enables precise updates to specific sections and prioritizes project documents over library documents.
+
+- `search_segments_across_documents_tool(queries, project_documents, user_id, ...)` - Search for relevant segments across multiple documents
+- `extract_relevant_content_section(full_content, query, max_length, domain_keywords)` - Extract relevant sections from document content
+
+**Key Features:**
+- **Prioritizes project documents**: Searches project files first, then library documents
+- **Returns segments, not documents**: Provides specific sections with context
+- **Structured segment data**: Includes section names, positions, and relevance scores
+- **Domain-agnostic**: Works for any domain (electronics, fiction, research, etc.)
+
+**Usage**:
+```python
+from orchestrator.tools.segment_search_tools import search_segments_across_documents_tool
+
+# Project documents from referenced_context
+project_docs = {
+    "components": [
+        {"document_id": "doc1", "filename": "component_spec.md"},
+        {"document_id": "doc2", "filename": "circuit_design.md"}
+    ]
+}
+
+# Search queries (can be from generate_project_aware_queries or simple strings)
+queries = [
+    "ESP32 keyboard matrix scanning",
+    "keyboard scanning circuit design"
+]
+
+# Perform segment search
+result = await search_segments_across_documents_tool(
+    queries=queries,
+    project_documents=project_docs,
+    user_id=user_id,
+    limit_per_query=5,
+    max_queries=3,
+    prioritize_project_docs=True,
+    context_window=500,
+    domain_keywords=["circuit", "schematic", "voltage"]  # Optional domain-specific keywords
+)
+
+# Access results
+segments = result["segments"]
+for segment in segments:
+    print(f"Found in {segment['filename']}: {segment['section_name']}")
+    print(f"Content: {segment['content'][:200]}...")
+    print(f"Source: {segment['source']}")  # "project_document" or "library_document"
+    print(f"Relevance: {segment['relevance_score']}")
+
+# Result structure:
+# {
+#     "segments": [
+#         {
+#             "document_id": "...",
+#             "filename": "...",
+#             "section_name": "...",
+#             "content": "...",
+#             "section_start": 123,
+#             "section_end": 456,
+#             "match_start": 200,  # Only for project docs
+#             "match_end": 250,     # Only for project docs
+#             "source": "project_document" | "library_document",
+#             "relevance_score": 0.85,
+#             "search_query": "..."
+#         }
+#     ],
+#     "documents_found_count": 5,
+#     "project_doc_count": 3,
+#     "library_doc_count": 2
+# }
+```
+
+**Use Cases:**
+- **Electronics Agent**: Finding specific component sections that need updates
+- **Fiction Editing Agent**: Finding specific scenes/chapters across project files
+- **Content Analysis Agent**: Finding relevant segments across multiple documents
+- **Research Agent**: Searching project files + library for comprehensive results
+- **Any Project-Based Agent**: Finding precise sections within project documentation
+
+**Benefits:**
+- Enables precise, targeted updates to specific sections
+- Prioritizes project context (most relevant)
+- Returns structured segment data for routing
+- Reusable across all project-based agents
+
+### Information Analysis Tools (`orchestrator/tools/information_analysis_tools.py`)
+**LLM-powered tools for understanding information needs and generating targeted queries**
+
+These tools help agents understand what information is needed and generate project-aware search queries.
+
+- `analyze_information_needs_tool(query, query_type, project_context, ...)` - Analyze what information is needed
+- `generate_project_aware_queries_tool(query, query_type, information_needs, project_context, ...)` - Generate targeted queries
+
+**Key Features:**
+- **Domain-agnostic**: Works for any domain (electronics, fiction, research, etc.)
+- **Project context aware**: Uses project context to identify relevant entities
+- **Gap analysis**: Identifies information gaps before searching
+- **Targeted queries**: Generates queries optimized for project context
+
+**Usage**:
+```python
+from orchestrator.tools.information_analysis_tools import (
+    analyze_information_needs_tool,
+    generate_project_aware_queries_tool
+)
+
+# Step 1: Analyze information needs
+project_context = {
+    "components": ["ESP32", "keyboard matrix"],
+    "protocols": ["I2C", "SPI"],
+    "characters": ["protagonist", "antagonist"],  # For fiction
+    "plot_points": ["act 1", "climax"]  # For fiction
+}
+
+# Get LLM function from agent (agents should pass their _get_llm method)
+get_llm_func = lambda: self._get_llm(temperature=0.1, model=fast_model, state=state)
+
+information_needs = await analyze_information_needs_tool(
+    query="How to implement keyboard scanning",
+    query_type="circuit_design",
+    project_context=project_context,
+    context_keys=["components", "protocols"],
+    domain_name="electronics",
+    user_id=user_id,
+    get_llm_func=get_llm_func
+)
+
+# Step 2: Generate project-aware queries
+result = await generate_project_aware_queries_tool(
+    query="keyboard scanning",
+    query_type="circuit_design",
+    information_needs=information_needs,
+    project_context=project_context,
+    domain_examples=[
+        "ESP32 keyboard matrix scanning circuit design",
+        "I2C sensor communication protocol implementation"
+    ],
+    user_id=user_id,
+    num_queries=5,
+    get_llm_func=lambda: self._get_llm(temperature=0.2, model=fast_model, state=state)
+)
+
+queries = result["search_queries"]
+# [
+#   {"query": "ESP32 keyboard matrix scanning", "priority": 1, "focus": "Project-specific implementation"},
+#   {"query": "keyboard scanning circuit design I2C", "priority": 2, "focus": "Protocol integration"}
+# ]
+```
+
+**Relationship to Query Expansion:**
+- **Query Expansion** (`expand_query_tool`): Creates semantic variations of a query
+- **Project-Aware Generation**: Creates context-specific, targeted queries
+- **Can be used together**: Expand first, then make project-aware, or use independently
+
+**Use Cases:**
+- **Electronics Agent**: Identify component/protocol gaps, generate targeted queries
+- **Fiction Editing Agent**: Identify story element gaps, generate character/plot queries
+- **Research Agent**: Identify research gaps, generate targeted research queries
+- **Content Analysis Agent**: Identify analysis needs, generate targeted analysis queries
+- **Any Project-Based Agent**: Understand information needs and generate targeted searches
+
+**Benefits:**
+- Helps agents understand what they need before searching
+- Enables targeted, efficient searches
+- Leverages project context for better results
+- Reusable across domains with appropriate context extraction
+
+### Document Editing Tools (`orchestrator/tools/document_editing_tools.py`)
+**Backend gRPC tools for document editing**
+
+- `update_document_metadata_tool(document_id, title, frontmatter_type, user_id)` - Update document metadata
+- `update_document_content_tool(document_id, content, user_id, append)` - Update document content
+- `propose_document_edit_tool(document_id, edit_type, operations, content_edit, agent_name, summary, requires_preview, user_id)` - Propose edits for user review
+
+**Usage**:
+```python
+from orchestrator.tools.document_editing_tools import (
+    update_document_content_tool,
+    propose_document_edit_tool
+)
+
+await update_document_content_tool(document_id, content, user_id, append=True)
+await propose_document_edit_tool(
+    document_id=doc_id,
+    edit_type="operations",
+    operations=[...],
+    agent_name="electronics_agent",
+    summary="Update component specifications",
+    user_id=user_id
+)
+```
+
+### File Creation Tools (`orchestrator/tools/file_creation_tools.py`)
+**Backend gRPC tools for file/folder creation**
+
+- `create_user_file_tool(filename, content, folder_path, title, tags, category, user_id)` - Create user document
+- `create_user_folder_tool(folder_name, parent_folder_path, user_id)` - Create user folder
+
+**Usage**:
+```python
+from orchestrator.tools.file_creation_tools import create_user_file_tool, create_user_folder_tool
+
+result = await create_user_file_tool(
+    filename="component_spec.md",
+    content="# Component Spec\n\n...",
+    folder_path="Projects/Electronics",
+    title="Component Specification",
+    tags=["electronics", "component"],
+    category="electronics",
+    user_id=user_id
+)
+```
+
+### Web Tools (`orchestrator/tools/web_tools.py`)
+**Backend gRPC tools for web search**
+
+- `search_web_structured(query, num_results)` - Structured web search
+- `crawl_web_content_tool(url)` - Crawl web content
+- `search_and_crawl_tool(query, num_results)` - Search and crawl
+
+**Usage**:
+```python
+from orchestrator.tools.web_tools import search_web_structured
+
+results = await search_web_structured(query="Arduino ESP32 tutorial", num_results=10)
+```
+
+### Enhancement Tools (`orchestrator/tools/enhancement_tools.py`)
+**Backend gRPC tools for query enhancement**
+
+- `expand_query_tool(query)` - Expand search query
+- `search_conversation_cache_tool(query, user_id)` - Search conversation history
+
+### Project Content Management Tools (`orchestrator/tools/project_content_tools.py`)
+**Tools for intelligently managing project content across multiple files**
+
+- `save_or_update_project_content(result, project_plan_document_id, referenced_context, documents, user_id, metadata)` - Intelligently save/update content in appropriate files
+- `determine_content_target(response_text, frontmatter, referenced_context, documents)` - Determine which file and section to update based on content type
+- `enrich_documents_with_metadata(documents, referenced_context, user_id)` - Enrich documents with titles/descriptions from actual files
+- `check_if_new_file_needed(response_text, content_type, frontmatter, documents, referenced_context)` - Check if a new file should be created
+- `create_new_project_file(file_suggestion, project_plan_document_id, initial_content, project_plan_frontmatter, user_id, metadata)` - Create a new project file based on user approval
+- `should_update_existing_section(existing_content, section_name, new_content)` - Check if existing section should be updated vs appended
+- `propose_section_update(document_id, existing_content, section_name, new_content, user_id)` - Propose an update to an existing section
+- `append_project_content(document_id, section_name, content, user_id)` - Append new content to a project file
+
+**Usage**:
+```python
+from orchestrator.tools.project_content_tools import save_or_update_project_content
+
+# Automatically save/update project content after generating response
+await save_or_update_project_content(
+    result=agent_response,
+    project_plan_document_id=project_plan_id,
+    referenced_context=referenced_files,
+    documents=search_results,
+    user_id=user_id,
+    metadata={"shared_memory": shared_memory, "active_editor": active_editor}
+)
+```
+
+### Reference File Loader (`orchestrator/tools/reference_file_loader.py`)
+**Universal tool for loading referenced files from frontmatter using TRUE FILESYSTEM PATH RESOLUTION**
+
+**Key Features:**
+- ✅ **True filesystem path resolution** - Deterministic, fast, specific (not semantic search)
+- ✅ **Relative path support** - `./file.md` (same directory), `../file.md` (parent directory)
+- ✅ **Bare filename normalization** - `file.md` automatically treated as `./file.md` (same directory)
+- ✅ **Cascade support** - Load primary file, then load its referenced files (e.g., outline → rules/style/characters)
+- ✅ **Universal** - Works for **ALL agents** with configurable reference fields
+- ✅ **Backend RPC** - Uses `FindDocumentByPath` gRPC tool for reliable path-to-document lookup
+
+**Core Function:**
+- `load_referenced_files(active_editor, user_id, reference_config, doc_type_filter, cascade_config)` - Load referenced files from active editor frontmatter
+
+**Path Resolution:**
+- **Requires `canonical_path`** in `active_editor` - automatically provided by frontend when document is open
+- Uses `active_editor["canonical_path"]` to determine base directory (e.g., `/app/uploads/Users/admin/Projects/MyProject/`)
+- Resolves relative paths from that base directory (e.g., `./file.md` → `/app/uploads/Users/admin/Projects/MyProject/file.md`)
+- Finds documents by actual filesystem path using backend `FindDocumentByPath` RPC (not semantic search)
+- Returns document_id and full content for each referenced file
+
+**Important:** If `canonical_path` is missing from `active_editor`, path resolution will fail. The frontend automatically includes `canonical_path` when sending active editor context, so agents don't need to set it manually.
+
+**Usage Examples:**
+
+**Electronics Agent** (components, protocols, schematics):
+```python
+from orchestrator.tools.reference_file_loader import load_referenced_files
+
+reference_config = {
+    "components": ["components", "component"],
+    "protocols": ["protocols", "protocol"],
+    "schematics": ["schematics", "schematic"],
+    "specifications": ["specifications", "spec"],
+    "other": ["files", "references", "docs"]
+}
+
+result = await load_referenced_files(
+    active_editor=active_editor,
+    user_id=user_id,
+    reference_config=reference_config,
+    doc_type_filter="electronics"
+)
+
+loaded_files = result.get("loaded_files", {})
+# Returns: {"components": [...], "protocols": [...], "schematics": [...], ...}
+```
+
+**Fiction Editing Agent** (with cascade: outline → rules/style/characters):
+```python
+from orchestrator.tools.reference_file_loader import load_referenced_files
+
+reference_config = {
+    "outline": ["outline"]
+}
+
+# Cascading: outline file's frontmatter contains rules, style, characters
+cascade_config = {
+    "outline": {
+        "rules": ["rules"],
+        "style": ["style"],
+        "characters": ["characters", "character_*"]  # Supports wildcards
+    }
+}
+
+result = await load_referenced_files(
+    active_editor=active_editor,
+    user_id=user_id,
+    reference_config=reference_config,
+    doc_type_filter="fiction",
+    cascade_config=cascade_config  # Enables cascading
+)
+
+loaded_files = result.get("loaded_files", {})
+# Returns: {
+#   "outline": [...],      # Primary file
+#   "rules": [...],        # Cascaded from outline
+#   "style": [...],        # Cascaded from outline
+#   "characters": [...]    # Cascaded from outline
+# }
+```
+
+**Frontmatter Format Requirements:**
+- **Always use relative paths** in frontmatter: `./file.md` or `../file.md`
+- **Bare filenames** (e.g., `file.md`) are normalized to `./file.md` (same directory)
+- **Path format**: Use `./` prefix for same directory, `../` for parent directory
+
+**Example Frontmatter:**
+```yaml
+---
+type: electronics
+title: Project Plan
+files:
+  - ./component_list.md
+  - ./wiring_diagram.md
+components:
+  - ./component_list.md
+  - ./digital_control_specifications.md
+protocols:
+  - ./cat6_network_protocol.md
+schematics:
+  - ./wiring_diagram.md
+---
+```
+
+### Frontmatter Utilities (`orchestrator/utils/frontmatter_utils.py`)
+**CRITICAL: Always use these utilities when updating frontmatter - never use regex or string manipulation!**
+
+**Why use these utilities:**
+- ✅ Preserves all existing frontmatter fields (no data loss)
+- ✅ Handles complex YAML structures (lists, nested objects)
+- ✅ Prevents duplicate entries automatically
+- ✅ Graceful fallback for malformed YAML
+- ✅ Properly formatted output
+
+**Available Functions:**
+
+1. **`update_frontmatter_field()`** - Main function for updating any frontmatter fields
+   ```python
+   from orchestrator.utils.frontmatter_utils import update_frontmatter_field
+   
+   # Update scalar fields and lists
+   updated_content, success = await update_frontmatter_field(
+       content=document_content,
+       field_updates={"title": "New Title", "status": "published"},
+       list_updates={"files": ["./new_file.md"], "components": ["./component.md"]}
+   )
+   ```
+
+2. **`add_to_frontmatter_list()`** - Convenience function for adding items to lists
+   ```python
+   from orchestrator.utils.frontmatter_utils import add_to_frontmatter_list
+   
+   # Add file reference (automatically also adds to 'files' list)
+   updated_content, success = await add_to_frontmatter_list(
+       content=project_plan_content,
+       list_key="components",
+       new_items=["./new_component.md"]
+   )
+   ```
+
+3. **`parse_frontmatter()`** - Read-only parsing (no modifications)
+   ```python
+   from orchestrator.utils.frontmatter_utils import parse_frontmatter
+   
+   frontmatter, body = await parse_frontmatter(document_content)
+   title = frontmatter.get("title")
+   files = frontmatter.get("files", [])
+   ```
+
+**Complete Example - Updating Project Plan Frontmatter:**
+```python
+from orchestrator.utils.frontmatter_utils import add_to_frontmatter_list
+from orchestrator.tools.document_tools import get_document_content_tool, update_document_content_tool
+
+# Get current content
+content = await get_document_content_tool(document_id, user_id)
+
+# Add new file reference to both specific list and 'files' list
+updated_content, success = await add_to_frontmatter_list(
+    content=content,
+    list_key="components",  # or "protocols", "schematics", etc.
+    new_items=["./new_component.md"],
+    also_update_files=True  # Also adds to 'files' list for active editor context
+)
+
+# Save updated content
+if success:
+    await update_document_content_tool(
+        document_id=document_id,
+        content=updated_content,
+        user_id=user_id,
+        append=False
+    )
+```
+
+**❌ NEVER DO THIS:**
+- Don't use regex to parse/update frontmatter
+- Don't manually rebuild frontmatter strings
+- Don't overwrite entire frontmatter blocks
+- Don't use string replacement for list updates
+
+**✅ ALWAYS DO THIS:**
+- Use `update_frontmatter_field()` or `add_to_frontmatter_list()`
+- Let the utility handle YAML parsing and serialization
+- Trust the utility to preserve all existing fields
+
+**Cascade Example (Fiction):**
+```yaml
+# manuscript.md
+---
+type: fiction
+outline: ./outline.md
+---
+
+# outline.md (loaded first, then cascades)
+---
+type: outline
+rules: ./rules.md
+style: ./style.md
+characters:
+  - ./characters/alex.md
+  - ./characters/maya.md
+---
+```
+
+The system will:
+1. Load `outline.md` (primary reference)
+2. Parse its frontmatter
+3. Load `rules.md`, `style.md`, and character files (cascaded references)
+
+### Project Structure Management Tools (`orchestrator/tools/project_structure_tools.py`)
+**Tools for planning and creating project file structures**
+
+- `plan_project_structure(query, user_id, llm, project_type, default_folder)` - Use LLM to intelligently plan project structure, files, and organization
+- `execute_project_structure_plan(plan, query, user_id, project_type, project_category, project_plan_sections)` - Execute the project structure plan by creating files and folders
+
+**Note**: `execute_project_structure_plan` automatically generates frontmatter with proper relative paths (`./filename.md`) for use with `load_referenced_files`.
+
+**Usage**:
+```python
+from orchestrator.tools.project_structure_tools import (
+    plan_project_structure,
+    execute_project_structure_plan
+)
+
+# Plan project structure using LLM
+result = await plan_project_structure(
+    query="I need to create a new electronics project for an Allen organ control system",
+    user_id=user_id,
+    llm=llm_instance,  # Configured ChatOpenAI instance
+    project_type="electronics",
+    default_folder="Projects"
+)
+
+if result.get("success"):
+    plan = result.get("plan")
+    # plan contains: project_name, folder_path, files[]
+    
+    # Execute the plan to create files
+    execution_result = await execute_project_structure_plan(
+        plan=plan,
+        query=original_query,
+        user_id=user_id,
+        project_type="electronics",
+        project_category="electronics"
+    )
+    
+    if execution_result.get("success"):
+        project_plan_doc_id = execution_result.get("project_plan_document_id")
+        # Files created with proper frontmatter references using ./filename.md format
+```
+
+## Available Utilities by Category
+
+### Project Utilities (`orchestrator/utils/project_utils.py`)
+**Pure utility functions for project content generation**
+
+- `sanitize_filename(filename)` - Sanitize filename (preserves spaces, removes problematic chars)
+- `generate_filename_from_content(content, content_type)` - Generate filename from content
+- `generate_title_from_content(content, content_type)` - Generate title from content
+- `extract_description_from_content(content)` - Extract description (first sentence)
+
+**Usage**:
+```python
+from orchestrator.utils.project_utils import (
+    sanitize_filename,
+    generate_filename_from_content,
+    generate_title_from_content,
+    extract_description_from_content
+)
+
+# Sanitize filename (preserves spaces)
+safe_name = sanitize_filename("My Project - Component Spec.md")
+# Returns: "My Project - Component Spec.md"
+
+# Generate filename from content
+filename = generate_filename_from_content(
+    "The Keyboard Matrix circuit uses...",
+    "component"
+)
+# Returns: "Keyboard Matrix component.md"
+
+# Generate title
+title = generate_title_from_content(
+    "The Keyboard Matrix circuit uses...",
+    "component"
+)
+# Returns: "Keyboard Matrix - Component"
+
+# Extract description
+desc = extract_description_from_content(
+    "The keyboard scanning matrix uses a 8x8 grid. It connects..."
+)
+# Returns: "The keyboard scanning matrix uses a 8x8 grid."
+```
+
+## Tool Access Patterns
+
+### For LLM Orchestrator Agents
+**Import tools directly from modules**:
+```python
+from orchestrator.tools.document_tools import search_documents_structured
+from orchestrator.utils.project_utils import sanitize_filename
+
+# Use directly
+results = await search_documents_structured(query, user_id)
+safe_name = sanitize_filename(filename)
+```
+
+### For Backend Agents (LangGraph)
+**Use centralized tool registry**:
+```python
+from services.langgraph_tools.centralized_tool_registry import get_tool_registry
+
+tool_registry = await get_tool_registry()
+search_tool = tool_registry.get_tool_function("search_documents", AgentType.RESEARCH_AGENT)
+```
+
+## Tool Development Guidelines
+
+### Creating New Tools
+
+1. **Determine tool type**:
+   - Needs backend/gRPC? → `orchestrator/tools/`
+   - Pure function? → `orchestrator/utils/`
+
+2. **Follow naming conventions**:
+   - Tools: `*_tool` suffix (e.g., `create_user_file_tool`)
+   - Utilities: descriptive names (e.g., `sanitize_filename`)
+
+3. **Add to exports**:
+   - Tools: Add to `orchestrator/tools/__init__.py`
+   - Utilities: Add to module `__all__` if needed
+
+4. **Document usage**:
+   - Add docstrings with examples
+   - Update this reference document
+   - Include in agent prompts if commonly used
+
+### Tool Documentation Requirements
+
+**All tools MUST have**:
+- Clear docstring with Args/Returns
+- Usage examples in docstring
+- Type hints for all parameters
+- Error handling documentation
+
+**Example**:
+```python
+async def create_user_file_tool(
+    filename: str,
+    content: str,
+    folder_path: Optional[str] = None,
+    user_id: str = "system"
+) -> Dict[str, Any]:
+    """
+    Create a file in the user's My Documents section
+    
+    Args:
+        filename: Name of the file to create (e.g., "sensor_spec.md")
+        content: File content as string
+        folder_path: Optional folder path (e.g., "Projects/Electronics")
+        user_id: User ID (required - must match the user making the request)
+    
+    Returns:
+        Dict with success, document_id, filename, and message
+        
+    Example:
+        >>> result = await create_user_file_tool(
+        ...     filename="component.md",
+        ...     content="# Component",
+        ...     folder_path="Projects",
+        ...     user_id="user123"
+        ... )
+        >>> result["success"]
+        True
+    """
+```
+
+## Tool Categories Summary
+
+| Category | Location | Type | Examples |
+|----------|----------|------|----------|
+| Document Operations | `tools/document_tools.py` | gRPC | search, get content |
+| Document Editing | `tools/document_editing_tools.py` | gRPC | update, propose edits |
+| File Creation | `tools/file_creation_tools.py` | gRPC | create file, create folder |
+| Web Search | `tools/web_tools.py` | gRPC | search web, crawl |
+| Query Enhancement | `tools/enhancement_tools.py` | gRPC | expand query, cache search |
+| Project Content Management | `tools/project_content_tools.py` | gRPC | save/update content, determine target, enrich metadata |
+| Project Structure Management | `tools/project_structure_tools.py` | gRPC | plan structure, execute plan, load referenced context |
+| Project Utilities | `utils/project_utils.py` | Pure | filename gen, sanitize |
+
+## Best Practices
+
+1. **Use the right tool type**: Don't create gRPC tools for pure functions
+2. **Import directly**: LLM orchestrator agents import tools directly
+3. **Handle errors**: All tools return Dict with success/error fields
+4. **Document usage**: Add examples to docstrings and this reference
+5. **Keep utilities pure**: Utils should have no side effects or backend calls
+6. **Test independently**: Tools and utilities should be testable in isolation
+
+## Updating This Reference
+
+**When adding new tools**:
+1. Add to appropriate category section
+2. Include usage example
+3. Document parameters and return values
+4. Note if it's gRPC-backed or pure utility
+
+**When modifying existing tools**:
+1. Update the relevant section
+2. Note breaking changes
+3. Update examples if behavior changed

@@ -7,6 +7,15 @@ import logging
 from typing import Dict, List, Any, Optional, Callable
 from enum import Enum
 
+try:
+    from langchain_core.tools import StructuredTool
+    from langgraph.prebuilt import ToolNode
+    LANGGRAPH_AVAILABLE = True
+except ImportError:
+    LANGGRAPH_AVAILABLE = False
+    StructuredTool = None
+    ToolNode = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -14,7 +23,7 @@ class AgentType(str, Enum):
     """Agent types for tool access control"""
     RESEARCH_AGENT = "research_agent"
     CHAT_AGENT = "chat_agent"
-    CODING_AGENT = "coding_agent"
+    # CODING_AGENT removed - not fully fleshed out
     REPORT_AGENT = "report_agent"
     DATA_FORMATTING_AGENT = "data_formatting_agent"  # ROOSEVELT'S TABLE SPECIALIST
     WEATHER_AGENT = "weather_agent"
@@ -24,7 +33,7 @@ class AgentType(str, Enum):
     ORG_INBOX_AGENT = "org_inbox_agent"
     ORG_PROJECT_AGENT = "org_project_agent"
     IMAGE_GENERATION_AGENT = "image_generation_agent"
-    WARGAMING_AGENT = "wargaming_agent"
+    # WARGAMING_AGENT removed - not fully fleshed out
     PROOFREADING_AGENT = "proofreading_agent"
     WEBSITE_CRAWLER_AGENT = "website_crawler_agent"  # ROOSEVELT'S WEBSITE CAVALRY!
     # Content and Writing Agents
@@ -32,18 +41,21 @@ class AgentType(str, Enum):
     OUTLINE_EDITING_AGENT = "outline_editing_agent"
     CHARACTER_DEVELOPMENT_AGENT = "character_development_agent"
     RULES_EDITING_AGENT = "rules_editing_agent"
-    SYSML_AGENT = "sysml_agent"  # ROOSEVELT'S SYSTEMS ENGINEERING SPECIALIST
+    # SYSML_AGENT removed - not fully fleshed out
     STORY_ANALYSIS_AGENT = "story_analysis_agent"
     CONTENT_ANALYSIS_AGENT = "content_analysis_agent"
-    FACT_CHECKING_AGENT = "fact_checking_agent"
+    # FACT_CHECKING_AGENT removed - not actively used
     SITE_CRAWL_AGENT = "site_crawl_agent"
     # Intent and Intelligence Agents
-    SIMPLE_INTENT_AGENT = "simple_intent_agent"
+    # DEPRECATED: SIMPLE_INTENT_AGENT removed - intent classification now in llm-orchestrator
+    # SIMPLE_INTENT_AGENT = "simple_intent_agent"
     PERMISSION_INTELLIGENCE_AGENT = "permission_intelligence_agent"
     # Pipeline Agent
     PIPELINE_AGENT = "pipeline_agent"
     # Template Agent
     TEMPLATE_AGENT = "template_agent"
+    # Email Agent
+    EMAIL_AGENT = "email_agent"
     PODCAST_SCRIPT_AGENT = "podcast_script_agent"
     SUBSTACK_AGENT = "substack_agent"
     MESSAGING_AGENT = "messaging_agent"  # ROOSEVELT'S MESSAGING CAVALRY!
@@ -110,6 +122,8 @@ class CentralizedToolRegistry:
             await self._register_org_search_tools()  # **BULLY!** Org file search across all .org files!
             await self._register_image_tools()
             await self._register_messaging_tools()  # **BULLY!** Messaging cavalry tools!
+            await self._register_file_creation_tools()  # **BULLY!** File and folder creation for agents!
+            await self._register_document_editing_tools()  # **BULLY!** Document editing tools for agents!
             
             # Set up agent permissions
             self._configure_agent_permissions()
@@ -693,6 +707,77 @@ class CentralizedToolRegistry:
         except Exception as e:
             logger.error(f"❌ Failed to register messaging tools: {e}")
     
+    async def _register_file_creation_tools(self):
+        """Register file and folder creation tools for agents"""
+        try:
+            from services.langgraph_tools.file_creation_tools import (
+                create_user_file,
+                create_user_folder
+            )
+            
+            self._tools["create_user_file"] = ToolDefinition(
+                name="create_user_file",
+                function=create_user_file,
+                description="Create a file in the user's My Documents section. Only creates files in user's collection (not global). Can create folders automatically if folder_path is provided.",
+                access_level=ToolAccessLevel.READ_WRITE,
+                parameters={
+                    "filename": {"type": "string", "required": True, "description": "Name of the file to create (e.g., 'sensor_spec.md', 'circuit_diagram.txt')"},
+                    "content": {"type": "string", "required": True, "description": "File content as string"},
+                    "folder_id": {"type": "string", "required": False, "description": "Optional folder ID to place file in (must be user's folder)"},
+                    "folder_path": {"type": "string", "required": False, "description": "Optional folder path (e.g., 'Projects/Electronics') - will create folders if needed"},
+                    "title": {"type": "string", "required": False, "description": "Optional document title (defaults to filename)"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "required": False, "description": "Optional list of tags for the document"},
+                    "category": {"type": "string", "required": False, "description": "Optional category for the document"},
+                    "user_id": {"type": "string", "required": True, "description": "User ID (must match the user making the request)"}
+                },
+                timeout_seconds=30
+            )
+            
+            self._tools["create_user_folder"] = ToolDefinition(
+                name="create_user_folder",
+                function=create_user_folder,
+                description="Create a folder in the user's My Documents section. Only creates folders in user's collection (not global). Can create parent folders automatically if parent_folder_path is provided.",
+                access_level=ToolAccessLevel.READ_WRITE,
+                parameters={
+                    "folder_name": {"type": "string", "required": True, "description": "Name of the folder to create (e.g., 'Electronics Projects', 'Components')"},
+                    "parent_folder_id": {"type": "string", "required": False, "description": "Optional parent folder ID (must be user's folder)"},
+                    "parent_folder_path": {"type": "string", "required": False, "description": "Optional parent folder path (e.g., 'Projects') - will resolve to folder_id"},
+                    "user_id": {"type": "string", "required": True, "description": "User ID (must match the user making the request)"}
+                },
+                timeout_seconds=30
+            )
+            
+            logger.info("✅ Registered file creation tools")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to register file creation tools: {e}")
+    
+    async def _register_document_editing_tools(self):
+        """Register document editing tools for agents"""
+        try:
+            from services.langgraph_tools.document_editing_tools import (
+                update_document_metadata_tool
+            )
+            
+            self._tools["update_document_metadata"] = ToolDefinition(
+                name="update_document_metadata",
+                function=update_document_metadata_tool,
+                description="Update document title and/or frontmatter type. Updates both database metadata and file content frontmatter. Only works on user's own documents.",
+                access_level=ToolAccessLevel.READ_WRITE,
+                parameters={
+                    "document_id": {"type": "string", "required": True, "description": "Document ID to update"},
+                    "title": {"type": "string", "required": False, "description": "New document title (updates database and frontmatter)"},
+                    "frontmatter_type": {"type": "string", "required": False, "description": "Frontmatter type (e.g., 'electronics', 'fiction', 'rules') - updates file content"},
+                    "user_id": {"type": "string", "required": True, "description": "User ID (must match document owner)"}
+                },
+                timeout_seconds=30
+            )
+            
+            logger.info("✅ Registered document editing tools")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to register document editing tools: {e}")
+    
     def _configure_agent_permissions(self):
         """Configure which tools each agent type can access"""
         
@@ -771,8 +856,8 @@ class CentralizedToolRegistry:
             "estimate_aws_workload": ToolAccessLevel.WEB_ACCESS  # Complex workload calculations
         }
         
-        # Coding Agent: Full access (placeholder for future implementation)
-        self._agent_permissions[AgentType.CODING_AGENT] = {}
+        # CodingAgent removed - not fully fleshed out
+        # Removed agent permissions
         
         # RSS agents
         self._agent_permissions[AgentType.RSS_BACKGROUND_AGENT] = {
@@ -828,10 +913,8 @@ class CentralizedToolRegistry:
             "generate_image": ToolAccessLevel.WEB_ACCESS,
         }
 
-        # Wargaming Agent: no external tools; pure simulation
-        self._agent_permissions[AgentType.WARGAMING_AGENT] = {
-            # Intentionally empty; conversational-only structured simulation
-        }
+        # WargamingAgent removed - not fully fleshed out
+        # Removed agent permissions
 
         # Proofreading Agent: local-only content utilities; no web tools by default
         self._agent_permissions[AgentType.PROOFREADING_AGENT] = {
@@ -883,14 +966,8 @@ class CentralizedToolRegistry:
             "search_conversation_cache": ToolAccessLevel.READ_ONLY,
         }
         
-        # Fact Checking Agent - Needs web access like research agent
-        self._agent_permissions[AgentType.FACT_CHECKING_AGENT] = {
-            "search_local": ToolAccessLevel.READ_ONLY,
-            "get_document": ToolAccessLevel.READ_ONLY,
-            "search_web": ToolAccessLevel.WEB_ACCESS,
-            "search_and_crawl": ToolAccessLevel.WEB_ACCESS,
-            "search_conversation_cache": ToolAccessLevel.READ_ONLY,
-        }
+        # FactCheckingAgent removed - not actively used
+        # Removed agent permissions
         
         # Site Crawl Agent - Query-driven research with web tools
         self._agent_permissions[AgentType.SITE_CRAWL_AGENT] = {
@@ -902,9 +979,10 @@ class CentralizedToolRegistry:
         }
         
         # Intent and Intelligence Agents - Pure LLM-based (no external tools)
-        self._agent_permissions[AgentType.SIMPLE_INTENT_AGENT] = {
-            # Pure LLM-based intent classification
-        }
+        # DEPRECATED: SIMPLE_INTENT_AGENT removed - intent classification now in llm-orchestrator
+        # self._agent_permissions[AgentType.SIMPLE_INTENT_AGENT] = {
+        #     # Pure LLM-based intent classification
+        # }
         
         self._agent_permissions[AgentType.PERMISSION_INTELLIGENCE_AGENT] = {
             # Pure LLM-based permission analysis
@@ -1078,6 +1156,143 @@ class CentralizedToolRegistry:
             }
             for name, tool_def in self._tools.items()
         }
+    
+    def get_structured_tools_for_agent(self, agent_type: AgentType) -> List[Any]:
+        """
+        Get StructuredTool objects for an agent (LangGraph best practice)
+        
+        Returns list of StructuredTool objects that can be used with:
+        - llm.bind_tools(tools) for LLM tool binding
+        - ToolNode(tools) for automatic tool execution
+        
+        Args:
+            agent_type: Agent type to get tools for
+            
+        Returns:
+            List of StructuredTool objects
+        """
+        if not LANGGRAPH_AVAILABLE:
+            logger.warning("⚠️ LangGraph not available, cannot create StructuredTool objects")
+            return []
+        
+        if not self._initialized:
+            logger.warning("⚠️ Tool registry not initialized, returning empty list")
+            return []
+        
+        permissions = self._agent_permissions.get(agent_type, {})
+        structured_tools = []
+        
+        for tool_name in permissions.keys():
+            if tool_name in self._tools:
+                tool_def = self._tools[tool_name]
+                try:
+                    structured_tool = self._convert_to_structured_tool(tool_def)
+                    if structured_tool:
+                        structured_tools.append(structured_tool)
+                except Exception as e:
+                    logger.error(f"❌ Failed to convert tool {tool_name} to StructuredTool: {e}")
+                    continue
+        
+        logger.info(f"🔧 Agent {agent_type.value} has {len(structured_tools)} StructuredTool objects: {[tool.name for tool in structured_tools]}")
+        return structured_tools
+    
+    def _convert_to_structured_tool(self, tool_def: ToolDefinition) -> Optional[Any]:
+        """
+        Convert ToolDefinition to StructuredTool object
+        
+        Args:
+            tool_def: ToolDefinition to convert
+            
+        Returns:
+            StructuredTool object or None if conversion fails
+        """
+        if not LANGGRAPH_AVAILABLE or StructuredTool is None:
+            return None
+        
+        try:
+            # Convert parameters to JSON Schema for StructuredTool
+            schema_parameters = self._convert_to_json_schema(tool_def.parameters)
+            
+            # Create StructuredTool from function
+            # StructuredTool.from_function handles async functions automatically
+            structured_tool = StructuredTool.from_function(
+                func=tool_def.function,
+                name=tool_def.name,
+                description=tool_def.description,
+                args_schema=None,  # Let StructuredTool infer from function signature
+                return_direct=False
+            )
+            
+            # Override the schema if we have custom parameter definitions
+            # This ensures our parameter descriptions and defaults are used
+            if schema_parameters and schema_parameters.get("properties"):
+                # Update tool's args_schema if needed
+                # Note: StructuredTool.from_function may not support direct schema override
+                # We rely on function signature + docstring for now
+                pass
+            
+            return structured_tool
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create StructuredTool for {tool_def.name}: {e}")
+            return None
+    
+    def get_tool_node_for_agent(self, agent_type: AgentType) -> Optional[Any]:
+        """
+        Get LangGraph ToolNode for an agent (LangGraph best practice)
+        
+        ToolNode provides automatic tool execution in LangGraph workflows.
+        Use this instead of manual tool execution for better integration.
+        
+        Usage in workflow:
+            tool_node = registry.get_tool_node_for_agent(AgentType.RESEARCH_AGENT)
+            workflow.add_node("tools", tool_node)
+            
+            # Route to tools when LLM requests them
+            workflow.add_conditional_edges(
+                "agent",
+                should_continue,  # Checks if tool_calls exist
+                {
+                    "continue": "tools",
+                    "end": END
+                }
+            )
+        
+        Args:
+            agent_type: Agent type to get ToolNode for
+            
+        Returns:
+            ToolNode object or None if LangGraph not available
+        """
+        if not LANGGRAPH_AVAILABLE:
+            logger.warning("⚠️ LangGraph not available, cannot create ToolNode")
+            return None
+        
+        if ToolNode is None:
+            logger.warning("⚠️ ToolNode not available, cannot create ToolNode")
+            return None
+        
+        if not self._initialized:
+            logger.warning("⚠️ Tool registry not initialized, cannot create ToolNode")
+            return None
+        
+        try:
+            # Get StructuredTool objects for this agent
+            structured_tools = self.get_structured_tools_for_agent(agent_type)
+            
+            if not structured_tools:
+                logger.warning(f"⚠️ No tools available for agent {agent_type.value}, cannot create ToolNode")
+                return None
+            
+            # Create ToolNode with tools
+            tool_node = ToolNode(structured_tools)
+            
+            logger.info(f"✅ Created ToolNode for {agent_type.value} with {len(structured_tools)} tools")
+            return tool_node
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to create ToolNode for {agent_type.value}: {e}")
+            return None
 
 
 # Global registry instance
@@ -1110,4 +1325,39 @@ async def get_tool_objects_for_agent(agent_type: AgentType) -> List[Dict[str, An
     """Get tool objects for an agent (LangGraph format)"""
     registry = await get_tool_registry()
     return registry.get_tool_objects_for_agent(agent_type)
+
+
+async def get_structured_tools_for_agent(agent_type: AgentType) -> List[Any]:
+    """
+    Get StructuredTool objects for an agent (LangGraph best practice)
+    
+    Returns list of StructuredTool objects that can be used with:
+    - llm.bind_tools(tools) for LLM tool binding
+    - ToolNode(tools) for automatic tool execution
+    
+    Args:
+        agent_type: Agent type to get tools for
+        
+    Returns:
+        List of StructuredTool objects
+    """
+    registry = await get_tool_registry()
+    return registry.get_structured_tools_for_agent(agent_type)
+
+
+async def get_tool_node_for_agent(agent_type: AgentType) -> Optional[Any]:
+    """
+    Get LangGraph ToolNode for an agent (LangGraph best practice)
+    
+    ToolNode provides automatic tool execution in LangGraph workflows.
+    Use this instead of manual tool execution for better integration.
+    
+    Args:
+        agent_type: Agent type to get ToolNode for
+        
+    Returns:
+        ToolNode object or None if not available
+    """
+    registry = await get_tool_registry()
+    return registry.get_tool_node_for_agent(agent_type)
 

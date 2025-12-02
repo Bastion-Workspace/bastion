@@ -231,36 +231,6 @@ class WebScrapingPlacementStrategy(FilePlacementStrategy):
         return tags
 
 
-class CalibrePlacementStrategy(FilePlacementStrategy):
-    """Strategy for placing Calibre-imported content"""
-    
-    def get_folder_path(self, request: FilePlacementRequest) -> List[str]:
-        """Calibre content goes to: Calibre Library / [Author]"""
-        author = request.author or "Unknown Author"
-        return ["Calibre Library", author]
-    
-    def get_filename(self, request: FilePlacementRequest) -> str:
-        """Generate filename from title and author"""
-        clean_title = "".join(c for c in request.title if c.isalnum() or c in (' ', '-', '_')).rstrip()
-        clean_title = clean_title[:30]  # Limit length
-        
-        author = request.author or "Unknown"
-        clean_author = "".join(c for c in author if c.isalnum() or c in (' ', '-', '_')).rstrip()
-        clean_author = clean_author[:20]  # Limit length
-        
-        return f"{clean_author}_{clean_title}.txt"
-    
-    def get_tags(self, request: FilePlacementRequest) -> List[str]:
-        """Add Calibre-specific tags"""
-        tags = request.tags.copy()
-        tags.extend(["calibre", "book", "imported"])
-        
-        if request.author:
-            tags.append(f"author-{request.author.lower().replace(' ', '-')}")
-        
-        return tags
-
-
 class ManualPlacementStrategy(FilePlacementStrategy):
     """Strategy for manually placed files"""
     
@@ -289,6 +259,36 @@ class ManualPlacementStrategy(FilePlacementStrategy):
         return request.tags.copy()
 
 
+class AgentCreatedPlacementStrategy(FilePlacementStrategy):
+    """Strategy for agent-created files - uses target_folder_id if provided, otherwise manual strategy"""
+    
+    def get_folder_path(self, request: FilePlacementRequest) -> List[str]:
+        """
+        Agent-created files should go to the target_folder_id if provided (project folder),
+        otherwise fall back to Manual / [Date]
+        """
+        # If target_folder_id is provided, the file_manager will use it directly
+        # This method is only called if target_folder_id is None
+        # So we fall back to manual strategy
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        return ["Manual", date_str]
+    
+    def get_filename(self, request: FilePlacementRequest) -> str:
+        """Use provided filename"""
+        if request.filename:
+            return request.filename
+        
+        clean_title = "".join(c for c in request.title if c.isalnum() or c in (' ', '-', '_')).rstrip()
+        clean_title = clean_title[:30]  # Limit length
+        
+        timestamp = datetime.now().strftime("%H%M%S")
+        return f"{timestamp}_{clean_title}.txt"
+    
+    def get_tags(self, request: FilePlacementRequest) -> List[str]:
+        """Return tags from request"""
+        return request.tags.copy()
+
+
 class FilePlacementStrategyFactory:
     """Factory for creating file placement strategies"""
     
@@ -298,8 +298,8 @@ class FilePlacementStrategyFactory:
         SourceType.CODING: CodingPlacementStrategy(),
         SourceType.UPLOAD: UploadPlacementStrategy(),
         SourceType.WEB_SCRAPING: WebScrapingPlacementStrategy(),
-        SourceType.CALIBRE: CalibrePlacementStrategy(),
         SourceType.MANUAL: ManualPlacementStrategy(),
+        SourceType.AGENT_CREATED: AgentCreatedPlacementStrategy(),
     }
     
     @classmethod

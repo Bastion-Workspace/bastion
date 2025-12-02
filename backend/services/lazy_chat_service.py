@@ -8,9 +8,9 @@ import logging
 from datetime import datetime
 from typing import Optional, Any
 import redis.asyncio as redis
-from openai import AsyncOpenAI
 
 from config import settings
+from utils.openrouter_client import get_openrouter_client
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +40,8 @@ class LazyChatService:
         start_time = datetime.now()
         
         # Initialize only essential components
-        self.openai_client = AsyncOpenAI(
-            api_key=settings.OPENROUTER_API_KEY,
-            base_url="https://openrouter.ai/api/v1"
-        )
+        # Use OpenRouterClient wrapper for automatic reasoning support
+        self.openai_client = get_openrouter_client()
         
         self.redis_client = redis.from_url(settings.REDIS_URL)
         

@@ -52,12 +52,6 @@ class Settings(BaseSettings):
     WEBDAV_PORT: int = 8001
     WEBDAV_ENABLED: bool = True
     
-    # Calibre Integration
-    CALIBRE_LIBRARY_PATH: str = "/app/calibre"  # Docker mount path
-    CALIBRE_ENABLED: bool = False  # Disabled by default, admin can enable
-    CALIBRE_SEARCH_WEIGHT: float = 0.3  # Weight in combined search results
-    CALIBRE_MAX_RESULTS: int = 50  # Maximum results from Calibre per search
-    
     # PostgreSQL Configuration (parsed from DATABASE_URL)
     @property
     def POSTGRES_HOST(self) -> str:
@@ -110,6 +104,10 @@ class Settings(BaseSettings):
     INTENT_CLASSIFICATION_MODEL: str = ""  # Optional override for capability-based intent classifier
     OPENROUTER_MODEL: str = ""  # Optional default chat model used when selecting primary model
     EMBEDDING_MODEL: str = "text-embedding-3-large"
+
+    # Reasoning Configuration
+    REASONING_ENABLED: bool = True  # Enable reasoning tokens support
+    REASONING_EFFORT: str = "medium"  # "high", "medium", "low", "minimal", "none"
     EMBEDDING_DIMENSIONS: int = 3072
     
     # LLM Output Configuration
@@ -135,6 +133,16 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "/app/uploads"
     PROCESSED_DIR: str = "/app/processed"
     LOGS_DIR: str = "/app/logs"
+    
+    # Messaging Attachment Configuration
+    MESSAGING_ATTACHMENT_MAX_SIZE: int = 10 * 1024 * 1024  # 10MB
+    MESSAGING_ATTACHMENT_ALLOWED_TYPES: List[str] = [
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "image/webp"
+    ]
+    MESSAGING_ATTACHMENT_STORAGE_PATH: str = "/app/uploads/messaging"
     
     # OCR Configuration
     OCR_LANGUAGES: List[str] = ["eng", "fra", "deu"]
@@ -190,6 +198,27 @@ class Settings(BaseSettings):
     MESSAGE_RETENTION_DAYS: int = 0  # 0 = indefinite retention
     PRESENCE_HEARTBEAT_SECONDS: int = 30  # How often clients should ping presence
     PRESENCE_OFFLINE_THRESHOLD_SECONDS: int = 90  # When to mark user offline
+    
+    # Email Configuration (SMTP)
+    # Configure for your SMTP service (SendGrid, Mailgun, Postfix, etc.)
+    SMTP_ENABLED: bool = False  # Set to True when SMTP is configured
+    SMTP_HOST: str = ""  # SMTP server hostname (e.g., smtp.sendgrid.net, smtp.mailgun.org)
+    SMTP_PORT: int = 587  # SMTP port (587 for TLS, 465 for SSL, 25 for unencrypted)
+    SMTP_USER: str = ""  # SMTP username (e.g., "apikey" for SendGrid)
+    SMTP_PASSWORD: str = ""  # SMTP password or API key
+    SMTP_USE_TLS: bool = True  # Use TLS encryption (recommended)
+    SMTP_FROM_EMAIL: str = "noreply@bastion.local"  # From email address
+    SMTP_FROM_NAME: str = "Bastion AI Workspace"  # From name
+    
+    # Email Agent Configuration
+    EMAIL_AGENT_ENABLED: bool = True
+    EMAIL_VERIFICATION_REQUIRED: bool = True
+    EMAIL_VERIFICATION_EXPIRY_HOURS: int = 24
+    
+    # Rate Limiting (Conservative: 5/hour, 20/day)
+    EMAIL_HOURLY_LIMIT: int = 5
+    EMAIL_DAILY_LIMIT: int = 20
+    EMAIL_RATE_LIMITING_ENABLED: bool = True
     
     class Config:
         env_file = ".env"

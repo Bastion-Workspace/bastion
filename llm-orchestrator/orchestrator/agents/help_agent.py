@@ -4,12 +4,29 @@ Provides application navigation assistance, feature documentation, and system ca
 """
 
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TypedDict
 from datetime import datetime
 
+from langgraph.graph import StateGraph, END
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from .base_agent import BaseAgent, TaskStatus
 
 logger = logging.getLogger(__name__)
+
+
+class HelpState(TypedDict):
+    """State for help agent LangGraph workflow"""
+    query: str
+    user_id: str
+    metadata: Dict[str, Any]
+    messages: List[Any]
+    persona: Optional[Dict[str, Any]]
+    system_prompt: str
+    conversation_history: List[Dict[str, str]]
+    llm_messages: List[Any]
+    response: Dict[str, Any]
+    task_status: str
+    error: str
 
 
 class HelpAgent(BaseAgent):
@@ -17,12 +34,36 @@ class HelpAgent(BaseAgent):
     
     def __init__(self):
         super().__init__("help_agent")
+        logger.info("❓ Help Agent ready for assistance!")
+    
+    def _build_workflow(self, checkpointer) -> StateGraph:
+        """Build LangGraph workflow for help agent"""
+        workflow = StateGraph(HelpState)
+        
+        # Add nodes
+        workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("generate_response", self._generate_response_node)
+        
+        # Entry point
+        workflow.set_entry_point("prepare_context")
+        
+        # Linear flow: prepare context -> generate response -> END
+        workflow.add_edge("prepare_context", "generate_response")
+        workflow.add_edge("generate_response", END)
+        
+        return workflow.compile(checkpointer=checkpointer)
     
     def _build_help_prompt(self, persona: Optional[Dict[str, Any]] = None) -> str:
         """Build system prompt for help agent with embedded documentation"""
         ai_name = persona.get("ai_name", "Codex") if persona else "Codex"
+        persona_style = persona.get("persona_style", "professional") if persona else "professional"
+        
+        # Build style instruction based on persona_style
+        style_instruction = self._get_style_instruction(persona_style)
         
         base_prompt = f"""You are {ai_name}, a helpful application guide providing assistance with navigating features and understanding system capabilities.
+
+{style_instruction}
 
 YOUR ROLE:
 Provide clear, practical help for users learning to use this application. Give step-by-step instructions for UI navigation and explain agent capabilities with examples.
@@ -75,7 +116,37 @@ Steps:
 2. Click "New Document" or open an existing file
 3. Write content - AI agents can assist based on document type
 4. Changes save automatically
-5. Use frontmatter to set document type (fiction, outline, rules, etc.)
+5. Use frontmatter to set document type (see Frontmatter Types section below)
+
+**FRONTMATTER TYPES FOR AGENT OPERATIONS**
+Set the `type` field in your document's YAML frontmatter to enable specialized agent assistance:
+
+**Creative Writing Types:**
+- `type: fiction` - Enables Fiction Editing Agent for prose creation/editing
+- `type: outline` - Enables Outline Editing Agent for story structure
+- `type: character` - Enables Character Development Agent for character profiles
+- `type: rules` - Enables Rules Editing Agent for world-building rules
+- `type: style` - Style guide for proofreading and consistency
+
+**Content Creation Types:**
+- `type: substack` or `type: blog` - Enables Substack Agent for article/tweet generation
+- `type: podcast` - Enables Podcast Script Agent for TTS-ready scripts
+
+**Technical Types:**
+- `type: electronics` - Enables Electronics Agent for circuit design and embedded programming
+- `type: project` - Enables General Project Agent for project planning, design, and documentation (HVAC, landscaping, home improvement, etc.)
+- `type: sysml` - Enables SysML Agent for system diagrams and UML
+
+**Example frontmatter:**
+```yaml
+---
+type: fiction
+title: My Story
+author: Your Name
+---
+```
+
+When you have a document open with a matching type, agents automatically use it as project context!
 
 **ORG-MODE TASKS (Manage TODO items)**
 Commands:
@@ -106,7 +177,7 @@ SYSTEM CAPABILITIES - AVAILABLE AGENTS
 
 **RESEARCH AGENT**
 What it does:
-- Searches your local knowledge base (documents, calibre library, entities)
+- Searches your local knowledge base (documents, entities)
 - Can search the web if local results insufficient (asks permission first)
 - Provides cited results with source references
 When to use: "Research [topic]", "Find information about [subject]", "Tell me about [concept]"
@@ -219,6 +290,32 @@ What it does:
 When to use: "Tell me about [movie]", "Recommend movies like [title]", "Compare [show A] and [show B]"
 Example: "Recommend sci-fi movies like Blade Runner" → Personalized recommendations
 
+**ELECTRONICS AGENT**
+What it does:
+- Circuit design and schematic guidance
+- Embedded programming (Arduino, ESP32, Raspberry Pi, STM32)
+- Component selection and specifications
+- Electronics calculations (resistor values, voltage dividers, power dissipation, timing)
+- Troubleshooting circuit issues (circuit debugging, signal integrity, power issues)
+- Project management: Creates project plans, organizes project files and folders
+- Automatically updates project files based on your input
+When to use: "Design a circuit for [purpose]", "Arduino code for [sensor]", "Calculate resistor value", "Troubleshoot [issue]", "Plan an electronics project", "Save project files"
+Example: "Design a voltage divider for 12V to 5V" → Circuit design with component values and calculations
+Note: Works best when you have a document open with `type: electronics` in frontmatter (uses it as project context). The agent maintains a project plan as the source of truth and organizes detailed specs in referenced files.
+
+**GENERAL PROJECT AGENT**
+What it does:
+- Project planning and requirements gathering
+- Scope definition and timeline planning
+- Design assistance and approach recommendations
+- Tradeoff analysis and decision documentation
+- Project file organization and maintenance
+- Task management and milestone tracking
+- Automatically updates project files based on your input
+When to use: "Plan a [project type]", "Create a project plan for [project]", "Help me design [system]", "What are the requirements for [project]", "Update project files"
+Example: "Plan an HVAC system for my home" → Comprehensive project plan with requirements, design approach, timeline, and organized project files
+Note: Works best when you have a document open with `type: project` in frontmatter. Handles a wide variety of projects including HVAC, landscaping, gardening, home improvement, and more. The agent maintains a project plan as the source of truth and organizes detailed specifications in referenced files.
+
 ═══════════════════════════════════════════════════════════════
 FEATURE DISCOVERY - WHAT YOU CAN DO
 ═══════════════════════════════════════════════════════════════
@@ -230,7 +327,7 @@ FEATURE DISCOVERY - WHAT YOU CAN DO
 
 **KNOWLEDGE BASE**
 - Store and retrieve information
-- Search across documents, books (Calibre), entities
+- Search across documents, entities
 - Build personal knowledge graph
 
 **CREATIVE WRITING**
@@ -286,7 +383,7 @@ For "How do I send a message?":
 
 For "How does the research agent work?":
 {{
-    "message": "**Research Agent**\\n\\nThe research agent is your comprehensive information gathering tool:\\n\\n**How it works:**\\n1. Searches your local knowledge base first (documents, calibre library, entities)\\n2. If local results are insufficient, it requests permission to search the web\\n3. Synthesizes information from multiple sources\\n4. Provides cited results with source references\\n\\n**When to use:** \\\"Research [topic]\\\", \\\"Find information about [subject]\\\", \\\"Tell me about [concept]\\\"\\n\\n**Example:** \\\"Research the history of quantum computing\\\" → Comprehensive research with citations",
+    "message": "**Research Agent**\\n\\nThe research agent is your comprehensive information gathering tool:\\n\\n**How it works:**\\n1. Searches your local knowledge base first (documents, entities)\\n2. If local results are insufficient, it requests permission to search the web\\n3. Synthesizes information from multiple sources\\n4. Provides cited results with source references\\n\\n**When to use:** \\\"Research [topic]\\\", \\\"Find information about [subject]\\\", \\\"Tell me about [concept]\\\"\\n\\n**Example:** \\\"Research the history of quantum computing\\\" → Comprehensive research with citations",
     "task_status": "complete",
     "help_category": "system_capabilities",
     "related_topics": ["Web search permissions", "Citation format", "Other research agents"]
@@ -304,29 +401,57 @@ Remember: Be helpful, clear, and practical. Provide actionable guidance that use
 
         return base_prompt
     
-    async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
-        """Process help query and provide assistance"""
+    async def _prepare_context_node(self, state: HelpState) -> Dict[str, Any]:
+        """Prepare context: extract persona, build prompt, extract conversation history"""
         try:
-            logger.info(f"❓ Help agent processing: {query[:100]}...")
+            logger.info(f"❓ Preparing context for help query: {state['query'][:100]}...")
             
-            # Extract metadata
-            metadata = metadata or {}
+            # Extract metadata and persona
+            metadata = state.get("metadata", {})
             persona = metadata.get("persona")
             
-            # Build system prompt
+            # Build system prompt (preserves all documentation)
             system_prompt = self._build_help_prompt(persona)
             
             # Extract conversation history
             conversation_history = []
+            messages = state.get("messages", [])
             if messages:
                 conversation_history = self._extract_conversation_history(messages, limit=5)
             
             # Build messages for LLM
-            llm_messages = self._build_messages(system_prompt, query, conversation_history)
+            llm_messages = self._build_messages(system_prompt, state["query"], conversation_history)
             
-            # Call LLM
+            return {
+                "persona": persona,
+                "system_prompt": system_prompt,
+                "conversation_history": conversation_history,
+                "llm_messages": llm_messages
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Context preparation failed: {e}")
+            return {
+                "error": str(e),
+                "task_status": "error"
+            }
+    
+    async def _generate_response_node(self, state: HelpState) -> Dict[str, Any]:
+        """Generate response: call LLM and parse structured output"""
+        try:
+            logger.info("❓ Generating help response...")
+            
+            llm_messages = state.get("llm_messages", [])
+            if not llm_messages:
+                return {
+                    "error": "No LLM messages prepared",
+                    "task_status": "error",
+                    "response": {}
+                }
+            
+            # Call LLM with lower temperature for consistent help responses
             start_time = datetime.now()
-            llm = self._get_llm(temperature=0.3)  # Lower temperature for consistent help
+            llm = self._get_llm(temperature=0.3)
             response = await llm.ainvoke(llm_messages)
             processing_time = (datetime.now() - start_time).total_seconds()
             
@@ -339,8 +464,12 @@ Remember: Be helpful, clear, and practical. Provide actionable guidance that use
             help_category = structured_response.get("help_category", "general")
             related_topics = structured_response.get("related_topics", [])
             
+            # Add assistant response to messages for checkpoint persistence
+            state = self._add_assistant_response_to_messages(state, final_message)
+            
             # Build result
             result = {
+                "response": {
                 "response": final_message,
                 "task_status": structured_response.get("task_status", "complete"),
                 "agent_type": "help_agent",
@@ -348,12 +477,69 @@ Remember: Be helpful, clear, and practical. Provide actionable guidance that use
                 "related_topics": related_topics,
                 "processing_time": processing_time,
                 "timestamp": datetime.now().isoformat()
+                },
+                "task_status": structured_response.get("task_status", "complete"),
+                "messages": state.get("messages", [])
             }
             
-            logger.info(f"✅ Help agent completed in {processing_time:.2f}s (category: {help_category})")
+            logger.info(f"✅ Help response generated in {processing_time:.2f}s (category: {help_category})")
             return result
             
         except Exception as e:
-            logger.error(f"❌ Help agent error: {e}")
+            logger.error(f"❌ Response generation failed: {e}")
+            return {
+                "error": str(e),
+                "task_status": "error",
+                "response": self._create_error_response(str(e))
+            }
+    
+    async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
+        """Process help query using LangGraph workflow"""
+        try:
+            logger.info(f"❓ Help agent processing: {query[:100]}...")
+            
+            # Extract user_id from metadata
+            metadata = metadata or {}
+            user_id = metadata.get("user_id", "system")
+            
+            # Initialize state for LangGraph workflow
+            initial_state: HelpState = {
+                "query": query,
+                "user_id": user_id,
+                "metadata": metadata,
+                # Add current user query to messages for checkpoint persistence
+                "messages": (list(messages) if messages else []) + [HumanMessage(content=query)] if HumanMessage else messages or [],
+                "persona": None,
+                "system_prompt": "",
+                "conversation_history": [],
+                "llm_messages": [],
+                "response": {},
+                "task_status": "",
+                "error": ""
+            }
+            
+            # Get workflow and checkpoint config
+            workflow = await self._get_workflow()
+            config = self._get_checkpoint_config(metadata)
+            
+            # Run LangGraph workflow with checkpointing
+            result_state = await workflow.ainvoke(initial_state, config=config)
+            
+            # Extract final response
+            response = result_state.get("response", {})
+            task_status = result_state.get("task_status", "complete")
+            
+            if task_status == "error":
+                error_msg = result_state.get("error", "Unknown error")
+                logger.error(f"❌ Help agent failed: {error_msg}")
+                return self._create_error_response(error_msg)
+            
+            logger.info(f"✅ Help agent completed: {task_status}")
+            return response
+            
+        except Exception as e:
+            logger.error(f"❌ Help agent failed: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return self._create_error_response(str(e))
 

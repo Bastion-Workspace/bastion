@@ -86,12 +86,20 @@ class MessagingService:
                     VALUES ($1, $2, $3, $4)
                 """, room_id, room_name, room_type, creator_id)
                 
-                # Add all participants
-                for participant_id in all_participants:
-                    await conn.execute("""
-                        INSERT INTO room_participants (room_id, user_id)
-                        VALUES ($1, $2)
+                # Add all participants (deduplicate to avoid duplicates)
+                unique_participants = list(dict.fromkeys(all_participants))  # Preserves order
+                for participant_id in unique_participants:
+                    # Check if participant already exists (idempotent)
+                    existing = await conn.fetchval("""
+                        SELECT 1 FROM room_participants 
+                        WHERE room_id = $1 AND user_id = $2
                     """, room_id, participant_id)
+                    
+                    if not existing:
+                        await conn.execute("""
+                            INSERT INTO room_participants (room_id, user_id)
+                            VALUES ($1, $2)
+                        """, room_id, participant_id)
                 
                 # Create encryption key for future E2EE (only if encryption is enabled)
                 if encryption_service.is_encryption_enabled():
@@ -282,6 +290,11 @@ class MessagingService:
                 if not is_participant:
                     logger.warning(f"⚠️ User {user_id} not authorized to delete room {room_id}")
                     return False
+                
+                # Delete room attachments before deleting room
+                from services.messaging.messaging_attachment_service import messaging_attachment_service
+                await messaging_attachment_service.initialize(shared_db_pool=self.db_pool)
+                await messaging_attachment_service.delete_room_attachments(room_id)
                 
                 # Delete room (cascades will handle participants, messages, etc.)
                 result = await conn.execute("""

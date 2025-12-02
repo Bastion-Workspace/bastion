@@ -36,6 +36,11 @@ class AuthService extends ApiServiceBase {
   adminChangePassword = async (userId, passwordData) => {
     return this.post(`/api/admin/users/${userId}/change-password`, passwordData);
   }
+
+  // Refresh token
+  refreshToken = async () => {
+    return this.post('/api/auth/refresh');
+  }
 }
 
 export default new AuthService();

@@ -139,32 +139,9 @@ class BulkCategorizeRequest(BaseModel):
     tags: Optional[List[str]] = Field(None, description="Tags to add")
 
 
-class FreeFormNoteRequest(BaseModel):
-    """Request to create or update a free-form note"""
-    title: str = Field(..., min_length=1, max_length=500, description="Note title")
-    content: str = Field(..., min_length=1, description="Note content")
-    note_date: Optional[date] = Field(None, description="Date associated with the note")
-    tags: Optional[List[str]] = Field(None, description="Optional tags for categorization")
-    category: Optional[str] = Field(None, max_length=100, description="Optional category")
-    folder_id: Optional[str] = Field(None, description="Target folder ID for the note")
-
-
-class FreeFormNoteFilterRequest(BaseModel):
-    """Request to filter and search free-form notes"""
-    search_query: Optional[str] = Field(None, description="Text search in title and content")
-    category: Optional[str] = Field(None, description="Filter by category")
-    tags: Optional[List[str]] = Field(None, description="Filter by tags (AND logic)")
-    date_from: Optional[date] = Field(None, description="Filter notes from this date")
-    date_to: Optional[date] = Field(None, description="Filter notes to this date")
-    sort_by: Optional[str] = Field("created_at", description="Sort field: created_at, note_date, title")
-    sort_order: Optional[str] = Field("desc", description="Sort order: asc or desc")
-    skip: Optional[int] = Field(0, description="Number of notes to skip")
-    limit: Optional[int] = Field(50, description="Maximum number of notes to return")
 
 
 # Alias for backward compatibility with main.py
-NotesFilterRequest = FreeFormNoteFilterRequest
-
 
 class CreateNoteRequest(BaseModel):
     """Request to create a new free-form note"""
@@ -240,6 +217,7 @@ class DocumentInfo(BaseModel):
     # Document ownership
     user_id: Optional[str] = Field(None, description="ID of user who uploaded this document (NULL for admin/global documents)")
     folder_id: Optional[str] = Field(None, description="ID of folder containing this document (NULL for root documents)")
+    team_id: Optional[str] = Field(None, description="ID of team this document belongs to (NULL for user/global documents)")
     
     # Global submission workflow fields
     submission_status: SubmissionStatus = Field(default=SubmissionStatus.NOT_SUBMITTED, description="Global submission status")
@@ -258,6 +236,7 @@ class DocumentFolder(BaseModel):
     name: str = Field(..., description="Folder name")
     parent_folder_id: Optional[str] = Field(None, description="Parent folder ID")
     user_id: Optional[str] = Field(None, description="Owner user ID")
+    team_id: Optional[str] = Field(None, description="Team ID if this is a team folder")
     collection_type: str = Field(default="user", description="Collection type")
     category: Optional[DocumentCategory] = Field(None, description="Folder category (inherited by documents)")
     tags: List[str] = Field(default_factory=list, description="Folder tags (inherited by documents)")
@@ -403,33 +382,7 @@ class ReviewResponse(BaseModel):
     moved_to_global: Optional[bool] = Field(None, description="Whether document was moved to global collection")
 
 
-class FreeFormNoteInfo(BaseModel):
-    """Free-form note information"""
-    note_id: str = Field(..., description="Unique note identifier")
-    title: str = Field(..., description="Note title")
-    content: str = Field(..., description="Note content")
-    note_date: Optional[date] = Field(None, description="Date associated with the note")
-    tags: List[str] = Field(default_factory=list, description="Note tags")
-    category: Optional[str] = Field(None, description="Note category")
-    created_at: datetime = Field(..., description="Creation timestamp")
-    updated_at: datetime = Field(..., description="Last update timestamp")
-    embedding_processed: bool = Field(..., description="Whether note is indexed for search")
 
-
-class FreeFormNoteResponse(BaseModel):
-    """Response for single note operations"""
-    note_id: str = Field(..., description="Note identifier")
-    title: str = Field(..., description="Note title")
-    message: str = Field(..., description="Operation result message")
-
-
-class FreeFormNotesListResponse(BaseModel):
-    """Response for note listing"""
-    notes: List[FreeFormNoteInfo] = Field(..., description="List of notes")
-    total: int = Field(..., description="Total number of notes")
-    categories: Optional[Dict[str, int]] = Field(None, description="Category counts")
-    tags: Optional[Dict[str, int]] = Field(None, description="Tag counts")
-    filters_applied: Optional[Dict[str, Any]] = Field(None, description="Applied filters")
 
 
 class VisualCitation(BaseModel):
@@ -775,6 +728,7 @@ class UserCreateRequest(BaseModel):
 class UserUpdateRequest(BaseModel):
     email: Optional[str] = None
     display_name: Optional[str] = None
+    avatar_url: Optional[str] = None
     role: Optional[str] = None
     is_active: Optional[bool] = None
 
@@ -787,6 +741,7 @@ class UserResponse(BaseModel):
     username: str
     email: str
     display_name: Optional[str] = None
+    avatar_url: Optional[str] = None
     role: str
     is_active: bool
     created_at: datetime

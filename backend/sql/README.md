@@ -60,53 +60,50 @@ That's it! No migrations, no multiple SQL files, no complex setup.
    - `pdf_segments` - OCR segments
    - `segment_relationships` - Layout analysis
 
-3. **Notes System**
-   - `free_form_notes` - User-created notes
-
-4. **Authentication**
+3. **Authentication**
    - `users` - User accounts
    - `user_sessions` - Session tokens
 
-5. **Document Folders** ⭐
+4. **Document Folders** ⭐
    - `document_folders` - Hierarchical organization
    - **Includes UNIQUE constraint** - prevents duplicates
    - **Includes UPSERT index** - fast conflict resolution
 
-6. **Conversations**
+5. **Conversations**
    - `conversations` - Chat sessions
    - `conversation_messages` - Message history
    - `conversation_shares` - Sharing system
    - `conversation_folders` - Organization
 
-7. **Background Jobs**
+6. **Background Jobs**
    - `background_chat_jobs` - Async chat processing
 
-8. **Templates & Pipelines**
+7. **Templates & Pipelines**
    - `report_templates` - Custom report templates
    - Various pipeline tables
 
-9. **Research Plans**
+8. **Research Plans**
    - Research planning and execution tracking
 
-10. **RSS Feeds**
+9. **RSS Feeds**
     - `rss_feeds` - Feed configurations
     - `rss_articles` - Fetched articles
     - `rss_feed_subscriptions` - User subscriptions
 
-11. **LangGraph State**
+10. **LangGraph State**
     - `checkpoints` - Conversation state persistence
     - `checkpoint_blobs` - Large object storage
     - `checkpoint_writes` - Pending writes
 
-12. **Video Processing**
+11. **Video Processing**
     - `videos` - Video metadata
     - `video_transcripts` - Full transcripts
     - `video_segments` - Searchable chunks
 
-13. **Org-Mode**
+12. **Org-Mode**
     - `org_settings` - Per-user org preferences
 
-14. **GitHub Integration** ⭐
+13. **GitHub Integration** ⭐
     - `github_connections` - API connections
     - `github_project_mappings` - Repository mappings
     - `github_issue_sync` - Sync tracking
@@ -167,6 +164,31 @@ WHERE conrelid = 'document_folders'::regclass;
 ```
 
 ## 📝 Recent Changes
+
+### November 13, 2025 - FreeForm Notes Complete Removal
+
+**What Changed:**
+- ❌ Removed `free_form_notes` table definition from 01_init.sql
+- ❌ Removed all indexes, grants, and RLS policies
+- ❌ Removed FreeFormNotesService backend
+- ❌ Removed notes API endpoints (292 lines)
+- ❌ Removed frontend NotesService
+- ❌ Removed 6 model classes from api_models.py
+
+**Why:**
+- Feature was fully implemented but never had a UI
+- No frontend components using the service
+- Backend service and API were orphaned code
+- ~960 lines of dead code eliminated
+
+**Migration:** 
+- Fresh installations: Table no longer created
+- Existing deployments: Drop the volume and rebuild for clean slate
+  ```bash
+  docker compose down
+  docker volume rm bastion_postgres_data
+  docker compose up --build
+  ```
 
 ### October 24, 2025 - Consolidation Campaign
 

@@ -10,6 +10,7 @@ import { parseFrontmatter as parseMarkdownFrontmatter } from '../utils/frontmatt
 import { Box, TextField, Button, Tooltip, Drawer, IconButton, Typography, Stack, Switch, FormControlLabel } from '@mui/material';
 import { Add, Delete } from '@mui/icons-material';
 import { createGhostTextExtension } from './editor/extensions/ghostTextExtension';
+import { createInlineEditSuggestionsExtension } from './editor/extensions/inlineEditSuggestionsExtension';
 import { editorSuggestionService } from '../services/editor/EditorSuggestionService';
 
 const createMdTheme = (darkMode) => EditorView.baseTheme({
@@ -173,7 +174,24 @@ function buildFrontmatter(data) {
 
 export default function MarkdownCMEditor({ value, onChange, filename, canonicalPath }) {
   const { darkMode } = useTheme();
-  const [suggestionsEnabled, setSuggestionsEnabled] = useState(true);
+  const [suggestionsEnabled, setSuggestionsEnabled] = useState(() => {
+    try {
+      const saved = localStorage.getItem('editorPredictiveSuggestionsEnabled');
+      return saved !== null ? JSON.parse(saved) : false;
+    } catch {
+      return false;
+    }
+  });
+
+  // Persist suggestions preference to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('editorPredictiveSuggestionsEnabled', JSON.stringify(suggestionsEnabled));
+    } catch (error) {
+      console.error('Failed to save predictive suggestions preference:', error);
+    }
+  }, [suggestionsEnabled]);
+
   // Removed floating Accept UI state; Tab or clicking ghost text suffices
   const ghostExt = useMemo(() => suggestionsEnabled ? createGhostTextExtension(async ({ prefix, suffix, position, signal, frontmatter, filename: fn }) => {
     try {
@@ -191,13 +209,15 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
     } catch { return ''; }
   }, { debounceMs: 350 }) : [], [suggestionsEnabled]);
   const mdTheme = useMemo(() => createMdTheme(darkMode), [darkMode]);
+  const inlineEditExt = useMemo(() => createInlineEditSuggestionsExtension(), []);
   const extensions = useMemo(() => [
     history(),
     keymap.of([...defaultKeymap, ...historyKeymap]),
     markdown({ base: markdownLanguage }),
     EditorView.lineWrapping,
-    mdTheme
-  ], [mdTheme]);
+    mdTheme,
+    inlineEditExt
+  ], [mdTheme, inlineEditExt]);
 
   const { setEditorState } = useEditor();
   const [fmOpen, setFmOpen] = useState(false);
@@ -268,7 +288,10 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
   // Publish active editor state to context on mount/update (debounced localStorage write for ChatSidebar consumption)
   useEffect(() => {
     const fullText = (value || '').replace(/\r\n/g, '\n');
-    const { data } = parseFrontmatter(fullText);
+    const { data, lists } = parseFrontmatter(fullText);
+    
+    // **ROOSEVELT'S FRONTMATTER MERGE**: Merge data and lists so array fields (files, components, etc.) are included!
+    const mergedFrontmatter = { ...data, ...lists };
     
     // **ROOSEVELT'S CANONICAL PATH**: Backend provides the canonical path - we just pass it through!
     const payload = {
@@ -277,7 +300,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
       language: 'markdown',
       content: fullText,
       contentLength: fullText.length,
-      frontmatter: data,
+      frontmatter: mergedFrontmatter,
       // Cursor info populated by onUpdate plugin below; default unknowns here
       cursorOffset: -1,
       selectionStart: -1,
@@ -495,7 +518,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
         value={value}
         height="100%"
         basicSetup={true}
-        extensions={[...extensions, frontmatterHider, ...(ghostExt || []), EditorView.updateListener.of((update) => {
+        extensions={[...extensions, frontmatterHider, ...(ghostExt || []), inlineEditExt, EditorView.updateListener.of((update) => {
           try {
             if (!update.view) return;
             const sel = update.state.selection.main;
@@ -503,7 +526,10 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
             const selectionStart = sel.from;
             const selectionEnd = sel.to;
             const docText = update.state.doc.toString();
-            const { data } = parseFrontmatter(docText);
+            const { data, lists } = parseFrontmatter(docText);
+            
+            // **ROOSEVELT'S FRONTMATTER MERGE**: Merge data and lists so array fields (files, components, etc.) are included!
+            const mergedFrontmatter = { ...data, ...lists };
             
             // **ROOSEVELT: Use backend-provided canonical path**
             const payload = {
@@ -512,7 +538,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
               language: 'markdown',
               content: docText,
               contentLength: docText.length,
-              frontmatter: data,
+              frontmatter: mergedFrontmatter,
               cursorOffset,
               selectionStart,
               selectionEnd,

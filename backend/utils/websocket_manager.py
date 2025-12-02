@@ -251,7 +251,7 @@ class WebSocketManager:
         except Exception as e:
             logger.error(f"❌ Failed to send folder update: {e}")
 
-    async def send_document_status_update(self, document_id: str, status: str, folder_id: str = None, user_id: str = None, filename: str = None):
+    async def send_document_status_update(self, document_id: str, status: str, folder_id: str = None, user_id: str = None, filename: str = None, proposal_data: Dict[str, Any] = None):
         """Send document status update to appropriate sessions - **BULLY!** Now with filename for toast notifications!"""
         try:
             message = {
@@ -262,6 +262,27 @@ class WebSocketManager:
                 "filename": filename,  # **ROOSEVELT FIX**: Include filename for UI toast notifications!
                 "timestamp": datetime.now().isoformat()
             }
+            
+            # If status is edit_proposal and proposal_data is provided, send as separate message
+            if status == "edit_proposal" and proposal_data:
+                proposal_message = {
+                    "type": "document_edit_proposal",
+                    "document_id": document_id,
+                    "proposal_id": proposal_data.get("proposal_id"),
+                    "edit_type": proposal_data.get("edit_type"),
+                    "operations": proposal_data.get("operations"),
+                    "content_edit": proposal_data.get("content_edit"),
+                    "agent_name": proposal_data.get("agent_name"),
+                    "summary": proposal_data.get("summary"),
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+                if user_id:
+                    await self.send_to_session(proposal_message, user_id)
+                    logger.info(f"📝 Sent document edit proposal to user {user_id}: {document_id} (proposal: {proposal_data.get('proposal_id')})")
+                else:
+                    await self.broadcast(proposal_message)
+                    logger.info(f"📝 Broadcasted document edit proposal: {document_id} (proposal: {proposal_data.get('proposal_id')})")
             
             if user_id:
                 await self.send_to_session(message, user_id)

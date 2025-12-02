@@ -6,11 +6,11 @@ Weather information and forecasting agent with structured outputs
 import logging
 import os
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, TypedDict
 from datetime import datetime
-from openai import AsyncOpenAI
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from langgraph.graph import StateGraph, END
 from orchestrator.agents.base_agent import BaseAgent
 from orchestrator.services.weather_request_analyzer import get_weather_request_analyzer
 from orchestrator.services.weather_response_formatters import get_weather_response_formatters
@@ -19,10 +19,31 @@ from orchestrator.tools.weather_tools import get_weather_tools
 logger = logging.getLogger(__name__)
 
 
+class WeatherState(TypedDict):
+    """State for weather agent LangGraph workflow"""
+    query: str
+    user_id: str
+    metadata: Dict[str, Any]
+    messages: List[Any]
+    shared_memory: Dict[str, Any]
+    persona: Optional[Dict[str, Any]]
+    user_preferences: Dict[str, Any]
+    communication_style: str
+    detail_level: str
+    weather_request: Dict[str, Any]
+    weather_data: Dict[str, Any]
+    recommendations: Optional[str]
+    collaboration_data: Dict[str, Any]
+    response: Dict[str, Any]
+    task_status: str
+    error: str
+
+
 class WeatherAgent(BaseAgent):
     """
     Meteorological Intelligence Agent
     Provides weather conditions and forecasts with structured outputs
+    Uses LangGraph workflow for explicit state management
     """
     
     def __init__(self):
@@ -30,7 +51,38 @@ class WeatherAgent(BaseAgent):
         self._analyzer = None
         self._formatter = None
         self._weather_tools = None
-        self._openai_client = None
+        logger.info("🌤️ Weather Agent ready for meteorological intelligence!")
+    
+    def _build_workflow(self, checkpointer) -> StateGraph:
+        """Build LangGraph workflow for weather agent"""
+        workflow = StateGraph(WeatherState)
+        
+        # Add nodes
+        workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("analyze_request", self._analyze_request_node)
+        workflow.add_node("get_weather_data", self._get_weather_data_node)
+        workflow.add_node("generate_response", self._generate_response_node)
+        
+        # Entry point
+        workflow.set_entry_point("prepare_context")
+        
+        # Flow: prepare_context -> analyze_request -> (conditional) -> get_weather_data -> generate_response -> END
+        workflow.add_edge("prepare_context", "analyze_request")
+        
+        # Conditional routing from analyze_request
+        workflow.add_conditional_edges(
+            "analyze_request",
+            self._route_from_analysis,
+            {
+                "location_needed": "generate_response",  # Generate clarification response
+                "get_data": "get_weather_data"
+            }
+        )
+        
+        workflow.add_edge("get_weather_data", "generate_response")
+        workflow.add_edge("generate_response", END)
+        
+        return workflow.compile(checkpointer=checkpointer)
     
     async def _get_analyzer(self):
         """Get weather request analyzer instance"""
@@ -50,68 +102,190 @@ class WeatherAgent(BaseAgent):
             self._weather_tools = await get_weather_tools()
         return self._weather_tools
     
-    async def _get_openai_client(self):
-        """Get or create OpenAI client"""
-        if self._openai_client is None:
-            api_key = os.getenv("OPENROUTER_API_KEY")
-            if not api_key:
-                raise ValueError("OPENROUTER_API_KEY environment variable not set")
-            
-            self._openai_client = AsyncOpenAI(
-                api_key=api_key,
-                base_url="https://openrouter.ai/api/v1"
-            )
-        return self._openai_client
-    
-    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Process weather requests with structured outputs"""
+    async def _prepare_context_node(self, state: WeatherState) -> Dict[str, Any]:
+        """Prepare context: extract messages, preferences, and communication style"""
         try:
-            logger.info("🌤️ Weather Agent: Starting meteorological intelligence operation...")
+            logger.info("📋 Preparing context for weather agent...")
             
-            # Extract user message and context
             messages = state.get("messages", [])
-            user_message = messages[-1].content if messages else ""
             shared_memory = state.get("shared_memory", {})
-            user_id = state.get("user_id")
+            persona = state.get("persona", {})
             
-            # Get instances
-            analyzer = await self._get_analyzer()
-            formatter = await self._get_formatter()
-            weather_tools = await self._get_weather_tools()
+            # Extract user message
+            user_message = ""
+            if messages:
+                last_message = messages[-1]
+                if hasattr(last_message, 'content'):
+                    user_message = last_message.content
+                elif isinstance(last_message, dict):
+                    user_message = last_message.get("content", "")
             
             # Get user preferences from shared memory and state persona  
             user_preferences = shared_memory.get("user_preferences", {})
-            configured_persona = state.get("persona", "casual")
-            communication_style = user_preferences.get("communication_style", configured_persona)
+            
+            # Extract persona_style using centralized approach
+            persona_style = "professional"  # Default
+            if persona:
+                if isinstance(persona, str):
+                    persona_style = persona
+                elif isinstance(persona, dict):
+                    persona_style = persona.get("persona_style", persona.get("style", "professional"))
+            
+            # Use user preferences if available, otherwise use persona_style
+            communication_style = user_preferences.get("communication_style", persona_style)
             detail_level = user_preferences.get("preferred_detail_level", "moderate")
             
-            # Analyze the weather request using intelligent analysis
-            weather_request = await analyzer.analyze_weather_request(user_message, shared_memory)
+            return {
+                "query": user_message,
+                "user_preferences": user_preferences,
+                "communication_style": communication_style,
+                "detail_level": detail_level
+            }
             
-            if not weather_request["success"]:
-                error_response = await formatter.format_error_response(weather_request["error"], communication_style)
-                return self._create_response(error_response, is_complete=False)
+        except Exception as e:
+            logger.error(f"❌ Failed to prepare context: {e}")
+            return {
+                "query": "",
+                "user_preferences": {},
+                "communication_style": "casual",
+                "detail_level": "moderate",
+                "error": str(e)
+            }
+    
+    async def _analyze_request_node(self, state: WeatherState) -> Dict[str, Any]:
+        """Analyze weather request using intelligent analysis"""
+        try:
+            logger.info("🔍 Analyzing weather request...")
             
-            # Check if location clarification is needed
-            if weather_request.get("location") == "LOCATION_NEEDED":
-                clarification_response = "Where would you like weather for? Please provide a city name, state, or ZIP code."
-                return self._create_response(clarification_response, is_complete=False)
+            query = state.get("query", "")
+            shared_memory = state.get("shared_memory", {})
+            
+            # Get analyzer instance
+            analyzer = await self._get_analyzer()
+            
+            # Analyze the weather request
+            weather_request = await analyzer.analyze_weather_request(query, shared_memory)
+            
+            return {
+                "weather_request": weather_request
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to analyze request: {e}")
+            return {
+                "weather_request": {
+                    "success": False,
+                    "error": str(e)
+                },
+                "error": str(e)
+            }
+    
+    def _route_from_analysis(self, state: WeatherState) -> str:
+        """Route from analysis: check if location is needed or proceed to get data"""
+        weather_request = state.get("weather_request", {})
+        
+        if not weather_request.get("success", False):
+            return "location_needed"  # Error case - will be handled in response
+        
+        if weather_request.get("location") == "LOCATION_NEEDED":
+            return "location_needed"
+        
+        return "get_data"
+    
+    async def _get_weather_data_node(self, state: WeatherState) -> Dict[str, Any]:
+        """Get weather data using weather tools"""
+        try:
+            logger.info("🌤️ Fetching weather data...")
+            
+            weather_request = state.get("weather_request", {})
+            user_id = state.get("user_id", "system")
+            
+            # Get weather tools instance
+            weather_tools = await self._get_weather_tools()
             
             # Get weather data
             weather_data = await self._get_weather_data(weather_request, weather_tools, user_id)
             
-            if not weather_data["success"]:
-                error_response = await formatter.format_error_response(weather_data["error"], communication_style)
-                return self._create_response(error_response, is_complete=False)
+            # Store results in shared memory if successful
+            if weather_data.get("success", False):
+                shared_memory = state.get("shared_memory", {})
+                analyzer = await self._get_analyzer()
+                analyzer.update_shared_memory(shared_memory, weather_request, weather_data, self.agent_type)
             
-            # Store results in shared memory
-            analyzer.update_shared_memory(shared_memory, weather_request, weather_data, self.agent_type)
+            return {
+                "weather_data": weather_data
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to get weather data: {e}")
+            return {
+                "weather_data": {
+                    "success": False,
+                    "error": str(e)
+                },
+                "error": str(e)
+            }
+    
+    async def _generate_response_node(self, state: WeatherState) -> Dict[str, Any]:
+        """Generate formatted response with recommendations and collaboration suggestions"""
+        try:
+            logger.info("📝 Generating weather response...")
+            
+            weather_request = state.get("weather_request", {})
+            weather_data = state.get("weather_data", {})
+            query = state.get("query", "")
+            communication_style = state.get("communication_style", "casual")
+            detail_level = state.get("detail_level", "moderate")
+            shared_memory = state.get("shared_memory", {})
+            
+            # Get formatter instance
+            formatter = await self._get_formatter()
+            
+            # Check for errors
+            if not weather_request.get("success", False):
+                error_response = await formatter.format_error_response(
+                    weather_request.get("error", "Unknown error"), 
+                    communication_style
+                )
+                return {
+                    "response": self._create_response(error_response, is_complete=False),
+                    "task_status": "error"
+                }
+            
+            # Check if location clarification is needed
+            if weather_request.get("location") == "LOCATION_NEEDED":
+                clarification_response = "Where would you like weather for? Please provide a city name, state, or ZIP code."
+                return {
+                    "response": self._create_response(clarification_response, is_complete=False),
+                    "task_status": "incomplete"
+                }
+            
+            # Check for weather data errors
+            if not weather_data.get("success", False):
+                error_response = await formatter.format_error_response(
+                    weather_data.get("error", "Unknown error"),
+                    communication_style
+                )
+                return {
+                    "response": self._create_response(error_response, is_complete=False),
+                    "task_status": "error"
+                }
             
             # Get LLM-enhanced intelligent recommendations
-            recommendations = await self._get_llm_recommendations(weather_request, weather_data, communication_style)
+            recommendations = await self._get_llm_recommendations(
+                weather_request, 
+                weather_data, 
+                communication_style,
+                state
+            )
             
             # Detect research opportunities
-            collaboration_data = await self._detect_collaboration_opportunities(user_message, weather_request, weather_data)
+            collaboration_data = await self._detect_collaboration_opportunities(
+                query, 
+                weather_request, 
+                weather_data,
+                state
+            )
             
             # Format response based on user preferences
             formatted_response = await formatter.format_weather_response(
@@ -131,15 +305,137 @@ class WeatherAgent(BaseAgent):
             if recommendations:
                 formatted_response += f"\n\n💡 {recommendations}"
             
-            logger.info(f"✅ Weather Agent: Successfully provided weather intelligence for {weather_request['location']}")
-            return self._create_response(formatted_response, is_complete=True)
+            location = weather_request.get("location", "unknown")
+            logger.info(f"✅ Weather response generated for {location}")
+            
+            # Persist agent selection for conversation continuity
+            shared_memory = state.get("shared_memory", {})
+            shared_memory["primary_agent_selected"] = "weather_agent"
+            shared_memory["last_agent"] = "weather_agent"
+            
+            return {
+                "response": self._create_response(formatted_response, is_complete=True),
+                "recommendations": recommendations,
+                "collaboration_data": collaboration_data,
+                "task_status": "complete",
+                "shared_memory": shared_memory
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to generate response: {e}")
+            communication_style = state.get("communication_style", "casual")
+            formatter = await self._get_formatter()
+            error_response = await formatter.format_error_response(str(e), communication_style)
+            return {
+                "response": self._create_response(error_response, is_complete=False),
+                "task_status": "error",
+                "error": str(e)
+            }
+    
+    async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
+        """
+        Process weather requests using LangGraph workflow
+        
+        Args:
+            query: User's weather query
+            metadata: Metadata dict with user_id, conversation_id, shared_memory, persona, etc.
+            messages: Optional conversation messages
+            
+        Returns:
+            Dictionary with weather response and metadata
+        """
+        try:
+            logger.info(f"🌤️ Weather Agent: Processing weather query: {query[:100]}...")
+            
+            # Get workflow (lazy initialization with checkpointer)
+            workflow = await self._get_workflow()
+            
+            # Extract user_id from metadata
+            metadata = metadata or {}
+            user_id = metadata.get("user_id", "system")
+            
+            # Get checkpoint config (handles thread_id from conversation_id/user_id)
+            config = self._get_checkpoint_config(metadata)
+            
+            # Prepare new messages (current query)
+            new_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Load and merge checkpointed messages to preserve conversation history
+            conversation_messages = await self._load_and_merge_checkpoint_messages(
+                workflow, config, new_messages
+            )
+            
+            # Load shared_memory from checkpoint if available
+            checkpoint_state = await workflow.aget_state(config)
+            existing_shared_memory = {}
+            if checkpoint_state and checkpoint_state.values:
+                existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+            
+            # Merge with any shared_memory from metadata
+            shared_memory = metadata.get("shared_memory", {}) or {}
+            shared_memory.update(existing_shared_memory)
+            
+            # Extract persona (can be string or dict)
+            persona = metadata.get("persona", {})
+            if isinstance(persona, str):
+                # Convert string persona to dict format
+                persona = {"persona_style": persona, "style": persona}
+            
+            # Extract persona_style for initial state
+            persona_style = "professional"  # Default
+            if persona:
+                if isinstance(persona, dict):
+                    persona_style = persona.get("persona_style", persona.get("style", "professional"))
+                elif isinstance(persona, str):
+                    persona_style = persona
+            
+            # Build initial state for LangGraph workflow
+            initial_state: WeatherState = {
+                "query": query,
+                "user_id": user_id,
+                "metadata": metadata,
+                "messages": conversation_messages,
+                "shared_memory": shared_memory,
+                "persona": persona if isinstance(persona, dict) else {"persona_style": persona_style},
+                "user_preferences": {},
+                "communication_style": persona_style,
+                "detail_level": "moderate",
+                "weather_request": {},
+                "weather_data": {},
+                "recommendations": None,
+                "collaboration_data": {},
+                "response": {},
+                "task_status": "",
+                "error": ""
+            }
+            
+            # Invoke LangGraph workflow with checkpointing
+            final_state = await workflow.ainvoke(initial_state, config=config)
+            
+            # Extract final response (weather agent returns response dict with _create_response result)
+            response_dict = final_state.get("response", {})
+            task_status = final_state.get("task_status", "complete")
+            
+            if task_status == "error":
+                error_msg = final_state.get("error", "Unknown error")
+                logger.error(f"❌ Weather agent failed: {error_msg}")
+                return self._create_error_response(error_msg)
+            
+            # Extract shared_memory if it was updated
+            updated_shared_memory = final_state.get("shared_memory", {})
+            if updated_shared_memory:
+                # Merge back into response for persistence
+                if isinstance(response_dict, dict):
+                    response_dict["shared_memory"] = updated_shared_memory
+            
+            logger.info(f"✅ Weather agent completed: {task_status}")
+            return response_dict
             
         except Exception as e:
             logger.error(f"❌ Weather Agent: Processing failed: {e}")
-            configured_persona = state.get("persona", "casual")
-            formatter = await self._get_formatter()
-            error_response = await formatter.format_error_response(str(e), configured_persona)
-            return self._create_response(error_response, is_complete=False)
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return self._create_error_response(str(e))
     
     async def _get_weather_data(self, weather_request: Dict[str, Any], weather_tools, user_id: str) -> Dict[str, Any]:
         """Get weather data using weather tools"""
@@ -169,44 +465,51 @@ class WeatherAgent(BaseAgent):
                 "error": f"Could not retrieve weather data: {str(e)}"
             }
     
-    async def _get_llm_recommendations(self, request: Dict[str, Any], weather_data: Dict[str, Any], style: str) -> str:
+    async def _get_llm_recommendations(self, request: Dict[str, Any], weather_data: Dict[str, Any], style: str, state: Optional[Dict[str, Any]] = None) -> str:
         """Get intelligent LLM-based weather recommendations and insights"""
         try:
-            client = await self._get_openai_client()
-            fast_model = os.getenv("FAST_MODEL", "anthropic/claude-haiku-4.5")
+            # Use centralized LLM access from BaseAgent
+            fast_model = self._get_fast_model(state)
+            llm = self._get_llm(temperature=0.3, model=fast_model, state=state)
+            
+            # Get centralized persona style instructions from BaseAgent
+            style_instruction = self._get_style_instruction(style)
             
             # Build prompt for weather intelligence
             weather_info = self._extract_weather_summary(request, weather_data)
             
-            prompt = f"""Based on the weather data provided, give intelligent recommendations and insights.
+            prompt = f"""Based on the weather data provided, provide intelligent recommendations and ONE fun weather feature.
 
 WEATHER DATA:
 {weather_info}
 
-COMMUNICATION STYLE: {style}
+{style_instruction}
 
-Provide 1-2 sentences of intelligent recommendations focusing on:
-- Optimal activities for these conditions
-- What to watch out for
-- Any interesting meteorological insights
+REQUIREMENTS:
+1. Provide 1-2 sentences of practical recommendations focusing on:
+   - Optimal activities for these conditions
+   - What to watch out for
+   - Any interesting meteorological insights
 
-Keep recommendations practical and match the {style} communication style.
-Be brief but insightful - this is additional context, not the main response.
+2. Choose ONE fun feature to include (pick the most appropriate for these conditions):
+   - **Activity Matchmaking**: Suggest a specific activity that's perfect for this weather (e.g., "Perfect day for a picnic in the park!" or "Great weather for indoor reading with hot cocoa")
+   - **Weather-Based Food/Drink**: Suggest a food or drink that matches the weather (e.g., "Time for a refreshing iced tea!" or "Perfect weather for a warm bowl of soup")
+   - **Weather Challenge**: Offer a fun weather-related challenge or observation task (e.g., "Can you spot a rainbow today?" or "Perfect day for cloud watching - see if you can identify different cloud types!")
+
+Format your response as:
+[Practical recommendations]
+
+🎯 [Fun Feature Type]: [Your fun suggestion]
+
+Be brief, engaging, and match the communication style. Make it feel natural and fun!
 """
             
-            # Get LLM recommendations
-            response = await client.chat.completions.create(
-                model=fast_model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3
-            )
+            # Get LLM recommendations using LangChain interface
+            response = await llm.ainvoke([HumanMessage(content=prompt)])
+            recommendation = response.content if hasattr(response, 'content') else str(response)
+            recommendation = recommendation.strip()
             
-            recommendation = response.choices[0].message.content.strip()
-            
-            # Validate and clean up recommendation
-            if len(recommendation) > 200:
-                recommendation = recommendation[:197] + "..."
-            
+            # Return recommendation (no truncation - max_tokens handled centrally by OpenRouter)
             return recommendation if recommendation else None
             
         except Exception as e:
@@ -240,11 +543,12 @@ Be brief but insightful - this is additional context, not the main response.
             logger.error(f"❌ Error extracting weather summary: {e}")
             return "Weather data available but summary extraction failed."
     
-    async def _detect_collaboration_opportunities(self, user_message: str, weather_request: Dict[str, Any], weather_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def _detect_collaboration_opportunities(self, user_message: str, weather_request: Dict[str, Any], weather_data: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Detect opportunities for weather→research collaboration using LLM intelligence"""
         try:
-            client = await self._get_openai_client()
-            fast_model = os.getenv("FAST_MODEL", "anthropic/claude-haiku-4.5")
+            # Use centralized LLM access from BaseAgent
+            fast_model = self._get_fast_model(state)
+            llm = self._get_llm(temperature=0.2, model=fast_model, state=state)
             
             # Extract weather conditions for context
             weather_summary = self._extract_weather_summary(weather_request, weather_data)
@@ -290,15 +594,17 @@ User: "Weather for my hiking trip to Yosemite this weekend"
 
 Return ONLY valid JSON, nothing else."""
 
-            response = await client.chat.completions.create(
-                model=fast_model,
-                messages=[{"role": "user", "content": collaboration_prompt}],
-                temperature=0.2
-            )
+            # Use LangChain interface with system message for JSON output
+            messages = [
+                SystemMessage(content="You are a collaboration analyzer. Always respond with valid JSON only."),
+                HumanMessage(content=collaboration_prompt)
+            ]
+            response = await llm.ainvoke(messages)
             
             # Parse LLM response
             try:
-                collaboration_data = json.loads(response.choices[0].message.content)
+                response_content = response.content if hasattr(response, 'content') else str(response)
+                collaboration_data = json.loads(response_content)
                 logger.info(f"🤝 Collaboration Analysis: {collaboration_data.get('collaboration_type', 'none')} (confidence: {collaboration_data.get('confidence', 0.0)})")
                 return collaboration_data
                 

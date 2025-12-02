@@ -79,6 +79,8 @@ class SharedMemory(BaseModel):
     research_findings: Dict[str, ResearchFindingEntry] = Field(default_factory=dict, description="Research results by topic")
     formatted_reports: Dict[str, FormattedReportEntry] = Field(default_factory=dict, description="Generated reports by template")
     search_history: List[SearchHistoryEntry] = Field(default_factory=list, description="History of search operations")
+    last_agent: Optional[str] = Field(None, description="Last primary agent used in conversation for continuity tracking")
+    primary_agent_selected: Optional[str] = Field(None, description="Primary agent currently selected by intent classifier")
     
     # Optional fields for specific use cases
     web_search_permission: bool = Field(False, description="Whether web search permission is granted")

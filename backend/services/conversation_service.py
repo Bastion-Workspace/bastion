@@ -196,12 +196,42 @@ class ConversationLifecycleManager:
             )
             
             # Generate title from first user message if not set
-            if not conversation['title'] and role == "user":
-                title = content[:100] + ("..." if len(content) > 100 else "")
-                await conn.execute(
-                    "UPDATE conversations SET title = $1 WHERE conversation_id = $2",
-                    title, conversation_id
-                )
+            if not conversation['title'] or conversation['title'] == "New Conversation":
+                if role == "user":
+                    # Check if this is the first user message (no previous user messages)
+                    user_message_count = await conn.fetchval("""
+                        SELECT COUNT(*) FROM conversation_messages 
+                        WHERE conversation_id = $1 AND message_type = 'user'
+                    """, conversation_id)
+                    
+                    # Only generate LLM title for the very first user message
+                    if user_message_count == 0:
+                        try:
+                            # Use LLM title generation service for first message
+                            from services.title_generation_service import TitleGenerationService
+                            title_service = TitleGenerationService()
+                            title = await title_service.generate_title(content)
+                            
+                            await conn.execute(
+                                "UPDATE conversations SET title = $1 WHERE conversation_id = $2",
+                                title, conversation_id
+                            )
+                            logger.info(f"✅ Generated LLM title for conversation {conversation_id}: {title}")
+                        except Exception as title_error:
+                            logger.warning(f"⚠️ Failed to generate LLM title, using fallback: {title_error}")
+                            # Fallback to simple title
+                            title = content[:100] + ("..." if len(content) > 100 else "")
+                            await conn.execute(
+                                "UPDATE conversations SET title = $1 WHERE conversation_id = $2",
+                                title, conversation_id
+                            )
+                    else:
+                        # Not the first message, just update with simple title if still "New Conversation"
+                        title = content[:100] + ("..." if len(content) > 100 else "")
+                        await conn.execute(
+                            "UPDATE conversations SET title = $1 WHERE conversation_id = $2",
+                            title, conversation_id
+                        )
             
             # Add the message
             message_id = str(uuid.uuid4())

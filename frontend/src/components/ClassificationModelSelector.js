@@ -34,8 +34,9 @@ const ClassificationModelSelector = ({ enabledModels, modelsData, modelsLoading 
     () => apiService.get('/api/models/classification'),
     {
       onSuccess: (data) => {
-        if (data?.classification_model) {
-          setSelectedClassificationModel(data.classification_model);
+        // Always set the effective model (what agents actually use)
+        if (data?.effective_classification_model) {
+          setSelectedClassificationModel(data.effective_classification_model);
         }
       },
       onError: () => {
@@ -213,11 +214,24 @@ const ClassificationModelSelector = ({ enabledModels, modelsData, modelsLoading 
 
       {/* Current Selection Info */}
       {selectedClassificationModel && (
-        <Paper sx={{ p: 2, mt: 2, bgcolor: 'primary.light', color: 'primary.contrastText' }}>
+        <Paper sx={{
+          p: 2,
+          mt: 2,
+          bgcolor: currentClassificationModel?.classification_model_is_fallback ? 'warning.light' : 'primary.light',
+          color: currentClassificationModel?.classification_model_is_fallback ? 'warning.contrastText' : 'primary.contrastText'
+        }}>
           <Box display="flex" alignItems="center" mb={1}>
             <Speed sx={{ mr: 1, fontSize: 20 }} />
             <Typography variant="subtitle2">
               Current Classification Model
+              {currentClassificationModel?.classification_model_is_fallback && (
+                <Chip
+                  label="Using Fallback"
+                  size="small"
+                  color="warning"
+                  sx={{ ml: 1, fontSize: '0.7rem' }}
+                />
+              )}
             </Typography>
           </Box>
           <Typography variant="body2">
@@ -225,6 +239,11 @@ const ClassificationModelSelector = ({ enabledModels, modelsData, modelsLoading 
           </Typography>
           <Typography variant="caption">
             This model will be used for all intent classification requests.
+            {currentClassificationModel?.classification_model_is_fallback && (
+              <Box component="span" sx={{ display: 'block', mt: 1, fontWeight: 'bold' }}>
+                ⚠️ No model explicitly set - using system fallback. Consider selecting a specific model above.
+              </Box>
+            )}
           </Typography>
         </Paper>
       )}

@@ -13,39 +13,45 @@ import re
 import os
 from typing import Dict, Any, Optional
 
-from openai import AsyncOpenAI
-from orchestrator.models.intent_models import SimpleIntentResult
+from langgraph.graph import StateGraph, END
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from orchestrator.utils.openrouter_client import get_openrouter_client
+from orchestrator.models.intent_models import SimpleIntentResult, IntentClassificationState
+from orchestrator.services.agent_capabilities import (
+    detect_domain,
+    route_within_domain,
+    find_best_agent_match
+)
 
 logger = logging.getLogger(__name__)
 
 
 class IntentClassifier:
 	"""
-	Simple Intent Classification Service
+	Intent Classification Service using LangGraph workflow
 	
-	Provides semantic routing to 24+ specialized agents based on:
-	- Action intent (observation, generation, modification, analysis, query, management)
-	- Editor context (fiction, rules, outline, character, podcast, substack, sysml)
-	- Pipeline context (active_pipeline_id presence)
-	- Conversation intelligence (recent agent activity)
+	Two-stage classification with capability-based routing:
+	- Stage 1: Detect domain (LLM node)
+	- Stage 2: Classify action intent (LLM node)
+	- Stage 3: Route using capability matching (deterministic node)
 	"""
 	
 	def __init__(self):
-		"""Initialize intent classifier with LLM client"""
+		"""Initialize intent classifier with LangGraph workflow"""
 		self._openai_client = None
 		self._classification_model = None
+		self.workflow = self._build_workflow()
 	
-	async def _get_openai_client(self) -> AsyncOpenAI:
-		"""Get or create OpenAI client"""
+	async def _get_openai_client(self):
+		"""Get or create OpenRouter client with automatic reasoning support"""
 		if self._openai_client is None:
 			api_key = os.getenv("OPENROUTER_API_KEY")
 			if not api_key:
 				raise ValueError("OPENROUTER_API_KEY environment variable not set")
 			
-			self._openai_client = AsyncOpenAI(
-				api_key=api_key,
-				base_url="https://openrouter.ai/api/v1"
-			)
+			# Use OpenRouterClient wrapper for automatic reasoning support
+			self._openai_client = get_openrouter_client(api_key=api_key)
 		return self._openai_client
 	
 	def _get_classification_model(self) -> str:
@@ -64,13 +70,32 @@ class IntentClassifier:
 			logger.info(f"Classification model: {self._classification_model}")
 		return self._classification_model
 	
+	def _build_workflow(self) -> StateGraph:
+		"""Build LangGraph workflow for intent classification"""
+		workflow = StateGraph(IntentClassificationState)
+		
+		# Add nodes
+		workflow.add_node("detect_domain", self._detect_domain_node)
+		workflow.add_node("classify_action_intent", self._classify_action_intent_node)
+		workflow.add_node("route_agent", self._route_agent_node)
+		
+		# Entry point
+		workflow.set_entry_point("detect_domain")
+		
+		# Flow: detect_domain -> classify_action_intent -> route_agent -> END
+		workflow.add_edge("detect_domain", "classify_action_intent")
+		workflow.add_edge("classify_action_intent", "route_agent")
+		workflow.add_edge("route_agent", END)
+		
+		return workflow.compile()
+	
 	async def classify_intent(
 		self, 
 		user_message: str, 
 		conversation_context: Optional[Dict[str, Any]] = None
 	) -> SimpleIntentResult:
 		"""
-		Classify user intent and route to appropriate agent
+		Classify intent using LangGraph workflow
 		
 		Args:
 			user_message: The user's query/message
@@ -83,10 +108,73 @@ class IntentClassifier:
 			SimpleIntentResult with target_agent, action_intent, permission, confidence
 		"""
 		try:
-			logger.info(f"🎯 SIMPLE CLASSIFICATION: Processing message: {user_message[:100]}...")
+			logger.info(f"🎯 INTENT CLASSIFICATION: Processing message: {user_message[:100]}...")
 			
-			# Build simple prompt
-			prompt = self._build_simple_prompt(user_message, conversation_context or {})
+			# Log conversation context for debugging
+			context = conversation_context or {}
+			shared_memory = context.get('shared_memory', {}) or {}
+			primary_agent = shared_memory.get('primary_agent_selected')
+			last_agent = shared_memory.get('last_agent')
+			
+			if primary_agent:
+				logger.info(f"📋 CONVERSATION CONTEXT: primary_agent_selected = '{primary_agent}'")
+			else:
+				logger.info(f"📋 CONVERSATION CONTEXT: primary_agent_selected = None (new conversation or no previous agent)")
+			
+			if last_agent and last_agent != primary_agent:
+				logger.info(f"📋 CONVERSATION CONTEXT: last_agent = '{last_agent}' (different from primary_agent)")
+			
+			# Initialize state
+			initial_state: IntentClassificationState = {
+				"user_message": user_message,
+				"conversation_context": context,
+				"domain": "",
+				"action_intent": "",
+				"target_agent": "",
+				"confidence": 0.0,
+				"reasoning": "",
+				"permission_required": False,
+				"result": None
+			}
+			
+			# Run workflow
+			final_state = await self.workflow.ainvoke(initial_state)
+			
+			# Return result
+			return final_state["result"]
+			
+		except Exception as e:
+			logger.error(f"❌ Intent classification failed: {e}")
+			# Simple fallback
+			return self._create_simple_fallback(user_message, conversation_context)
+	
+	async def _detect_domain_node(self, state: IntentClassificationState) -> IntentClassificationState:
+		"""
+		Stage 1: Detect domain using LLM
+		
+		Uses LLM for semantic understanding of domain, not just keyword matching.
+		"""
+		try:
+			user_message = state["user_message"]
+			context = state["conversation_context"]
+			
+			# Extract editor context
+			shared_memory = context.get('shared_memory', {})
+			active_editor = shared_memory.get('active_editor', {}) or {}
+			editor_context = {}
+			if active_editor:
+				fm = active_editor.get('frontmatter', {}) or {}
+				editor_type = fm.get('type', '').strip().lower()
+				if editor_type:
+					editor_context = {'type': editor_type}
+			
+			# Log primary agent for domain detection
+			primary_agent = shared_memory.get('primary_agent_selected')
+			if primary_agent:
+				logger.info(f"🔍 DOMAIN DETECTION: Analyzing with primary_agent = '{primary_agent}' (will consider for continuity)")
+			
+			# Build domain detection prompt
+			prompt = self._build_domain_detection_prompt(user_message, editor_context, context)
 			
 			# Get LLM classification
 			openai_client = await self._get_openai_client()
@@ -94,24 +182,324 @@ class IntentClassifier:
 			
 			response = await openai_client.chat.completions.create(
 				messages=[
-					{"role": "system", "content": "You are Roosevelt's Simple Intent Classifier. Respond with JSON ONLY (no prose, no markdown fences), matching the required schema strictly."},
+					{"role": "system", "content": "You are a Domain Classifier. Classify ONLY the domain. Respond with JSON ONLY (no prose, no markdown fences)."},
 					{"role": "user", "content": prompt}
 				],
 				model=classification_model,
 				temperature=0.1,
-				max_tokens=500  # Simple responses don't need many tokens
+				max_tokens=150
 			)
 			
-			# Extract response content
-			response_content = response.choices[0].message.content
+			# Parse response
+			response_content = response.choices[0].message.content.strip()
+			if "```json" in response_content:
+				match = re.search(r'```json\s*\n(.*?)\n```', response_content, re.DOTALL)
+				if match:
+					response_content = match.group(1).strip()
+			elif "```" in response_content:
+				response_content = response_content.replace("```", "").strip()
 			
-			# Parse simple JSON response
-			return await self._parse_simple_response(response_content, user_message, conversation_context)
+			data = json.loads(response_content)
+			domain = data.get('domain', 'general').lower()
+			
+			# Validate domain
+			valid_domains = ['electronics', 'fiction', 'weather', 'general', 'content', 'management']
+			if domain not in valid_domains:
+				logger.warning(f"⚠️ Invalid domain '{domain}', defaulting to 'general'")
+				domain = 'general'
+			
+			logger.info(f"📊 STAGE 1 - DOMAIN: {domain}")
+			
+			state["domain"] = domain
+			return state
 			
 		except Exception as e:
-			logger.error(f"❌ Simple intent classification failed: {e}")
-			# Simple fallback
-			return self._create_simple_fallback(user_message, conversation_context)
+			logger.error(f"❌ Domain detection failed: {e}")
+			# Fallback to deterministic detection
+			domain = detect_domain(
+				query=state["user_message"],
+				editor_context=editor_context if editor_context.get('type') else None,
+				conversation_history={
+					'last_agent': shared_memory.get('last_agent'),
+					'primary_agent_selected': shared_memory.get('primary_agent_selected')
+				}
+			)
+			state["domain"] = domain
+			return state
+	
+	async def _classify_action_intent_node(self, state: IntentClassificationState) -> IntentClassificationState:
+		"""
+		Stage 2: Classify action intent using LLM
+		"""
+		try:
+			user_message = state["user_message"]
+			context = state["conversation_context"]
+			
+			# Build action intent prompt
+			prompt = self._build_action_intent_prompt(user_message, context)
+			
+			# Get LLM classification
+			openai_client = await self._get_openai_client()
+			classification_model = self._get_classification_model()
+			
+			response = await openai_client.chat.completions.create(
+				messages=[
+					{"role": "system", "content": "You are an Action Intent Classifier. Classify ONLY the action intent. Respond with JSON ONLY (no prose, no markdown fences)."},
+					{"role": "user", "content": prompt}
+				],
+				model=classification_model,
+				temperature=0.1,
+				max_tokens=200
+			)
+			
+			# Parse response
+			response_content = response.choices[0].message.content.strip()
+			if "```json" in response_content:
+				match = re.search(r'```json\s*\n(.*?)\n```', response_content, re.DOTALL)
+				if match:
+					response_content = match.group(1).strip()
+			elif "```" in response_content:
+				response_content = response_content.replace("```", "").strip()
+			
+			data = json.loads(response_content)
+			action_intent = data.get('action_intent', 'query').lower()
+			
+			# Validate
+			valid_intents = ['observation', 'generation', 'modification', 'analysis', 'query', 'management']
+			if action_intent not in valid_intents:
+				logger.warning(f"⚠️ Invalid action_intent '{action_intent}', defaulting to 'query'")
+				action_intent = 'query'
+			
+			logger.info(f"📊 STAGE 2 - ACTION INTENT: {action_intent}")
+			
+			state["action_intent"] = action_intent
+			return state
+			
+		except Exception as e:
+			logger.error(f"❌ Action intent classification failed: {e}")
+			state["action_intent"] = 'query'
+			return state
+	
+	async def _route_agent_node(self, state: IntentClassificationState) -> IntentClassificationState:
+		"""
+		Stage 3: Route to agent using capability matching
+		"""
+		try:
+			domain = state["domain"]
+			action_intent = state["action_intent"]
+			user_message = state["user_message"]
+			context = state["conversation_context"]
+			
+			# Extract editor context
+			shared_memory = context.get('shared_memory', {})
+			active_editor = shared_memory.get('active_editor', {}) or {}
+			editor_context = {}
+			if active_editor:
+				fm = active_editor.get('frontmatter', {}) or {}
+				editor_type = fm.get('type', '').strip().lower()
+				if editor_type:
+					editor_context = {'type': editor_type}
+			
+			# Extract conversation history
+			primary_agent = shared_memory.get('primary_agent_selected')
+			last_agent = shared_memory.get('last_agent')
+			conversation_history = {
+				'last_agent': last_agent,
+				'primary_agent_selected': primary_agent
+			}
+			
+			# Log primary agent for routing
+			if primary_agent:
+				logger.info(f"🔄 AGENT ROUTING: Using primary_agent = '{primary_agent}' for capability matching (continuity boost)")
+			else:
+				logger.info(f"🔄 AGENT ROUTING: No primary_agent (new conversation)")
+			
+			# Route using capability matching
+			target_agent, confidence = find_best_agent_match(
+				domain=domain,
+				action_intent=action_intent,
+				query=user_message,
+				editor_context=editor_context if editor_context.get('type') else None,
+				conversation_history=conversation_history
+			)
+			
+			logger.info(f"📊 STAGE 3 - ROUTING: {target_agent} (confidence: {confidence:.2f})")
+			
+			# Check if agent needs web search permission
+			agents_requiring_web_search = {
+				'research_agent',  # Always needs web search for research
+				'site_crawl_agent',  # Always needs web search for crawling
+				'substack_agent',  # Has built-in research capability
+			}
+			
+			# Electronics agent may need web search for component research
+			# Check if query suggests web search is needed
+			electronics_needs_web = (
+				target_agent == 'electronics_agent' and
+				any(kw in user_message.lower() for kw in [
+					'research', 'find', 'look up', 'search for', 'component', 'datasheet',
+					'specification', 'price', 'availability', 'where to buy'
+				])
+			)
+			
+			# Determine if permission is required
+			needs_web_search = (
+				target_agent in agents_requiring_web_search or
+				electronics_needs_web
+			)
+			
+			# Check if permission already exists in shared_memory
+			web_permission_granted = shared_memory.get('web_search_permission', False)
+			
+			# Set permission_required flag
+			# If agent needs web search but permission not granted, require it
+			permission_required = needs_web_search and not web_permission_granted
+			
+			if permission_required:
+				logger.info(f"🛡️ PERMISSION CHECK: {target_agent} needs web search, permission not granted → permission_required=True")
+			elif needs_web_search and web_permission_granted:
+				logger.info(f"✅ PERMISSION CHECK: {target_agent} needs web search, permission already granted")
+			
+			# Build reasoning
+			reasoning = f"Domain: {domain}, Action: {action_intent}, Editor: {editor_context.get('type', 'none')} → {target_agent}"
+			if permission_required:
+				reasoning += " (web search permission required)"
+			
+			# Create result
+			result = SimpleIntentResult(
+				target_agent=target_agent,
+				action_intent=action_intent,
+				permission_required=permission_required,
+				confidence=confidence,
+				reasoning=reasoning
+			)
+			
+			state["target_agent"] = target_agent
+			state["confidence"] = confidence
+			state["reasoning"] = reasoning
+			state["result"] = result
+			
+			return state
+			
+		except Exception as e:
+			logger.error(f"❌ Agent routing failed: {e}")
+			# Fallback - check permissions even in error case
+			shared_memory = context.get('shared_memory', {}) if 'context' in locals() else {}
+			web_permission_granted = shared_memory.get('web_search_permission', False)
+			fallback_agent = "chat_agent"
+			permission_required = False
+			
+			# If fallback is to research_agent, check permissions
+			if fallback_agent == 'research_agent' and not web_permission_granted:
+				permission_required = True
+			
+			result = SimpleIntentResult(
+				target_agent=fallback_agent,
+				action_intent=state.get("action_intent", "query"),
+				permission_required=permission_required,
+				confidence=0.5,
+				reasoning=f"Fallback due to error: {str(e)}"
+			)
+			state["result"] = result
+			return state
+	
+	def _build_domain_detection_prompt(self, user_message: str, editor_context: Dict[str, Any], conversation_context: Dict[str, Any]) -> str:
+		"""
+		Build prompt for domain detection
+		"""
+		editor_hint = ""
+		if editor_context.get('type'):
+			editor_hint = f"\n\n**EDITOR CONTEXT**: User has a '{editor_context['type']}' editor open. This is a STRONG signal for domain detection."
+		
+		shared_memory = conversation_context.get('shared_memory', {})
+		primary_agent = shared_memory.get('primary_agent_selected')
+		continuity_hint = ""
+		if primary_agent:
+			continuity_hint = f"\n\n**CONVERSATION CONTEXT**: Previous agent was '{primary_agent}'. Consider if this is a continuation."
+		
+		return f"""Classify the DOMAIN of this user message:
+
+**USER MESSAGE**: "{user_message}"{editor_hint}{continuity_hint}
+
+**DOMAIN OPTIONS** (choose ONE):
+
+1. **electronics** - Electronics, circuits, embedded systems, Arduino, ESP32, microcontrollers, sensors, components
+2. **fiction** - Fiction writing, stories, manuscripts, chapters, characters, plots, worldbuilding
+3. **weather** - Weather conditions, forecasts, temperature, climate
+4. **content** - Content creation (articles, podcasts, blog posts)
+5. **management** - Task management, project organization, system configuration
+6. **general** - General queries, research, information gathering, or unclear domain
+
+**CRITICAL RULES**:
+- Editor context is PRIMARY signal - if editor type matches a domain, use that domain
+- "our electronics project" or "electronics project" → electronics
+- "chapter", "scene", "manuscript" → fiction
+- "weather", "temperature", "forecast" → weather
+- If unclear, default to "general"
+
+**OUTPUT FORMAT** (JSON ONLY):
+{{
+  "domain": "electronics|fiction|weather|content|management|general",
+  "reasoning": "Brief explanation of domain choice"
+}}"""
+	
+	def _build_action_intent_prompt(self, user_message: str, conversation_context: Dict[str, Any]) -> str:
+		"""
+		Build focused prompt for action intent classification only
+		
+		Much simpler than full routing prompt - just classifies HOW user wants to interact.
+		"""
+		# Get conversation context hints
+		shared = conversation_context.get('shared_memory', {}) or {}
+		primary_agent = shared.get('primary_agent_selected')
+		last_response = shared.get('last_response')
+		
+		continuity_hint = ""
+		if primary_agent and last_response:
+			response_preview = last_response[:400] + "..." if len(last_response) > 400 else last_response
+			continuity_hint = f"\n\n**CONTEXT**: Previous agent '{primary_agent}' responded: \"{response_preview}\"\nIf this is a continuation/response to that, consider that context."
+		
+		return f"""Classify the ACTION INTENT of this user message:
+
+**USER MESSAGE**: "{user_message}"{continuity_hint}
+
+**ACTION INTENT OPTIONS** (choose ONE):
+
+1. **observation** - User wants to see/check/review/confirm existing content
+   - Examples: "Do you see...", "Show me...", "What's in...", "How is...", "Is there..."
+   - Intent: View/confirm what exists, NOT create/modify
+
+2. **generation** - User wants to CREATE/WRITE/DRAFT NEW content
+   - Examples: "Write...", "Create...", "Draft...", "Generate...", "Compose..."
+   - Intent: Create something new
+
+3. **modification** - User wants to CHANGE/EDIT/REVISE EXISTING content
+   - Examples: "Edit...", "Revise...", "Change...", "Improve...", "Update...", "Fix..."
+   - Intent: Alter existing content
+
+4. **analysis** - User wants CRITIQUE/FEEDBACK/ASSESSMENT/COMPARISON/SUMMARIZATION
+   - Examples: "Analyze...", "Critique...", "Review...", "Compare...", "Summarize...", "Find differences..."
+   - Intent: Get feedback, assessment, or summary
+
+5. **query** - User seeks EXTERNAL INFORMATION or FACTS (NOT document analysis)
+   - Examples: "Tell me about...", "What is...", "Explain...", "Research...", "Find information about..."
+   - Intent: Get information about general topics (NOT specific documents)
+
+6. **management** - User wants to ORGANIZE/CONFIGURE/MANAGE system/tasks/project files
+   - Examples: "Add TODO...", "Save...", "Update project files...", "Mark as done...", "Crawl website..."
+   - Intent: System, task, or project file management
+
+**CRITICAL RULES**:
+- Document-specific queries (mentions specific files/documents) → **analysis** (NOT query)
+- "How is X looking?" or "How is X going?" → **observation** (checking status)
+- "Save what we discussed" → **management** (project file operation)
+- Comparison/contrast queries → **analysis** (NOT query)
+
+**OUTPUT FORMAT** (JSON ONLY):
+{{
+  "action_intent": "observation|generation|modification|analysis|query|management",
+  "reasoning": "Brief explanation of why this action intent was chosen"
+}}"""
 	
 	def _build_simple_prompt(self, user_message: str, conversation_context: Dict[str, Any]) -> str:
 		"""
@@ -123,12 +511,82 @@ class IntentClassifier:
 		# **CONTEXT-AWARE AGENT FILTERING**: Only show available agents based on page context
 		has_active_pipeline = conversation_context.get("shared_memory", {}).get("active_pipeline_id") is not None
 		recent_messages = len(conversation_context.get("messages", []))
-		
+		last_agent = conversation_context.get("shared_memory", {}).get("last_agent")
+
 		context_hint = ""
 		if has_active_pipeline:
 			context_hint = "\n**CONTEXT**: User has an active pipeline in conversation."
 		elif recent_messages > 1:
 			context_hint = "\n**CONTEXT**: Ongoing conversation with previous messages."
+			if last_agent:
+				context_hint += f" Last agent used: {last_agent}."
+
+		# **PRIMARY SIGNAL: CONVERSATION CONTINUITY** - This is the MOST IMPORTANT signal for routing
+		# Use primary_agent_selected (not last_agent) to avoid utility agents like data_formatter
+		# If user is clearly continuing the previous conversation, route back to the same primary agent
+		primary_agent = conversation_context.get("shared_memory", {}).get("primary_agent_selected")
+		last_response = conversation_context.get("shared_memory", {}).get("last_response")
+		
+		conversation_continuity_hint = ""
+		if primary_agent and last_response and recent_messages > 1:
+			# Truncate response for prompt (keep enough context to understand what agent said)
+			response_preview = last_response[:800] + "..." if len(last_response) > 800 else last_response
+			conversation_continuity_hint = f"""
+**🎯 PRIMARY ROUTING SIGNAL: CONVERSATION CONTINUITY**
+
+The '{primary_agent}' agent previously responded with:
+"{response_preview}"
+
+**CRITICAL ROUTING RULES**:
+1. **CONTINUATION DETECTION**: If the user's message is clearly continuing or responding to the above agent message, route to '{primary_agent}'.
+   - Examples of continuations: "Yes, please", "That sounds good", "Can you show me more?", "What about X?", "Save that", "Update it", "How does that work?", "Tell me more", "What's next?"
+   - These are responses to the agent's previous message, not new topics.
+
+2. **TOPIC CHANGE DETECTION**: If the user's message is clearly a NEW topic unrelated to the above conversation, route to the appropriate agent for that new topic.
+   - Examples of topic changes: "What's the weather?" (after electronics discussion) → weather_agent
+   - "Tell me about Napoleon" (after project discussion) → research_agent
+   - The user is explicitly changing topics, not continuing the conversation.
+
+3. **SEMANTIC UNDERSTANDING**: Use semantic analysis, not keyword matching:
+   - "Save what we discussed" after electronics_agent response → electronics_agent (continuation)
+   - "What's the weather?" after electronics_agent response → weather_agent (topic change)
+   - "Update the project" after electronics_agent response → electronics_agent (continuation)
+
+**BALANCED ROUTING PRIORITY**:
+1. **SEMANTIC INTENT FIRST**: If the query clearly requires a specialized agent (research, weather, etc.), route to that agent even if continuing a conversation.
+2. **CONTINUITY SECOND**: Only maintain continuity if the query is clearly continuing the previous topic.
+3. **RESEARCH QUERIES**: Future predictions, economic analysis, policy effects, "what would be", "anticipate effects" → research_agent (even if continuing chat conversation)
+4. **TOPIC CHANGE**: If clearly a new, unrelated topic → route to appropriate agent
+
+**EXAMPLES**:
+- "What do we anticipate the effects of tariff checks would be?" → research_agent (research query, even if continuing chat)
+- "What's the weather?" → weather_agent (clear topic change)
+- "Yes, please continue" → {primary_agent} (clear continuation)
+- "Tell me more about that" → {primary_agent} (clear continuation)
+- "What are the implications of X?" → research_agent (research query, switch even if continuing)"""
+		elif primary_agent and recent_messages > 1:
+			conversation_continuity_hint = f"\n**CONTINUITY**: The primary agent used was '{primary_agent}'. If this appears to be a continuation of the previous conversation, route to '{primary_agent}'."
+		
+		# **CONVERSATION HISTORY**: Include recent conversation messages for additional context
+		conversation_history_hint = ""
+		messages = conversation_context.get("messages", [])
+		if messages and len(messages) > 1:
+			# Include last 3-4 message pairs (6-8 messages) for context
+			recent_messages = messages[-8:] if len(messages) > 8 else messages
+			conversation_lines = []
+			for msg in recent_messages:
+				role = msg.get("role", "unknown")
+				content = msg.get("content", "")
+				# Truncate very long messages to avoid overwhelming the prompt
+				if len(content) > 300:
+					content = content[:300] + "..."
+				if role == "user":
+					conversation_lines.append(f"User: {content}")
+				elif role == "assistant":
+					conversation_lines.append(f"Assistant: {content}")
+			
+			if conversation_lines:
+				conversation_history_hint = f"\n\n**ADDITIONAL CONTEXT - RECENT CONVERSATION HISTORY**:\n" + "\n".join(conversation_lines) + "\n\n(Use this for additional context, but conversation continuity signal above takes priority)"
 		
 		# Bias toward ORG_INBOX if org agent has been active in this conversation
 		org_bias_hint = ""
@@ -140,7 +598,8 @@ class IntentClassifier:
 		except Exception:
 			pass
 		
-		# Detect active editor context type
+		# **CONTEXTUAL SIGNAL: EDITOR CONTEXT** - Provides helpful context but does NOT override conversation continuity
+		# User could have editor open but ask about weather - editor is contextual, not primary
 		editor_hint = ""
 		try:
 			shared = conversation_context.get("shared_memory", {}) or {}
@@ -148,21 +607,23 @@ class IntentClassifier:
 			fm = (active_editor.get("frontmatter") or {})
 			doc_type = str((fm.get('type') or '')).strip().lower()
 			if doc_type == 'fiction':
-				editor_hint = "\n\nEDITOR CONTEXT: Active editor contains FICTION manuscript. Prefer fiction_editing_agent."
+				editor_hint = "\n\n**CONTEXTUAL INFO**: Active editor contains FICTION manuscript. This is helpful context, but conversation continuity (above) takes priority."
 			elif doc_type == 'rules':
-				editor_hint = "\n\nEDITOR CONTEXT: Active editor contains RULES document. Prefer rules_editing_agent. (Do NOT use ARTICLE_ANALYSIS.)"
+				editor_hint = "\n\n**CONTEXTUAL INFO**: Active editor contains RULES document. This is helpful context, but conversation continuity (above) takes priority."
 			elif doc_type == 'character':
-				editor_hint = "\n\nEDITOR CONTEXT: Active editor contains CHARACTER profile. Prefer character_development_agent."
+				editor_hint = "\n\n**CONTEXTUAL INFO**: Active editor contains CHARACTER profile. This is helpful context, but conversation continuity (above) takes priority."
 			elif doc_type == 'outline':
-				editor_hint = "\n\nEDITOR CONTEXT: Active editor contains OUTLINE. Prefer outline_editing_agent. (Do NOT use ARTICLE_ANALYSIS.)"
+				editor_hint = "\n\n**CONTEXTUAL INFO**: Active editor contains OUTLINE. This is helpful context, but conversation continuity (above) takes priority."
 			elif doc_type == 'style':
-				editor_hint = "\n\nEDITOR CONTEXT: Active editor contains STYLE guide. Prefer chat_agent for general edits; DO NOT use ARTICLE_ANALYSIS."
+				editor_hint = "\n\n**CONTEXTUAL INFO**: Active editor contains STYLE guide. This is helpful context, but conversation continuity (above) takes priority."
 			elif doc_type == 'sysml':
-				editor_hint = "\n\nEDITOR CONTEXT: Active editor contains SYSML diagram document. Prefer sysml_agent for system design, UML, and SysML diagram generation/modification."
+				editor_hint = "\n\n**CONTEXTUAL INFO**: Active editor contains SYSML diagram document. This is helpful context, but conversation continuity (above) takes priority."
 			elif doc_type == 'podcast':
-				editor_hint = "\n\nEDITOR CONTEXT: Active editor contains PODCAST document. Prefer podcast_script_agent when the user requests a podcast script/commentary."
+				editor_hint = "\n\n**CONTEXTUAL INFO**: Active editor contains PODCAST document. This is helpful context, but conversation continuity (above) takes priority."
 			elif doc_type in ['substack', 'blog']:
-				editor_hint = "\n\nEDITOR CONTEXT: Active editor contains SUBSTACK/BLOG document. Prefer substack_agent for article/tweet generation requests, EVEN IF they mention research/historical context (substack_agent has built-in research). Use research_agent ONLY for pure research queries without article generation."
+				editor_hint = "\n\n**CONTEXTUAL INFO**: Active editor contains SUBSTACK/BLOG document. This is helpful context, but conversation continuity (above) takes priority."
+			elif doc_type == 'electronics':
+				editor_hint = "\n\n**CONTEXTUAL INFO**: Active editor contains ELECTRONICS project. This is helpful context for electronics-related queries, but conversation continuity (above) takes priority. If user asks about weather or other unrelated topics, ignore editor context."
 		except Exception:
 			pass
 		
@@ -197,7 +658,7 @@ class IntentClassifier:
 
 **MISSION**: Classify user intent (WHAT they want) and action intent (HOW they want to interact), then route to the right agent.
 
-**USER MESSAGE**: "{user_message}"{context_hint}{org_bias_hint}{editor_hint}
+**USER MESSAGE**: "{user_message}"{conversation_continuity_hint}{conversation_history_hint}{org_bias_hint}{editor_hint}
 
 **ACTION INTENT CLASSIFICATION (CRITICAL - CLASSIFY FIRST!):**
 
@@ -257,13 +718,19 @@ Every query has a PRIMARY action intent that determines routing behavior:
      * "Tell me about document X in our database" → analysis (specific document)
      * "What's in the worldcom files" → analysis (specific document set)
 
-**6. MANAGEMENT** - User wants to ORGANIZE/CONFIGURE/MANAGE system/tasks
-   - Language: "Add TODO...", "Mark as done...", "Crawl website...", "Set up...", "Configure..."
-   - Intent: System or task management
+**6. MANAGEMENT** - User wants to ORGANIZE/CONFIGURE/MANAGE system/tasks/project files
+   - Language: "Add TODO...", "Mark as done...", "Crawl website...", "Set up...", "Configure...", "Save...", "Save what we discussed...", "Update project files..."
+   - Intent: System, task, or project file management
+   - **CRITICAL DISTINCTION**:
+     * **Org-mode task management**: Managing inbox.org tasks (TODO lists) → org_inbox_agent or org_project_agent
+     * **Project file management**: Saving/updating project files (electronics, fiction, etc.) → editor-specific agent (electronics_agent, fiction_editing_agent, etc.)
+     * **System management**: Website crawling, configuration → website_crawler_agent or appropriate system agent
    - Examples:
-     * "Add TODO: Finish chapter 5" → management (task creation)
-     * "Crawl this website" → management (data ingestion)
-     * "Mark task as complete" → management (status update)
+     * "Add TODO: Finish chapter 5" → management (org-mode task) → org_inbox_agent
+     * "Save what we discussed on this electronics project" → management (project file) → electronics_agent (if electronics editor)
+     * "Update project files" → management (project file) → editor agent matching editor type
+     * "Crawl this website" → management (system/data ingestion) → website_crawler_agent
+     * "Mark task as complete" → management (org-mode task) → org_inbox_agent
 
 **CRITICAL ROUTING RULES USING ACTION INTENT**:
 
@@ -385,18 +852,29 @@ Every query has a PRIMARY action intent that determines routing behavior:
     * "How do I create a TODO?" → help_agent (feature instructions)
   - AVOID: General knowledge questions (use chat_agent), research queries (use research_agent)
 
-**MANAGEMENT AGENTS**:
+**MANAGEMENT AGENTS** (ORG-MODE TASK MANAGEMENT ONLY):
 - **org_inbox_agent**
-  - ACTION INTENTS: management (task modifications ONLY)
+  - ACTION INTENTS: management (org-mode task modifications ONLY)
   - USE FOR: MANAGING inbox.org (add TODO, toggle done, update task, change TODO state)
   - TRIGGERS: "add TODO", "mark done", "toggle", "update task", "change state"
-  - AVOID: reading/searching org files (use chat_agent or research_agent)
+  - **CRITICAL**: ONLY for org-mode task management (inbox.org), NOT for project file management
+  - **AVOID**: 
+    * Project file operations (use editor agents: electronics_agent, fiction_editing_agent, etc.)
+    * Saving/updating project files (use editor agents)
+    * Technical project planning (use electronics_agent, etc.)
+    * Reading/searching org files (use chat_agent or research_agent)
 
 - **org_project_agent**
-  - ACTION INTENTS: management (project creation)
-  - USE FOR: Creating new projects with structured metadata
-  - TRIGGERS: "start project", "create project", "new initiative", "launch campaign"
-  - AVOID: simple tasks (use org_inbox_agent)
+  - ACTION INTENTS: management (org-mode project entry creation ONLY)
+  - USE FOR: Creating new org-mode project entries for task management (NOT technical project design/planning)
+  - TRIGGERS: "start project", "create project", "new initiative", "launch campaign" (ONLY for org-mode task/project management, NOT technical design)
+  - **CRITICAL**: This is for ORG-MODE PROJECT MANAGEMENT (creating org-mode entries), not technical project planning/design
+  - **AVOID**: 
+    * Technical project planning (use electronics_agent, research_agent, or chat_agent): "design a circuit project", "plan an electronic project", "formulate a new electronic project"
+    * Software project planning (use chat_agent or research_agent): "create a software project", "plan a coding project"
+    * Project file operations (use editor agents: electronics_agent, etc.)
+    * Saving/updating project files (use editor agents)
+    * Simple tasks (use org_inbox_agent)
 
 - **website_crawler_agent**
   - ACTION INTENTS: management (data ingestion)
@@ -405,6 +883,17 @@ Every query has a PRIMARY action intent that determines routing behavior:
   - AVOID: single-page views (use research_agent)
 {pipeline_agent_section}
 **SPECIALIZED AGENTS**:
+- **email_agent**
+  - ACTION INTENTS: generation (email composition)
+  - USE FOR: Drafting and sending emails with user approval, context-aware email composition
+  - TRIGGERS: "send an email to", "email to", "compose email", "draft email", "send email", "email the research to", "send the findings to"
+  - EXAMPLES:
+    * "Send an email to john@example.com about the meeting" → email_agent
+    * "Email the research on X to bob@company.com" → email_agent
+    * "Compose an email to sarah@example.com" → email_agent
+    * "Send the research findings to my manager" → email_agent
+  - AVOID: General email questions (use chat_agent), email configuration (use help_agent)
+
 - **data_formatting_agent**
   - ACTION INTENTS: modification (data transformation)
   - USE FOR: Format data into tables, CSV, JSON for display/output{data_formatting_note}
@@ -415,17 +904,27 @@ Every query has a PRIMARY action intent that determines routing behavior:
   - USE FOR: Generate images using DALL-E or other image models
   - TRIGGERS: "create image", "generate picture", "draw", "visualize"
 
-- **wargaming_agent**
-  - ACTION INTENTS: analysis, query
-  - USE FOR: Military scenario analysis and outcome assessment
-  - TRIGGERS: "wargame scenario", "battle outcome", "military analysis"
+# WargamingAgent removed - not fully fleshed out
 
 - **entertainment_agent**
   - ACTION INTENTS: query, analysis
   - USE FOR: Movie/TV information, recommendations, entertainment comparisons
-  - TRIGGERS: "tell me about [movie]", "recommend movies like", "find TV shows about", 
+  - TRIGGERS: "tell me about [movie]", "recommend movies like", "find TV shows about",
               "compare Breaking Bad and The Wire", "what should I watch", "movies similar to"
   - AVOID: non-entertainment queries
+
+- **electronics_agent**
+  - ACTION INTENTS: generation, query, modification, analysis, **management** (project file operations)
+  - USE FOR: Circuit design, embedded programming, component selection, electronics troubleshooting, electronics project planning/design, **saving/updating electronics project files**
+  - TRIGGERS: "design circuit", "Arduino code", "ESP32 firmware", "component selection",
+              "voltage divider", "resistor calculator", "PCB layout", "microcontroller programming",
+              "embedded system", "circuit analysis", "calculate resistor values", "motor driver",
+              "sensor integration", "power supply design", "electronic project", "electronics project",
+              "plan electronic", "formulate electronic project", "design electronic system", "electro-magnetic control",
+              **"save project", "save what we discussed", "update project files", "save the system", "save the design"**
+  - **CRITICAL**: Use for technical electronics project planning/design AND project file management, NOT org-mode project management
+  - **MANAGEMENT ACTIONS**: When user wants to save/update electronics project files → electronics_agent (NOT org_inbox_agent or org_project_agent)
+  - AVOID: non-electronics technical queries, org-mode task management (use org_inbox_agent/org_project_agent)
 
 **ORG-MODE ROUTING RULES (CRITICAL - READ CAREFULLY!)**:
 - **org_inbox_agent**: ONLY for MODIFICATION actions on inbox.org
@@ -444,12 +943,17 @@ Every query has a PRIMARY action intent that determines routing behavior:
   - "Show me all WAITING tasks related to budget" → research_agent (complex filtered search)
 
 ROUTING HINTS FOR PROJECT CAPTURE:
-- If the user requests a project (phrases like 'start project', 'create project', 'new project', 'initiative', 'campaign', 'launch') with no active editor context, route to org_project_agent.
+- **ORG-MODE PROJECT MANAGEMENT**: If the user requests creating a project entry for task management (phrases like 'start project', 'create project', 'new initiative', 'launch campaign') with NO technical context, route to org_project_agent.
+- **TECHNICAL PROJECT PLANNING**: If the user mentions "project" in a technical context (electronics, software, engineering, etc.), route to the appropriate specialized agent:
+  * "electronic project", "electronics project", "plan electronic", "formulate electronic project" → electronics_agent
+  * "software project", "coding project", "programming project" → chat_agent or research_agent
+  * "engineering project" → research_agent or chat_agent
+- **KEY DISTINCTION**: org_project_agent is for TASK/PROJECT MANAGEMENT (creating org-mode entries), NOT for technical project design/planning.
 
 **STRICT OUTPUT FORMAT - JSON ONLY (NO MARKDOWN, NO EXPLANATION):**
 You MUST respond with a single JSON object matching this schema:
 {{
-  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|data_formatting_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|wargaming_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_inbox_agent|org_project_agent|website_crawler_agent|podcast_script_agent|substack_agent|entertainment_agent",
+  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|data_formatting_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_inbox_agent|org_project_agent|website_crawler_agent|podcast_script_agent|substack_agent|entertainment_agent|electronics_agent",
   "action_intent": "observation|generation|modification|analysis|query|management",
   "permission_required": false,
   "confidence": 0.0,
@@ -480,6 +984,10 @@ You MUST respond with a single JSON object matching this schema:
    - "Tell me about the Enron scandal" → query (general topic)
    - "What is quantum computing" → query (concept definition)
    - "Research Napoleon Bonaparte" → query (historical figure)
+   - "What do we anticipate the effects of X would be?" → query (future prediction/research)
+   - "What are the implications of Y?" → query (analysis/research)
+   - "How will Z affect the economy?" → query (economic analysis/research)
+   - "What would happen if..." → query (hypothetical analysis/research)
 6. **NO BRITTLE PATTERN MATCHING**: Use semantic understanding, not keyword matching
 7. **ALWAYS INCLUDE reasoning**: Explain why this action_intent was chosen
 8. **Return JSON ONLY**: No code fences, no markdown, no extra text
@@ -526,67 +1034,84 @@ You MUST respond with a single JSON object matching this schema:
 				fm = (active_editor.get('frontmatter') or {})
 				doc_type = str((fm.get('type') or '')).strip().lower()
 				
-				# **ACTION INTENT ROUTING**: Action intent determines agent, not just editor type
-				if doc_type:
-					logger.info(f"📝 EDITOR CONTEXT: type={doc_type}, action_intent={action_intent}")
+				# Get primary_agent for conversation continuity check
+				primary_agent = shared.get('primary_agent_selected')
+				
+				# **EDITOR CONTEXT OVERRIDE**: Editor type is PRIMARY signal for domain-specific routing
+				# If user has a specialized editor open, route to that agent (with exceptions for analysis)
+				# This fixes cases like "How is our electronics project looking?" → should go to electronics_agent
+				current_agent = data.get('target_agent', 'chat_agent')
+				
+				if doc_type == 'electronics':
+					# STRICT GATING: Only route to electronics_agent if project_plan.md is open
+					filename = active_editor.get('filename', '').lower()
 					
-					# OBSERVATION intent → editor-specific agent (they can read and respond about content)
-					if action_intent == 'observation':
-						editor_agent_map = {
-							'fiction': 'fiction_editing_agent',
-							'rules': 'rules_editing_agent',
-							'outline': 'outline_editing_agent',
-							'character': 'character_development_agent',
-							'sysml': 'sysml_agent',
-							'podcast': 'podcast_script_agent',
-							'substack': 'substack_agent',
-							'blog': 'substack_agent',
-						}
-						preferred_agent = editor_agent_map.get(doc_type, 'chat_agent')
-						data['target_agent'] = preferred_agent
-						logger.info(f"👁️ OBSERVATION INTENT: {doc_type} → {preferred_agent} (editor agent can read and respond)")
-					
-					# ANALYSIS intent → analysis agents
-					elif action_intent == 'analysis':
-						if doc_type == 'fiction':
+					# Check if this is actually a project_plan file
+					if 'project_plan' in filename or filename == 'project_plan.md':
+						# Valid electronics project plan open → route electronics queries
+						query_lower = user_message.lower()
+						electronics_keywords = ['electronics', 'circuit', 'arduino', 'esp32', 'project', 'component', 'sensor', 'microcontroller', 'firmware', 'embedded', 'voltage', 'resistor', 'pcb', 'schematic', 'design', 'our', 'the project']
+						non_electronics_keywords = ['weather', 'temperature', 'forecast', 'rain', 'snow']
+						
+						# Check if query is clearly NOT electronics-related
+						if any(kw in query_lower for kw in non_electronics_keywords):
+							# Non-electronics query, don't override routing
+							logger.info(f"📝 Electronics project open, but query is non-electronics")
+						elif any(kw in query_lower for kw in electronics_keywords):
+							# Electronics query with project open → electronics_agent
+							if current_agent != 'electronics_agent':
+								logger.info(f"🔄 EDITOR GATING: {current_agent} → electronics_agent (project_plan.md open)")
+								data['target_agent'] = 'electronics_agent'
+								data['reasoning'] = f"Electronics project plan open. Routing to electronics_agent."
+						else:
+							# Ambiguous query with electronics project open → electronics_agent
+							logger.info(f"🔄 EDITOR GATING: Ambiguous query with electronics project → electronics_agent")
+							data['target_agent'] = 'electronics_agent'
+							data['reasoning'] = f"Electronics project plan open. Routing to electronics_agent."
+					else:
+						# Electronics document open, but NOT project_plan → don't route to electronics_agent
+						logger.info(f"📝 Electronics doc open ({filename}), but not project_plan - no electronics_agent override")
+						
+						# Check if informational query → research_agent
+						from orchestrator.services.agent_capabilities import is_information_lookup_query
+						if is_information_lookup_query(user_message):
+							logger.info(f"🔍 Informational query detected → research_agent")
+							data['target_agent'] = 'research_agent'
+							data['reasoning'] = f"Electronics document open but not project_plan. Informational query → research_agent."
+						# Otherwise let natural domain classification decide (likely chat_agent)
+				
+				elif doc_type == 'fiction':
+					# Fiction queries go to fiction_editing_agent (unless analysis)
+					if action_intent == 'analysis':
+						if current_agent not in ['story_analysis_agent', 'content_analysis_agent']:
+							logger.info(f"🔄 EDITOR OVERRIDE: {current_agent} → story_analysis_agent (editor type: fiction, action: analysis)")
 							data['target_agent'] = 'story_analysis_agent'
-							logger.info(f"📊 ANALYSIS INTENT: Fiction → story_analysis_agent")
-						else:
-							data['target_agent'] = 'content_analysis_agent'
-							logger.info(f"📊 ANALYSIS INTENT: {doc_type} → content_analysis_agent")
+							data['reasoning'] = f"Editor context (fiction) + analysis intent → story_analysis_agent"
+					else:
+						# Non-analysis fiction queries → fiction_editing_agent
+						if current_agent not in ['fiction_editing_agent', 'outline_editing_agent', 'character_development_agent', 'rules_editing_agent']:
+							logger.info(f"🔄 EDITOR OVERRIDE: {current_agent} → fiction_editing_agent (editor type: fiction, action: {action_intent})")
+							data['target_agent'] = 'fiction_editing_agent'
+							data['reasoning'] = f"Editor context (fiction) + {action_intent} intent → fiction_editing_agent"
+				
+				elif doc_type in ['outline', 'character', 'rules']:
+					# Specialized fiction editors → their specific agents
+					editor_agent_map = {
+						'outline': 'outline_editing_agent',
+						'character': 'character_development_agent',
+						'rules': 'rules_editing_agent'
+					}
+					target_agent = editor_agent_map.get(doc_type)
+					if target_agent and current_agent != target_agent and action_intent != 'analysis':
+						logger.info(f"🔄 EDITOR OVERRIDE: {current_agent} → {target_agent} (editor type: {doc_type})")
+						data['target_agent'] = target_agent
+						data['reasoning'] = f"Editor context ({doc_type}) → {target_agent}"
+				
+				if doc_type:
+					logger.info(f"📝 EDITOR CONTEXT: type={doc_type}, action_intent={action_intent}, primary_agent={primary_agent}, final_agent={data.get('target_agent')}")
+				else:
+					logger.info(f"✅ NO EDITOR CONTEXT: → {data.get('target_agent')}")
 					
-					# GENERATION/MODIFICATION intent → editor agents
-					elif action_intent in ['generation', 'modification']:
-						editor_agent_map = {
-							'fiction': 'fiction_editing_agent',
-							'rules': 'rules_editing_agent',
-							'outline': 'outline_editing_agent',
-							'character': 'character_development_agent',
-							'sysml': 'sysml_agent',
-							'podcast': 'podcast_script_agent',
-							'substack': 'substack_agent',
-							'blog': 'substack_agent',
-						}
-						preferred_agent = editor_agent_map.get(doc_type)
-						if preferred_agent:
-							data['target_agent'] = preferred_agent
-							logger.info(f"✍️ {action_intent.upper()} INTENT: {doc_type} → {preferred_agent}")
-						else:
-							# Trust LLM's decision for unknown editor types
-							logger.info(f"✍️ {action_intent.upper()} INTENT: Unknown doc_type '{doc_type}', trusting LLM")
-					
-					# QUERY intent → TRUST LLM DECISION (research_agent vs chat_agent)
-					elif action_intent == 'query':
-						# **"TRUST THE LLM" DOCTRINE**: 
-						# LLM distinguishes between external info queries (research_agent) 
-						# and document-context queries (chat_agent)
-						logger.info(f"❓ QUERY INTENT: Trusting LLM decision: {data.get('target_agent')} (distinguishes 'Tell me about X' vs 'What's in this doc?')")
-						# Don't override - LLM chose correctly based on query semantics
-					
-					# MANAGEMENT intent → keep LLM's decision (org_inbox, website_crawler, etc.)
-					elif action_intent == 'management':
-						logger.info(f"⚙️ MANAGEMENT INTENT: Keeping LLM decision: {data.get('target_agent')}")
-						# Don't override - LLM chose the right management agent
 					
 			except Exception as e:
 				logger.error(f"❌ Action intent routing failed: {e}")
@@ -628,8 +1153,9 @@ You MUST respond with a single JSON object matching this schema:
 						# But don't override clear intents for other things
 						non_pipeline_agents = [
 							'weather_agent', 'research_agent', 'rss_agent',
-							'image_generation_agent', 'wargaming_agent',
-							'fact_checking_agent', 'org_inbox_agent', 'org_project_agent',
+							'image_generation_agent',  # WargamingAgent removed - not fully fleshed out
+							# FactCheckingAgent removed - not actively used
+							'org_inbox_agent', 'org_project_agent',
 							'fiction_editing_agent', 'story_analysis_agent',
 							'content_analysis_agent', 'proofreading_agent'
 						]
@@ -642,10 +1168,43 @@ You MUST respond with a single JSON object matching this schema:
 				logger.error(f"Pipeline preference logic failed: {e}")
 				pass
 			
+			# Check permissions after parsing (override LLM's permission_required if needed)
+			shared = (conversation_context or {}).get('shared_memory', {}) if conversation_context else {}
+			target_agent = data.get('target_agent', 'chat_agent')
+			
+			# Agents that always need web search
+			agents_requiring_web_search = {
+				'research_agent',
+				'site_crawl_agent',
+				'substack_agent',
+			}
+			
+			# Electronics agent may need web search
+			electronics_needs_web = (
+				target_agent == 'electronics_agent' and
+				any(kw in user_message.lower() for kw in [
+					'research', 'find', 'look up', 'search for', 'component', 'datasheet',
+					'specification', 'price', 'availability', 'where to buy'
+				])
+			)
+			
+			needs_web_search = (
+				target_agent in agents_requiring_web_search or
+				electronics_needs_web
+			)
+			
+			web_permission_granted = shared.get('web_search_permission', False)
+			
+			# Override permission_required based on actual permission state
+			if needs_web_search:
+				data['permission_required'] = not web_permission_granted
+				if data['permission_required']:
+					logger.info(f"🛡️ PERMISSION OVERRIDE: {target_agent} needs web search, permission not granted")
+			
 			# Create SimpleIntentResult with validation
 			result = SimpleIntentResult(**data)
 			
-			logger.info(f"✅ SIMPLE CLASSIFICATION: → {result.target_agent} (confidence: {result.confidence})")
+			logger.info(f"✅ SIMPLE CLASSIFICATION: → {result.target_agent} (confidence: {result.confidence}, permission_required: {result.permission_required})")
 			return result
 			
 		except json.JSONDecodeError as e:
@@ -658,47 +1217,99 @@ You MUST respond with a single JSON object matching this schema:
 	
 	def _create_simple_fallback(self, user_message: str, conversation_context: Optional[Dict[str, Any]] = None) -> SimpleIntentResult:
 		"""
-		Create simple fallback classification based on keywords
+		Create fallback classification using two-stage approach
 		
-		Identical to backend implementation for consistent routing.
+		Uses deterministic domain detection and simple keyword-based action intent.
 		"""
-		
-		message_lower = user_message.lower()
-		
-		# Minimal fallback - only route to wargaming_agent for clear triggers; else prefer editor agent, else chat
-		if any(phrase in message_lower for phrase in [
-			"i am the us", "i am russia", "i am china", "i am iran", "i am the uk",
-			"diplomats", "embassy", "sanctions", "naval", "submarine", "mobilize",
-			"airspace", "no-fly", "border incursion", "expelled", "ejected your diplomats",
-			"carrier group", "patrols off your coast", "wargame", "war game", "escalate"
-		]):
-			target_agent = "wargaming_agent"
-		else:
-			target_agent = "chat_agent"
-			try:
-				shared = (conversation_context or {}).get('shared_memory', {}) or {}
-				ae = shared.get('active_editor', {}) or {}
-				fm = (ae.get('frontmatter') or {})
-				doc_type = str((fm.get('type') or '')).strip().lower()
-				editor_agent_map = {
-					'rules': 'rules_editing_agent',
-					'outline': 'outline_editing_agent',
-					'character': 'character_development_agent',
-					'fiction': 'fiction_editing_agent',
-				}
-				target_agent = editor_agent_map.get(doc_type, target_agent)
-			except Exception:
-				pass
-		
-		logger.info(f"🎯 SIMPLE FALLBACK: → {target_agent}")
-		
-		return SimpleIntentResult(
-			target_agent=target_agent,
-			action_intent="query",  # Default to query for fallback
-			permission_required=False,
-			confidence=0.6,
-			reasoning="Fallback classification due to parsing error"
-		)
+		try:
+			context = conversation_context or {}
+			shared_memory = context.get('shared_memory', {})
+			active_editor = shared_memory.get('active_editor', {}) or {}
+			editor_context = {}
+			if active_editor:
+				fm = active_editor.get('frontmatter', {}) or {}
+				editor_context = {'type': fm.get('type', '').strip().lower()}
+			
+			conversation_history = {
+				'last_agent': shared_memory.get('last_agent'),
+				'primary_agent_selected': shared_memory.get('primary_agent_selected')
+			}
+			
+			# Stage 1: Detect domain
+			domain = detect_domain(
+				query=user_message,
+				editor_context=editor_context if editor_context.get('type') else None,
+				conversation_history=conversation_history
+			)
+			
+			# Stage 2: Simple keyword-based action intent
+			message_lower = user_message.lower()
+			if any(kw in message_lower for kw in ['write', 'create', 'draft', 'generate', 'compose']):
+				action_intent = 'generation'
+			elif any(kw in message_lower for kw in ['edit', 'revise', 'change', 'improve', 'update', 'fix']):
+				action_intent = 'modification'
+			elif any(kw in message_lower for kw in ['analyze', 'critique', 'review', 'compare', 'summarize']):
+				action_intent = 'analysis'
+			elif any(kw in message_lower for kw in ['add todo', 'save', 'mark', 'crawl', 'update project']):
+				action_intent = 'management'
+			elif any(kw in message_lower for kw in ['do you see', 'show me', "what's in", 'how is', 'is there']):
+				action_intent = 'observation'
+			else:
+				action_intent = 'query'
+			
+			# Stage 3: Route
+			target_agent, confidence = find_best_agent_match(
+				domain=domain,
+				action_intent=action_intent,
+				query=user_message,
+				editor_context=editor_context if editor_context.get('type') else None,
+				conversation_history=conversation_history
+			)
+			
+			# Check if agent needs web search permission (same logic as main routing)
+			agents_requiring_web_search = {
+				'research_agent',
+				'site_crawl_agent',
+				'substack_agent',
+			}
+			
+			electronics_needs_web = (
+				target_agent == 'electronics_agent' and
+				any(kw in user_message.lower() for kw in [
+					'research', 'find', 'look up', 'search for', 'component', 'datasheet',
+					'specification', 'price', 'availability', 'where to buy'
+				])
+			)
+			
+			needs_web_search = (
+				target_agent in agents_requiring_web_search or
+				electronics_needs_web
+			)
+			
+			web_permission_granted = shared_memory.get('web_search_permission', False)
+			permission_required = needs_web_search and not web_permission_granted
+			
+			logger.info(f"🎯 FALLBACK CLASSIFICATION: → {target_agent} (domain: {domain}, action: {action_intent})")
+			if permission_required:
+				logger.info(f"🛡️ FALLBACK PERMISSION CHECK: {target_agent} needs web search, permission not granted")
+			
+			return SimpleIntentResult(
+				target_agent=target_agent,
+				action_intent=action_intent,
+				permission_required=permission_required,
+				confidence=max(confidence, 0.5),  # Minimum 0.5 for fallback
+				reasoning=f"Fallback classification: Domain={domain}, Action={action_intent}"
+			)
+		except Exception as e:
+			logger.error(f"❌ Fallback classification failed: {e}")
+			# Ultimate fallback
+			return SimpleIntentResult(
+				target_agent="chat_agent",
+				action_intent="query",
+				permission_required=False,
+				confidence=0.3,
+				reasoning="Ultimate fallback due to error"
+			)
 
 
 # Singleton instance for easy access

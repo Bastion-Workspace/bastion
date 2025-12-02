@@ -1301,33 +1301,55 @@ class DocumentRepository:
             from services.database_manager.database_helpers import fetch_one
             
             user_id = folder_data.get("user_id")
+            team_id = folder_data.get("team_id")
             collection_type = folder_data.get("collection_type", "user")
             folder_name = folder_data.get("name")
             parent_id = folder_data.get("parent_folder_id")
             
-            logger.info(f"📁 Repository: Create or get folder '{folder_name}' (parent: {parent_id}, user: {user_id}, collection: {collection_type})")
+            logger.info(f"📁 Repository: Create or get folder '{folder_name}' (parent: {parent_id}, user: {user_id}, team: {team_id}, collection: {collection_type})")
             
             # **ROOSEVELT'S NULL-SAFE UPSERT!**
             # PostgreSQL's ON CONFLICT with partial indexes requires different syntax
             # for root folders (NULL parent) vs. non-root folders
             
             if parent_id is None:
-                # Root folder - need different UPSERT for user vs global folders
-                if user_id is not None:
-                    # USER root folder - includes user_id in conflict constraint
+                # Root folder - need different UPSERT for user vs global vs team folders
+                if collection_type == "team" and team_id is not None:
+                    # TEAM root folder - includes team_id in conflict constraint
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-                        ON CONFLICT (user_id, name, collection_type) 
-                        WHERE parent_folder_id IS NULL AND user_id IS NOT NULL
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        ON CONFLICT (team_id, name, collection_type) 
+                        WHERE parent_folder_id IS NULL AND team_id IS NOT NULL
                         DO UPDATE SET updated_at = EXCLUDED.updated_at
-                        RETURNING folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
                     """, 
                         folder_data["folder_id"],
                         folder_name,
                         parent_id,
                         user_id,
+                        team_id,
+                        collection_type,
+                        folder_data["created_at"],
+                        folder_data["updated_at"]
+                    )
+                elif user_id is not None:
+                    # USER root folder - includes user_id in conflict constraint
+                    row = await fetch_one("""
+                        INSERT INTO document_folders (
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        ON CONFLICT (user_id, name, collection_type) 
+                        WHERE parent_folder_id IS NULL AND user_id IS NOT NULL
+                        DO UPDATE SET updated_at = EXCLUDED.updated_at
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                    """, 
+                        folder_data["folder_id"],
+                        folder_name,
+                        parent_id,
+                        user_id,
+                        team_id,
                         collection_type,
                         folder_data["created_at"],
                         folder_data["updated_at"]
@@ -1336,38 +1358,60 @@ class DocumentRepository:
                     # GLOBAL root folder - user_id is NULL, constraint doesn't include user_id
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                         ON CONFLICT (name, collection_type) 
                         WHERE parent_folder_id IS NULL AND user_id IS NULL
                         DO UPDATE SET updated_at = EXCLUDED.updated_at
-                        RETURNING folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
                     """, 
                         folder_data["folder_id"],
                         folder_name,
                         parent_id,
                         user_id,
+                        team_id,
                         collection_type,
                         folder_data["created_at"],
                         folder_data["updated_at"]
                     )
             else:
-                # Non-root folder - different UPSERT for user vs global folders
-                if user_id is not None:
-                    # USER non-root folder - includes user_id in conflict constraint
+                # Non-root folder - different UPSERT for user vs global vs team folders
+                if collection_type == "team" and team_id is not None:
+                    # TEAM non-root folder - includes team_id in conflict constraint
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
-                        ON CONFLICT (user_id, name, parent_folder_id, collection_type)
-                        WHERE parent_folder_id IS NOT NULL AND user_id IS NOT NULL
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        ON CONFLICT (team_id, name, parent_folder_id, collection_type)
+                        WHERE parent_folder_id IS NOT NULL AND team_id IS NOT NULL
                         DO UPDATE SET updated_at = EXCLUDED.updated_at
-                        RETURNING folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
                     """, 
                         folder_data["folder_id"],
                         folder_name,
                         parent_id,
                         user_id,
+                        team_id,
+                        collection_type,
+                        folder_data["created_at"],
+                        folder_data["updated_at"]
+                    )
+                elif user_id is not None:
+                    # USER non-root folder - includes user_id in conflict constraint
+                    row = await fetch_one("""
+                        INSERT INTO document_folders (
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        ON CONFLICT (user_id, name, parent_folder_id, collection_type)
+                        WHERE parent_folder_id IS NOT NULL AND user_id IS NOT NULL
+                        DO UPDATE SET updated_at = EXCLUDED.updated_at
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                    """, 
+                        folder_data["folder_id"],
+                        folder_name,
+                        parent_id,
+                        user_id,
+                        team_id,
                         collection_type,
                         folder_data["created_at"],
                         folder_data["updated_at"]
@@ -1376,17 +1420,18 @@ class DocumentRepository:
                     # GLOBAL non-root folder - user_id is NULL, constraint doesn't include user_id
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                         ON CONFLICT (name, parent_folder_id, collection_type)
                         WHERE parent_folder_id IS NOT NULL AND user_id IS NULL
                         DO UPDATE SET updated_at = EXCLUDED.updated_at
-                        RETURNING folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
                     """, 
                         folder_data["folder_id"],
                         folder_name,
                         parent_id,
                         user_id,
+                        team_id,
                         collection_type,
                         folder_data["created_at"],
                         folder_data["updated_at"]
@@ -1402,7 +1447,13 @@ class DocumentRepository:
             else:
                 logger.info(f"📁 Repository: Found EXISTING folder '{folder_name}' → {row['folder_id']} (requested {folder_data['folder_id']})")
             
-            return dict(row)
+            # Convert row to dict and ensure UUID fields are strings
+            result = dict(row)
+            # Convert UUID to string for team_id (asyncpg returns UUID objects)
+            if result.get('team_id') and not isinstance(result['team_id'], str):
+                result['team_id'] = str(result['team_id'])
+            
+            return result
             
         except Exception as e:
             logger.error(f"❌ Repository: Failed to create or get folder '{folder_data.get('name')}': {e}")
@@ -1454,11 +1505,18 @@ class DocumentRepository:
             from services.database_manager.database_helpers import fetch_one
             
             row = await fetch_one("""
-                SELECT folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
+                SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
                 FROM document_folders WHERE folder_id = $1
             """, folder_id)
             
-            return row
+            if row:
+                # Convert UUID to string for team_id (asyncpg returns UUID objects)
+                result = dict(row)
+                if result.get('team_id') and not isinstance(result['team_id'], str):
+                    result['team_id'] = str(result['team_id'])
+                return result
+            
+            return None
         except Exception as e:
             logger.error(f"❌ Failed to get folder {folder_id}: {e}")
             return None
@@ -1471,22 +1529,59 @@ class DocumentRepository:
             
             if user_id:
                 rows = await fetch_all("""
-                    SELECT folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
+                    SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
                     FROM document_folders 
                     WHERE user_id = $1 AND collection_type = $2
                     ORDER BY name
                 """, user_id, collection_type)
             else:
                 rows = await fetch_all("""
-                    SELECT folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
+                    SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
                     FROM document_folders 
                     WHERE collection_type = $1
                     ORDER BY name
                 """, collection_type)
             
-            return rows
+            # Convert UUID to string for team_id (asyncpg returns UUID objects)
+            result = []
+            for row in rows:
+                row_dict = dict(row)
+                if row_dict.get('team_id') and not isinstance(row_dict['team_id'], str):
+                    row_dict['team_id'] = str(row_dict['team_id'])
+                result.append(row_dict)
+            
+            return result
         except Exception as e:
             logger.error(f"❌ Failed to get folders for user {user_id}: {e}")
+            return []
+    
+    async def get_folders_by_teams(self, team_ids: List[str]) -> List[Dict[str, Any]]:
+        """Get all folders for a list of teams"""
+        try:
+            if not team_ids:
+                return []
+            
+            logger.debug(f"📁 Getting folders for teams: {team_ids}")
+            from services.database_manager.database_helpers import fetch_all
+            
+            rows = await fetch_all("""
+                SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                FROM document_folders 
+                WHERE team_id = ANY($1) AND collection_type = 'team'
+                ORDER BY name
+            """, team_ids)
+            
+            # Convert UUID to string for team_id (asyncpg returns UUID objects)
+            result = []
+            for row in rows:
+                row_dict = dict(row)
+                if row_dict.get('team_id') and not isinstance(row_dict['team_id'], str):
+                    row_dict['team_id'] = str(row_dict['team_id'])
+                result.append(row_dict)
+            
+            return result
+        except Exception as e:
+            logger.error(f"❌ Failed to get folders for teams: {e}")
             return []
     
     async def get_subfolders(self, parent_folder_id: str) -> List[Dict[str, Any]]:
@@ -1835,6 +1930,51 @@ class DocumentRepository:
             logger.error(f"❌ Failed to update document folder for {document_id}: {e}")
             return False
     
+    async def find_documents_by_tags(
+        self,
+        required_tags: List[str],
+        user_id: Optional[str] = None,
+        collection_type: Optional[str] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        Find documents that contain ALL of the specified tags
+
+        Args:
+            required_tags: List of tags that ALL must be present on the document
+            user_id: Optional user ID to filter results
+            collection_type: Optional collection type filter ('user' or 'global')
+            limit: Maximum number of results to return
+
+        Returns:
+            List of document dictionaries with metadata
+        """
+        try:
+            # Import fetch_all directly like in the working manual test
+            from services.database_manager.database_helpers import fetch_all
+
+            query = """
+                SELECT
+                    document_id, filename, title, category, tags, description,
+                    author, language, publication_date, doc_type, file_size,
+                    file_hash, processing_status, upload_date, quality_score,
+                    page_count, chunk_count, entity_count, user_id, collection_type
+                FROM document_metadata
+                WHERE tags @> $1
+                ORDER BY upload_date DESC
+                LIMIT $2
+            """
+
+            # Call exactly like the working manual test
+            documents = await fetch_all(query, required_tags, limit)
+
+            logger.info(f"📄 Found {len(documents)} documents with tags {required_tags}")
+            return documents
+
+        except Exception as e:
+            logger.error(f"❌ Failed to find documents by tags {required_tags}: {e}")
+            return []
+
     async def close(self):
         """Close database connections"""
         if self.pool:

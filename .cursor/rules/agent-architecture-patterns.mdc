@@ -154,6 +154,102 @@ available_tools = ToolRegistry.get_tools_for_agent("research_agent")
 
 **Never give agents tools they don't need** - follow principle of least privilege!
 
+## Document Batch Editing Pattern
+
+### Universal Batch Editor for Multiple Edits
+
+When agents need to make multiple edits to a single document, **ALWAYS use** the `DocumentEditBatch` class from [llm-orchestrator/orchestrator/utils/document_batch_editor.py](llm-orchestrator/orchestrator/utils/document_batch_editor.py).
+
+**Why batch editing?**
+- **Atomic operations**: All edits applied in a single write (no race conditions)
+- **Efficiency**: 1 write instead of N writes (6x faster for 6 edits)
+- **Reliability**: No partial updates if operations fail mid-stream
+- **No duplicates**: Prevents duplicate frontmatter blocks from sequential updates
+
+### Batch Editor Usage Pattern
+
+```python
+from orchestrator.utils.document_batch_editor import DocumentEditBatch
+
+# Group edits by document_id first
+edits_by_doc = {}
+for edit in routing_items:
+    doc_id = resolve_document_id(edit["target_file"], ...)
+    if doc_id not in edits_by_doc:
+        edits_by_doc[doc_id] = []
+    edits_by_doc[doc_id].append(edit)
+
+# Process each document with batch editor
+for doc_id, edits in edits_by_doc.items():
+    batch = DocumentEditBatch(doc_id, user_id, "agent_name")
+    await batch.initialize()  # Reads content once
+    
+    # Queue all operations
+    for edit in edits:
+        if edit["section"].lower() == "frontmatter":
+            # Parse YAML and add frontmatter update
+            batch.add_frontmatter_update(scalar_fields, list_fields)
+        elif edit["action"] == "replace":
+            batch.add_section_replace(edit["section"], edit["content"])
+        elif edit["action"] == "append":
+            batch.add_section_append(edit["section"], edit["content"])
+        elif edit["action"] == "remove":
+            batch.add_section_delete(edit["section"])
+    
+    # Apply all edits atomically (single write)
+    result = await batch.apply()
+```
+
+### Operation Types
+
+**Frontmatter updates:**
+```python
+batch.add_frontmatter_update(
+    field_updates={"title": "New Title", "status": "active"},
+    list_updates={"files": ["./file1.md", "./file2.md"]}
+)
+```
+
+**Section operations:**
+```python
+batch.add_section_replace("Requirements", "New requirements content...")
+batch.add_section_append("Tasks", "- New task item")
+batch.add_section_delete("Obsolete Section")
+```
+
+### Error Handling
+
+The batch editor uses **best-effort** error handling:
+- Individual operation failures are logged but don't stop other operations
+- Returns detailed metrics: `operations_succeeded`, `operations_failed`, `failed_operations`
+- Only writes if content actually changed
+
+### Anti-Pattern: Sequential Edits
+
+**❌ NEVER DO THIS:**
+```python
+# Sequential read-modify-write cycles (BAD!)
+for edit in edits:
+    content = await get_document_content_tool(doc_id, user_id)
+    # ... modify content ...
+    await update_document_content_tool(doc_id, modified_content, user_id)
+```
+
+**Problems:**
+- Race conditions (stale reads between operations)
+- Inefficient (N writes for N edits)
+- Risk of partial updates
+- Duplicate frontmatter blocks
+
+**✅ ALWAYS DO THIS:**
+```python
+# Batch editor (GOOD!)
+batch = DocumentEditBatch(doc_id, user_id, "agent_name")
+await batch.initialize()
+# ... queue all operations ...
+await batch.apply()  # Single atomic write
+```
+
 ## Performance and Scalability
 
 ### Async-First Design

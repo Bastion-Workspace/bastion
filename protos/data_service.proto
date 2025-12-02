@@ -93,6 +93,7 @@ message UpdateWorkspaceRequest {
   string icon = 4;
   string color = 5;
   bool is_pinned = 6;
+  string user_id = 7;
 }
 
 message DeleteWorkspaceRequest {
@@ -110,6 +111,7 @@ message WorkspaceResponse {
   string metadata_json = 8;
   string created_at = 9;
   string updated_at = 10;
+  string updated_by = 11;
 }
 
 message WorkspaceListResponse {
@@ -123,6 +125,7 @@ message CreateDatabaseRequest {
   string name = 2;
   string description = 3;
   string source_type = 4;
+  string user_id = 5;
 }
 
 message ListDatabasesRequest {
@@ -148,6 +151,8 @@ message DatabaseResponse {
   string created_at = 8;
   string metadata_json = 9;
   string updated_at = 10;
+  string created_by = 11;
+  string updated_by = 12;
 }
 
 message DatabaseListResponse {
@@ -161,6 +166,7 @@ message CreateTableRequest {
   string name = 2;
   string description = 3;
   string schema_json = 4;
+  string user_id = 5;
 }
 
 message ListTablesRequest {
@@ -189,12 +195,14 @@ message GetTableDataRequest {
 message InsertRowRequest {
   string table_id = 1;
   string row_data_json = 2;
+  string user_id = 3;
 }
 
 message UpdateRowRequest {
   string table_id = 1;
   string row_id = 2;
   string row_data_json = 3;
+  string user_id = 4;
 }
 
 message UpdateCellRequest {
@@ -202,6 +210,7 @@ message UpdateCellRequest {
   string row_id = 2;
   string column_name = 3;
   string value_json = 4;
+  string user_id = 5;
 }
 
 message DeleteRowRequest {
@@ -220,6 +229,8 @@ message TableResponse {
   string metadata_json = 8;
   string created_at = 9;
   string updated_at = 10;
+  string created_by = 11;
+  string updated_by = 12;
 }
 
 message TableDataResponse {
@@ -257,6 +268,7 @@ message ExecuteImportRequest {
   string table_name = 3;
   string file_path = 4;
   string field_mapping_json = 5;
+  string user_id = 6;
 }
 
 message ImportJobResponse {
@@ -272,6 +284,7 @@ message ImportJobResponse {
   string table_id = 10;
   string source_file = 11;
   int32 progress_percent = 12;
+  string created_by = 13;
 }
 
 message GetImportStatusRequest {

@@ -95,6 +95,7 @@ message ActiveEditor {
   int32 content_length = 5;
   EditorFrontmatter frontmatter = 6;  // Parsed YAML frontmatter
   string editor_preference = 7;  // "prefer" | "ignore"
+  string canonical_path = 8;  // Full filesystem path for resolving relative references
 }
 
 // Editor frontmatter (YAML metadata from markdown files)

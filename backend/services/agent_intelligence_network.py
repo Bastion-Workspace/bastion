@@ -25,6 +25,7 @@ class AgentCapability(str, Enum):
     CODE_GENERATION = "code_generation"
     ORG_INBOX_MANAGEMENT = "org_inbox_management"
     PIPELINE_DESIGN = "pipeline_design"
+    EMAIL_SENDING = "email_sending"
 
 
 
@@ -229,6 +230,27 @@ class AgentIntelligenceNetwork:
             handoff_triggers=[],
             collaboration_permission=CollaborationPermission.SUGGEST_ONLY
         )
+
+        # Email Agent
+        self._agent_registry["email_agent"] = AgentInfo(
+            agent_type="email_agent",
+            display_name="Email Agent",
+            description="Drafts and sends emails with user approval and conversation context",
+            capabilities=[AgentCapability.EMAIL_SENDING],
+            specialties=[
+                "Email drafting",
+                "Context-aware email composition",
+                "Professional email formatting",
+                "Email sending with approval"
+            ],
+            handoff_triggers=[
+                "send email",
+                "email to",
+                "compose email",
+                "draft email"
+            ],
+            collaboration_permission=CollaborationPermission.SUGGEST_ONLY
+        )
         
         # Initialize collaboration patterns
         self._initialize_collaboration_patterns()
@@ -299,7 +321,8 @@ class AgentIntelligenceNetwork:
             "MAPPING": [AgentCapability.RESEARCH_INTELLIGENCE],  # Future mapping agent would have its own capability
             "COLLABORATION_RESPONSE": [AgentCapability.CONVERSATION],  # Handled by chat/orchestrator
             "PERMISSION_GRANT": [AgentCapability.RESEARCH_INTELLIGENCE],  # Continue research
-            "PERMISSION_CANCEL": [AgentCapability.CONVERSATION]  # Cancel and return to chat
+            "PERMISSION_CANCEL": [AgentCapability.CONVERSATION],  # Cancel and return to chat
+            "EMAIL": [AgentCapability.EMAIL_SENDING]
         }
         
         logger.info(f"🎯 AGENT MAPPING: intent_type={intent_type} → intent_str={intent_str}")

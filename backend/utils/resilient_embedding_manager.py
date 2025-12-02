@@ -14,12 +14,12 @@ from pathlib import Path
 import pickle
 
 from openai import AsyncOpenAI
-from qdrant_client import QdrantClient
-from qdrant_client.models import PointStruct, Distance, VectorParams, Filter, FieldCondition, MatchValue
+from qdrant_client.models import PointStruct
 
 from config import settings
 from models.api_models import Chunk
-from utils.embedding_manager import EmbeddingManager
+from services.embedding_service_wrapper import get_embedding_service
+from services.vector_store_service import get_vector_store
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,8 @@ class ResilientEmbeddingManager:
     """
     
     def __init__(self):
-        self.base_manager = None
+        self.embedding_service = None
+        self.vector_store = None
         self.progress_dir = Path(settings.LOGS_DIR) / "embedding_progress"
         self.progress_dir.mkdir(parents=True, exist_ok=True)
         
@@ -83,20 +84,22 @@ class ResilientEmbeddingManager:
         self.batch_size = 1  # Process one chunk at a time for maximum resilience
         self.save_progress_interval = 5  # Save progress every 5 chunks
         
-        logger.info("🔧 Resilient Embedding Manager initialized")
+        logger.info("Resilient Embedding Manager initialized")
     
     async def initialize(self):
         """Initialize the resilient embedding manager"""
-        logger.info("🔧 Initializing Resilient Embedding Manager...")
+        logger.info("Initializing Resilient Embedding Manager...")
         
-        # Initialize base embedding manager
-        self.base_manager = EmbeddingManager()
-        await self.base_manager.initialize()
+        # Initialize embedding service (Vector Service)
+        self.embedding_service = await get_embedding_service()
+        
+        # Initialize vector store (for storage)
+        self.vector_store = await get_vector_store()
         
         # Load any existing progress from disk
         await self._load_existing_progress()
         
-        logger.info("✅ Resilient Embedding Manager initialized")
+        logger.info("Resilient Embedding Manager initialized")
     
     async def embed_and_store_chunks_resilient(
         self, 
@@ -264,8 +267,8 @@ class ResilientEmbeddingManager:
                 logger.debug(f"🔄 Attempt {retry_count + 1}/{self.max_retries_per_chunk} for chunk {chunk_id}")
                 
                 # Step 1: Generate embedding
-                logger.debug(f"🧠 Generating embedding for chunk {chunk_id}")
-                embeddings = await self.base_manager.generate_embeddings([chunk.content])
+                logger.debug(f"Generating embedding for chunk {chunk_id}")
+                embeddings = await self.embedding_service.generate_embeddings([chunk.content])
                 
                 if not embeddings or len(embeddings) != 1:
                     raise Exception("Failed to generate embedding")
@@ -318,10 +321,10 @@ class ResilientEmbeddingManager:
     ):
         """Store a single chunk embedding immediately"""
         try:
-            # Determine collection to use
+            # Ensure collection exists if needed
             if user_id:
-                await self.base_manager._ensure_user_collection_exists(user_id)
-                collection_name = self.base_manager._get_user_collection_name(user_id)
+                await self.vector_store.ensure_user_collection_exists(user_id)
+                collection_name = self.vector_store._get_user_collection_name(user_id)
             else:
                 collection_name = settings.VECTOR_COLLECTION_NAME
             
@@ -347,28 +350,15 @@ class ResilientEmbeddingManager:
                 }
             )
             
-            # Store immediately with timeout
+            # Store immediately via VectorStoreService with timeout
             await asyncio.wait_for(
-                self._store_point_sync(point, collection_name),
+                self.vector_store.insert_points([point], collection_name),
                 timeout=30.0
             )
             
         except Exception as e:
-            logger.error(f"❌ Failed to store chunk embedding: {e}")
+            logger.error(f"Failed to store chunk embedding: {e}")
             raise
-    
-    async def _store_point_sync(self, point: PointStruct, collection_name: str):
-        """Store a single point synchronously"""
-        loop = asyncio.get_event_loop()
-        
-        # Run the Qdrant operation in a thread to avoid blocking
-        await loop.run_in_executor(
-            None,
-            lambda: self.base_manager.qdrant_client.upsert(
-                collection_name=collection_name,
-                points=[point]
-            )
-        )
     
     async def _save_progress(self, progress: EmbeddingProgress):
         """Save progress to disk for crash recovery"""
@@ -561,39 +551,39 @@ class ResilientEmbeddingManager:
     
     # Delegate methods to base manager for compatibility
     async def generate_embeddings(self, texts: List[str], max_retries: int = 5) -> List[List[float]]:
-        """Generate embeddings for a list of texts (delegates to base manager)"""
-        return await self.base_manager.generate_embeddings(texts, max_retries)
+        """Generate embeddings for a list of texts (delegates to embedding service)"""
+        return await self.embedding_service.generate_embeddings(texts)
     
     async def search_similar(self, query_text: str, limit: int = 50, score_threshold: float = 0.7, 
-                           use_query_expansion: bool = True, expansion_model: str = None,
-                           user_id: str = None, include_adjacent_chunks: bool = False) -> List[Dict[str, Any]]:
-        """Enhanced search with LLM query expansion (delegates to base manager)"""
-        return await self.base_manager.search_similar(
-            query_text, limit, score_threshold, use_query_expansion, expansion_model, user_id, include_adjacent_chunks
+                           user_id: str = None) -> List[Dict[str, Any]]:
+        """Search with vector store service"""
+        # Generate embedding
+        embeddings = await self.embedding_service.generate_embeddings([query_text])
+        if not embeddings:
+            return []
+        
+        # Search via vector store
+        return await self.vector_store.search_similar(
+            query_embedding=embeddings[0],
+            limit=limit,
+            score_threshold=score_threshold,
+            user_id=user_id
         )
     
-    async def get_chunk_by_id(self, chunk_id: str) -> Dict[str, Any]:
-        """Retrieve a specific chunk by ID (delegates to base manager)"""
-        return await self.base_manager.get_chunk_by_id(chunk_id)
-    
     async def delete_document_chunks(self, document_id: str, user_id: str = None):
-        """Delete all chunks for a specific document (delegates to base manager)"""
-        return await self.base_manager.delete_document_chunks(document_id, user_id)
+        """Delete all chunks for a specific document"""
+        return await self.vector_store.delete_points_by_filter(document_id, user_id)
     
     async def get_collection_stats(self) -> Dict[str, Any]:
-        """Get statistics about the vector collection (delegates to base manager)"""
-        return await self.base_manager.get_collection_stats()
+        """Get statistics about the vector collection"""
+        return await self.vector_store.get_collection_stats()
     
     async def close(self):
         """Clean up resources"""
-        logger.info("🔄 Shutting down Resilient Embedding Manager...")
+        logger.info("Shutting down Resilient Embedding Manager...")
         
         # Save any active progress
         for progress in self.active_progress.values():
             await self._save_progress(progress)
         
-        # Close base manager
-        if self.base_manager:
-            await self.base_manager.close()
-        
-        logger.info("✅ Resilient Embedding Manager shut down complete")
+        logger.info("Resilient Embedding Manager shut down complete")

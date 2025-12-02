@@ -55,8 +55,35 @@ class DocumentFileHandler(FileSystemEventHandler):
             return True
         if '~$' in path:  # Office temp files
             return True
+        
+        # Ignore messaging attachments - these are not documents!
+        # Messaging attachments are in: uploads/messaging/{room_id}/
+        if '/messaging/' in path_lower:
+            return True
+        
+        # For team posts: allow text/document files but ignore images
+        # Team post attachments are in: uploads/Teams/{team_id}/posts/
+        if '/teams/' in path_lower and '/posts/' in path_lower:
+            # Allow text and document files to be vectorized
+            text_doc_extensions = [
+                '.md', '.org', '.txt', '.pdf', '.docx', '.html', '.htm', '.epub',
+                '.csv', '.json', '.xml', '.rtf', '.odt'
+            ]
+            if any(path_lower.endswith(ext) for ext in text_doc_extensions):
+                return False  # Process these files
             
-        # Ignore non-document files
+            # Ignore image files in team posts (they're just display attachments)
+            image_extensions = [
+                '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico',
+                '.tiff', '.tif', '.heic', '.heif'
+            ]
+            if any(path_lower.endswith(ext) for ext in image_extensions):
+                return True  # Ignore images
+            
+            # Ignore other non-text files in team posts
+            return True
+            
+        # Ignore non-document files (for other locations)
         valid_extensions = [
             '.md', '.org', '.txt', '.pdf', '.docx', '.html', '.htm', '.epub',  # Documents
             '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'  # Images
@@ -410,7 +437,7 @@ class DocumentFileHandler(FileSystemEventHandler):
                     logger.info(f"✅ Re-processed {len(chunks)} chunks (no embedding) for org document {document_id}")
             elif chunks:
                 # **ROOSEVELT'S COMPLETE CLEANUP!** Delete old vectors AND knowledge graph entities
-                await self.document_service.embedding_manager.delete_document_chunks(document_id)
+                await self.document_service.embedding_manager.delete_document_chunks(document_id, user_id)
                 
                 # Delete old knowledge graph entities
                 if self.document_service.kg_service:
@@ -420,8 +447,33 @@ class DocumentFileHandler(FileSystemEventHandler):
                     except Exception as e:
                         logger.warning(f"⚠️  Failed to delete old KG entities for {document_id}: {e}")
                 
-                # Store new embeddings
-                await self.document_service.embedding_manager.embed_and_store_chunks(chunks)
+                # Fetch document metadata for embedding storage
+                document_category = None
+                document_tags = None
+                document_title = None
+                document_author = None
+                document_filename = None
+                try:
+                    doc_info = await self.document_service.get_document(document_id)
+                    if doc_info:
+                        document_category = doc_info.category.value if doc_info.category else None
+                        document_tags = doc_info.tags if doc_info.tags else None
+                        document_title = doc_info.title if doc_info.title else None
+                        document_author = doc_info.author if doc_info.author else None
+                        document_filename = doc_info.filename if doc_info.filename else None
+                except Exception as e:
+                    logger.warning(f"⚠️  Could not fetch document metadata for {document_id}: {e}")
+                
+                # Store new embeddings with metadata
+                await self.document_service.embedding_manager.embed_and_store_chunks(
+                    chunks,
+                    user_id=user_id,
+                    document_category=document_category,
+                    document_tags=document_tags,
+                    document_title=document_title,
+                    document_author=document_author,
+                    document_filename=document_filename
+                )
                 logger.info(f"✅ Re-processed {len(chunks)} chunks for document {document_id}")
                 
                 # **BY GEORGE!** Extract and store NEW entities using PROPER spaCy NER
@@ -511,7 +563,7 @@ class DocumentFileHandler(FileSystemEventHandler):
                 logger.error(f"❌ Failed to send deletion notification: {e}")
             
             # Delete from vector store
-            await self.document_service.embedding_manager.delete_document_chunks(document_id)
+            await self.document_service.embedding_manager.delete_document_chunks(document_id, user_id)
             
             # Delete from database
             await self.document_service.document_repository.delete(document_id)
@@ -1428,8 +1480,9 @@ class FileWatcherService:
                 if not file_path.is_file():
                     continue
                 
-                # Check if this is a supported file type
-                if not any(str(file_path).lower().endswith(ext) for ext in valid_extensions):
+                # Use the same ignore logic as the file handler
+                file_path_str = str(file_path)
+                if self.event_handler._should_ignore_path(file_path_str, is_directory=False):
                     continue
                 
                 # Skip temp/hidden files

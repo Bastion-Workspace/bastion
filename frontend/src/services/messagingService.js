@@ -138,6 +138,56 @@ class MessagingService {
   }
 
   // =====================
+  // ATTACHMENT OPERATIONS
+  // =====================
+
+  async uploadAttachment(roomId, messageId, file) {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      
+      const response = await apiService.post(
+        `/api/messaging/rooms/${roomId}/messages/${messageId}/attachments`,
+        formData,
+        {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+          },
+        }
+      );
+      return response;
+    } catch (error) {
+      console.error('Failed to upload attachment:', error);
+      throw error;
+    }
+  }
+
+  async getAttachment(attachmentId) {
+    try {
+      const response = await apiService.get(`/api/messaging/attachments/${attachmentId}`);
+      return response;
+    } catch (error) {
+      console.error('Failed to get attachment:', error);
+      throw error;
+    }
+  }
+
+  getAttachmentUrl(attachmentId) {
+    const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+    return `/api/messaging/attachments/${attachmentId}/file${token ? `?token=${token}` : ''}`;
+  }
+
+  async getMessageAttachments(messageId) {
+    try {
+      const response = await apiService.get(`/api/messaging/messages/${messageId}/attachments`);
+      return response.attachments || [];
+    } catch (error) {
+      console.error('Failed to get message attachments:', error);
+      throw error;
+    }
+  }
+
+  // =====================
   // REACTION OPERATIONS
   // =====================
 

@@ -30,11 +30,13 @@ import {
   Menu as MenuIcon,
   Mail,
   MailOutline,
+  Group,
 } from '@mui/icons-material';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { useCapabilities } from '../contexts/CapabilitiesContext';
 import { useMessaging } from '../contexts/MessagingContext';
+import { useTeam } from '../contexts/TeamContext';
 
 const Navigation = () => {
   const navigate = useNavigate();
@@ -43,12 +45,14 @@ const Navigation = () => {
   const { darkMode, toggleDarkMode } = useTheme();
   const { isAdmin, has } = useCapabilities();
   const { toggleDrawer, totalUnreadCount } = useMessaging();
+  const { pendingInvitations } = useTeam();
   const [anchorEl, setAnchorEl] = useState(null);
   const [logoError, setLogoError] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
 
   const navItems = [
       { label: 'Documents', path: '/documents', icon: <Description /> },
+      { label: 'Teams', path: '/teams', icon: <Group />, badge: pendingInvitations?.length || 0 },
       ...(isAdmin || has('feature.news.view') ? [{ label: 'News', path: '/news', icon: <Description /> }] : []),
   ];
 
@@ -90,7 +94,7 @@ const Navigation = () => {
         }
       }}
     >
-      <Toolbar sx={{ minHeight: 64, py: 1 }}>
+      <Toolbar sx={{ minHeight: 64, py: 0.5 }}>
         <Box
           onClick={() => navigate('/documents')}
           sx={{ mr: 2, display: 'flex', alignItems: 'center', cursor: 'pointer' }}
@@ -98,9 +102,9 @@ const Navigation = () => {
           {!logoError ? (
             <Box
               component="img"
-              src={'/images/bastion-small.png'}
+              src={darkMode ? '/images/bastion-dark.png' : '/images/bastion.png'}
               alt="Bastion"
-              sx={{ height: 60 }}
+              sx={{ height: 48 }}
               onError={() => setLogoError(true)}
             />
           ) : (
@@ -115,7 +119,15 @@ const Navigation = () => {
             <Button
               key={item.path}
               color="inherit"
-              startIcon={item.icon}
+              startIcon={
+                item.badge > 0 ? (
+                  <Badge badgeContent={item.badge} color="error" max={99}>
+                    {item.icon}
+                  </Badge>
+                ) : (
+                  item.icon
+                )
+              }
               onClick={() => navigate(item.path)}
               sx={{
                 mx: 1,
@@ -237,7 +249,15 @@ const Navigation = () => {
         <List>
           {navItems.map((item) => (
             <ListItemButton key={item.path} onClick={() => { setMobileOpen(false); navigate(item.path); }} selected={isActive(item.path)}>
-              <ListItemIcon>{item.icon}</ListItemIcon>
+              <ListItemIcon>
+                {item.badge > 0 ? (
+                  <Badge badgeContent={item.badge} color="error" max={99}>
+                    {item.icon}
+                  </Badge>
+                ) : (
+                  item.icon
+                )}
+              </ListItemIcon>
               <ListItemText primary={item.label} />
             </ListItemButton>
           ))}

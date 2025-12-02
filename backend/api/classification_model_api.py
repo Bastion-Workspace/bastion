@@ -46,7 +46,7 @@ class ClassificationModelResponse(BaseModel):
         }
 
 
-@router.get("/models/classification", response_model=Dict[str, str])
+@router.get("/models/classification", response_model=Dict[str, Any])
 async def get_classification_model(
     current_user_id: str = Depends(get_current_user_id)
 ):
@@ -56,10 +56,19 @@ async def get_classification_model(
         chat_model = await settings_service.get_llm_model()
         text_completion_model = await settings_service.get_text_completion_model() or ""
         
+        # Determine effective models (including fallbacks)
+        from config import settings as backend_settings
+        effective_chat_model = chat_model or backend_settings.DEFAULT_MODEL
+        effective_classification_model = classification_model or backend_settings.FAST_MODEL
+
         return {
-            "classification_model": classification_model,
-            "chat_model": chat_model,
+            "classification_model": classification_model,  # Raw setting (may be empty)
+            "chat_model": chat_model,  # Raw setting (may be empty)
+            "effective_classification_model": effective_classification_model,  # What agents actually use
+            "effective_chat_model": effective_chat_model,  # What agents actually use
             "text_completion_model": text_completion_model,
+            "classification_model_is_fallback": not bool(classification_model),  # True if using fallback
+            "chat_model_is_fallback": not bool(chat_model),  # True if using fallback
             "description": "Classification model is used for fast intent classification, while chat model is used for main responses"
         }
         

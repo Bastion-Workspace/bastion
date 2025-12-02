@@ -26,6 +26,7 @@ from orchestrator.tools import (
 from orchestrator.backend_tool_client import get_backend_tool_client
 from orchestrator.utils.formatting_detection import detect_formatting_need
 from orchestrator.models import ResearchAssessmentResult, ResearchGapAnalysis
+from orchestrator.agents.base_agent import BaseAgent
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -97,7 +98,7 @@ class ResearchState(TypedDict):
     error: str
 
 
-class FullResearchAgent:
+class FullResearchAgent(BaseAgent):
     """
     Sophisticated research agent replicating clean_research_agent capabilities
     
@@ -113,23 +114,10 @@ class FullResearchAgent:
     """
     
     def __init__(self):
-        self.llm = ChatOpenAI(
-            model=settings.DEFAULT_MODEL,
-            openai_api_key=settings.OPENROUTER_API_KEY,
-            openai_api_base=settings.OPENROUTER_BASE_URL,
-            temperature=0.7
-        )
-        
-        self.synthesis_llm = ChatOpenAI(
-            model=settings.DEFAULT_MODEL,
-            openai_api_key=settings.OPENROUTER_API_KEY,
-            openai_api_base=settings.OPENROUTER_BASE_URL,
-            temperature=0.3  # Lower temp for synthesis
-        )
-        
-        self.workflow = self._build_workflow()
+        super().__init__("full_research_agent")
+        # LLMs will be created lazily using _get_llm() to respect user model preferences
     
-    def _build_workflow(self) -> StateGraph:
+    def _build_workflow(self, checkpointer) -> StateGraph:
         """Build sophisticated multi-round research workflow"""
         
         workflow = StateGraph(ResearchState)
@@ -137,8 +125,8 @@ class FullResearchAgent:
         # Add nodes for each stage
         workflow.add_node("cache_check", self._cache_check_node)
         workflow.add_node("query_expansion", self._query_expansion_node)
-        workflow.add_node("round1_local_search", self._round1_local_search_node)
-        workflow.add_node("assess_round1", self._assess_round1_node)
+        workflow.add_node("round1_parallel_search", self._round1_parallel_search_node)
+        workflow.add_node("assess_combined_round1", self._assess_combined_round1_node)
         workflow.add_node("gap_analysis", self._gap_analysis_node)
         workflow.add_node("round2_gap_filling", self._round2_gap_filling_node)
         workflow.add_node("web_round1", self._web_round1_node)
@@ -160,17 +148,20 @@ class FullResearchAgent:
             }
         )
         
-        # Query expansion always goes to round 1
-        workflow.add_edge("query_expansion", "round1_local_search")
+        # Query expansion always goes to parallel round 1 search
+        workflow.add_edge("query_expansion", "round1_parallel_search")
         
-        # Round 1 assessment routing
+        # Round 1 parallel search goes to combined assessment
+        workflow.add_edge("round1_parallel_search", "assess_combined_round1")
+        
+        # Combined Round 1 assessment routing (now has both local and web data)
         workflow.add_conditional_edges(
-            "assess_round1",
-            self._route_from_round1,
+            "assess_combined_round1",
+            self._route_from_combined_round1,
             {
                 "sufficient": "final_synthesis",
                 "needs_gap_filling": "gap_analysis",
-                "needs_web": "web_round1"
+                "needs_web_round2": "web_round2"
             }
         )
         
@@ -220,13 +211,23 @@ class FullResearchAgent:
         # Web Round 2 goes to synthesis
         workflow.add_edge("web_round2", "final_synthesis")
         
-        # Synthesis is the end
-        workflow.add_edge("final_synthesis", END)
+        # Add data formatting node (if formatting is needed)
+        workflow.add_node("format_data", self._format_data_node)
         
-        # Round 1 goes to assessment
-        workflow.add_edge("round1_local_search", "assess_round1")
+        # After synthesis, check if formatting is needed
+        workflow.add_conditional_edges(
+            "final_synthesis",
+            self._route_from_synthesis,
+            {
+                "format": "format_data",
+                "complete": END
+            }
+        )
         
-        return workflow.compile()
+        # Formatting node goes to end
+        workflow.add_edge("format_data", END)
+        
+        return workflow.compile(checkpointer=checkpointer)
     
     # ===== Routing Functions =====
     
@@ -238,30 +239,34 @@ class FullResearchAgent:
         logger.info("Cache miss - proceeding with research")
         return "do_research"
     
-    def _route_from_round1(self, state: ResearchState) -> str:
-        """Route based on Round 1 sufficiency with early exit detection"""
+    def _route_from_combined_round1(self, state: ResearchState) -> str:
+        """Route based on combined Round 1 assessment (local + web)"""
         if state.get("round1_sufficient"):
-            logger.info("Round 1 sufficient - proceeding to synthesis")
+            logger.info("Combined Round 1 sufficient - proceeding to synthesis")
             return "sufficient"
         
-        # Check for early exit: empty results or no relevant info
-        round1_results = state.get("round1_results", {})
-        search_results = round1_results.get("search_results", "")
         round1_assessment = state.get("round1_assessment", {})
+        needs_more_local = round1_assessment.get("needs_more_local", False)
+        needs_more_web = round1_assessment.get("needs_more_web", False)
+        best_source = round1_assessment.get("best_source", "both")
         
-        # Early exit: Zero or very minimal results
-        if not search_results or len(search_results.strip()) < 50:
-            logger.info("Round 1: Empty results detected - skipping Round 2 Local, going to Web Round 1")
-            return "needs_web"
+        # If we need more web data, go to web round 2
+        if needs_more_web:
+            logger.info("Combined Round 1: Needs more web data - routing to Web Round 2")
+            return "needs_web_round2"
         
-        # Early exit: No relevant information found
-        if not round1_assessment.get("has_relevant_info", True):
-            logger.info("Round 1: No relevant info detected - skipping Round 2 Local, going to Web Round 1")
-            return "needs_web"
+        # If we need more local data, do gap analysis for Round 2 local
+        if needs_more_local:
+            logger.info("Combined Round 1: Needs more local data - routing to gap analysis")
+            return "needs_gap_filling"
         
-        # Otherwise, do gap analysis to decide Round 2 Local vs Web
-        logger.info("Round 1 insufficient - doing gap analysis")
+        # Default: do gap analysis to determine next steps
+        logger.info("Combined Round 1 insufficient - doing gap analysis")
         return "needs_gap_filling"
+    
+    def _route_from_round1(self, state: ResearchState) -> str:
+        """Route based on Round 1 sufficiency (legacy - redirects to combined routing)"""
+        return self._route_from_combined_round1(state)
     
     def _route_from_gap_analysis(self, state: ResearchState) -> str:
         """Route from gap analysis based on severity and web search needs"""
@@ -384,60 +389,111 @@ class FullResearchAgent:
                 "original_query": state["query"]
             }
     
-    async def _round1_local_search_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Round 1: Initial local search"""
+    async def _round1_parallel_search_node(self, state: ResearchState) -> Dict[str, Any]:
+        """Round 1: Parallel local and web search for faster results and better decision-making"""
         try:
             query = state["query"]
             expanded_queries = state.get("expanded_queries", [query])
             
-            logger.info(f"Round 1: Local search with {len(expanded_queries)} queries")
+            logger.info(f"Round 1: Parallel search - local + web with {len(expanded_queries)} queries")
             
-            # Search using all query variations
-            all_results = []
-            for q in expanded_queries[:3]:  # Limit to top 3
-                result = await search_documents_tool(query=q, limit=10)
-                all_results.append(result)
+            # Run local and web search in parallel
+            import asyncio
+            from orchestrator.tools.web_tools import search_and_crawl_tool
             
-            # Combine results
-            combined_results = "\n\n".join(all_results)
+            async def local_search_task():
+                """Local search task"""
+                try:
+                    all_results = []
+                    for q in expanded_queries[:3]:  # Limit to top 3
+                        result = await search_documents_tool(query=q, limit=10)
+                        all_results.append(result)
+                    combined_results = "\n\n".join(all_results)
+                    return {
+                        "search_results": combined_results,
+                        "queries_used": expanded_queries[:3],
+                        "result_count": len(all_results)
+                    }
+                except Exception as e:
+                    logger.error(f"Local search error: {e}")
+                    return {"error": str(e), "search_results": ""}
+            
+            async def web_search_task():
+                """Web search task"""
+                try:
+                    web_result = await search_and_crawl_tool(query=query, max_results=10)
+                    return {
+                        "content": web_result,
+                        "query_used": query
+                    }
+                except Exception as e:
+                    logger.error(f"Web search error: {e}")
+                    return {"error": str(e), "content": ""}
+            
+            # Execute both searches in parallel
+            local_result, web_result = await asyncio.gather(
+                local_search_task(),
+                web_search_task(),
+                return_exceptions=True
+            )
+            
+            # Handle exceptions
+            if isinstance(local_result, Exception):
+                logger.error(f"Local search exception: {local_result}")
+                local_result = {"error": str(local_result), "search_results": ""}
+            
+            if isinstance(web_result, Exception):
+                logger.error(f"Web search exception: {web_result}")
+                web_result = {"error": str(web_result), "content": ""}
+            
+            logger.info(f"✅ Parallel search complete: local={bool(local_result.get('search_results'))}, web={bool(web_result.get('content'))}")
             
             return {
-                "round1_results": {
-                    "search_results": combined_results,
-                    "queries_used": expanded_queries[:3],
-                    "result_count": len(all_results)
-                },
+                "round1_results": local_result,
+                "web_round1_results": web_result,
                 "current_round": ResearchRound.INITIAL_LOCAL.value
             }
             
         except Exception as e:
-            logger.error(f"Round 1 search error: {e}")
+            logger.error(f"Round 1 parallel search error: {e}")
             return {
-                "round1_results": {"error": str(e)},
+                "round1_results": {"error": str(e), "search_results": ""},
+                "web_round1_results": {"error": str(e), "content": ""},
                 "current_round": ResearchRound.INITIAL_LOCAL.value
             }
     
-    async def _assess_round1_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Assess Round 1 results quality and sufficiency"""
+    async def _round1_local_search_node(self, state: ResearchState) -> Dict[str, Any]:
+        """Round 1: Initial local search (legacy - kept for backward compatibility)"""
+        return await self._round1_parallel_search_node(state)
+    
+    async def _assess_combined_round1_node(self, state: ResearchState) -> Dict[str, Any]:
+        """Assess combined Round 1 results (local + web) for quality and sufficiency"""
         try:
             query = state["query"]
             round1_results = state.get("round1_results", {})
-            search_results = round1_results.get("search_results", "")
+            web_round1_results = state.get("web_round1_results", {})
             
-            logger.info("Assessing Round 1 results quality")
+            local_results = round1_results.get("search_results", "")
+            web_results = web_round1_results.get("content", "")
             
-            # Use LLM to assess quality with structured output
-            assessment_prompt = f"""Assess the quality and sufficiency of these search results for answering the user's query.
+            logger.info("Assessing combined Round 1 results (local + web)")
+            
+            # Use LLM to assess quality with structured output - now includes both local and web
+            assessment_prompt = f"""Assess the quality and sufficiency of these combined search results (local documents + web search) for answering the user's query.
 
 USER QUERY: {query}
 
-SEARCH RESULTS:
-{search_results[:2000]}
+LOCAL DOCUMENT RESULTS:
+{local_results[:1500] if local_results else "No local results found."}
+
+WEB SEARCH RESULTS:
+{web_results[:1500] if web_results else "No web results found."}
 
 Evaluate:
-1. Do the results contain relevant information?
+1. Do the results (local + web combined) contain relevant information?
 2. Is there enough detail to answer the query comprehensively?
-3. What information is missing (if any)?
+3. What information is still missing (if any)?
+4. Which source (local vs web) provides better information?
 
 STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact schema:
 {{
@@ -445,19 +501,26 @@ STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact sc
     "has_relevant_info": boolean,
     "missing_info": ["list", "of", "specific", "gaps"],
     "confidence": number (0.0-1.0),
-    "reasoning": "brief explanation of assessment"
+    "reasoning": "brief explanation of assessment",
+    "best_source": "local" | "web" | "both",
+    "needs_more_local": boolean,
+    "needs_more_web": boolean
 }}
 
 Example:
 {{
-    "sufficient": false,
+    "sufficient": true,
     "has_relevant_info": true,
-    "missing_info": ["specific dates of events", "financial details"],
-    "confidence": 0.7,
-    "reasoning": "Results mention the relationship but lack specific details about interactions and timeline"
+    "missing_info": [],
+    "confidence": 0.9,
+    "reasoning": "Combined local and web results provide comprehensive information to answer the query",
+    "best_source": "both",
+    "needs_more_local": false,
+    "needs_more_web": false
 }}"""
             
-            response = await self.llm.ainvoke([
+            llm = self._get_llm(temperature=0.7, state=state)
+            response = await llm.ainvoke([
                 SystemMessage(content="You are a research quality assessor. Always respond with valid JSON."),
                 HumanMessage(content=assessment_prompt)
             ])
@@ -484,7 +547,13 @@ Example:
                 assessment = ResearchAssessmentResult.parse_raw(text)
                 sufficient = assessment.sufficient
                 
-                logger.info(f"Round 1 assessment: sufficient={sufficient}, confidence={assessment.confidence}, relevant={assessment.has_relevant_info}")
+                # Extract additional fields if present
+                assessment_dict = json.loads(text) if isinstance(text, str) else text
+                best_source = assessment_dict.get("best_source", "both")
+                needs_more_local = assessment_dict.get("needs_more_local", False)
+                needs_more_web = assessment_dict.get("needs_more_web", False)
+                
+                logger.info(f"Combined Round 1 assessment: sufficient={sufficient}, confidence={assessment.confidence}, best_source={best_source}")
                 logger.info(f"Assessment reasoning: {assessment.reasoning}")
                 
             except (json.JSONDecodeError, ValidationError, Exception) as e:
@@ -492,7 +561,10 @@ Example:
                 logger.warning(f"Raw response: {response.content[:500]}")
                 # Fallback: conservative assumption that more research needed
                 sufficient = False
-                logger.info(f"Round 1 assessment (fallback): sufficient={sufficient}")
+                best_source = "both"
+                needs_more_local = True
+                needs_more_web = False
+                logger.info(f"Combined Round 1 assessment (fallback): sufficient={sufficient}")
             
             return {
                 "round1_sufficient": sufficient,
@@ -500,7 +572,10 @@ Example:
                     "sufficient": assessment.sufficient if 'assessment' in locals() else sufficient,
                     "has_relevant_info": assessment.has_relevant_info if 'assessment' in locals() else True,
                     "confidence": assessment.confidence if 'assessment' in locals() else 0.5,
-                    "reasoning": assessment.reasoning if 'assessment' in locals() else response.content[:200]
+                    "reasoning": assessment.reasoning if 'assessment' in locals() else response.content[:200],
+                    "best_source": best_source if 'best_source' in locals() else "both",
+                    "needs_more_local": needs_more_local if 'needs_more_local' in locals() else False,
+                    "needs_more_web": needs_more_web if 'needs_more_web' in locals() else False
                 },
                 "gap_analysis": {
                     "has_local_gaps": not sufficient,
@@ -509,17 +584,24 @@ Example:
             }
             
         except Exception as e:
-            logger.error(f"Round 1 assessment error: {e}")
+            logger.error(f"Combined Round 1 assessment error: {e}")
             return {
                 "round1_sufficient": False,
                 "round1_assessment": {
                     "sufficient": False,
                     "has_relevant_info": False,
                     "confidence": 0.0,
-                    "reasoning": f"Assessment error: {str(e)}"
+                    "reasoning": f"Assessment error: {str(e)}",
+                    "best_source": "both",
+                    "needs_more_local": True,
+                    "needs_more_web": False
                 },
                 "gap_analysis": {"has_local_gaps": True}
             }
+    
+    async def _assess_round1_node(self, state: ResearchState) -> Dict[str, Any]:
+        """Assess Round 1 results quality and sufficiency (legacy - redirects to combined assessment)"""
+        return await self._assess_combined_round1_node(state)
     
     async def _gap_analysis_node(self, state: ResearchState) -> Dict[str, Any]:
         """Analyze gaps in Round 1 results"""
@@ -683,7 +765,7 @@ Example:
             logger.info(f"Web Round 1: {query}")
             
             # Use search_and_crawl for comprehensive web research
-            web_result = await search_and_crawl_tool(query=query, num_results=10)
+            web_result = await search_and_crawl_tool(query=query, max_results=10)
             
             return {
                 "web_round1_results": {
@@ -743,7 +825,8 @@ STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact sc
     "reasoning": "brief explanation of assessment"
 }}"""
             
-            response = await self.llm.ainvoke([
+            llm = self._get_llm(temperature=0.7, state=state)
+            response = await llm.ainvoke([
                 SystemMessage(content="You are a research quality assessor. Always respond with valid JSON."),
                 HumanMessage(content=assessment_prompt)
             ])
@@ -910,7 +993,7 @@ STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact sc
             logger.info(f"Web Round 2 search: {search_query}")
             
             # Use search_and_crawl for targeted web research
-            web_result = await search_and_crawl_tool(query=search_query, num_results=10)
+            web_result = await search_and_crawl_tool(query=search_query, max_results=10)
             
             return {
                 "web_round2_results": {
@@ -988,7 +1071,8 @@ Provide a well-organized, thorough response that:
 
 Your comprehensive response:"""
             
-            response = await self.synthesis_llm.ainvoke([
+            synthesis_llm = self._get_llm(temperature=0.3, state=state)
+            response = await synthesis_llm.ainvoke([
                 SystemMessage(content="You are an expert research synthesizer."),
                 HumanMessage(content=synthesis_prompt)
             ])
@@ -1029,6 +1113,63 @@ Your comprehensive response:"""
                 "final_response": f"Research completed but synthesis failed: {str(e)}",
                 "research_complete": True,
                 "error": str(e)
+            }
+    
+    def _route_from_synthesis(self, state: ResearchState) -> str:
+        """Route from synthesis: check if formatting is needed"""
+        routing_recommendation = state.get("routing_recommendation")
+        if routing_recommendation == "data_formatting":
+            logger.info("📊 Routing to data formatting agent")
+            return "format"
+        return "complete"
+    
+    async def _format_data_node(self, state: ResearchState) -> Dict[str, Any]:
+        """Format research results using data formatting agent"""
+        try:
+            logger.info("📊 Formatting research results with data formatting agent...")
+            
+            # Import data formatting agent
+            from orchestrator.agents import DataFormattingAgent
+            
+            # Get the research response and query
+            query = state.get("query", "")
+            final_response = state.get("final_response", "")
+            
+            # Build formatting request
+            formatting_query = f"Format the following research results into a well-organized structure:\n\n{final_response}"
+            
+            # Get messages from state for context
+            messages = state.get("messages", [])
+            
+            # Create data formatting agent instance
+            formatting_agent = DataFormattingAgent()
+            
+            # Call data formatting agent
+            formatting_result = await formatting_agent.process(
+                query=formatting_query,
+                metadata={"user_id": "system"},
+                messages=messages
+            )
+            
+            # Extract formatted output
+            formatted_output = formatting_result.get("response", final_response)
+            format_type = formatting_result.get("format_type", "structured_text")
+            
+            logger.info(f"✅ Data formatting complete: {format_type}")
+            
+            return {
+                "final_response": formatted_output,
+                "format_type": format_type,
+                "formatted": True
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Data formatting failed: {e}")
+            # Return original response if formatting fails
+            return {
+                "final_response": state.get("final_response", ""),
+                "formatted": False,
+                "formatting_error": str(e)
             }
     
     async def research(self, query: str, conversation_id: str = None) -> Dict[str, Any]:
@@ -1078,8 +1219,15 @@ Your comprehensive response:"""
                 "error": ""
             }
             
-            # Run workflow
-            result = await self.workflow.ainvoke(initial_state)
+            # Get workflow and checkpoint config
+            workflow = await self._get_workflow()
+            
+            # Create metadata for checkpoint config
+            metadata = {"conversation_id": conversation_id} if conversation_id else {}
+            config = self._get_checkpoint_config(metadata)
+            
+            # Run workflow with checkpointing
+            result = await workflow.ainvoke(initial_state, config=config)
             
             logger.info("Research workflow complete")
             

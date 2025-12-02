@@ -1,6 +1,6 @@
 {
   "name": "bastion-frontend",
-  "version": "1.0.0",
+  "version": "0.10.0",
   "description": "Bastion AI Workspace - React Frontend",
   "private": true,
   "dependencies": {
@@ -48,6 +48,7 @@
     "reactflow": "^11.10.1"
   },
   "scripts": {
+    "prebuild": "node ../scripts/update_package_version.js",
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",

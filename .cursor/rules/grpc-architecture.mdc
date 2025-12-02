@@ -1043,9 +1043,61 @@ docker compose build --no-cache backend llm-orchestrator
 docker compose up -d backend llm-orchestrator
 ```
 
+## Service-to-Service Communication Policy
+
+### **MANDATORY: ALL Internal Communication Uses gRPC**
+
+**ABSOLUTELY NO HTTP for service-to-service calls!**
+
+```python
+# ❌ WRONG - HTTP between services
+import httpx
+async with httpx.AsyncClient() as client:
+    response = await client.post("http://backend:8000/api/documents/filter", json=data)
+    # This bypasses gRPC architecture and causes auth issues!
+
+# ✅ CORRECT - gRPC between services
+from orchestrator.backend_tool_client import get_backend_tool_client
+client = await get_backend_tool_client()
+result = await client.search_documents(query=query, limit=10)
+```
+
+**Why gRPC Only:**
+1. **Proper authentication** - gRPC context handles auth, HTTP requires tokens
+2. **Type safety** - Proto contracts vs. loose JSON
+3. **Better performance** - Binary protocol, connection pooling
+4. **Streaming support** - Real-time updates built-in
+5. **Service discovery** - Works with Docker service names
+6. **Clear contracts** - Proto files document APIs
+
+**When to Use HTTP:**
+- **Frontend ↔ Backend** - Browser can't speak gRPC (use REST/SSE)
+- **External APIs** - Third-party services (OpenRouter, OpenAI, etc.)
+- **Webhooks** - External services calling into your system
+
+**When to Use gRPC:**
+- **Backend ↔ LLM Orchestrator** - All agent requests
+- **LLM Orchestrator ↔ Backend** - All tool calls (search, entities, web)
+- **Backend ↔ Vector Service** - Embedding generation
+- **Backend ↔ Data Service** - Database operations
+- **Any future microservice ↔ Any other microservice**
+
+### Authentication Models
+
+**gRPC (Internal Services):**
+- No JWT tokens needed
+- Service names imply trust within Docker network
+- Context metadata for user_id if needed
+
+**HTTP (External/Frontend):**
+- JWT Bearer tokens required
+- Auth middleware validates tokens
+- Protected paths require authentication
+
 ## Anti-Patterns to Avoid
 
 ### ❌ DON'T:
+- **Use HTTP between internal services** (biggest violation!)
 - Duplicate proto files across services
 - Use `localhost` for inter-service communication
 - Commit generated `*_pb2.py` files
@@ -1053,8 +1105,11 @@ docker compose up -d backend llm-orchestrator
 - Build from subdirectory context
 - Mix blocking and async code
 - Ignore gRPC status codes
+- Make direct database calls from orchestrator (use backend gRPC)
+- Bypass tool service for "convenience"
 
 ### ✅ DO:
+- **Use gRPC for ALL service-to-service communication**
 - Keep protos in shared `/opt/bastion/protos/`
 - Use Docker service names for hostnames
 - Let Docker build generate proto code
@@ -1062,6 +1117,8 @@ docker compose up -d backend llm-orchestrator
 - Build from root context (`.`)
 - Use async/await throughout
 - Set appropriate gRPC status codes
+- Route all data access through backend tool service
+- Add new RPC methods rather than creating HTTP endpoints
 
 ## Case Study: Vector Service Migration
 

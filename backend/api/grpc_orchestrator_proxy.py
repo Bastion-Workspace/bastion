@@ -6,7 +6,7 @@ Phase 5: Integration endpoint for new microservices architecture
 import logging
 import asyncio
 import json
-from typing import AsyncIterator, Dict, Any
+from typing import AsyncIterator, Dict, Any, Optional
 from datetime import datetime
 
 import grpc
@@ -99,7 +99,12 @@ async def stream_from_grpc_orchestrator(
         if agent_type:
             logger.info(f"Requesting agent type: {agent_type}")
         
-        async with grpc.aio.insecure_channel(f'{orchestrator_host}:{orchestrator_port}') as channel:
+        # Increase message size limits for large responses (default is 4MB)
+        options = [
+            ('grpc.max_send_message_length', 100 * 1024 * 1024),  # 100 MB
+            ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100 MB
+        ]
+        async with grpc.aio.insecure_channel(f'{orchestrator_host}:{orchestrator_port}', options=options) as channel:
             stub = orchestrator_pb2_grpc.OrchestratorServiceStub(channel)
             
             # Use context gatherer to build comprehensive request
@@ -119,10 +124,39 @@ async def stream_from_grpc_orchestrator(
             
             logger.info(f"Forwarding to gRPC orchestrator: {query[:100]}")
             
+            # Save user message to conversation BEFORE processing
+            try:
+                from services.conversation_service import ConversationService
+                conversation_service = ConversationService()
+                conversation_service.set_current_user(user_id)
+                
+                user_message_result = await conversation_service.add_message(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    role="user",
+                    content=query,
+                    metadata={"orchestrator_system": True, "streaming": True}
+                )
+                logger.info(f"✅ Saved user message to conversation {conversation_id}")
+            except Exception as save_error:
+                logger.warning(f"⚠️ Failed to save user message: {save_error}")
+                # Continue even if message save fails
+            
             # Stream chunks from gRPC service
             chunk_count = 0
+            agent_name_used = None  # Track which agent was used
+            accumulated_response = ""  # Accumulate full response content
+            
             async for chunk in stub.StreamChat(grpc_request):
                 chunk_count += 1
+                
+                # Track agent name from chunks (use the most specific one, not "orchestrator" or "system")
+                if chunk.agent_name and chunk.agent_name not in ["orchestrator", "system"]:
+                    agent_name_used = chunk.agent_name
+                
+                # Accumulate content chunks for saving as last_response
+                if chunk.type == "content" and chunk.message:
+                    accumulated_response += chunk.message
                 
                 # Convert gRPC chunk to SSE format using centralized JSON formatter
                 if chunk.type == "status":
@@ -158,6 +192,33 @@ async def stream_from_grpc_orchestrator(
                 await asyncio.sleep(0)
             
             logger.info(f"Received {chunk_count} chunks from gRPC orchestrator")
+            
+            # Save assistant response to conversation AFTER streaming completes
+            if accumulated_response:
+                try:
+                    from services.conversation_service import ConversationService
+                    conversation_service = ConversationService()
+                    conversation_service.set_current_user(user_id)
+                    
+                    assistant_message_result = await conversation_service.add_message(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        role="assistant",
+                        content=accumulated_response,
+                        metadata={
+                            "orchestrator_system": True,
+                            "streaming": True,
+                            "delegated_agent": agent_name_used or "unknown",
+                            "chunk_count": chunk_count
+                        }
+                    )
+                    logger.info(f"✅ Saved assistant response to conversation {conversation_id} (agent: {agent_name_used or 'unknown'})")
+                except Exception as save_error:
+                    logger.warning(f"⚠️ Failed to save assistant response: {save_error}")
+                    # Continue even if message save fails
+            
+            # NOTE: gRPC orchestrator handles its own state management via LangGraph checkpointing
+            # No need to manually update backend orchestrator state
             
             # Send final complete event
             yield format_sse_message({
@@ -218,6 +279,10 @@ async def stream_orchestrator_grpc(
         # Remove None values
         request_context = {k: v for k, v in request_context.items() if v is not None}
         
+        # NOTE: gRPC orchestrator handles its own state management via LangGraph checkpointing
+        # State is automatically retrieved by the gRPC service
+        conversation_state = None
+        
         return StreamingResponse(
             stream_from_grpc_orchestrator(
                 query=request.query,
@@ -227,7 +292,7 @@ async def stream_orchestrator_grpc(
                 agent_type=request.agent_type,
                 routing_reason=request.routing_reason,
                 request_context=request_context if request_context else None,
-                state=None  # TODO: Fetch from conversation DB if needed
+                state=conversation_state
             ),
             media_type="text/event-stream",
             headers={
@@ -252,7 +317,12 @@ async def grpc_orchestrator_health():
         }
     
     try:
-        async with grpc.aio.insecure_channel('llm-orchestrator:50051') as channel:
+        # Increase message size limits (default is 4MB)
+        options = [
+            ('grpc.max_send_message_length', 100 * 1024 * 1024),  # 100 MB
+            ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100 MB
+        ]
+        async with grpc.aio.insecure_channel('llm-orchestrator:50051', options=options) as channel:
             stub = orchestrator_pb2_grpc.OrchestratorServiceStub(channel)
             
             health_req = orchestrator_pb2.HealthCheckRequest()
@@ -269,4 +339,92 @@ async def grpc_orchestrator_health():
             "status": "error",
             "message": str(e)
         }
+
+
+async def _load_conversation_state(user_id: str, conversation_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Load conversation state for continuity between requests
+
+    This ensures the LLM orchestrator has access to:
+    - primary_agent_selected: Which agent was last used
+    - last_agent: Previous agent for context
+    - Other conversation metadata
+
+    Args:
+        user_id: User UUID
+        conversation_id: Conversation UUID
+
+    Returns:
+        Dict with conversation state or None if no state available
+    """
+    try:
+        # Get conversation service to load state
+        from services.conversation_service import ConversationService
+        conversation_service = ConversationService()
+        conversation_service.set_current_user(user_id)
+
+        # Load recent messages to determine conversation context
+        messages_data = await conversation_service.get_conversation_messages(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            skip=0,
+            limit=10  # Get last 10 messages for context
+        )
+
+        if not messages_data or not messages_data.get("messages"):
+            logger.debug(f"No conversation history found for {conversation_id}")
+            return None
+
+        messages = messages_data["messages"]
+
+        # Find the last assistant message to determine which agent was used
+        last_assistant_message = None
+        for msg in reversed(messages):
+            if msg.get("message_type") == "assistant":
+                last_assistant_message = msg.get("content", "")
+                break
+
+        # Determine primary_agent_selected based on conversation patterns
+        # This is a simplified heuristic - in production you might want more sophisticated logic
+        primary_agent_selected = None
+        last_agent = None
+
+        if last_assistant_message:
+            # Simple pattern matching to determine which agent was likely used
+            # This could be enhanced with more sophisticated analysis
+            message_lower = last_assistant_message.lower()
+
+            # Check for electronics agent patterns
+            if any(keyword in message_lower for keyword in [
+                "circuit", "arduino", "esp32", "voltage", "resistor", "component",
+                "electronics", "microcontroller", "sensor", "pcb", "schematic"
+            ]):
+                primary_agent_selected = "electronics_agent"
+                last_agent = "electronics_agent"
+
+            # Check for other agent patterns as needed
+            elif any(keyword in message_lower for keyword in [
+                "weather", "temperature", "forecast"
+            ]):
+                primary_agent_selected = "weather_agent"
+                last_agent = "weather_agent"
+
+            # Add more agent pattern matching as needed...
+
+        if primary_agent_selected:
+            logger.info(f"📋 LOADED CONVERSATION STATE: primary_agent_selected={primary_agent_selected}, last_agent={last_agent}")
+            return {
+                "shared_memory": {
+                    "primary_agent_selected": primary_agent_selected,
+                    "last_agent": last_agent,
+                    "last_response": last_assistant_message
+                }
+            }
+        else:
+            logger.debug(f"No primary agent determined from conversation history")
+            return None
+
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to load conversation state: {e}")
+        return None
 

@@ -85,6 +85,7 @@ class DataImportService:
         table_name: str,
         file_path: str,
         file_type: str,
+        user_id: str,
         field_mapping: Optional[Dict[str, str]] = None
     ) -> str:
         """Execute data import job"""
@@ -93,7 +94,7 @@ class DataImportService:
             
             # Create import job record
             await self._create_import_job(
-                job_id, workspace_id, database_id, file_path, 'pending'
+                job_id, workspace_id, database_id, file_path, 'pending', user_id
             )
             
             # Read file
@@ -124,6 +125,7 @@ class DataImportService:
                 database_id=database_id,
                 name=table_name,
                 schema=schema,
+                user_id=user_id,
                 description=f"Imported from {Path(file_path).name}"
             )
             
@@ -142,7 +144,7 @@ class DataImportService:
             for i in range(0, total_rows, batch_size):
                 batch = rows_data[i:i + batch_size]
                 await self.table_service.bulk_insert_rows(
-                    table_id, batch, batch_size
+                    table_id, batch, user_id, batch_size
                 )
                 
                 # Update progress
@@ -150,7 +152,7 @@ class DataImportService:
                 await self._update_import_job_progress(job_id, rows_processed)
             
             # Update database stats
-            await self.database_service.update_database_stats(database_id)
+            await self.database_service.update_database_stats(database_id, user_id)
             
             # Mark job as completed
             await self._update_import_job_status(
@@ -173,7 +175,7 @@ class DataImportService:
             query = """
                 SELECT job_id, workspace_id, database_id, table_id, status,
                        source_file, file_size, rows_processed, rows_total,
-                       field_mapping_json, error_log, started_at, completed_at, created_at
+                       field_mapping_json, error_log, started_at, completed_at, created_at, created_by
                 FROM data_import_jobs
                 WHERE job_id = $1
             """
@@ -195,6 +197,7 @@ class DataImportService:
                 'error_log': row['error_log'],
                 'started_at': row['started_at'].isoformat() if row['started_at'] else None,
                 'completed_at': row['completed_at'].isoformat() if row['completed_at'] else None,
+                'created_by': row.get('created_by'),
                 'progress_percent': int((row['rows_processed'] / row['rows_total'] * 100)) if row['rows_total'] > 0 else 0
             }
             
@@ -229,19 +232,20 @@ class DataImportService:
         workspace_id: str,
         database_id: str,
         source_file: str,
-        status: str
+        status: str,
+        user_id: str
     ):
         """Create import job record"""
         query = """
             INSERT INTO data_import_jobs 
             (job_id, workspace_id, database_id, status, source_file, 
-             rows_processed, rows_total, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             rows_processed, rows_total, created_at, created_by)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         """
         await self.db.execute(
             query,
             job_id, workspace_id, database_id, status, source_file,
-            0, 0, datetime.utcnow()
+            0, 0, datetime.utcnow(), user_id
         )
     
     async def _update_import_job_status(

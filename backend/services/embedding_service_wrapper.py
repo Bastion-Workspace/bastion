@@ -1,54 +1,52 @@
 """
 Embedding Service Wrapper
 
-Provides unified interface for embedding generation that can use either:
-1. Legacy EmbeddingManager (direct OpenAI calls)
-2. New Vector Service (gRPC microservice)
-
-This wrapper enables gradual migration via feature flag.
+Unified interface for embedding generation and storage using Vector Service.
+All embedding generation routed through dedicated Vector Service microservice.
+All storage operations handled by VectorStoreService.
 """
 
 import logging
 from typing import List, Optional, Dict, Any
 
-from config import get_settings
-from utils.embedding_manager import EmbeddingManager
+from config import get_settings, settings
 from clients.vector_service_client import get_vector_service_client
+from services.vector_store_service import get_vector_store
 from models.api_models import Chunk
+from qdrant_client.models import PointStruct
 
 logger = logging.getLogger(__name__)
 
 
 class EmbeddingServiceWrapper:
     """
-    Unified embedding service wrapper
+    Unified embedding service wrapper - Vector Service only
     
-    Provides the same interface as EmbeddingManager, but routes to either:
-    - Legacy EmbeddingManager (USE_VECTOR_SERVICE=False)
-    - New Vector Service (USE_VECTOR_SERVICE=True)
+    Architecture:
+    - Embedding generation: Vector Service (gRPC microservice)
+    - Vector storage: VectorStoreService (Qdrant)
+    - No fallback: Always uses Vector Service
     """
     
     def __init__(self):
         self.settings = get_settings()
-        self.embedding_manager: Optional[EmbeddingManager] = None
         self.vector_service_client = None
+        self.vector_store = None
         self._initialized = False
-        self._use_vector_service = self.settings.USE_VECTOR_SERVICE
     
     async def initialize(self):
-        """Initialize the appropriate embedding backend"""
+        """Initialize Vector Service client and vector store"""
         if self._initialized:
             return
         
-        if self._use_vector_service:
-            logger.info("Initializing Vector Service client for embeddings")
-            self.vector_service_client = await get_vector_service_client()
-            logger.info("✅ Vector Service client initialized")
-        else:
-            logger.info("Initializing legacy EmbeddingManager")
-            self.embedding_manager = EmbeddingManager()
-            await self.embedding_manager.initialize()
-            logger.info("✅ Legacy EmbeddingManager initialized")
+        # Initialize vector store for storage operations
+        self.vector_store = await get_vector_store()
+        logger.info("Vector Store Service initialized")
+        
+        # Initialize Vector Service for embedding generation
+        logger.info("Initializing Vector Service client for embeddings")
+        self.vector_service_client = await get_vector_service_client()
+        logger.info("Vector Service client initialized")
         
         self._initialized = True
     
@@ -58,7 +56,7 @@ class EmbeddingServiceWrapper:
         model: Optional[str] = None
     ) -> List[List[float]]:
         """
-        Generate embeddings for texts
+        Generate embeddings for texts via Vector Service
         
         Args:
             texts: List of texts to embed
@@ -70,20 +68,16 @@ class EmbeddingServiceWrapper:
         if not self._initialized:
             await self.initialize()
         
-        if self._use_vector_service:
-            # Use new Vector Service
-            return await self.vector_service_client.generate_embeddings(
-                texts=texts,
-                model=model
-            )
-        else:
-            # Use legacy EmbeddingManager
-            return await self.embedding_manager.generate_embeddings(texts)
+        return await self.vector_service_client.generate_embeddings(
+            texts=texts,
+            model=model
+        )
     
     async def embed_and_store_chunks(
         self,
         chunks: List[Any],
         user_id: Optional[str] = None,
+        team_id: Optional[str] = None,
         document_category: Optional[str] = None,
         document_tags: Optional[List[str]] = None,
         document_title: Optional[str] = None,
@@ -91,10 +85,9 @@ class EmbeddingServiceWrapper:
         document_filename: Optional[str] = None
     ):
         """
-        Generate embeddings for chunks and store in Qdrant
+        Generate embeddings for chunks and store in vector database
         
-        Note: This always uses EmbeddingManager for Qdrant storage logic.
-        In Vector Service mode, we generate embeddings via gRPC, then store via EmbeddingManager.
+        Uses Vector Service for generation, VectorStoreService for storage.
         
         Args:
             chunks: Document chunks to embed
@@ -108,39 +101,22 @@ class EmbeddingServiceWrapper:
         if not self._initialized:
             await self.initialize()
         
-        if self._use_vector_service:
-            # Generate embeddings via Vector Service
-            texts = [chunk.content for chunk in chunks]
-            embeddings = await self.vector_service_client.generate_embeddings(texts)
-            
-            # Store in Qdrant using EmbeddingManager's storage logic
-            # We need to initialize EmbeddingManager just for storage if not already done
-            if not self.embedding_manager:
-                self.embedding_manager = EmbeddingManager()
-                await self.embedding_manager.initialize()
-            
-            # Use EmbeddingManager's storage method with pre-generated embeddings
-            await self._store_embeddings_with_metadata(
-                chunks=chunks,
-                embeddings=embeddings,
-                user_id=user_id,
-                document_category=document_category,
-                document_tags=document_tags,
-                document_title=document_title,
-                document_author=document_author,
-                document_filename=document_filename
-            )
-        else:
-            # Use legacy path - generate and store in one call
-            await self.embedding_manager.embed_and_store_chunks(
-                chunks=chunks,
-                user_id=user_id,
-                document_category=document_category,
-                document_tags=document_tags,
-                document_title=document_title,
-                document_author=document_author,
-                document_filename=document_filename
-            )
+        # Generate embeddings via Vector Service
+        texts = [chunk.content for chunk in chunks]
+        embeddings = await self.vector_service_client.generate_embeddings(texts)
+        
+        # Store via VectorStoreService
+        await self._store_embeddings_with_metadata(
+            chunks=chunks,
+            embeddings=embeddings,
+            user_id=user_id,
+            team_id=team_id,
+            document_category=document_category,
+            document_tags=document_tags,
+            document_title=document_title,
+            document_author=document_author,
+            document_filename=document_filename
+        )
     
     async def search_similar(
         self,
@@ -148,20 +124,22 @@ class EmbeddingServiceWrapper:
         limit: int = 10,
         score_threshold: float = 0.7,
         user_id: Optional[str] = None,
-        filters: Optional[Dict[str, Any]] = None
+        team_ids: Optional[List[str]] = None,
+        filter_category: Optional[str] = None,
+        filter_tags: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Search for similar documents in Qdrant
+        Search for similar documents in vector database
         
-        Note: This always uses EmbeddingManager for Qdrant search logic.
-        In Vector Service mode, query embeddings are generated via gRPC.
+        Uses VectorStoreService for search operations.
         
         Args:
             query_embedding: Query embedding vector
             limit: Maximum results to return
             score_threshold: Minimum similarity score
             user_id: User ID for user-specific search
-            filters: Additional Qdrant filters
+            filter_category: Filter by document category
+            filter_tags: Filter by document tags
             
         Returns:
             List of search results
@@ -169,42 +147,65 @@ class EmbeddingServiceWrapper:
         if not self._initialized:
             await self.initialize()
         
-        # Search always uses EmbeddingManager (Qdrant logic)
-        if not self.embedding_manager:
-            self.embedding_manager = EmbeddingManager()
-            await self.embedding_manager.initialize()
-        
-        return await self.embedding_manager.search_similar(
+        return await self.vector_store.search_similar(
             query_embedding=query_embedding,
             limit=limit,
             score_threshold=score_threshold,
             user_id=user_id,
-            filters=filters
+            team_ids=team_ids,
+            filter_category=filter_category,
+            filter_tags=filter_tags
         )
     
     async def clear_cache(self):
-        """Clear embedding cache (if using Vector Service)"""
+        """Clear Vector Service embedding cache"""
         if not self._initialized:
             await self.initialize()
         
-        if self._use_vector_service and self.vector_service_client:
+        if self.vector_service_client:
             await self.vector_service_client.clear_cache(clear_all=True)
-            logger.info("✅ Vector Service cache cleared")
+            logger.info("Vector Service cache cleared")
     
     async def get_cache_stats(self) -> Optional[Dict[str, Any]]:
-        """Get cache statistics (if using Vector Service)"""
+        """Get Vector Service cache statistics"""
         if not self._initialized:
             await self.initialize()
         
-        if self._use_vector_service and self.vector_service_client:
+        if self.vector_service_client:
             return await self.vector_service_client.get_cache_stats()
         return None
+    
+    async def delete_document_chunks(
+        self,
+        document_id: str,
+        user_id: Optional[str] = None
+    ) -> bool:
+        """
+        Delete all embeddings for a document from vector database
+        
+        Uses VectorStoreService for deletion operations.
+        
+        Args:
+            document_id: Document ID to delete chunks for
+            user_id: Optional user ID for user-specific collection
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        return await self.vector_store.delete_points_by_filter(
+            document_id=document_id,
+            user_id=user_id
+        )
     
     async def _store_embeddings_with_metadata(
         self,
         chunks: List[Chunk],
         embeddings: List[List[float]],
         user_id: Optional[str] = None,
+        team_id: Optional[str] = None,
         document_category: Optional[str] = None,
         document_tags: Optional[List[str]] = None,
         document_title: Optional[str] = None,
@@ -212,31 +213,39 @@ class EmbeddingServiceWrapper:
         document_filename: Optional[str] = None
     ):
         """
-        Store pre-generated embeddings in Qdrant with metadata
+        Store pre-generated embeddings in vector database with metadata
         
-        This method replicates the storage logic from EmbeddingManager.embed_and_store_chunks
-        but accepts pre-generated embeddings instead of generating them.
+        Uses VectorStoreService for storage operations.
         """
-        from qdrant_client.models import PointStruct
-        from config import settings
-        
         try:
             if not chunks or not embeddings:
                 return
             
             if len(chunks) != len(embeddings):
-                raise ValueError(f"Chunks ({len(chunks)}) and embeddings ({len(embeddings)}) length mismatch")
+                raise ValueError(
+                    f"Chunks ({len(chunks)}) and embeddings ({len(embeddings)}) length mismatch"
+                )
             
-            # Determine collection to use
-            if user_id:
-                await self.embedding_manager._ensure_user_collection_exists(user_id)
-                collection_name = self.embedding_manager._get_user_collection_name(user_id)
-            else:
-                collection_name = settings.VECTOR_COLLECTION_NAME
+            # Ensure collection exists if needed
+            if team_id:
+                await self.vector_store.ensure_team_collection_exists(team_id)
+            elif user_id:
+                await self.vector_store.ensure_user_collection_exists(user_id)
             
             # Deduplicate chunks by content hash
-            unique_chunks = self.embedding_manager._deduplicate_chunks(chunks)
-            logger.info(f"📊 Deduplicated {len(chunks)} chunks to {len(unique_chunks)} unique chunks for user {user_id or 'system'}")
+            unique_chunks = []
+            seen_hashes = set()
+            for chunk in chunks:
+                normalized_content = ' '.join(chunk.content.split()).lower()
+                content_hash = hash(normalized_content)
+                if content_hash not in seen_hashes:
+                    seen_hashes.add(content_hash)
+                    unique_chunks.append(chunk)
+            
+            logger.info(
+                f"Deduplicated {len(chunks)} chunks to {len(unique_chunks)} "
+                f"unique chunks for {'team ' + team_id if team_id else ('user ' + user_id if user_id else 'system')}"
+            )
             
             # Build mapping of unique chunks to embeddings
             chunk_to_embedding = {}
@@ -244,7 +253,7 @@ class EmbeddingServiceWrapper:
                 content_hash = abs(hash(chunk.content))
                 chunk_to_embedding[content_hash] = embedding
             
-            # Prepare metadata info for logging
+            # Log metadata info
             metadata_info = ""
             if document_category:
                 metadata_info += f" category={document_category}"
@@ -258,16 +267,16 @@ class EmbeddingServiceWrapper:
                 metadata_info += f" filename='{document_filename}'"
             
             if metadata_info:
-                logger.info(f"📋 Including document metadata in vector payloads:{metadata_info}")
+                logger.info(f"Including document metadata in vector payloads:{metadata_info}")
             
-            # Prepare points for Qdrant
+            # Prepare points for storage
             points = []
             for chunk in unique_chunks:
                 content_hash = abs(hash(chunk.content))
                 embedding = chunk_to_embedding.get(content_hash)
                 
                 if not embedding:
-                    logger.warning(f"⚠️ No embedding found for chunk {chunk.chunk_id}, skipping")
+                    logger.warning(f"No embedding found for chunk {chunk.chunk_id}, skipping")
                     continue
                 
                 # Build payload with metadata
@@ -280,7 +289,8 @@ class EmbeddingServiceWrapper:
                     "method": chunk.method,
                     "metadata": chunk.metadata,
                     "content_hash": content_hash,
-                    "user_id": user_id
+                    "user_id": user_id,
+                    "team_id": team_id
                 }
                 
                 # Add optional metadata
@@ -302,14 +312,34 @@ class EmbeddingServiceWrapper:
                 )
                 points.append(point)
             
-            # Store in collection
-            await self.embedding_manager._store_points_with_retry(points, collection_name)
+            # Store via VectorStoreService
+            collection_name = None
+            if team_id:
+                collection_name = self.vector_store._get_team_collection_name(team_id)
+            elif user_id:
+                collection_name = self.vector_store._get_user_collection_name(user_id)
             
-            collection_type = "user" if user_id else "global"
-            logger.info(f"✅ Stored {len(points)} unique embeddings in {collection_type} collection: {collection_name}")
+            success = await self.vector_store.insert_points(
+                points=points,
+                collection_name=collection_name
+            )
+            
+            if success:
+                if team_id:
+                    collection_type = "team"
+                elif user_id:
+                    collection_type = "user"
+                else:
+                    collection_type = "global"
+                logger.info(
+                    f"Stored {len(points)} unique embeddings in "
+                    f"{collection_type} collection"
+                )
+            else:
+                logger.error("Failed to store embeddings")
             
         except Exception as e:
-            logger.error(f"❌ Failed to store embeddings with metadata for user {user_id}: {e}")
+            logger.error(f"Failed to store embeddings with metadata for {'team ' + team_id if team_id else ('user ' + user_id if user_id else 'system')}: {e}")
             raise
 
 
@@ -326,4 +356,3 @@ async def get_embedding_service() -> EmbeddingServiceWrapper:
         await _embedding_service_wrapper.initialize()
     
     return _embedding_service_wrapper
-

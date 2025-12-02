@@ -5,7 +5,6 @@ import authService from './auth/AuthService';
 import documentService from './document/DocumentService';
 import chatService from './chat/ChatService';
 import conversationService from './conversation/ConversationService';
-import notesService from './notes/NotesService';
 import settingsService from './settings/SettingsService';
 import adminService from './admin/AdminService';
 import folderService from './folder/FolderService';
@@ -21,7 +20,6 @@ class ApiService {
     this.documents = documentService;
     this.chat = chatService;
     this.conversations = conversationService;
-    this.notes = notesService;
     this.settings = settingsService;
     this.admin = adminService;
     this.folders = folderService;
@@ -149,6 +147,16 @@ class ApiService {
   moveFolder = (folderId, newParentId) => this.folders.moveFolder(folderId, newParentId);
   createDefaultFolders = () => this.folders.createDefaultFolders();
 
+  // ===== PROJECT METHODS =====
+  createProject = async (parentFolderId, projectName, projectType) => {
+    const response = await this.post('/api/projects/create', {
+      parent_folder_id: parentFolderId,
+      project_name: projectName,
+      project_type: projectType
+    });
+    return response;
+  };
+
   // ===== TEMPLATE METHODS =====
   getUserTemplates = () => this.templates.getUserTemplates();
   getPublicTemplates = () => this.templates.getPublicTemplates();
@@ -169,11 +177,6 @@ class ApiService {
   generateTemplatePlan = (templateId, query) => this.templates.generateTemplatePlan(templateId, query);
 
   // ===== INTEGRATION METHODS =====
-  getCalibreStatus = () => this.integrations.getCalibreStatus();
-  toggleCalibreIntegration = (enabled) => this.integrations.toggleCalibreIntegration(enabled);
-  updateCalibreSettings = (settings) => this.integrations.updateCalibreSettings(settings);
-  searchCalibreLibrary = (query, limit) => this.integrations.searchCalibreLibrary(query, limit);
-  getCalibreFilters = () => this.integrations.getCalibreFilters();
 }
 
 const apiService = new ApiService();

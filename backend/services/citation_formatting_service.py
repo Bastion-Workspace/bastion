@@ -125,8 +125,6 @@ class CitationFormattingService:
             citation_type = "document"
             if url and url.startswith("http"):
                 citation_type = "webpage"
-            elif result.get("source_collection") == "calibre":
-                citation_type = "book"
             
             return {
                 "title": title,

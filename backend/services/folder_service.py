@@ -28,6 +28,7 @@ class FolderService:
         self.uploads_base = Path(settings.UPLOAD_DIR)
         self.global_base = self.uploads_base / "Global"
         self.users_base = self.uploads_base / "Users"
+        self.teams_base = self.uploads_base / "Teams"
         
     async def initialize(self):
         """Initialize the folder service"""
@@ -36,16 +37,22 @@ class FolderService:
         # Ensure base directory structure exists
         self.global_base.mkdir(parents=True, exist_ok=True)
         self.users_base.mkdir(parents=True, exist_ok=True)
+        self.teams_base.mkdir(parents=True, exist_ok=True)
         
         logger.info(f"✅ Folder Service initialized")
         logger.info(f"📂 Global files: {self.global_base}")
         logger.info(f"📂 User files: {self.users_base}")
+        logger.info(f"📂 Team files: {self.teams_base}")
     
     def get_user_base_path(self, user_id: str, username: str = None) -> Path:
         """Get the base path for a user's documents"""
         # Use username if provided, otherwise use user_id
         folder_name = username if username else user_id
         return self.users_base / folder_name
+    
+    def get_team_base_path(self, team_id: str) -> Path:
+        """Get the base path for a team's documents"""
+        return self.teams_base / team_id / "documents"
     
     async def _get_username(self, user_id: str) -> str:
         """Get username from user_id"""
@@ -78,8 +85,15 @@ class FolderService:
             # Determine base path
             collection_type = folder_data.get('collection_type', 'user')
             user_id = folder_data.get('user_id')
+            team_id = folder_data.get('team_id')
             
-            if collection_type == 'global':
+            # Convert UUID to string if needed (asyncpg returns UUID objects)
+            if team_id and not isinstance(team_id, str):
+                team_id = str(team_id)
+            
+            if team_id:
+                base_path = self.get_team_base_path(team_id)
+            elif collection_type == 'global':
                 base_path = self.global_base
             else:
                 username = await self._get_username(user_id) if user_id else "unknown"
@@ -99,14 +113,17 @@ class FolderService:
     async def _create_physical_directory(self, folder_path: Path) -> bool:
         """Create physical directory on filesystem"""
         try:
-            folder_path.mkdir(parents=True, exist_ok=True)
-            logger.info(f"📁 Created physical directory: {folder_path}")
+            # Only log if directory doesn't exist (to reduce noise)
+            if not folder_path.exists():
+                folder_path.mkdir(parents=True, exist_ok=True)
+                logger.info(f"📁 Created physical directory: {folder_path}")
+            # Directory already exists - no need to log
             return True
         except Exception as e:
             logger.error(f"❌ Failed to create physical directory {folder_path}: {e}")
             return False
     
-    async def get_document_file_path(self, filename: str, folder_id: str = None, user_id: str = None, collection_type: str = "user") -> Path:
+    async def get_document_file_path(self, filename: str, folder_id: str = None, user_id: str = None, collection_type: str = "user", team_id: str = None) -> Path:
         """
         Get the physical file path for a document based on folder structure.
         
@@ -114,7 +131,8 @@ class FolderService:
             filename: Name of the file
             folder_id: Folder ID to place file in (optional)
             user_id: User ID for user-specific files
-            collection_type: 'user' or 'global'
+            collection_type: 'user', 'global', or 'team'
+            team_id: Team ID for team-specific files
             
         Returns:
             Path object for where the file should be stored
@@ -129,7 +147,10 @@ class FolderService:
                     return folder_path / filename
             
             # No folder_id - place at base level
-            if collection_type == "global":
+            if team_id:
+                base_path = self.get_team_base_path(team_id)
+                await self._create_physical_directory(base_path)
+            elif collection_type == "global":
                 base_path = self.global_base
             else:
                 username = await self._get_username(user_id) if user_id else "unknown"
@@ -144,7 +165,7 @@ class FolderService:
             # Fallback to old flat structure
             return self.uploads_base / filename
     
-    async def create_folder(self, name: str, parent_folder_id: str = None, user_id: str = None, collection_type: str = "user", current_user_role: str = "user", admin_user_id: str = None) -> DocumentFolder:
+    async def create_folder(self, name: str, parent_folder_id: str = None, user_id: str = None, collection_type: str = "user", current_user_role: str = "user", admin_user_id: str = None, team_id: str = None) -> DocumentFolder:
         """
         Create a new folder or return existing one if already present.
         
@@ -160,7 +181,11 @@ class FolderService:
             logger.info(f"🔍 Creating folder: name='{name}', parent_folder_id='{parent_folder_id}', user_id='{user_id}', collection_type='{collection_type}'")
             
             # Security validation
-            if current_user_role != "admin":
+            if collection_type == "team":
+                # Team folders can be created by any user (will be validated by team membership elsewhere)
+                # For now, allow team folder creation
+                pass
+            elif current_user_role != "admin":
                 # Regular users can only create folders for themselves
                 if collection_type == "global":
                     raise ValueError("Regular users cannot create global folders")
@@ -191,6 +216,7 @@ class FolderService:
                 "parent_folder_id": parent_folder_id,
                 "user_id": user_id,
                 "collection_type": collection_type,
+                "team_id": team_id,
                 "created_at": now,
                 "updated_at": now
             }
@@ -350,8 +376,23 @@ class FolderService:
                 global_folders_data = await self.document_repository.get_folders_by_user(None, "global")
                 logger.debug(f"📁 Found {len(global_folders_data)} global folders")
             
+            # Get team folders for user's teams
+            team_folders_data = []
+            if user_id:
+                try:
+                    from services.team_service import TeamService
+                    team_service = TeamService()
+                    await team_service.initialize()
+                    user_teams = await team_service.list_user_teams(user_id)
+                    team_ids = [team['team_id'] for team in user_teams]
+                    if team_ids:
+                        team_folders_data = await self.document_repository.get_folders_by_teams(team_ids)
+                        logger.info(f"📁 Found {len(team_folders_data)} team folders for user {user_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to get team folders for user {user_id}: {e}")
+            
             # Combine all folders
-            all_folders_data = user_folders_data + global_folders_data
+            all_folders_data = user_folders_data + global_folders_data + team_folders_data
             
             # Add counts for each folder
             for folder_data in all_folders_data:
@@ -464,6 +505,14 @@ class FolderService:
                 logger.info(f"✅ Created Global Documents virtual root with {len(all_global_children)} children (including virtual sources)")
             else:
                 logger.info(f"⚠️ User {user_id} is not admin - Global Documents not created")
+            
+            # Add team folders as virtual roots
+            team_root_folders = [f for f in root_folders if f.collection_type == "team"]
+            logger.info(f"🔍 Found {len(team_root_folders)} team root folders for user {user_id}")
+            
+            for team_folder in team_root_folders:
+                virtual_roots.append(team_folder)
+                logger.info(f"✅ Added team folder: {team_folder.name} (ID: {team_folder.folder_id})")
             
             # If no virtual roots were created, return the original root folders
             if not virtual_roots:
@@ -654,6 +703,10 @@ class FolderService:
             if not folder:
                 return None
             
+            # Get old physical path before any updates
+            old_physical_path = await self.get_folder_physical_path(folder_id)
+            old_folder_name = folder.name
+            
             # Validate parent folder if changing
             if update_data.parent_folder_id and update_data.parent_folder_id != folder.parent_folder_id:
                 parent_folder = await self.get_folder(update_data.parent_folder_id, user_id, current_user_role)
@@ -664,7 +717,7 @@ class FolderService:
                 if await self._would_create_circular_reference(folder_id, update_data.parent_folder_id):
                     raise ValueError("Cannot move folder: would create circular reference")
             
-            # Update folder
+            # Update folder in database
             update_dict = update_data.dict(exclude_unset=True)
             if update_dict:
                 update_dict["updated_at"] = datetime.utcnow()
@@ -672,6 +725,44 @@ class FolderService:
                 
                 # Get updated folder
                 updated_folder = await self.get_folder(folder_id, user_id, current_user_role)
+                
+                # If folder name changed, rename physical directory
+                if update_data.name and update_data.name != old_folder_name and old_physical_path:
+                    new_physical_path = await self.get_folder_physical_path(folder_id)
+                    
+                    if old_physical_path.exists():
+                        try:
+                            # Rename the physical directory
+                            old_physical_path.rename(new_physical_path)
+                            logger.info(f"✅ Renamed physical directory: {old_physical_path} -> {new_physical_path}")
+                        except Exception as rename_error:
+                            logger.error(f"❌ Failed to rename physical directory: {rename_error}")
+                            # Rollback database change
+                            await self.document_repository.update_folder(folder_id, {"name": old_folder_name})
+                            raise ValueError(f"Failed to rename physical directory: {rename_error}")
+                    else:
+                        logger.warning(f"⚠️ Physical directory not found, creating new one: {new_physical_path}")
+                        await self._create_physical_directory(new_physical_path)
+                    
+                    # Send WebSocket notification for folder rename
+                    try:
+                        from services.websocket_manager import get_websocket_manager
+                        ws_manager = get_websocket_manager()
+                        await ws_manager.send_to_user(user_id, {
+                            "type": "folder_update",
+                            "action": "renamed",
+                            "folder": {
+                                "folder_id": updated_folder.folder_id,
+                                "name": updated_folder.name,
+                                "parent_folder_id": updated_folder.parent_folder_id,
+                                "updated_at": updated_folder.updated_at.isoformat() if updated_folder.updated_at else None
+                            },
+                            "old_name": old_folder_name
+                        })
+                        logger.info(f"📡 WebSocket notification sent for folder rename: {folder_id}")
+                    except Exception as ws_error:
+                        logger.warning(f"⚠️ Failed to send WebSocket notification: {ws_error}")
+                
                 logger.info(f"📁 Folder updated: {folder_id}")
                 return updated_folder
             
@@ -690,6 +781,10 @@ class FolderService:
             folder = await self.get_folder(folder_id, user_id, current_user_role)
             if not folder:
                 return False
+            
+            # Prevent deletion of team root folders (must delete team instead)
+            if folder.collection_type == "team" and folder.parent_folder_id is None:
+                raise ValueError("Cannot delete team root folder. Delete the team instead to remove the folder.")
             
             # No cache to clear - database is the source of truth
             

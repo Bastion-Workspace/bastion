@@ -8,7 +8,8 @@ from typing import Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel, Field
 
-from services.langgraph_official_orchestrator import LangGraphOfficialOrchestrator
+# DEPRECATED: Backend orchestrator removed
+# from services.langgraph_official_orchestrator import LangGraphOfficialOrchestrator
 from utils.auth_middleware import get_current_user
 from models.api_models import AuthenticatedUserResponse
 
@@ -57,8 +58,11 @@ async def execute_template_research(
         logger.info(f"🎯 Executing template research: {request.template_id} for user {current_user.username}")
         
         # Initialize orchestrator
-        orchestrator = LangGraphOfficialOrchestrator()
-        await orchestrator.initialize()
+        # DEPRECATED: Backend orchestrator removed
+        raise HTTPException(
+            status_code=410,
+            detail="This endpoint is deprecated. Backend orchestrator has been removed."
+        )
         
         # Create execution query with template specification
         execution_query = f"EXECUTE_TEMPLATE:{request.template_id}|{request.query}"
@@ -98,8 +102,11 @@ async def confirm_template_usage(
         logger.info(f"✅ Template confirmation: {request.action} for template {request.template_id}")
         
         # Initialize orchestrator
-        orchestrator = LangGraphOfficialOrchestrator()
-        await orchestrator.initialize()
+        # DEPRECATED: Backend orchestrator removed
+        raise HTTPException(
+            status_code=410,
+            detail="This endpoint is deprecated. Backend orchestrator has been removed."
+        )
         
         # Create confirmation message for LangGraph
         if request.action == "accept":
@@ -144,8 +151,11 @@ async def get_execution_status(
         logger.info(f"📊 Getting execution status for conversation: {conversation_id}")
         
         # Initialize orchestrator to check status
-        orchestrator = LangGraphOfficialOrchestrator()
-        await orchestrator.initialize()
+        # DEPRECATED: Backend orchestrator removed
+        raise HTTPException(
+            status_code=410,
+            detail="This endpoint is deprecated. Backend orchestrator has been removed."
+        )
         
         # Get conversation state from LangGraph checkpoint
         state = await orchestrator.get_conversation_state(conversation_id)

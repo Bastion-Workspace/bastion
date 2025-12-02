@@ -62,6 +62,37 @@ class ConversationService extends ApiServiceBase {
       throw error;
     }
   }
+
+  // Conversation sharing methods
+  shareConversation = async (conversationId, userId, shareType = 'read', expiresAt = null) => {
+    return this.post(`/api/conversations/${conversationId}/share`, {
+      shared_with_user_id: userId,
+      share_type: shareType,
+      expires_at: expiresAt
+    });
+  }
+
+  unshareConversation = async (conversationId, shareId) => {
+    return this.delete(`/api/conversations/${conversationId}/share/${shareId}`);
+  }
+
+  getConversationShares = async (conversationId) => {
+    return this.get(`/api/conversations/${conversationId}/shares`);
+  }
+
+  getSharedConversations = async (skip = 0, limit = 50) => {
+    return this.get(`/api/conversations/shared-with-me?skip=${skip}&limit=${limit}`);
+  }
+
+  getConversationParticipants = async (conversationId) => {
+    return this.get(`/api/conversations/${conversationId}/participants`);
+  }
+
+  updateSharePermissions = async (conversationId, shareId, shareType) => {
+    return this.put(`/api/conversations/${conversationId}/share/${shareId}`, {
+      share_type: shareType
+    });
+  }
 }
 
 export default new ConversationService();

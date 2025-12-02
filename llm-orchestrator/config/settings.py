@@ -16,11 +16,12 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     
     # Database Configuration (for LangGraph checkpointer)
-    POSTGRES_HOST: str = "db"
+    # Note: These defaults are overridden by docker-compose.yml environment variables
+    POSTGRES_HOST: str = "postgres"
     POSTGRES_PORT: int = 5432
-    POSTGRES_DB: str = "codex"
-    POSTGRES_USER: str = "codex_user"
-    POSTGRES_PASSWORD: str = "your_secure_password"
+    POSTGRES_DB: str = "bastion_knowledge_base"
+    POSTGRES_USER: str = "bastion_user"
+    POSTGRES_PASSWORD: str = "bastion_secure_password"
     
     # Backend Tool Service
     BACKEND_TOOL_SERVICE_HOST: str = "backend"

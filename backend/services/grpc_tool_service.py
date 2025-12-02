@@ -4,7 +4,7 @@ Provides document, RSS, entity, weather, and org-mode data via gRPC
 """
 
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 import asyncio
 import json
 
@@ -113,12 +113,74 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             
             logger.info(f"SearchDocuments: Found {len(results)} results")
             return response
-            
+
         except Exception as e:
             logger.error(f"SearchDocuments error: {e}")
             import traceback
             traceback.print_exc()
             await context.abort(grpc.StatusCode.INTERNAL, f"Search failed: {str(e)}")
+
+    async def FindDocumentsByTags(
+        self,
+        request: tool_service_pb2.FindDocumentsByTagsRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.FindDocumentsByTagsResponse:
+        """Find documents that contain ALL of the specified tags using database query"""
+        try:
+            logger.info(f"FindDocumentsByTags: user={request.user_id}, tags={list(request.required_tags)}, collection={request.collection_type}")
+
+            # Debug the request
+            logger.info(f"Request details: user_id={request.user_id}, required_tags={request.required_tags}, collection_type={request.collection_type}, limit={request.limit}")
+
+            # Query database directly using the same approach that works in manual testing
+            from services.database_manager.database_helpers import fetch_all
+
+            query = """
+                SELECT
+                    document_id, filename, title, category, tags, description,
+                    author, language, publication_date, doc_type, file_size,
+                    file_hash, processing_status, upload_date, quality_score,
+                    page_count, chunk_count, entity_count, user_id, collection_type
+                FROM document_metadata
+                WHERE tags @> $1
+                ORDER BY upload_date DESC
+                LIMIT $2
+            """
+
+            documents = await fetch_all(query, request.required_tags, request.limit or 20)
+
+            logger.info(f"Found {len(documents)} documents matching tags")
+
+            # Convert to proto response
+            response = tool_service_pb2.FindDocumentsByTagsResponse(
+                total_count=len(documents)
+            )
+
+            for doc in documents:
+                doc_result = tool_service_pb2.DocumentResult(
+                    document_id=str(doc.get('document_id', '')),
+                    title=doc.get('title', doc.get('filename', '')),
+                    filename=doc.get('filename', ''),
+                    content_preview="",  # No preview for metadata-only search
+                    relevance_score=1.0  # All matches are equally relevant
+                )
+                # Add metadata
+                doc_result.metadata.update({
+                    'tags': str(doc.get('tags', [])),
+                    'category': doc.get('category', ''),
+                    'user_id': doc.get('user_id', ''),
+                    'collection_type': doc.get('collection_type', '')
+                })
+                response.results.append(doc_result)
+
+            logger.info(f"FindDocumentsByTags: Found {len(documents)} documents")
+            return response
+
+        except Exception as e:
+            logger.error(f"FindDocumentsByTags error: {e}")
+            import traceback
+            traceback.print_exc()
+            await context.abort(grpc.StatusCode.INTERNAL, f"Find by tags failed: {str(e)}")
     
     async def GetDocument(
         self,
@@ -153,7 +215,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         request: tool_service_pb2.DocumentRequest,
         context: grpc.aio.ServicerContext
     ) -> tool_service_pb2.DocumentContentResponse:
-        """Get document full content"""
+        """Get document full content from disk"""
         try:
             logger.info(f"GetDocumentContent: doc_id={request.document_id}")
             
@@ -163,17 +225,237 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             if not doc:
                 await context.abort(grpc.StatusCode.NOT_FOUND, "Document not found")
             
+            # Get content from disk (same logic as REST API)
+            filename = doc.get('filename')
+            user_id = doc.get('user_id')
+            folder_id = doc.get('folder_id')
+            collection_type = doc.get('collection_type', 'user')
+            
+            full_content = None
+            
+            if filename:
+                from pathlib import Path
+                from services.service_container import get_service_container
+                
+                container = await get_service_container()
+                folder_service = container.folder_service
+                
+                # Skip PDFs - they don't have text content
+                if filename.lower().endswith('.pdf'):
+                    logger.info(f"GetDocumentContent: Skipping PDF content for {request.document_id}")
+                    full_content = ""
+                else:
+                    try:
+                        file_path_str = await folder_service.get_document_file_path(
+                            filename=filename,
+                            folder_id=folder_id,
+                            user_id=user_id,
+                            collection_type=collection_type
+                        )
+                        file_path = Path(file_path_str)
+                        
+                        if file_path.exists():
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                full_content = f.read()
+                            logger.info(f"GetDocumentContent: Loaded {len(full_content)} chars from {file_path}")
+                        else:
+                            logger.warning(f"GetDocumentContent: File not found at {file_path}")
+                    except Exception as e:
+                        logger.warning(f"GetDocumentContent: Failed to load from folder service: {e}")
+            
+            # If content is None, file wasn't found
+            if full_content is None:
+                logger.error(f"GetDocumentContent: File not found for document {request.document_id}")
+                await context.abort(grpc.StatusCode.NOT_FOUND, f"Document file not found on disk")
+            
             response = tool_service_pb2.DocumentContentResponse(
                 document_id=str(doc.get('document_id', '')),
-                content=doc.get('content', ''),
+                content=full_content or '',
                 format='text'
             )
             
             return response
             
+        except grpc.RpcError:
+            raise
         except Exception as e:
             logger.error(f"GetDocumentContent error: {e}")
+            import traceback
+            traceback.print_exc()
             await context.abort(grpc.StatusCode.INTERNAL, f"Get content failed: {str(e)}")
+    
+    async def FindDocumentByPath(
+        self,
+        request: tool_service_pb2.FindDocumentByPathRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.FindDocumentByPathResponse:
+        """
+        Find a document by filesystem path (true path resolution).
+        
+        Resolves relative paths from base_path, then finds the document record
+        by matching the actual filesystem path.
+        """
+        try:
+            from pathlib import Path
+            from config import settings
+            
+            logger.info(f"FindDocumentByPath: user={request.user_id}, path={request.file_path}, base={request.base_path}")
+            
+            # Resolve the path
+            file_path_str = request.file_path.strip()
+            base_path_str = request.base_path.strip() if request.base_path else None
+            
+            # If relative path, resolve from base
+            if base_path_str and not Path(file_path_str).is_absolute():
+                base_path = Path(base_path_str)
+                resolved_path = (base_path / file_path_str).resolve()
+            else:
+                resolved_path = Path(file_path_str).resolve()
+            
+            # Ensure .md extension if no extension
+            if not resolved_path.suffix:
+                resolved_path = resolved_path.with_suffix('.md')
+            
+            logger.info(f"FindDocumentByPath: Resolved to {resolved_path}")
+            
+            # Check if file exists
+            if not resolved_path.exists() or not resolved_path.is_file():
+                logger.warning(f"FindDocumentByPath: File not found at {resolved_path}")
+                return tool_service_pb2.FindDocumentByPathResponse(
+                    success=False,
+                    error=f"File not found at {resolved_path}"
+                )
+            
+            # Find document record by path using repository
+            # Replicate logic from DocumentFileHandler._get_document_by_path
+            from pathlib import Path as PathLib
+            
+            path = PathLib(resolved_path)
+            filename = path.name
+            
+            # Parse the path to extract user context
+            parts = path.parts
+            uploads_idx = -1
+            for i, part in enumerate(parts):
+                if part == 'uploads':
+                    uploads_idx = i
+                    break
+            
+            if uploads_idx == -1:
+                logger.warning(f"FindDocumentByPath: File path doesn't contain 'uploads': {resolved_path}")
+                return tool_service_pb2.FindDocumentByPathResponse(
+                    success=False,
+                    error=f"Invalid path structure: {resolved_path}"
+                )
+            
+            # Determine collection type and context
+            doc_repo = self._get_document_repo()
+            user_id = request.user_id
+            collection_type = 'user'
+            folder_id = None
+            
+            if uploads_idx + 1 < len(parts):
+                collection_dir = parts[uploads_idx + 1]
+                
+                if collection_dir == 'Users' and uploads_idx + 2 < len(parts):
+                    # User file: uploads/Users/{username}/{folders...}/{filename}
+                    username = parts[uploads_idx + 2]
+                    collection_type = 'user'
+                    
+                    # Get user_id from username if not provided
+                    if not user_id:
+                        from repositories.document_repository import DocumentRepository
+                        temp_repo = DocumentRepository()
+                        import asyncpg
+                        from config import settings
+                        conn = await asyncpg.connect(settings.DATABASE_URL)
+                        try:
+                            row = await conn.fetchrow("SELECT user_id FROM users WHERE username = $1", username)
+                            if row:
+                                user_id = row['user_id']
+                        finally:
+                            await conn.close()
+                    
+                    # Resolve folder hierarchy if folders exist
+                    folder_start_idx = uploads_idx + 3
+                    folder_end_idx = len(parts) - 1  # Exclude filename
+                    
+                    if folder_start_idx < folder_end_idx:
+                        folder_parts = parts[folder_start_idx:folder_end_idx]
+                        # Get folders and resolve hierarchy
+                        folders_data = await doc_repo.get_folders_by_user(user_id, collection_type)
+                        folder_map = {(f.get('name'), f.get('parent_folder_id')): f.get('folder_id') for f in folders_data}
+                        
+                        parent_folder_id = None
+                        for folder_name in folder_parts:
+                            key = (folder_name, parent_folder_id)
+                            if key in folder_map:
+                                folder_id = folder_map[key]
+                                parent_folder_id = folder_id
+                            else:
+                                folder_id = None
+                                break
+                
+                elif collection_dir == 'Global':
+                    # Global file: uploads/Global/{folders...}/{filename}
+                    collection_type = 'global'
+                    user_id = None
+                    
+                    # Resolve folder hierarchy if folders exist
+                    folder_start_idx = uploads_idx + 2
+                    folder_end_idx = len(parts) - 1  # Exclude filename
+                    
+                    if folder_start_idx < folder_end_idx:
+                        folder_parts = parts[folder_start_idx:folder_end_idx]
+                        # Get folders and resolve hierarchy
+                        folders_data = await doc_repo.get_folders_by_user(None, collection_type)
+                        folder_map = {(f.get('name'), f.get('parent_folder_id')): f.get('folder_id') for f in folders_data}
+                        
+                        parent_folder_id = None
+                        for folder_name in folder_parts:
+                            key = (folder_name, parent_folder_id)
+                            if key in folder_map:
+                                folder_id = folder_map[key]
+                                parent_folder_id = folder_id
+                            else:
+                                folder_id = None
+                                break
+            
+            # Find document by filename, user_id, and folder_id
+            document = await doc_repo.find_by_filename_and_context(
+                filename=filename,
+                user_id=user_id,
+                collection_type=collection_type,
+                folder_id=folder_id
+            )
+            
+            if not document:
+                logger.warning(f"FindDocumentByPath: No document record found for {resolved_path}")
+                return tool_service_pb2.FindDocumentByPathResponse(
+                    success=False,
+                    error=f"No document record found for {resolved_path}"
+                )
+            
+            document_id = document.document_id
+            filename = document.filename
+            
+            logger.info(f"FindDocumentByPath: Found document {document_id} at {resolved_path}")
+            
+            return tool_service_pb2.FindDocumentByPathResponse(
+                success=True,
+                document_id=document_id,
+                filename=filename,
+                resolved_path=str(resolved_path)
+            )
+            
+        except Exception as e:
+            logger.error(f"FindDocumentByPath error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return tool_service_pb2.FindDocumentByPathResponse(
+                success=False,
+                error=str(e)
+            )
     
     # ===== RSS Operations =====
     
@@ -983,13 +1265,26 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             from services.langgraph_tools.web_content_tools import search_web
             
             # Execute search
-            results = await search_web(query=request.query, num_results=request.max_results or 15)
+            search_response = await search_web(query=request.query, limit=request.max_results or 15)
             
-            # Parse results (returns list of dicts)
+            # Parse results - search_web returns a dict with "results" key containing list
             response = tool_service_pb2.WebSearchResponse()
             
-            if isinstance(results, list):
-                for result in results[:request.max_results or 15]:
+            # Extract results list from response dict
+            if isinstance(search_response, dict) and search_response.get("success"):
+                results_list = search_response.get("results", [])
+                if isinstance(results_list, list):
+                    for result in results_list[:request.max_results or 15]:
+                        web_result = tool_service_pb2.WebSearchResult(
+                            title=result.get('title', ''),
+                            url=result.get('url', ''),
+                            snippet=result.get('snippet', ''),
+                            relevance_score=float(result.get('relevance_score', 0.0))
+                        )
+                        response.results.append(web_result)
+            elif isinstance(search_response, list):
+                # Fallback: if it's already a list (legacy format)
+                for result in search_response[:request.max_results or 15]:
                     web_result = tool_service_pb2.WebSearchResult(
                         title=result.get('title', ''),
                         url=result.get('url', ''),
@@ -1040,6 +1335,366 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         except Exception as e:
             logger.error(f"CrawlWebContent error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Web crawl failed: {str(e)}")
+    
+    async def CrawlWebsiteRecursive(
+        self,
+        request: tool_service_pb2.RecursiveWebsiteCrawlRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.RecursiveWebsiteCrawlResponse:
+        """Recursively crawl entire website"""
+        try:
+            logger.info(f"CrawlWebsiteRecursive: {request.start_url}, max_pages={request.max_pages}, max_depth={request.max_depth}")
+            
+            # Import recursive crawler tool
+            from services.langgraph_tools.website_crawler_tools import WebsiteCrawlerTools
+            
+            crawler = WebsiteCrawlerTools()
+            
+            # Execute recursive crawl
+            crawl_result = await crawler.crawl_website_recursive(
+                start_url=request.start_url,
+                max_pages=request.max_pages if request.max_pages > 0 else 500,
+                max_depth=request.max_depth if request.max_depth > 0 else 10,
+                user_id=request.user_id if request.user_id else None
+            )
+            
+            # Store crawled content (same as backend agent does)
+            if crawl_result.get("success"):
+                try:
+                    storage_result = await self._store_crawled_website(crawl_result, request.user_id if request.user_id else None)
+                    logger.info(f"CrawlWebsiteRecursive: Stored {storage_result.get('stored_count', 0)} items")
+                except Exception as e:
+                    logger.warning(f"CrawlWebsiteRecursive: Storage failed: {e}, but crawl succeeded")
+            
+            # Build response
+            response = tool_service_pb2.RecursiveWebsiteCrawlResponse()
+            
+            if crawl_result.get("success"):
+                response.success = True
+                response.start_url = crawl_result.get("start_url", "")
+                response.base_domain = crawl_result.get("base_domain", "")
+                response.crawl_session_id = crawl_result.get("crawl_session_id", "")
+                response.total_items_crawled = crawl_result.get("total_items_crawled", 0)
+                response.html_pages_crawled = crawl_result.get("html_pages_crawled", 0)
+                response.images_downloaded = crawl_result.get("images_downloaded", 0)
+                response.documents_downloaded = crawl_result.get("documents_downloaded", 0)
+                response.total_items_failed = crawl_result.get("total_items_failed", 0)
+                response.max_depth_reached = crawl_result.get("max_depth_reached", 0)
+                response.elapsed_time_seconds = crawl_result.get("elapsed_time_seconds", 0.0)
+                
+                # Add crawled pages
+                crawled_pages = crawl_result.get("crawled_pages", [])
+                for page in crawled_pages:
+                    crawled_page = tool_service_pb2.CrawledPage()
+                    crawled_page.url = page.get("url", "")
+                    crawled_page.content_type = page.get("content_type", "html")
+                    crawled_page.markdown_content = page.get("markdown_content", "")
+                    crawled_page.html_content = page.get("html_content", "")
+                    
+                    # Add metadata
+                    if page.get("metadata"):
+                        for key, value in page["metadata"].items():
+                            crawled_page.metadata[str(key)] = str(value)
+                    
+                    # Add links
+                    crawled_page.internal_links.extend(page.get("internal_links", []))
+                    crawled_page.image_links.extend(page.get("image_links", []))
+                    crawled_page.document_links.extend(page.get("document_links", []))
+                    
+                    crawled_page.depth = page.get("depth", 0)
+                    if page.get("parent_url"):
+                        crawled_page.parent_url = page["parent_url"]
+                    crawled_page.crawl_time = page.get("crawl_time", "")
+                    
+                    # Add binary content for images/documents
+                    if page.get("binary_content"):
+                        crawled_page.binary_content = page["binary_content"]
+                    if page.get("filename"):
+                        crawled_page.filename = page["filename"]
+                    if page.get("mime_type"):
+                        crawled_page.mime_type = page["mime_type"]
+                    if page.get("size_bytes"):
+                        crawled_page.size_bytes = page["size_bytes"]
+                    
+                    response.crawled_pages.append(crawled_page)
+            else:
+                response.success = False
+                error_msg = crawl_result.get("error", "Unknown error")
+                response.error = error_msg
+            
+            logger.info(f"CrawlWebsiteRecursive: Success={response.success}, Pages={response.total_items_crawled}")
+            return response
+            
+        except Exception as e:
+            logger.error(f"CrawlWebsiteRecursive error: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Recursive website crawl failed: {str(e)}")
+    
+    async def CrawlSite(
+        self,
+        request: tool_service_pb2.DomainCrawlRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.DomainCrawlResponse:
+        """Domain-scoped crawl starting from seed URL, filtering by query criteria"""
+        try:
+            logger.info(f"CrawlSite: {request.seed_url}, query={request.query_criteria}, max_pages={request.max_pages}, max_depth={request.max_depth}")
+            
+            # Import domain-scoped crawler tool
+            from services.langgraph_tools.crawl4ai_web_tools import Crawl4AIWebTools
+            
+            crawler = Crawl4AIWebTools()
+            
+            # Execute domain-scoped crawl
+            crawl_result = await crawler.crawl_site(
+                seed_url=request.seed_url,
+                query_criteria=request.query_criteria,
+                max_pages=request.max_pages if request.max_pages > 0 else 50,
+                max_depth=request.max_depth if request.max_depth > 0 else 2,
+                allowed_path_prefix=request.allowed_path_prefix if request.allowed_path_prefix else None,
+                include_pdfs=request.include_pdfs,
+                user_id=request.user_id if request.user_id else None
+            )
+            
+            # Build response
+            response = tool_service_pb2.DomainCrawlResponse()
+            
+            if crawl_result.get("success"):
+                response.success = True
+                response.domain = crawl_result.get("domain", "")
+                response.successful_crawls = crawl_result.get("successful_crawls", 0)
+                response.urls_considered = crawl_result.get("urls_considered", 0)
+                
+                # Add crawl results
+                results = crawl_result.get("results", [])
+                for item in results:
+                    result = tool_service_pb2.DomainCrawlResult()
+                    result.url = item.get("url", "")
+                    result.title = ((item.get("metadata") or {}).get("title") or "No title").strip()
+                    result.full_content = item.get("full_content", "")
+                    result.relevance_score = item.get("relevance_score", 0.0)
+                    result.success = item.get("success", False)
+                    
+                    # Add metadata
+                    if item.get("metadata"):
+                        for key, value in item["metadata"].items():
+                            result.metadata[str(key)] = str(value)
+                    
+                    response.results.append(result)
+            else:
+                response.success = False
+                response.error = crawl_result.get("error", "Unknown error")
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"CrawlSite error: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Domain crawl failed: {str(e)}")
+    
+    async def _store_crawled_website(
+        self,
+        crawl_result: Dict[str, Any],
+        user_id: Optional[str]
+    ) -> Dict[str, Any]:
+        """Store crawled website content as documents (same logic as backend agent)"""
+        try:
+            logger.info("Storing crawled website content")
+            
+            from services.document_service_v2 import DocumentService
+            from urllib.parse import urlparse
+            import hashlib
+            
+            # Initialize document service
+            doc_service = DocumentService()
+            await doc_service.initialize()
+            
+            # Extract website name from URL
+            parsed_url = urlparse(crawl_result["start_url"])
+            website_name = parsed_url.netloc.replace("www.", "")
+            
+            crawled_pages = crawl_result.get("crawled_pages", [])
+            stored_count = 0
+            failed_count = 0
+            images_stored = 0
+            documents_stored = 0
+            
+            from pathlib import Path
+            from config import settings
+            
+            for page in crawled_pages:
+                try:
+                    # Generate document ID
+                    doc_id = hashlib.md5(page["url"].encode()).hexdigest()[:16]
+                    content_type = page.get("content_type", "html")
+                    
+                    # Prepare common metadata
+                    base_metadata = {
+                        "category": "web_crawl",
+                        "source_url": page["url"],
+                        "site_root": crawl_result["base_domain"],
+                        "crawl_session_id": crawl_result["crawl_session_id"],
+                        "depth": page["depth"],
+                        "parent_url": page.get("parent_url"),
+                        "crawl_date": page["crawl_time"],
+                        "website_name": website_name,
+                        "content_type": content_type
+                    }
+                    
+                    success = False
+                    
+                    if content_type == "html":
+                        # Store HTML page as markdown text document
+                        metadata = {
+                            **base_metadata,
+                            "title": page.get("metadata", {}).get("title", page["url"]),
+                            "internal_links": page.get("internal_links", []),
+                            "image_links": page.get("image_links", []),
+                            "document_links": page.get("document_links", []),
+                            **page.get("metadata", {})
+                        }
+                        
+                        path_part = urlparse(page["url"]).path.strip("/") or "index"
+                        filename = f"{website_name}_{path_part.replace('/', '_')}.md"
+                        content = page["markdown_content"]
+                        page_title = page.get("metadata", {}).get("title", page["url"])
+                        
+                        # Store in vector database for search
+                        success = await doc_service.store_text_document(
+                            doc_id=doc_id,
+                            content=content,
+                            metadata=metadata,
+                            filename=filename,
+                            user_id=user_id,
+                            collection_type="user" if user_id else "global"
+                        )
+                        
+                        # ALSO create browseable markdown file using FileManager
+                        if success:
+                            try:
+                                from services.file_manager.agent_helpers import place_web_content
+                                await place_web_content(
+                                    content=content,
+                                    title=page_title,
+                                    url=page["url"],
+                                    domain=website_name,
+                                    user_id=user_id,
+                                    tags=["web-crawl", website_name],
+                                    description=f"Crawled from {page['url']}"
+                                )
+                                logger.info(f"Created browseable file for: {page_title}")
+                            except Exception as e:
+                                logger.warning(f"Failed to create browseable file for {page['url']}: {e}")
+                        
+                    elif content_type == "image":
+                        # Store image binary file
+                        binary_content = page.get("binary_content")
+                        filename = page.get("filename", "image")
+                        
+                        if binary_content:
+                            # Save image to uploads directory
+                            upload_dir = Path(settings.UPLOAD_DIR) / "web_sources" / "images" / website_name
+                            upload_dir.mkdir(parents=True, exist_ok=True)
+                            
+                            safe_filename = filename.replace("/", "_").replace("\\", "_")
+                            file_path = upload_dir / f"{doc_id}_{safe_filename}"
+                            
+                            with open(file_path, 'wb') as f:
+                                f.write(binary_content)
+                            
+                            logger.info(f"Saved image: {file_path}")
+                            
+                            # Create metadata entry
+                            metadata = {
+                                **base_metadata,
+                                "title": filename,
+                                "file_path": str(file_path),
+                                "mime_type": page.get("mime_type"),
+                                "size_bytes": page.get("size_bytes", 0)
+                            }
+                            
+                            # Store as text document with reference to image
+                            content = f"Image from {page['url']}\n\nLocal path: {file_path}\n\nSource: {website_name}"
+                            
+                            success = await doc_service.store_text_document(
+                                doc_id=doc_id,
+                                content=content,
+                                metadata=metadata,
+                                filename=safe_filename,
+                                user_id=user_id,
+                                collection_type="user" if user_id else "global"
+                            )
+                            
+                            if success:
+                                images_stored += 1
+                        
+                    elif content_type == "document":
+                        # Store document binary file (PDF, DOC, etc.)
+                        binary_content = page.get("binary_content")
+                        filename = page.get("filename", "document")
+                        
+                        if binary_content:
+                            # Save document to uploads directory
+                            upload_dir = Path(settings.UPLOAD_DIR) / "web_sources" / "documents" / website_name
+                            upload_dir.mkdir(parents=True, exist_ok=True)
+                            
+                            safe_filename = filename.replace("/", "_").replace("\\", "_")
+                            file_path = upload_dir / f"{doc_id}_{safe_filename}"
+                            
+                            with open(file_path, 'wb') as f:
+                                f.write(binary_content)
+                            
+                            logger.info(f"Saved document: {file_path}")
+                            
+                            # Create metadata entry
+                            metadata = {
+                                **base_metadata,
+                                "title": filename,
+                                "file_path": str(file_path),
+                                "mime_type": page.get("mime_type"),
+                                "size_bytes": page.get("size_bytes", 0)
+                            }
+                            
+                            # Store as text document with reference to file
+                            content = f"Document from {page['url']}\n\nLocal path: {file_path}\n\nFilename: {filename}\n\nSource: {website_name}"
+                            
+                            success = await doc_service.store_text_document(
+                                doc_id=doc_id,
+                                content=content,
+                                metadata=metadata,
+                                filename=safe_filename,
+                                user_id=user_id,
+                                collection_type="user" if user_id else "global"
+                            )
+                            
+                            if success:
+                                documents_stored += 1
+                    
+                    if success:
+                        stored_count += 1
+                    else:
+                        failed_count += 1
+                        logger.warning(f"Failed to store item: {page['url']}")
+                    
+                except Exception as e:
+                    logger.error(f"Error storing item {page.get('url', 'unknown')}: {e}")
+                    failed_count += 1
+            
+            logger.info(f"Stored {stored_count}/{len(crawled_pages)} items ({images_stored} images, {documents_stored} documents)")
+            
+            return {
+                "success": True,
+                "stored_count": stored_count,
+                "failed_count": failed_count,
+                "total_items": len(crawled_pages),
+                "images_stored": images_stored,
+                "documents_stored": documents_stored
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to store crawled website: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "stored_count": 0
+            }
     
     async def SearchAndCrawl(
         self,
@@ -1171,6 +1826,380 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         except Exception as e:
             logger.error(f"SearchConversationCache error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Cache search failed: {str(e)}")
+    
+    # ===== File Creation Operations =====
+    
+    async def CreateUserFile(
+        self,
+        request: tool_service_pb2.CreateUserFileRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.CreateUserFileResponse:
+        """Create a file in the user's My Documents section"""
+        try:
+            logger.info(f"CreateUserFile: user={request.user_id}, filename={request.filename}")
+            
+            # Import file creation tool
+            from services.langgraph_tools.file_creation_tools import create_user_file
+            
+            # Execute file creation
+            result = await create_user_file(
+                filename=request.filename,
+                content=request.content,
+                folder_id=request.folder_id if request.folder_id else None,
+                folder_path=request.folder_path if request.folder_path else None,
+                title=request.title if request.title else None,
+                tags=list(request.tags) if request.tags else None,
+                category=request.category if request.category else None,
+                user_id=request.user_id
+            )
+            
+            # Build response
+            if result.get("success"):
+                response = tool_service_pb2.CreateUserFileResponse(
+                    success=True,
+                    document_id=result.get("document_id", ""),
+                    filename=result.get("filename", request.filename),
+                    folder_id=result.get("folder_id", ""),
+                    message=result.get("message", "File created successfully")
+                )
+                logger.info(f"CreateUserFile: Success - {response.document_id}")
+            else:
+                response = tool_service_pb2.CreateUserFileResponse(
+                    success=False,
+                    message=result.get("message", "File creation failed"),
+                    error=result.get("error", "Unknown error")
+                )
+                logger.warning(f"CreateUserFile: Failed - {response.error}")
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"CreateUserFile error: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"File creation failed: {str(e)}")
+    
+    async def CreateUserFolder(
+        self,
+        request: tool_service_pb2.CreateUserFolderRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.CreateUserFolderResponse:
+        """Create a folder in the user's My Documents section"""
+        try:
+            logger.info(f"CreateUserFolder: user={request.user_id}, folder_name={request.folder_name}")
+            
+            # Import folder creation tool
+            from services.langgraph_tools.file_creation_tools import create_user_folder
+            
+            # Execute folder creation
+            result = await create_user_folder(
+                folder_name=request.folder_name,
+                parent_folder_id=request.parent_folder_id if request.parent_folder_id else None,
+                parent_folder_path=request.parent_folder_path if request.parent_folder_path else None,
+                user_id=request.user_id
+            )
+            
+            # Build response
+            if result.get("success"):
+                response = tool_service_pb2.CreateUserFolderResponse(
+                    success=True,
+                    folder_id=result.get("folder_id", ""),
+                    folder_name=result.get("folder_name", request.folder_name),
+                    parent_folder_id=result.get("parent_folder_id", ""),
+                    message=result.get("message", "Folder created successfully")
+                )
+                logger.info(f"CreateUserFolder: Success - {response.folder_id}")
+            else:
+                response = tool_service_pb2.CreateUserFolderResponse(
+                    success=False,
+                    message=result.get("message", "Folder creation failed"),
+                    error=result.get("error", "Unknown error")
+                )
+                logger.warning(f"CreateUserFolder: Failed - {response.error}")
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"CreateUserFolder error: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Folder creation failed: {str(e)}")
+    
+    async def UpdateDocumentMetadata(
+        self,
+        request: tool_service_pb2.UpdateDocumentMetadataRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.UpdateDocumentMetadataResponse:
+        """Update document title and/or frontmatter type"""
+        try:
+            logger.info(f"UpdateDocumentMetadata: user={request.user_id}, doc={request.document_id}, title={request.title}, type={request.frontmatter_type}")
+            
+            # Import document editing tool
+            from services.langgraph_tools.document_editing_tools import update_document_metadata_tool
+            
+            # Execute metadata update
+            result = await update_document_metadata_tool(
+                document_id=request.document_id,
+                title=request.title if request.title else None,
+                frontmatter_type=request.frontmatter_type if request.frontmatter_type else None,
+                user_id=request.user_id
+            )
+            
+            # Build response
+            if result.get("success"):
+                response = tool_service_pb2.UpdateDocumentMetadataResponse(
+                    success=True,
+                    document_id=result.get("document_id", request.document_id),
+                    updated_fields=result.get("updated_fields", []),
+                    message=result.get("message", "Document metadata updated successfully")
+                )
+                logger.info(f"UpdateDocumentMetadata: Success - updated {len(response.updated_fields)} field(s)")
+            else:
+                response = tool_service_pb2.UpdateDocumentMetadataResponse(
+                    success=False,
+                    document_id=request.document_id,
+                    message=result.get("message", "Document metadata update failed"),
+                    error=result.get("error", "Unknown error")
+                )
+                logger.warning(f"UpdateDocumentMetadata: Failed - {response.error}")
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"UpdateDocumentMetadata error: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Document metadata update failed: {str(e)}")
+    
+    async def UpdateDocumentContent(
+        self,
+        request: tool_service_pb2.UpdateDocumentContentRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.UpdateDocumentContentResponse:
+        """Update document content (append or replace)"""
+        try:
+            logger.info(f"UpdateDocumentContent: user={request.user_id}, doc={request.document_id}, append={request.append}, content_length={len(request.content)}")
+            
+            # Import document editing tool
+            from services.langgraph_tools.document_editing_tools import update_document_content_tool
+            
+            # Execute content update
+            result = await update_document_content_tool(
+                document_id=request.document_id,
+                content=request.content,
+                user_id=request.user_id,
+                append=request.append
+            )
+            
+            # Build response
+            if result.get("success"):
+                response = tool_service_pb2.UpdateDocumentContentResponse(
+                    success=True,
+                    document_id=result.get("document_id", request.document_id),
+                    content_length=result.get("content_length", len(request.content)),
+                    message=result.get("message", "Document content updated successfully")
+                )
+                logger.info(f"UpdateDocumentContent: Success - updated content ({response.content_length} chars)")
+            else:
+                response = tool_service_pb2.UpdateDocumentContentResponse(
+                    success=False,
+                    document_id=request.document_id,
+                    message=result.get("message", "Document content update failed"),
+                    error=result.get("error", "Unknown error")
+                )
+                logger.warning(f"UpdateDocumentContent: Failed - {response.error}")
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"UpdateDocumentContent error: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Document content update failed: {str(e)}")
+    
+    async def ProposeDocumentEdit(
+        self,
+        request: tool_service_pb2.ProposeDocumentEditRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ProposeDocumentEditResponse:
+        """Propose a document edit for user review"""
+        try:
+            logger.info(f"ProposeDocumentEdit: user={request.user_id}, doc={request.document_id}, type={request.edit_type}, agent={request.agent_name}")
+            
+            # Import document editing tool
+            from services.langgraph_tools.document_editing_tools import propose_document_edit_tool
+            
+            # Convert proto operations to dicts
+            operations = None
+            if request.edit_type == "operations" and request.operations:
+                operations = []
+                for op_proto in request.operations:
+                    op_dict = {
+                        "op_type": op_proto.op_type,
+                        "start": op_proto.start,
+                        "end": op_proto.end,
+                        "text": op_proto.text,
+                        "pre_hash": op_proto.pre_hash,
+                        "original_text": op_proto.original_text if op_proto.HasField("original_text") else None,
+                        "anchor_text": op_proto.anchor_text if op_proto.HasField("anchor_text") else None,
+                        "left_context": op_proto.left_context if op_proto.HasField("left_context") else None,
+                        "right_context": op_proto.right_context if op_proto.HasField("right_context") else None,
+                        "occurrence_index": op_proto.occurrence_index if op_proto.HasField("occurrence_index") else None,
+                        "note": op_proto.note if op_proto.HasField("note") else None,
+                        "confidence": op_proto.confidence if op_proto.HasField("confidence") else None
+                    }
+                    operations.append(op_dict)
+            
+            # Convert proto content_edit to dict
+            content_edit = None
+            if request.edit_type == "content" and request.HasField("content_edit"):
+                ce_proto = request.content_edit
+                content_edit = {
+                    "edit_mode": ce_proto.edit_mode,
+                    "content": ce_proto.content,
+                    "insert_position": ce_proto.insert_position if ce_proto.HasField("insert_position") else None,
+                    "note": ce_proto.note if ce_proto.HasField("note") else None
+                }
+            
+            # Execute proposal
+            result = await propose_document_edit_tool(
+                document_id=request.document_id,
+                edit_type=request.edit_type,
+                operations=operations,
+                content_edit=content_edit,
+                agent_name=request.agent_name,
+                summary=request.summary,
+                requires_preview=request.requires_preview,
+                user_id=request.user_id
+            )
+            
+            # Build response
+            if result.get("success"):
+                response = tool_service_pb2.ProposeDocumentEditResponse(
+                    success=True,
+                    proposal_id=result.get("proposal_id", ""),
+                    document_id=result.get("document_id", request.document_id),
+                    message=result.get("message", "Document edit proposal created successfully")
+                )
+                logger.info(f"ProposeDocumentEdit: Success - proposal_id={response.proposal_id}")
+            else:
+                response = tool_service_pb2.ProposeDocumentEditResponse(
+                    success=False,
+                    proposal_id="",
+                    document_id=request.document_id,
+                    message=result.get("message", "Document edit proposal failed"),
+                    error=result.get("error", "Unknown error")
+                )
+                logger.warning(f"ProposeDocumentEdit: Failed - {response.error}")
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"ProposeDocumentEdit error: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Document edit proposal failed: {str(e)}")
+    
+    async def ApplyOperationsDirectly(
+        self,
+        request: tool_service_pb2.ApplyOperationsDirectlyRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ApplyOperationsDirectlyResponse:
+        """Apply operations directly to a document (for authorized agents only)"""
+        try:
+            logger.info(f"ApplyOperationsDirectly: user={request.user_id}, doc={request.document_id}, agent={request.agent_name}, ops={len(request.operations)}")
+            
+            # Import document editing tool
+            from services.langgraph_tools.document_editing_tools import apply_operations_directly
+            
+            # Convert proto operations to dicts
+            operations = []
+            for op_proto in request.operations:
+                op_dict = {
+                    "op_type": op_proto.op_type,
+                    "start": op_proto.start,
+                    "end": op_proto.end,
+                    "text": op_proto.text,
+                    "pre_hash": op_proto.pre_hash,
+                    "original_text": op_proto.original_text if op_proto.HasField("original_text") else None,
+                    "anchor_text": op_proto.anchor_text if op_proto.HasField("anchor_text") else None,
+                    "left_context": op_proto.left_context if op_proto.HasField("left_context") else None,
+                    "right_context": op_proto.right_context if op_proto.HasField("right_context") else None,
+                    "occurrence_index": op_proto.occurrence_index if op_proto.HasField("occurrence_index") else None,
+                    "note": op_proto.note if op_proto.HasField("note") else None,
+                    "confidence": op_proto.confidence if op_proto.HasField("confidence") else None
+                }
+                operations.append(op_dict)
+            
+            # Execute direct operation application
+            result = await apply_operations_directly(
+                document_id=request.document_id,
+                operations=operations,
+                user_id=request.user_id,
+                agent_name=request.agent_name
+            )
+            
+            # Build response
+            if result.get("success"):
+                response = tool_service_pb2.ApplyOperationsDirectlyResponse(
+                    success=True,
+                    document_id=result.get("document_id", request.document_id),
+                    applied_count=result.get("applied_count", len(operations)),
+                    message=result.get("message", "Operations applied successfully")
+                )
+                logger.info(f"ApplyOperationsDirectly: Success - {result.get('applied_count')} operations applied")
+                return response
+            else:
+                response = tool_service_pb2.ApplyOperationsDirectlyResponse(
+                    success=False,
+                    document_id=request.document_id,
+                    applied_count=0,
+                    message=result.get("message", "Failed to apply operations"),
+                    error=result.get("error", "Unknown error")
+                )
+                logger.warning(f"ApplyOperationsDirectly: Failed - {result.get('error')}")
+                return response
+                
+        except Exception as e:
+            logger.error(f"ApplyOperationsDirectly error: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Direct operation application failed: {str(e)}")
+    
+    async def ApplyDocumentEditProposal(
+        self,
+        request: tool_service_pb2.ApplyDocumentEditProposalRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ApplyDocumentEditProposalResponse:
+        """Apply an approved document edit proposal"""
+        try:
+            logger.info(f"ApplyDocumentEditProposal: user={request.user_id}, proposal={request.proposal_id}, selected_ops={len(request.selected_operation_indices)}")
+            
+            # Import document editing tool
+            from services.langgraph_tools.document_editing_tools import apply_document_edit_proposal
+            
+            # Convert repeated int32 to list
+            selected_indices = list(request.selected_operation_indices) if request.selected_operation_indices else None
+            
+            # Execute proposal application
+            result = await apply_document_edit_proposal(
+                proposal_id=request.proposal_id,
+                selected_operation_indices=selected_indices,
+                user_id=request.user_id
+            )
+            
+            # Build response
+            if result.get("success"):
+                response = tool_service_pb2.ApplyDocumentEditProposalResponse(
+                    success=True,
+                    document_id=result.get("document_id", ""),
+                    applied_count=result.get("applied_count", 0),
+                    message=result.get("message", "Document edit proposal applied successfully")
+                )
+                logger.info(f"ApplyDocumentEditProposal: Success - applied {response.applied_count} edit(s)")
+            else:
+                response = tool_service_pb2.ApplyDocumentEditProposalResponse(
+                    success=False,
+                    document_id="",
+                    applied_count=0,
+                    message=result.get("message", "Document edit proposal application failed"),
+                    error=result.get("error", "Unknown error")
+                )
+                logger.warning(f"ApplyDocumentEditProposal: Failed - {response.error}")
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"ApplyDocumentEditProposal error: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Document edit proposal application failed: {str(e)}")
 
 
 async def serve_tool_service(port: int = 50052):
@@ -1206,8 +2235,8 @@ async def serve_tool_service(port: int = 50052):
             health_pb2.HealthCheckResponse.SERVING
         )
         
-        # Bind to port
-        server.add_insecure_port(f'[::]:{port}')
+        # Bind to port (use 0.0.0.0 for IPv4 compatibility)
+        server.add_insecure_port(f'0.0.0.0:{port}')
         
         # Start server
         await server.start()

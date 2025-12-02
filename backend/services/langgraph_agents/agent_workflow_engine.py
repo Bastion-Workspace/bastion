@@ -33,9 +33,9 @@ class AgentWorkflowEngine:
     def _initialize_agent_registry(self):
         """Initialize registry of available agents"""
         self.agent_registry = {
-            "chat": {"class": "ChatAgent", "module": "services.langgraph_agents.chat_agent"},
+            # ChatAgent removed - migrated to llm-orchestrator gRPC service
             "research": {"class": "ResearchAgent", "module": "services.langgraph_agents.research_agent"},
-            "coding": {"class": "CodingAgent", "module": "services.langgraph_agents.coding_agent"},
+            # CodingAgent removed - not fully fleshed out
             "direct": {"class": "DirectAgent", "module": "services.langgraph_agents.direct_agent"}
         }
         logger.info(f"🏭 Initialized agent registry with {len(self.agent_registry)} agents")

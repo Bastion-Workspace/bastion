@@ -8,7 +8,9 @@ import re
 import os
 from typing import Dict, Any
 from datetime import datetime
-from openai import AsyncOpenAI
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage, SystemMessage
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -17,20 +19,19 @@ class WeatherRequestAnalyzer:
     """Analyzes and extracts intent from weather-related user requests"""
     
     def __init__(self):
-        self._openai_client = None
+        self._llm = None
     
-    async def _get_openai_client(self) -> AsyncOpenAI:
-        """Get or create OpenAI client"""
-        if self._openai_client is None:
-            api_key = os.getenv("OPENROUTER_API_KEY")
-            if not api_key:
-                raise ValueError("OPENROUTER_API_KEY environment variable not set")
-            
-            self._openai_client = AsyncOpenAI(
-                api_key=api_key,
-                base_url="https://openrouter.ai/api/v1"
-            )
-        return self._openai_client
+    def _get_llm(self, temperature: float = 0.1, model: str = None) -> ChatOpenAI:
+        """Get configured LLM instance using centralized settings"""
+        if model is None:
+            model = settings.FAST_MODEL
+        
+        return ChatOpenAI(
+            model=model,
+            openai_api_key=settings.OPENROUTER_API_KEY,
+            openai_api_base=settings.OPENROUTER_BASE_URL,
+            temperature=temperature
+        )
     
     async def analyze_weather_request(self, user_message: str, shared_memory: Dict[str, Any]) -> Dict[str, Any]:
         """Analyze user message to determine weather request type and location"""
@@ -100,7 +101,8 @@ class WeatherRequestAnalyzer:
     async def _extract_location_with_llm(self, user_message: str, shared_memory: Dict[str, Any]) -> Dict[str, Any]:
         """Use LLM intelligence for contextual location extraction"""
         try:
-            client = await self._get_openai_client()
+            # Use centralized LLM access
+            llm = self._get_llm(temperature=0.1, model=settings.FAST_MODEL)
             
             # Get comprehensive conversation context
             conversation_context = self._build_conversation_context(shared_memory)
@@ -108,9 +110,6 @@ class WeatherRequestAnalyzer:
             # Get recent location context from shared memory
             weather_data = shared_memory.get("weather_data", {})
             recent_locations = list(weather_data.get("recent_queries", {}).keys())[-3:]  # Last 3 locations
-            
-            # Get fast model from environment
-            fast_model = os.getenv("FAST_MODEL", "anthropic/claude-haiku-4.5")
             
             location_prompt = f"""Extract the location from this weather request. Return ONLY the location in a format suitable for weather APIs.
 
@@ -141,13 +140,10 @@ EXAMPLES:
 
 Return ONLY the location string, nothing else."""
 
-            response = await client.chat.completions.create(
-                model=fast_model,
-                messages=[{"role": "user", "content": location_prompt}],
-                temperature=0.1  # Low temperature for consistent extraction
-            )
-            
-            extracted_location = response.choices[0].message.content.strip()
+            # Use LangChain interface
+            response = await llm.ainvoke([HumanMessage(content=location_prompt)])
+            extracted_location = response.content if hasattr(response, 'content') else str(response)
+            extracted_location = extracted_location.strip()
             
             # Handle special cases
             if extracted_location == "DEFAULT_LOCATION":

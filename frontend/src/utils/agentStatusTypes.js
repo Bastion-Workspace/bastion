@@ -22,7 +22,7 @@
 
 /**
  * Tool Names (what tool is being executed)
- * @typedef {'search_local' | 'get_document' | 'search_and_crawl' | 'crawl_web_content' | 'search_entities' | 'get_calibre_books'} ToolName
+ * @typedef {'search_local' | 'get_document' | 'search_and_crawl' | 'crawl_web_content' | 'search_entities'} ToolName
  */
 
 /**

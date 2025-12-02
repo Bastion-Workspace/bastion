@@ -34,7 +34,7 @@ Think of it as your personal AI command center - whether you're researching docu
 ### 🔍 **Advanced Search & Retrieval**
 - **Vector Similarity Search**: Semantic search across all documents via Qdrant
 - **Knowledge Graph**: Entity extraction and relationship mapping via Neo4j
-- **Multi-Source Search**: Documents, videos, ebooks (Calibre), entities, web content
+- **Multi-Source Search**: Documents, videos, entities, web content
 - **Unified Search Tools**: Single interface for all search types
 - **Citation Support**: Answers include source references and relevance scores
 
@@ -59,12 +59,6 @@ Think of it as your personal AI command center - whether you're researching docu
 - **Article Import**: Import feed articles into knowledge base
 - **Unread Tracking**: Track which articles have been read
 - **RSS Agent**: Natural language feed queries and article summaries
-
-### 📚 **Calibre Library Integration**
-- **Ebook Search**: Search your Calibre library by title, author, series, tags
-- **Content Analysis**: Extract and analyze book content
-- **LLM-Ready Segments**: Process books into enhanced, metadata-rich segments
-- **Unified Research**: Books integrate with document search and knowledge graph
 
 ### 🎬 **Entertainment Knowledge Base**
 - **Movies & TV Shows**: Track and query entertainment content
@@ -128,7 +122,7 @@ Think of it as your personal AI command center - whether you're researching docu
 - **Cache & Queue**: Redis (task queue, caching)
 - **Search Engine**: SearXNG (self-hosted metasearch)
 - **Task Queue**: Celery with Celery Beat for scheduling
-- **File Storage**: Local filesystem with NFS mount for Calibre
+- **File Storage**: Local filesystem
 - **WebDAV Server**: For org-mode mobile sync
 
 ### Frontend Stack
@@ -234,7 +228,6 @@ The power of Bastion lies in its natural language interface. Examples:
 **Research Queries:**
 - "What are the main themes in my uploaded documents about climate change?"
 - "Find video clips where someone mentions 'illegal immigration'"
-- "Search my Calibre library for books about machine learning"
 
 **Agent Commands:**
 - "What's the weather in Tokyo?"
@@ -362,7 +355,6 @@ Models are configurable in the chat sidebar dropdown.
 
 ## 🎯 Key Implementation Documents
 
-- **CALIBRE_INTEGRATION.md**: Calibre ebook library integration
 - **DATAWORKSPACE_IMPLEMENTATION_COMPLETE.md**: Data workspace platform architecture
 - **FILEMANAGER_IMPLEMENTATION.md**: Centralized file management
 - **MESSAGING_SYSTEM_IMPLEMENTATION.md**: User-to-user messaging

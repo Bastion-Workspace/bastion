@@ -40,11 +40,9 @@ class ContentCategorizationService:
     async def initialize(self):
         """Initialize the content categorization service"""
         try:
-            # Initialize OpenRouter client for categorization
-            self.openrouter_client = AsyncOpenAI(
-                api_key=settings.OPENROUTER_API_KEY,
-                base_url="https://openrouter.ai/api/v1"
-            )
+            # Initialize OpenRouter client for categorization with automatic reasoning support
+            from utils.openrouter_client import get_openrouter_client
+            self.openrouter_client = get_openrouter_client()
             
             self.initialized = True
             logger.info("✅ Content Categorization Service initialized")

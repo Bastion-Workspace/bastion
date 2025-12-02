@@ -32,8 +32,6 @@ from mcp.tools.web_search_analysis_tool import WebSearchAnalysisTool, WebSearchA
 from mcp.tools.web_ingest_selected_tool import WebIngestSelectedTool, WebIngestSelectedInput
 from mcp.tools.crawl4ai_tool import Crawl4AITool, Crawl4AIInput
 # Research planning tool removed - migrated to LangGraph subgraph workflows
-from mcp.tools.calibre_search_tool import CalibreSearchTool, CalibreSearchInput
-from mcp.tools.calibre_book_analysis_tool import CalibreBookAnalysisTool, CalibreBookAnalysisInput
 from mcp.tools.document_summarization_tool import DocumentSummarizationTool, DocumentSummarizationInput
 from services.user_document_service import UserDocumentService
 
@@ -184,16 +182,6 @@ class MCPServer:
             await web_ingest_selected_tool.initialize()
             self.tools[web_ingest_selected_tool.name] = web_ingest_selected_tool
             
-            # Initialize and register Calibre search tool first
-            calibre_search_tool = CalibreSearchTool()
-            await calibre_search_tool.initialize()
-            self.tools[calibre_search_tool.name] = calibre_search_tool
-            
-            # Initialize and register Calibre book analysis tool
-            calibre_book_analysis_tool = CalibreBookAnalysisTool()
-            await calibre_book_analysis_tool.initialize()
-            self.tools[calibre_book_analysis_tool.name] = calibre_book_analysis_tool
-            
             # Research planning tool removed - migrated to LangGraph subgraph workflows
             
             # Initialize and register Document Summarization tool
@@ -342,10 +330,6 @@ class MCPServer:
                 return Crawl4AIInput(**tool_input)
             elif tool_name == "plan_research_comprehensive":
                 return ResearchQuery(**tool_input)
-            elif tool_name == "search_calibre_library":
-                return CalibreSearchInput(**tool_input)
-            elif tool_name == "analyze_calibre_book":
-                return CalibreBookAnalysisInput(**tool_input)
             elif tool_name == "summarize_documents":
                 return DocumentSummarizationInput(**tool_input)
             else:

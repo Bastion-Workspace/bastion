@@ -103,7 +103,7 @@ class ConversationIntelligenceService:
                 conversation_intel["collaboration_suggestions"] = collaboration_suggestions[-3:]
             
             # Update research cache if this was research
-            if agent_type == "research_agent" or agent_type == "clean_research_agent":
+            if agent_type == "research_agent":
                 await self._update_research_cache(conversation_intel, agent_output, agent_results)
             
             # Pre-compute coverage analysis for common follow-up patterns
@@ -175,7 +175,7 @@ class ConversationIntelligenceService:
     
     def _determine_result_type(self, agent_type: str, content: str) -> CachedResultType:
         """Determine the type of cached result based on agent and content"""
-        if agent_type in ["research_agent", "clean_research_agent"]:
+        if agent_type == "research_agent":
             return CachedResultType.RESEARCH_FINDINGS
         elif agent_type == "chat_agent":
             return CachedResultType.CHAT_OUTPUT

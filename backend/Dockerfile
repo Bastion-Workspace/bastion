@@ -12,7 +12,6 @@ RUN apt-get update && apt-get install -y \
     unpaper \
     curl \
     postgresql-client \
-    calibre-bin \
     build-essential \
     python3-dev \
     wget \

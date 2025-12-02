@@ -6,8 +6,10 @@ package tool_service;
 service ToolService {
   // Document operations
   rpc SearchDocuments(SearchRequest) returns (SearchResponse);
+  rpc FindDocumentsByTags(FindDocumentsByTagsRequest) returns (FindDocumentsByTagsResponse);
   rpc GetDocument(DocumentRequest) returns (DocumentResponse);
   rpc GetDocumentContent(DocumentRequest) returns (DocumentContentResponse);
+  rpc FindDocumentByPath(FindDocumentByPathRequest) returns (FindDocumentByPathResponse);
   
   // RSS operations
   rpc SearchRSSFeeds(RSSSearchRequest) returns (RSSSearchResponse);
@@ -48,10 +50,25 @@ service ToolService {
   rpc SearchWeb(WebSearchRequest) returns (WebSearchResponse);
   rpc CrawlWebContent(WebCrawlRequest) returns (WebCrawlResponse);
   rpc SearchAndCrawl(SearchAndCrawlRequest) returns (SearchAndCrawlResponse);
+  rpc CrawlWebsiteRecursive(RecursiveWebsiteCrawlRequest) returns (RecursiveWebsiteCrawlResponse);
+  rpc CrawlSite(DomainCrawlRequest) returns (DomainCrawlResponse);
   
   // Enhancement operations
   rpc ExpandQuery(QueryExpansionRequest) returns (QueryExpansionResponse);
   rpc SearchConversationCache(CacheSearchRequest) returns (CacheSearchResponse);
+  
+  // File creation operations (user documents only)
+  rpc CreateUserFile(CreateUserFileRequest) returns (CreateUserFileResponse);
+  rpc CreateUserFolder(CreateUserFolderRequest) returns (CreateUserFolderResponse);
+  
+  // Document editing operations (user documents only)
+  rpc UpdateDocumentMetadata(UpdateDocumentMetadataRequest) returns (UpdateDocumentMetadataResponse);
+  rpc UpdateDocumentContent(UpdateDocumentContentRequest) returns (UpdateDocumentContentResponse);
+  
+  // Document edit proposal operations (universal edit proposal system)
+  rpc ProposeDocumentEdit(ProposeDocumentEditRequest) returns (ProposeDocumentEditResponse);
+  rpc ApplyDocumentEditProposal(ApplyDocumentEditProposalRequest) returns (ApplyDocumentEditProposalResponse);
+  rpc ApplyOperationsDirectly(ApplyOperationsDirectlyRequest) returns (ApplyOperationsDirectlyResponse);
 }
 
 // Document Messages
@@ -63,6 +80,18 @@ message SearchRequest {
 }
 
 message SearchResponse {
+  repeated DocumentResult results = 1;
+  int32 total_count = 2;
+}
+
+message FindDocumentsByTagsRequest {
+  string user_id = 1;
+  repeated string required_tags = 2;
+  string collection_type = 3;  // "user", "global", or empty for both
+  int32 limit = 4;
+}
+
+message FindDocumentsByTagsResponse {
   repeated DocumentResult results = 1;
   int32 total_count = 2;
 }
@@ -93,6 +122,20 @@ message DocumentContentResponse {
   string document_id = 1;
   string content = 2;
   string format = 3;  // "text", "markdown", "html"
+}
+
+message FindDocumentByPathRequest {
+  string user_id = 1;
+  string file_path = 2;  // Relative or absolute filesystem path
+  string base_path = 3;  // Base directory for resolving relative paths (optional)
+}
+
+message FindDocumentByPathResponse {
+  bool success = 1;
+  string document_id = 2;
+  string filename = 3;
+  string resolved_path = 4;  // Actual filesystem path found
+  optional string error = 5;
 }
 
 // RSS Messages
@@ -451,6 +494,77 @@ message WebCrawlResult {
   map<string, string> metadata = 4;
 }
 
+// Recursive Website Crawling Messages
+message RecursiveWebsiteCrawlRequest {
+  string start_url = 1;
+  int32 max_pages = 2;
+  int32 max_depth = 3;
+  string user_id = 4;
+}
+
+message RecursiveWebsiteCrawlResponse {
+  bool success = 1;
+  string start_url = 2;
+  string base_domain = 3;
+  string crawl_session_id = 4;
+  int32 total_items_crawled = 5;
+  int32 html_pages_crawled = 6;
+  int32 images_downloaded = 7;
+  int32 documents_downloaded = 8;
+  int32 total_items_failed = 9;
+  int32 max_depth_reached = 10;
+  float elapsed_time_seconds = 11;
+  repeated CrawledPage crawled_pages = 12;
+  optional string error = 13;
+}
+
+message CrawledPage {
+  string url = 1;
+  string content_type = 2;  // html, image, document
+  string markdown_content = 3;
+  string html_content = 4;
+  map<string, string> metadata = 5;
+  repeated string internal_links = 6;
+  repeated string image_links = 7;
+  repeated string document_links = 8;
+  int32 depth = 9;
+  optional string parent_url = 10;
+  string crawl_time = 11;
+  optional bytes binary_content = 12;  // For images/documents
+  optional string filename = 13;
+  optional string mime_type = 14;
+  optional int32 size_bytes = 15;
+}
+
+// Domain-scoped crawl messages
+message DomainCrawlRequest {
+  string seed_url = 1;
+  string query_criteria = 2;
+  int32 max_pages = 3;
+  int32 max_depth = 4;
+  optional string allowed_path_prefix = 5;
+  bool include_pdfs = 6;
+  string user_id = 7;
+}
+
+message DomainCrawlResponse {
+  bool success = 1;
+  string domain = 2;
+  int32 successful_crawls = 3;
+  int32 urls_considered = 4;
+  repeated DomainCrawlResult results = 5;
+  optional string error = 6;
+}
+
+message DomainCrawlResult {
+  string url = 1;
+  string title = 2;
+  string full_content = 3;
+  map<string, string> metadata = 4;
+  float relevance_score = 5;
+  bool success = 6;
+}
+
 // Query Expansion Messages
 message QueryExpansionRequest {
   string query = 1;
@@ -513,5 +627,151 @@ message GeneratedImage {
   int32 width = 4;
   int32 height = 5;
   string format = 6;
+}
+
+// File Creation Messages
+message CreateUserFileRequest {
+  string user_id = 1;
+  string filename = 2;
+  string content = 3;
+  optional string folder_id = 4;
+  optional string folder_path = 5;  // e.g., "Projects/Electronics" - will create if needed
+  optional string title = 6;
+  repeated string tags = 7;
+  optional string category = 8;
+}
+
+message CreateUserFileResponse {
+  bool success = 1;
+  string document_id = 2;
+  string filename = 3;
+  string folder_id = 4;
+  string message = 5;
+  optional string error = 6;
+}
+
+message CreateUserFolderRequest {
+  string user_id = 1;
+  string folder_name = 2;
+  optional string parent_folder_id = 3;
+  optional string parent_folder_path = 4;  // e.g., "Projects" - will resolve to folder_id
+}
+
+message CreateUserFolderResponse {
+  bool success = 1;
+  string folder_id = 2;
+  string folder_name = 3;
+  optional string parent_folder_id = 4;
+  string message = 5;
+  optional string error = 6;
+}
+
+// Document Editing Messages
+message UpdateDocumentMetadataRequest {
+  string user_id = 1;
+  string document_id = 2;
+  optional string title = 3;
+  optional string frontmatter_type = 4;  // e.g., "electronics", "fiction", "rules"
+}
+
+message UpdateDocumentMetadataResponse {
+  bool success = 1;
+  string document_id = 2;
+  repeated string updated_fields = 3;  // e.g., ["title", "frontmatter_type"]
+  string message = 4;
+  optional string error = 5;
+}
+
+message UpdateDocumentContentRequest {
+  string user_id = 1;
+  string document_id = 2;
+  string content = 3;  // New content (replace entire content) or content to append
+  bool append = 4;  // If true, append to existing content; if false, replace entire content
+}
+
+message UpdateDocumentContentResponse {
+  bool success = 1;
+  string document_id = 2;
+  int32 content_length = 3;  // Length of updated content
+  string message = 4;
+  optional string error = 5;
+}
+
+// Document Edit Proposal Messages (Universal Edit Proposal System)
+message ProposeDocumentEditRequest {
+  string user_id = 1;
+  string document_id = 2;
+  string edit_type = 3;  // "operations" or "content"
+  
+  // For operation-based edits
+  repeated EditorOperationProto operations = 4;
+  
+  // For content-based edits
+  optional ContentEditProto content_edit = 5;
+  
+  // Metadata
+  string agent_name = 6;
+  string summary = 7;
+  bool requires_preview = 8;  // If false and edit is small, frontend may auto-apply
+}
+
+message ProposeDocumentEditResponse {
+  bool success = 1;
+  string proposal_id = 2;  // Unique ID for this proposal
+  string document_id = 3;
+  string message = 4;
+  optional string error = 5;
+}
+
+message EditorOperationProto {
+  string op_type = 1;  // "replace_range", "insert_after_heading", "delete_range"
+  int32 start = 2;
+  int32 end = 3;
+  string text = 4;
+  string pre_hash = 5;
+  optional string original_text = 6;
+  optional string anchor_text = 7;
+  optional string left_context = 8;
+  optional string right_context = 9;
+  optional int32 occurrence_index = 10;
+  optional string note = 11;
+  optional float confidence = 12;
+}
+
+message ContentEditProto {
+  string edit_mode = 1;  // "append", "replace", "insert_at"
+  string content = 2;
+  optional int32 insert_position = 3;
+  optional string note = 4;
+}
+
+message ApplyDocumentEditProposalRequest {
+  string user_id = 1;
+  string proposal_id = 2;
+  repeated int32 selected_operation_indices = 3;  // For operations: which to apply (empty = all)
+}
+
+message ApplyDocumentEditProposalResponse {
+  bool success = 1;
+  string document_id = 2;
+  int32 applied_count = 3;  // Number of operations/content edits applied
+  string message = 4;
+  optional string error = 5;
+}
+
+// Direct operation application (for authorized agents only)
+message ApplyOperationsDirectlyRequest {
+  string user_id = 1;
+  string document_id = 2;
+  repeated EditorOperationProto operations = 3;
+  string agent_name = 4;  // For security check
+}
+
+message ApplyOperationsDirectlyResponse {
+  bool success = 1;
+  string document_id = 2;
+  int32 applied_count = 3;  // Number of operations applied
+  string message = 4;
+  optional string error = 5;
 }
 

@@ -911,13 +911,31 @@ ${message.content}
                       padding: '8px 16px'
                     }
                   }}>
-                    <ReactMarkdown 
-                      className="markdown-content"
-                      components={markdownComponents}
-                      remarkPlugins={[remarkBreaks, remarkGfm]}
-                    >
-                      {message.content}
-                    </ReactMarkdown>
+                    {(() => {
+                      // Format agent type to display name
+                      const formatAgentName = (agentType) => {
+                        if (!agentType) return 'AI';
+                        return agentType
+                          .split('_')
+                          .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                          .join(' ');
+                      };
+                      
+                      // If content is empty/undefined and we have agent_type, show agent name
+                      const displayContent = (!message.content || message.content.trim() === '') && message.metadata?.agent_type
+                        ? formatAgentName(message.metadata.agent_type)
+                        : (message.content || '');
+                      
+                      return (
+                        <ReactMarkdown 
+                          className="markdown-content"
+                          components={markdownComponents}
+                          remarkPlugins={[remarkBreaks, remarkGfm]}
+                        >
+                          {displayContent}
+                        </ReactMarkdown>
+                      );
+                    })()}
                   </Box>
                 )}
 
@@ -1214,9 +1232,6 @@ ${message.content}
             py: 2
           }}>
             <CircularProgress size={20} />
-            <Typography variant="body2" color="text.secondary" sx={{ ml: 1 }}>
-              AI is thinking...
-            </Typography>
           </Box>
         )}
 

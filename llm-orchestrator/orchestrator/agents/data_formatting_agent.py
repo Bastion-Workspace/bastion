@@ -4,23 +4,58 @@ Transforms research data into tables, charts, and organized formats
 """
 
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TypedDict
 from datetime import datetime
 
+from langgraph.graph import StateGraph, END
+from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from .base_agent import BaseAgent, TaskStatus
 
 logger = logging.getLogger(__name__)
+
+
+class DataFormattingState(TypedDict):
+    """State for data formatting agent LangGraph workflow"""
+    query: str
+    user_id: str
+    metadata: Dict[str, Any]
+    messages: List[Any]
+    conversation_context: str
+    system_prompt: str
+    formatted_output: str
+    format_type: str
+    response: Dict[str, Any]
+    task_status: str
+    error: str
 
 
 class DataFormattingAgent(BaseAgent):
     """
     Data Formatting Specialist
     Transforms research findings into structured formats like tables, charts, and organized data
+    Uses LangGraph workflow for explicit state management
     """
     
     def __init__(self):
         super().__init__("data_formatting_agent")
         logger.info("🔢 Data Formatting Agent assembled and ready!")
+    
+    def _build_workflow(self, checkpointer) -> StateGraph:
+        """Build LangGraph workflow for data formatting agent"""
+        workflow = StateGraph(DataFormattingState)
+        
+        # Add nodes
+        workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("format_data", self._format_data_node)
+        
+        # Entry point
+        workflow.set_entry_point("prepare_context")
+        
+        # Linear flow: prepare_context -> format_data -> END
+        workflow.add_edge("prepare_context", "format_data")
+        workflow.add_edge("format_data", END)
+        
+        return workflow.compile(checkpointer=checkpointer)
     
     def _build_formatting_prompt(self, user_request: str, conversation_context: str) -> str:
         """Build data formatting prompt with conversation context"""
@@ -107,38 +142,55 @@ You MUST respond with valid JSON matching this schema:
 4. **Valid JSON structure always!**
 """
     
-    def _extract_conversation_context(self, messages: List[Any]) -> str:
-        """Extract conversation context for formatting"""
+    async def _prepare_context_node(self, state: DataFormattingState) -> Dict[str, Any]:
+        """Prepare conversation context for formatting"""
         try:
-            if not messages:
-                return "No previous conversation context available."
+            logger.info("📋 Preparing conversation context for data formatting...")
             
-            # Get last few messages for context
-            recent_messages = messages[-5:] if len(messages) > 5 else messages
-            
-            context_parts = []
-            for i, msg in enumerate(recent_messages):
-                if hasattr(msg, 'content'):
-                    role = "ASSISTANT" if hasattr(msg, 'type') and msg.type == "ai" else "USER"
-                    content = msg.content
-                    context_parts.append(f"{i+1}. {role}: {content}")
-            
-            return "\n".join(context_parts)
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to extract conversation context: {e}")
-            return "Error extracting conversation context."
-    
-    async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
-        """Process data formatting request"""
-        try:
-            logger.info(f"🔢 Data Formatting Agent processing: {query[:100]}...")
+            messages = state.get("messages", [])
             
             # Extract conversation context
-            conversation_context = self._extract_conversation_context(messages)
+            if not messages:
+                conversation_context = "No previous conversation context available."
+            else:
+                # Get last few messages for context
+                recent_messages = messages[-5:] if len(messages) > 5 else messages
+                
+                context_parts = []
+                for i, msg in enumerate(recent_messages):
+                    if hasattr(msg, 'content'):
+                        role = "ASSISTANT" if hasattr(msg, 'type') and msg.type == "ai" else "USER"
+                        content = msg.content
+                        context_parts.append(f"{i+1}. {role}: {content}")
+                
+                conversation_context = "\n".join(context_parts)
             
             # Build formatting prompt
-            system_prompt = self._build_formatting_prompt(query, conversation_context)
+            system_prompt = self._build_formatting_prompt(state.get("query", ""), conversation_context)
+            
+            return {
+                "conversation_context": conversation_context,
+                "system_prompt": system_prompt
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to prepare context: {e}")
+            return {
+                "conversation_context": "Error extracting conversation context.",
+                "system_prompt": "",
+                "error": str(e)
+            }
+    
+    async def _format_data_node(self, state: DataFormattingState) -> Dict[str, Any]:
+        """Format data using LLM with structured output"""
+        try:
+            logger.info("🔢 Formatting data with structured output...")
+            
+            query = state.get("query", "")
+            system_prompt = state.get("system_prompt", "")
+            
+            if not system_prompt:
+                raise ValueError("System prompt not prepared")
             
             # Call LLM with low temperature for consistent formatting
             start_time = datetime.now()
@@ -155,8 +207,14 @@ You MUST respond with valid JSON matching this schema:
             if formatted_output:
                 formatted_output = formatted_output.replace("\\n", "\n")
             
+            # Add assistant response to messages for checkpoint persistence
+            state = self._add_assistant_response_to_messages(state, formatted_output)
+            
             # Build result
             result = {
+                "formatted_output": formatted_output,
+                "format_type": structured_result.get("format_type", "structured_text"),
+                "response": {
                 "response": formatted_output,
                 "task_status": structured_result.get("task_status", "complete"),
                 "format_type": structured_result.get("format_type", "structured_text"),
@@ -165,6 +223,9 @@ You MUST respond with valid JSON matching this schema:
                 "processing_time": processing_time,
                 "timestamp": datetime.now().isoformat(),
                 "formatting_notes": structured_result.get("formatting_notes", "")
+                },
+                "task_status": structured_result.get("task_status", "complete"),
+                "messages": state.get("messages", [])
             }
             
             logger.info(f"✅ Data formatting completed in {processing_time:.2f}s")
@@ -172,5 +233,65 @@ You MUST respond with valid JSON matching this schema:
             
         except Exception as e:
             logger.error(f"❌ Data formatting failed: {e}")
+            error_response = self._create_error_response(str(e))
+            return {
+                "formatted_output": "",
+                "format_type": "error",
+                "response": error_response,
+                "task_status": "error",
+                "error": str(e)
+            }
+    
+    async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
+        """
+        Process data formatting request using LangGraph workflow
+        
+        Args:
+            query: User query or formatting request
+            metadata: Optional metadata (user_id, persona, etc.)
+            messages: Optional conversation history
+            
+        Returns:
+            Dictionary with formatted output and metadata
+        """
+        try:
+            logger.info(f"🔢 Data Formatting Agent processing: {query[:100]}...")
+            
+            # Add current user query to messages for checkpoint persistence
+            conversation_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Build initial state
+            initial_state: DataFormattingState = {
+                "query": query,
+                "user_id": metadata.get("user_id", "system") if metadata else "system",
+                "metadata": metadata or {},
+                "messages": conversation_messages,
+                "conversation_context": "",
+                "system_prompt": "",
+                "formatted_output": "",
+                "format_type": "",
+                "response": {},
+                "task_status": "",
+                "error": ""
+            }
+            
+            # Invoke LangGraph workflow
+            # Get workflow and checkpoint config
+            workflow = await self._get_workflow()
+            config = self._get_checkpoint_config(metadata)
+            
+            # Run workflow with checkpointing
+            final_state = await workflow.ainvoke(initial_state, config=config)
+            
+            # Return response from final state
+            return final_state.get("response", {
+                "response": final_state.get("formatted_output", ""),
+                "task_status": final_state.get("task_status", "complete"),
+                "format_type": final_state.get("format_type", "structured_text"),
+                "agent_type": "data_formatting"
+            })
+            
+        except Exception as e:
+            logger.error(f"❌ Data formatting workflow failed: {e}")
             return self._create_error_response(str(e))
 

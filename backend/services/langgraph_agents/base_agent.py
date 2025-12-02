@@ -68,7 +68,7 @@ class BaseAgent:
         type_mapping = {
             "research_agent": AgentType.RESEARCH_AGENT,
             "chat_agent": AgentType.CHAT_AGENT,
-            "coding_agent": AgentType.CODING_AGENT,
+            # CodingAgent removed - not fully fleshed out
             "report_formatting_agent": AgentType.REPORT_AGENT,
             "data_formatting_agent": AgentType.DATA_FORMATTING_AGENT,
             "weather_agent": AgentType.WEATHER_AGENT,
@@ -78,7 +78,7 @@ class BaseAgent:
             "org_inbox_agent": AgentType.ORG_INBOX_AGENT,
             "org_project_agent": AgentType.ORG_PROJECT_AGENT,
             "image_generation_agent": AgentType.IMAGE_GENERATION_AGENT,
-            "wargaming_agent": AgentType.WARGAMING_AGENT,
+            # WargamingAgent removed - not fully fleshed out
             "proofreading_agent": AgentType.PROOFREADING_AGENT,
             "website_crawler_agent": AgentType.WEBSITE_CRAWLER_AGENT,
             # Content and Writing Agents
@@ -86,17 +86,19 @@ class BaseAgent:
             "outline_editing_agent": AgentType.OUTLINE_EDITING_AGENT,
             "character_development_agent": AgentType.CHARACTER_DEVELOPMENT_AGENT,
             "rules_editing_agent": AgentType.RULES_EDITING_AGENT,
-            "sysml_agent": AgentType.SYSML_AGENT,
+            # SysMLAgent removed - not fully fleshed out
             "story_analysis_agent": AgentType.STORY_ANALYSIS_AGENT,
             "content_analysis_agent": AgentType.CONTENT_ANALYSIS_AGENT,
-            "fact_checking_agent": AgentType.FACT_CHECKING_AGENT,
+            # FactCheckingAgent removed - not actively used
             "site_crawl_agent": AgentType.SITE_CRAWL_AGENT,
             "podcast_script_agent": AgentType.PODCAST_SCRIPT_AGENT,
             "substack_agent": AgentType.SUBSTACK_AGENT,
+            "email_agent": AgentType.EMAIL_AGENT,
             "messaging_agent": AgentType.MESSAGING_AGENT,
             "entertainment_agent": AgentType.ENTERTAINMENT_AGENT,
             # Intent and Intelligence Agents
-            "simple_intent_agent": AgentType.SIMPLE_INTENT_AGENT,
+            # DEPRECATED: simple_intent_agent removed - intent classification now in llm-orchestrator
+            # "simple_intent_agent": AgentType.SIMPLE_INTENT_AGENT,
             "permission_intelligence_agent": AgentType.PERMISSION_INTELLIGENCE_AGENT,
             # Pipeline Agent
             "pipeline_agent": AgentType.PIPELINE_AGENT,
@@ -368,9 +370,11 @@ class BaseAgent:
                     elif msg.type == "ai":
                         messages.append({"role": "assistant", "content": msg.content})
                 elif isinstance(msg, dict):
-                    # Dict format
+                    # Dict format - strip reasoning_details from old messages to prevent accumulation
                     if msg.get("role") in ["user", "assistant", "system"]:
-                        messages.append(msg)
+                        # Create a clean copy without reasoning_details (except for most recent assistant message)
+                        clean_msg = {k: v for k, v in msg.items() if k != "reasoning_details"}
+                        messages.append(clean_msg)
         
         # Add comprehensive intelligence context if we have escalation info
         intelligence_context = self._build_intelligence_context(state)
@@ -514,8 +518,7 @@ class BaseAgent:
     async def _llm_analyze_topic_relationship(self, current_query: str, previous_topics: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Use LLM to analyze relationship between current query and previous topics"""
         try:
-            from openai import AsyncOpenAI
-            from config import settings
+            from utils.openrouter_client import get_openrouter_client
             
             # Build previous topics summary
             topics_summary = ""
@@ -548,15 +551,13 @@ RESPONSE FORMAT (JSON):
 
 Be concise and focus on preventing topic contamination while preserving relevant context."""
 
-            client = AsyncOpenAI(
-                api_key=settings.OPENROUTER_API_KEY,
-                base_url="https://openrouter.ai/api/v1"
-            )
+            client = get_openrouter_client()
             
             # **ROOSEVELT FIX**: Use user-configured classification model from Settings
             from services.settings_service import settings_service
             fast_model = await settings_service.get_classification_model()
             
+            # Reasoning automatically added by OpenRouterClient wrapper
             response = await client.chat.completions.create(
                 model=fast_model,
                 messages=[{"role": "user", "content": analysis_prompt}],
@@ -889,22 +890,28 @@ Be concise and focus on preventing topic contamination while preserving relevant
                 max_iterations=max_iterations
             )
             
-            # Add the assistant's tool call message
-            tool_messages.append({
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
+            # Add the assistant's tool call message with reasoning_details preservation
+            from utils.llm_reasoning_utils import build_assistant_message_with_reasoning
+
+            assistant_message = build_assistant_message_with_reasoning(response.choices[0].message)
+
+            # For tool calls, we need to transform the tool_calls format
+            if assistant_message.get("tool_calls"):
+                # Convert from OpenAI format to the expected format for tool_messages
+                formatted_tool_calls = []
+                for tool_call in response.choices[0].message.tool_calls:
+                    formatted_tool_calls.append({
                         "id": tool_call.id,
                         "type": "function",
                         "function": {
                             "name": tool_call.function.name,
                             "arguments": tool_call.function.arguments
                         }
-                    }
-                    for tool_call in response.choices[0].message.tool_calls
-                ]
-            })
+                    })
+                assistant_message["tool_calls"] = formatted_tool_calls
+                assistant_message["content"] = None  # Tool calls should have None content
+
+            tool_messages.append(assistant_message)
             
             # Execute all tool calls in this iteration
             for tool_call in response.choices[0].message.tool_calls:
@@ -1061,6 +1068,7 @@ Be concise and focus on preventing topic contamination while preserving relevant
                 logger.error(f"❌ Failed to get tools: {e}")
                 tools = []
             
+            # Reasoning automatically added by OpenRouterClient wrapper
             response = await chat_service.openai_client.chat.completions.create(
                 messages=tool_messages,
                 model=model_name,

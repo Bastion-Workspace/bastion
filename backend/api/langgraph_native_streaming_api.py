@@ -50,9 +50,11 @@ async def stream_langgraph_native(
                     "political_bias": user_settings.political_bias.value if user_settings else "neutral"
                 } if user_settings else None
                 
-                # Initialize LangGraph orchestrator
-                from services.langgraph_official_orchestrator import get_official_orchestrator
-                orchestrator = await get_official_orchestrator()
+                # DEPRECATED: Backend orchestrator removed
+                raise HTTPException(
+                    status_code=410,
+                    detail="This endpoint is deprecated. Backend orchestrator has been removed. Use /api/async/orchestrator/stream instead."
+                )
                 
                 # Get the compiled graph with checkpointer
                 graph = orchestrator.graph
@@ -193,9 +195,11 @@ async def resume_langgraph_hitl(
         
         async def generate_resume_stream() -> AsyncGenerator[str, None]:
             try:
-                # Initialize LangGraph orchestrator
-                from services.langgraph_official_orchestrator import get_official_orchestrator
-                orchestrator = await get_official_orchestrator()
+                # DEPRECATED: Backend orchestrator removed
+                raise HTTPException(
+                    status_code=410,
+                    detail="This endpoint is deprecated. Backend orchestrator has been removed. Use /api/async/orchestrator/stream instead."
+                )
                 graph = orchestrator.graph
                 
                 config = {

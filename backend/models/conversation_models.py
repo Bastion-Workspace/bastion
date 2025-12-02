@@ -149,8 +149,55 @@ class UpdateFolderRequest(BaseModel):
 class ShareConversationRequest(BaseModel):
     shared_with_user_id: Optional[str] = None  # None for public share
     permission_level: PermissionLevel = PermissionLevel.READ
+    share_type: Optional[str] = None  # Alias for permission_level (read/comment/edit)
     is_public: bool = False
     expires_at: Optional[datetime] = None
+
+
+class UpdateShareRequest(BaseModel):
+    share_type: str  # read, comment, or edit
+    expires_at: Optional[datetime] = None
+
+
+class ConversationShareDetail(BaseModel):
+    share_id: str
+    conversation_id: str
+    shared_by_user_id: str
+    shared_with_user_id: Optional[str] = None
+    share_type: str
+    is_public: bool
+    expires_at: Optional[datetime] = None
+    created_at: datetime
+    username: Optional[str] = None
+    email: Optional[str] = None
+
+
+class ConversationParticipant(BaseModel):
+    user_id: str
+    username: Optional[str] = None
+    email: Optional[str] = None
+    display_name: Optional[str] = None
+    share_type: str
+    is_owner: bool
+
+
+class ShareConversationResponse(BaseModel):
+    success: bool
+    share_id: str
+    message: str
+
+
+class ConversationSharesResponse(BaseModel):
+    shares: List[ConversationShareDetail]
+
+
+class ConversationParticipantsResponse(BaseModel):
+    participants: List[ConversationParticipant]
+
+
+class SharedConversationsResponse(BaseModel):
+    conversations: List[ConversationSummary]
+    total_count: int
 
 
 class ReorderConversationsRequest(BaseModel):

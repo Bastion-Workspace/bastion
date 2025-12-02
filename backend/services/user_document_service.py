@@ -205,11 +205,28 @@ class UserDocumentService:
             logger.error(f"Failed to associate document with user: {e}")
     
     async def _document_belongs_to_user(self, document_id: str, user_id: str) -> bool:
-        """Check if a document belongs to a specific user"""
+        """Check if a document belongs to a specific user or is accessible to them"""
         try:
-            # In production: SELECT 1 FROM user_documents WHERE user_id = ? AND document_id = ?
-            # For now, implement basic logic or always return True for demo
-            return True
+            doc_info = await self.document_service.get_document(document_id)
+            if not doc_info:
+                return False
+            
+            # User owns the document
+            if getattr(doc_info, 'user_id', None) == user_id:
+                return True
+            
+            # Document is global (everyone can read)
+            if getattr(doc_info, 'collection_type', 'user') == 'global':
+                return True
+            
+            # Document is in a team the user belongs to
+            doc_team_id = getattr(doc_info, 'team_id', None)
+            if doc_team_id:
+                from api.teams_api import team_service
+                role = await team_service.check_team_access(doc_team_id, user_id)
+                return role is not None
+            
+            return False
         except Exception as e:
             logger.error(f"Failed to check document ownership: {e}")
             return False

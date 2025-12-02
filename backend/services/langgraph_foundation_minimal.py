@@ -11,7 +11,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
-from services.langgraph_agents import ChatAgent, ResearchAgentHITL
+# ChatAgent removed - migrated to llm-orchestrator gRPC service
+from services.langgraph_agents import ResearchAgentHITL
 from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,7 @@ class MinimalLangGraphFoundation:
         self.is_initialized = False
         
         # Initialize agents
-        self.chat_agent = ChatAgent()
+        # ChatAgent removed - migrated to llm-orchestrator gRPC service
         self.research_agent = ResearchAgentHITL()
         
     async def initialize(self):
@@ -65,7 +66,8 @@ class MinimalLangGraphFoundation:
             self.graph = StateGraph(MinimalState)
             
             # Add agent nodes
-            self.graph.add_node("chat_agent", self._chat_node)
+            # ChatAgent removed - migrated to llm-orchestrator gRPC service
+            # Note: This foundation is deprecated - all requests route to gRPC orchestrator
             self.graph.add_node("research_agent", self._research_node)
             self.graph.add_node("router", self._router_node)
             
@@ -77,13 +79,13 @@ class MinimalLangGraphFoundation:
                 "router",
                 self._route_decision,
                 {
-                    "chat": "chat_agent",
+                    # ChatAgent removed - migrated to llm-orchestrator gRPC service
                     "research": "research_agent"
                 }
             )
             
-            # Both agents end the conversation
-            self.graph.add_edge("chat_agent", END)
+            # Research agent ends the conversation
+            # ChatAgent removed - migrated to llm-orchestrator gRPC service
             self.graph.add_edge("research_agent", END)
             
             # Compile with PostgreSQL persistence
@@ -145,14 +147,18 @@ class MinimalLangGraphFoundation:
             ]
             
             if query in simple_greetings or len(query) < 10:
-                state["execution_mode"] = ExecutionMode.CHAT
-                logger.info(f"🗣️ Routing to chat agent: simple greeting/chat")
+                # ChatAgent removed - migrated to llm-orchestrator gRPC service
+                # Default to research for now (this foundation is deprecated)
+                state["execution_mode"] = ExecutionMode.RESEARCH
+                logger.info(f"🔬 Routing to research agent: simple greeting (chat agent removed)")
             elif any(keyword in query for keyword in research_keywords):
                 state["execution_mode"] = ExecutionMode.RESEARCH
                 logger.info(f"🔬 Routing to research agent: research keywords detected")
             else:
-                state["execution_mode"] = ExecutionMode.CHAT
-                logger.info(f"🗣️ Routing to chat agent: default for conversation")
+                # ChatAgent removed - migrated to llm-orchestrator gRPC service
+                # Default to research for now (this foundation is deprecated)
+                state["execution_mode"] = ExecutionMode.RESEARCH
+                logger.info(f"🔬 Routing to research agent: default (chat agent removed)")
             
             return state
         
@@ -192,50 +198,16 @@ class MinimalLangGraphFoundation:
     
     def _route_decision(self, state: MinimalState) -> str:
         """Decide which agent to route to based on execution mode"""
-        mode = state.get("execution_mode", ExecutionMode.CHAT)
+        mode = state.get("execution_mode", ExecutionMode.RESEARCH)
         if mode == ExecutionMode.RESEARCH:
             return "research"
         else:
-            return "chat"
+            # ChatAgent removed - migrated to llm-orchestrator gRPC service
+            # Default to research for now (this foundation is deprecated)
+            return "research"
     
-    async def _chat_node(self, state: MinimalState) -> MinimalState:
-        """Chat agent node"""
-        try:
-            logger.info("💬 Processing with chat agent...")
-            
-            # Convert state to agent format
-            agent_state = {
-                "messages": state["messages"],
-                "user_id": state["user_id"],
-                "conversation_id": state["conversation_id"],
-                "current_query": self._get_latest_user_message(state),
-                "persona": state.get("persona"),  # Pass persona to agent
-                "agent_insights": {"chat_agent": {}},  # Required by agent
-                "shared_memory": {}  # Required by agent
-            }
-            
-            # CONVERSATION INTELLIGENCE: Log conversation context
-            msg_count = len(state["messages"])
-            logger.info(f"💬 Chat agent receiving {msg_count} messages for context")
-            
-            # Process with chat agent
-            result_state = await self.chat_agent.process(agent_state)
-            
-            # Extract response and add to messages
-            response = result_state.get("agent_results", {}).get("response", "I couldn't generate a response.")
-            
-            # Add AI response to messages (LangGraph will handle this automatically)
-            state["messages"] = state["messages"] + [AIMessage(content=response)]
-            state["is_complete"] = True
-            
-            logger.info("✅ Chat agent completed successfully")
-            return state
-            
-        except Exception as e:
-            logger.error(f"❌ Chat agent error: {e}")
-            state["messages"] = state["messages"] + [AIMessage(content=f"I encountered an error: {str(e)}")]
-            state["is_complete"] = True
-            return state
+    # ChatAgent removed - migrated to llm-orchestrator gRPC service
+    # Removed _chat_node method
     
     async def _research_node(self, state: MinimalState) -> MinimalState:
         """Research agent node"""

@@ -8,12 +8,34 @@ import logging
 import re
 import json
 from datetime import datetime
-from typing import Dict, Any, List, Optional
-from langchain_core.messages import AIMessage
+from typing import Dict, Any, List, Optional, TypedDict
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
+from langgraph.graph import StateGraph, END
 from orchestrator.agents.base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
+
+
+class PodcastScriptState(TypedDict):
+    """State for podcast script agent LangGraph workflow"""
+    query: str
+    user_id: str
+    metadata: Dict[str, Any]
+    messages: List[Any]
+    shared_memory: Dict[str, Any]
+    persona: Optional[Dict[str, Any]]
+    user_message: str
+    editor_content: str
+    frontmatter: Dict[str, Any]
+    content_block: str
+    system_prompt: str
+    task_block: str
+    script_text: str
+    metadata_result: Dict[str, Any]
+    response: Dict[str, Any]
+    task_status: str
+    error: str
 
 
 class PodcastScriptAgent(BaseAgent):
@@ -22,11 +44,32 @@ class PodcastScriptAgent(BaseAgent):
     
     Generates dynamic, emotionally engaging podcast scripts with
     inline bracket cues for text-to-speech systems
+    Uses LangGraph workflow for explicit state management
     """
     
     def __init__(self):
         super().__init__("podcast_script_agent")
         self._grpc_client = None
+        logger.info("🎙️ Podcast Script Agent ready!")
+    
+    def _build_workflow(self, checkpointer) -> StateGraph:
+        """Build LangGraph workflow for podcast script agent"""
+        workflow = StateGraph(PodcastScriptState)
+        
+        # Add nodes
+        workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("extract_content", self._extract_content_node)
+        workflow.add_node("generate_script", self._generate_script_node)
+        
+        # Entry point
+        workflow.set_entry_point("prepare_context")
+        
+        # Linear flow: prepare_context -> extract_content -> generate_script -> END
+        workflow.add_edge("prepare_context", "extract_content")
+        workflow.add_edge("extract_content", "generate_script")
+        workflow.add_edge("generate_script", END)
+        
+        return workflow.compile(checkpointer=checkpointer)
     
     async def _get_grpc_client(self):
         """Get or create gRPC client for backend tools"""
@@ -101,20 +144,23 @@ class PodcastScriptAgent(BaseAgent):
         
         if persona:
             persona_name = persona.get("ai_name", "")
-            persona_style = persona.get("persona_style", "")
-            if persona_name or persona_style:
-                base += f"\n\nPERSONA: Write as {persona_name or 'host'} with {persona_style or 'warm'} style."
+            persona_style = persona.get("persona_style", "professional")
+            
+            # Use centralized style instruction from BaseAgent
+            style_instruction = self._get_style_instruction(persona_style)
+            
+            if persona_name:
+                base += f"\n\nYou are {persona_name}."
+            base += f"\n\n{style_instruction}"
         
         return base
     
-    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """Process podcast script generation request"""
+    async def _prepare_context_node(self, state: PodcastScriptState) -> Dict[str, Any]:
+        """Prepare context: extract message and check editor type"""
         try:
-            logger.info("🎙️ Podcast Script Agent: Starting script generation")
+            logger.info("📋 Preparing context for podcast script generation...")
             
-            # Extract state components
             messages = state.get("messages", [])
-            user_id = state.get("user_id")
             shared_memory = state.get("shared_memory", {})
             active_editor = shared_memory.get("active_editor", {})
             
@@ -124,16 +170,45 @@ class PodcastScriptAgent(BaseAgent):
             
             if doc_type != "podcast":
                 logger.info(f"🎙️ Podcast agent skipping: editor type is '{doc_type}', not 'podcast'")
-                return self._create_response(
+                return {
+                    "response": self._create_response(
                     success=True,
                     response="Active editor is not a podcast document. Podcast agent requires editor with type='podcast'.",
                     skipped=True
-                )
+                    ),
+                    "task_status": "skipped"
+                }
             
             # Get user message and editor content
             latest_message = messages[-1] if messages else None
             user_message = latest_message.content if hasattr(latest_message, 'content') else ""
             editor_content = active_editor.get("content", "")
+            
+            return {
+                "user_message": user_message,
+                "editor_content": editor_content,
+                "frontmatter": frontmatter
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to prepare context: {e}")
+            return {
+                "user_message": "",
+                "editor_content": "",
+                "frontmatter": {},
+                "error": str(e),
+                "task_status": "error"
+            }
+    
+    async def _extract_content_node(self, state: PodcastScriptState) -> Dict[str, Any]:
+        """Extract content sections and build content/task blocks"""
+        try:
+            logger.info("📝 Extracting content sections...")
+            
+            user_message = state.get("user_message", "")
+            editor_content = state.get("editor_content", "")
+            frontmatter = state.get("frontmatter", {})
+            persona = state.get("persona")
             
             # Extract request parameters
             target_length = int(frontmatter.get("target_length_words", 900))
@@ -158,7 +233,6 @@ class PodcastScriptAgent(BaseAgent):
             )
             
             # Build system prompt
-            persona = state.get("persona")
             system_prompt = self._build_system_prompt(persona)
             
             # Build task instructions
@@ -166,38 +240,133 @@ class PodcastScriptAgent(BaseAgent):
                 user_message, target_length, tone, pacing, include_music, include_sfx
             )
             
-            # Execute LLM
-            chat_service = await self._get_chat_service()
+            return {
+                "content_block": content_block,
+                "system_prompt": system_prompt,
+                "task_block": task_block
+            }
             
-            messages_to_send = [
-                {"role": "system", "content": system_prompt},
-                {"role": "system", "content": f"Current Date/Time: {datetime.now().isoformat()}"},
+        except Exception as e:
+            logger.error(f"❌ Failed to extract content: {e}")
+            return {
+                "content_block": "",
+                "system_prompt": "",
+                "task_block": "",
+                "error": str(e)
+            }
+    
+    async def _generate_script_node(self, state: PodcastScriptState) -> Dict[str, Any]:
+        """Generate podcast script using LLM"""
+        try:
+            logger.info("🎙️ Generating podcast script...")
+            
+            content_block = state.get("content_block", "")
+            system_prompt = state.get("system_prompt", "")
+            task_block = state.get("task_block", "")
+            
+            # Use centralized LLM access from BaseAgent
+            llm = self._get_llm(temperature=0.3, state=state)
+            
+            # Build LangChain messages
+            messages = [
+                SystemMessage(content=system_prompt),
+                SystemMessage(content=f"Current Date/Time: {datetime.now().isoformat()}")
             ]
             
             if content_block:
-                messages_to_send.append({"role": "user", "content": content_block})
-            messages_to_send.append({"role": "user", "content": task_block})
+                messages.append(HumanMessage(content=content_block))
+            messages.append(HumanMessage(content=task_block))
             
-            logger.info(f"🎙️ Generating podcast script with {len(messages_to_send)} messages")
+            logger.info(f"🎙️ Generating podcast script with {len(messages)} messages")
             
-            response = await chat_service.openai_client.chat.completions.create(
-                model=chat_service.model,
-                messages=messages_to_send,
-                temperature=0.3
-            )
-            
-            content = response.choices[0].message.content or "{}"
+            # Use LangChain interface
+            response = await llm.ainvoke(messages)
+            content = response.content if hasattr(response, 'content') else str(response)
             
             # Parse structured response
             script_text, metadata = self._parse_response(content)
             
             logger.info("✅ Podcast Script Agent: Script generation complete")
             
-            return self._create_response(
+            result = self._create_response(
                 success=True,
                 response=script_text,
                 metadata=metadata
             )
+            
+            return {
+                "response": result,
+                "script_text": script_text,
+                "metadata_result": metadata,
+                "task_status": "complete"
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Script generation failed: {e}")
+            return {
+                "response": self._create_error_result(f"Script generation failed: {str(e)}"),
+                "task_status": "error",
+                "error": str(e)
+            }
+    
+    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process podcast script generation request using LangGraph workflow
+        
+        Args:
+            state: Dictionary with messages, shared_memory, user_id, persona, etc.
+            
+        Returns:
+            Dictionary with podcast script response and metadata
+        """
+        try:
+            logger.info("🎙️ Podcast Script Agent: Starting script generation...")
+            
+            # Extract user message
+            messages = state.get("messages", [])
+            latest_message = messages[-1] if messages else None
+            user_message = latest_message.content if hasattr(latest_message, 'content') else ""
+            
+            # Build initial state for LangGraph workflow
+            initial_state: PodcastScriptState = {
+                "query": user_message,
+                "user_id": state.get("user_id", "system"),
+                "metadata": state.get("metadata", {}),
+                "messages": messages,
+                "shared_memory": state.get("shared_memory", {}),
+                "persona": state.get("persona"),
+                "user_message": "",
+                "editor_content": "",
+                "frontmatter": {},
+                "content_block": "",
+                "system_prompt": "",
+                "task_block": "",
+                "script_text": "",
+                "metadata_result": {},
+                "response": {},
+                "task_status": "",
+                "error": ""
+            }
+            
+            # Get workflow (lazy initialization with checkpointer)
+            workflow = await self._get_workflow()
+            
+            # Get checkpoint config (handles thread_id from conversation_id/user_id)
+            metadata = state.get("metadata", {})
+            config = self._get_checkpoint_config(metadata)
+            
+            # Invoke LangGraph workflow with checkpointing
+            final_state = await workflow.ainvoke(initial_state, config=config)
+            
+            # Return response from final state
+            return final_state.get("response", {
+                "messages": [AIMessage(content="Podcast script generation failed")],
+                "agent_results": {
+                    "agent_type": self.agent_type,
+                    "is_complete": False
+                },
+                "is_complete": False
+            })
             
         except Exception as e:
             logger.error(f"❌ Podcast Script Agent ERROR: {e}")

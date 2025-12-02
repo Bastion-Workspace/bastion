@@ -11,7 +11,7 @@ from models.conversation_models import (
     MessageResponse,
     UpdateConversationRequest,
 )
-from utils.auth_middleware import get_current_user
+from utils.auth_middleware import get_current_user, validate_conversation_access
 from models.api_models import AuthenticatedUserResponse
 import logging
 
@@ -166,6 +166,15 @@ async def list_conversations(skip: int = 0, limit: int = 50, current_user: Authe
 @router.get("/api/conversations/{conversation_id}", response_model=ConversationResponse)
 async def get_conversation(conversation_id: str, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     try:
+        # Check access permission
+        has_access = await validate_conversation_access(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            required_permission="read"
+        )
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have access to this conversation")
+        
         logger.info(f"💬 Getting conversation: {conversation_id}")
         from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
         checkpointer = await get_postgres_checkpointer()
@@ -229,6 +238,55 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
                 await conn.close()
         except Exception as e:
             logger.warning(f"⚠️ Failed to query LangGraph checkpoints for conversation {conversation_id}: {e}")
+        
+        # ROOSEVELT'S DUAL SOURCE FIX: Fall back to conversation database if not found in checkpoints
+        if not conversation_dict:
+            logger.info(f"📚 Conversation not found in checkpoint, falling back to conversation database for {conversation_id}")
+            try:
+                from services.conversation_service import ConversationService
+                conversation_service = ConversationService()
+                conversation_service.set_current_user(current_user.user_id)
+                
+                # Get conversation from database
+                db_conversation = await conversation_service.lifecycle_manager.get_conversation_lifecycle(conversation_id)
+                if db_conversation:
+                    user_context = db_conversation.get("user_context", {})
+                    if user_context.get("user_id") == current_user.user_id:
+                        # Get message count from total_count in result
+                        messages_result = await conversation_service.get_conversation_messages(
+                            conversation_id=conversation_id,
+                            user_id=current_user.user_id,
+                            skip=0,
+                            limit=1  # Just to get count
+                        )
+                        # ConversationService returns dict with "total_count" key
+                        message_count = messages_result.get("total_count", 0) if messages_result and "total_count" in messages_result else 0
+                        
+                        conversation_dict = {
+                            "conversation_id": conversation_id,
+                            "user_id": current_user.user_id,
+                            "title": db_conversation.get("title", "New Conversation"),
+                            "description": db_conversation.get("description"),
+                            "is_pinned": db_conversation.get("is_pinned", False),
+                            "is_archived": db_conversation.get("is_archived", False),
+                            "tags": db_conversation.get("tags", []),
+                            "metadata_json": db_conversation.get("metadata_json", {}),
+                            "message_count": message_count,
+                            "last_message_at": db_conversation.get("last_message_at"),
+                            "manual_order": db_conversation.get("manual_order"),
+                            "order_locked": db_conversation.get("order_locked", False),
+                            "created_at": db_conversation.get("created_at", datetime.now().isoformat()),
+                            "updated_at": db_conversation.get("updated_at", datetime.now().isoformat()),
+                            "messages": []
+                        }
+                        logger.info(f"✅ Found conversation in database: {conversation_id}")
+                    else:
+                        logger.warning(f"⚠️ User {current_user.user_id} does not own conversation {conversation_id}")
+                else:
+                    logger.info(f"💬 Conversation {conversation_id} not found in database either")
+            except Exception as db_error:
+                logger.warning(f"⚠️ Fallback to conversation database failed: {db_error}")
+        
         if not conversation_dict:
             raise HTTPException(status_code=404, detail="Conversation not found")
         from models.conversation_models import ConversationDetail
@@ -261,6 +319,15 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
 @router.put("/api/conversations/{conversation_id}")
 async def update_conversation(conversation_id: str, request: UpdateConversationRequest, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     try:
+        # Check edit permission
+        has_access = await validate_conversation_access(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            required_permission="edit"
+        )
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have permission to edit this conversation")
+        
         logger.info(f"💬 Updating conversation: {conversation_id} for user: {current_user.user_id}")
         import asyncpg
         from config import settings

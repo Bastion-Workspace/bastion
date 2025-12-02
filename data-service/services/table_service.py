@@ -21,6 +21,7 @@ class TableService:
         database_id: str,
         name: str,
         schema: Dict[str, Any],
+        user_id: str,
         description: Optional[str] = None
     ) -> Dict[str, Any]:
         """Create a new table"""
@@ -31,16 +32,16 @@ class TableService:
             query = """
                 INSERT INTO custom_tables 
                 (table_id, database_id, name, description, row_count, schema_json,
-                 styling_rules_json, metadata_json, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 styling_rules_json, metadata_json, created_at, updated_at, created_by, updated_by)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 RETURNING table_id, database_id, name, description, row_count, 
-                          schema_json, styling_rules_json, metadata_json, created_at, updated_at
+                          schema_json, styling_rules_json, metadata_json, created_at, updated_at, created_by, updated_by
             """
             
             row = await self.db.fetchrow(
                 query,
                 table_id, database_id, name, description, 0,
-                json.dumps(schema), json.dumps({}), json.dumps({}), now, now
+                json.dumps(schema), json.dumps({}), json.dumps({}), now, now, user_id, user_id
             )
             
             logger.info(f"Created table: {table_id} in database: {database_id}")
@@ -55,7 +56,7 @@ class TableService:
         try:
             query = """
                 SELECT table_id, database_id, name, description, row_count,
-                       schema_json, styling_rules_json, metadata_json, created_at, updated_at
+                       schema_json, styling_rules_json, metadata_json, created_at, updated_at, created_by, updated_by
                 FROM custom_tables
                 WHERE database_id = $1
                 ORDER BY created_at DESC
@@ -73,7 +74,7 @@ class TableService:
         try:
             query = """
                 SELECT table_id, database_id, name, description, row_count,
-                       schema_json, styling_rules_json, metadata_json, created_at, updated_at
+                       schema_json, styling_rules_json, metadata_json, created_at, updated_at, created_by, updated_by
                 FROM custom_tables
                 WHERE table_id = $1
             """
@@ -156,6 +157,7 @@ class TableService:
         self,
         table_id: str,
         row_data: Dict[str, Any],
+        user_id: str,
         row_color: Optional[str] = None
     ) -> Dict[str, Any]:
         """Insert a single row"""
@@ -172,19 +174,19 @@ class TableService:
             # Insert row
             insert_query = """
                 INSERT INTO custom_data_rows 
-                (row_id, table_id, row_data, row_index, row_color, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
+                (row_id, table_id, row_data, row_index, row_color, created_at, updated_at, created_by, updated_by)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 RETURNING row_id, row_data, row_index, row_color
             """
             
             now = datetime.utcnow()
             row = await self.db.fetchrow(
                 insert_query,
-                row_id, table_id, json.dumps(row_data), new_index, row_color, now, now
+                row_id, table_id, json.dumps(row_data), new_index, row_color, now, now, user_id, user_id
             )
             
             # Update table row count
-            await self._update_table_row_count(table_id)
+            await self._update_table_row_count(table_id, user_id)
             
             logger.info(f"Inserted row {row_id} into table {table_id}")
             
@@ -203,6 +205,7 @@ class TableService:
         self,
         table_id: str,
         rows_data: List[Dict[str, Any]],
+        user_id: str,
         batch_size: int = 1000
     ) -> int:
         """Bulk insert rows efficiently"""
@@ -217,8 +220,8 @@ class TableService:
             now = datetime.utcnow()
             insert_query = """
                 INSERT INTO custom_data_rows 
-                (row_id, table_id, row_data, row_index, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                (row_id, table_id, row_data, row_index, created_at, updated_at, created_by, updated_by)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """
             
             total_inserted = 0
@@ -230,7 +233,7 @@ class TableService:
                     row_id = str(uuid.uuid4())
                     row_index = start_index + total_inserted + idx
                     args_list.append((
-                        row_id, table_id, json.dumps(row_data), row_index, now, now
+                        row_id, table_id, json.dumps(row_data), row_index, now, now, user_id, user_id
                     ))
                 
                 await self.db.executemany(insert_query, args_list)
@@ -239,7 +242,7 @@ class TableService:
                 logger.info(f"Inserted batch: {total_inserted}/{len(rows_data)} rows into table {table_id}")
             
             # Update table row count
-            await self._update_table_row_count(table_id)
+            await self._update_table_row_count(table_id, user_id)
             
             logger.info(f"Bulk insert complete: {total_inserted} rows into table {table_id}")
             return total_inserted
@@ -252,14 +255,15 @@ class TableService:
         self,
         table_id: str,
         row_id: str,
-        row_data: Dict[str, Any]
+        row_data: Dict[str, Any],
+        user_id: str
     ) -> Optional[Dict[str, Any]]:
         """Update a row"""
         try:
             query = """
                 UPDATE custom_data_rows
-                SET row_data = $1, updated_at = $2
-                WHERE row_id = $3 AND table_id = $4
+                SET row_data = $1, updated_at = $2, updated_by = $3
+                WHERE row_id = $4 AND table_id = $5
                 RETURNING row_id, row_data, row_index, row_color
             """
             
@@ -267,6 +271,7 @@ class TableService:
                 query,
                 json.dumps(row_data),
                 datetime.utcnow(),
+                user_id,
                 row_id,
                 table_id
             )
@@ -290,7 +295,8 @@ class TableService:
         table_id: str,
         row_id: str,
         column_name: str,
-        value: Any
+        value: Any,
+        user_id: str
     ) -> Optional[Dict[str, Any]]:
         """Update a single cell in a row"""
         try:
@@ -310,8 +316,8 @@ class TableService:
             # Save updated data
             update_query = """
                 UPDATE custom_data_rows
-                SET row_data = $1, updated_at = $2
-                WHERE row_id = $3 AND table_id = $4
+                SET row_data = $1, updated_at = $2, updated_by = $3
+                WHERE row_id = $4 AND table_id = $5
                 RETURNING row_id, row_data, row_index, row_color
             """
             
@@ -319,6 +325,7 @@ class TableService:
                 update_query,
                 json.dumps(row_data),
                 datetime.utcnow(),
+                user_id,
                 row_id,
                 table_id
             )
@@ -347,8 +354,8 @@ class TableService:
             deleted = result.split()[-1] != '0'
             
             if deleted and table_id:
-                # Update table row count
-                await self._update_table_row_count(table_id)
+                # Update table row count (user_id not available for deletes, pass None)
+                await self._update_table_row_count(table_id, None)
                 logger.info(f"Deleted row {row_id}")
             
             return deleted
@@ -400,7 +407,7 @@ class TableService:
             logger.error(f"Failed to infer schema: {e}")
             raise
     
-    async def _update_table_row_count(self, table_id: str):
+    async def _update_table_row_count(self, table_id: str, user_id: Optional[str] = None):
         """Update the row count for a table"""
         try:
             count_query = "SELECT COUNT(*) FROM custom_data_rows WHERE table_id = $1"
@@ -408,10 +415,10 @@ class TableService:
             
             update_query = """
                 UPDATE custom_tables 
-                SET row_count = $2, updated_at = $3 
+                SET row_count = $2, updated_at = $3, updated_by = $4
                 WHERE table_id = $1
             """
-            await self.db.execute(update_query, table_id, count, datetime.utcnow())
+            await self.db.execute(update_query, table_id, count, datetime.utcnow(), user_id)
             
         except Exception as e:
             logger.error(f"Failed to update row count for table {table_id}: {e}")
@@ -432,7 +439,9 @@ class TableService:
             'styling_rules_json': row['styling_rules_json'] if isinstance(row['styling_rules_json'], str) else json.dumps(row['styling_rules_json']),
             'metadata_json': row['metadata_json'] if isinstance(row['metadata_json'], str) else json.dumps(row['metadata_json']),
             'created_at': row['created_at'].isoformat() if row['created_at'] else None,
-            'updated_at': row['updated_at'].isoformat() if row['updated_at'] else None
+            'updated_at': row['updated_at'].isoformat() if row['updated_at'] else None,
+            'created_by': row.get('created_by'),
+            'updated_by': row.get('updated_by')
         }
 
 

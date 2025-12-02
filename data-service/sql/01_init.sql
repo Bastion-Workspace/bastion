@@ -12,11 +12,13 @@ CREATE TABLE data_workspaces (
     is_pinned BOOLEAN DEFAULT FALSE,
     metadata_json JSONB,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_by VARCHAR(255)
 );
 
 CREATE INDEX idx_workspaces_user ON data_workspaces(user_id);
 CREATE INDEX idx_workspaces_created_at ON data_workspaces(created_at DESC);
+CREATE INDEX idx_workspaces_updated_by ON data_workspaces(updated_by);
 
 -- Custom Databases within workspaces
 CREATE TABLE custom_databases (
@@ -30,10 +32,14 @@ CREATE TABLE custom_databases (
     total_rows BIGINT DEFAULT 0,
     metadata_json JSONB,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    created_by VARCHAR(255),
+    updated_by VARCHAR(255)
 );
 
 CREATE INDEX idx_databases_workspace ON custom_databases(workspace_id);
+CREATE INDEX idx_databases_created_by ON custom_databases(created_by);
+CREATE INDEX idx_databases_updated_by ON custom_databases(updated_by);
 
 -- Tables with styling support
 CREATE TABLE custom_tables (
@@ -48,10 +54,14 @@ CREATE TABLE custom_tables (
     constraints_json JSONB,
     metadata_json JSONB,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    created_by VARCHAR(255),
+    updated_by VARCHAR(255)
 );
 
 CREATE INDEX idx_tables_database ON custom_tables(database_id);
+CREATE INDEX idx_tables_created_by ON custom_tables(created_by);
+CREATE INDEX idx_tables_updated_by ON custom_tables(updated_by);
 
 -- Data rows (flexible JSONB storage)
 CREATE TABLE custom_data_rows (
@@ -61,12 +71,16 @@ CREATE TABLE custom_data_rows (
     row_index INTEGER NOT NULL,
     row_color VARCHAR(20),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    created_by VARCHAR(255),
+    updated_by VARCHAR(255)
 );
 
 CREATE INDEX idx_rows_table ON custom_data_rows(table_id);
 CREATE INDEX idx_rows_table_index ON custom_data_rows(table_id, row_index);
 CREATE INDEX idx_rows_data_gin ON custom_data_rows USING gin(row_data);
+CREATE INDEX idx_rows_created_by ON custom_data_rows(created_by);
+CREATE INDEX idx_rows_updated_by ON custom_data_rows(updated_by);
 
 -- External database connections
 CREATE TABLE external_db_connections (
@@ -84,10 +98,13 @@ CREATE TABLE external_db_connections (
     last_tested TIMESTAMP WITH TIME ZONE,
     last_sync TIMESTAMP WITH TIME ZONE,
     metadata_json JSONB,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    created_by VARCHAR(255),
+    updated_by VARCHAR(255)
 );
 
 CREATE INDEX idx_connections_workspace ON external_db_connections(workspace_id);
+CREATE INDEX idx_connections_created_by ON external_db_connections(created_by);
 
 -- Data transformations
 CREATE TABLE data_transformations (
@@ -118,11 +135,13 @@ CREATE TABLE data_visualizations (
     is_pinned BOOLEAN DEFAULT FALSE,
     created_by VARCHAR(255) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_by VARCHAR(255)
 );
 
 CREATE INDEX idx_visualizations_workspace ON data_visualizations(workspace_id);
 CREATE INDEX idx_visualizations_table ON data_visualizations(table_id);
+CREATE INDEX idx_visualizations_updated_by ON data_visualizations(updated_by);
 
 -- Import jobs
 CREATE TABLE data_import_jobs (
@@ -139,11 +158,13 @@ CREATE TABLE data_import_jobs (
     error_log TEXT,
     started_at TIMESTAMP WITH TIME ZONE,
     completed_at TIMESTAMP WITH TIME ZONE,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    created_by VARCHAR(255)
 );
 
 CREATE INDEX idx_import_jobs_workspace ON data_import_jobs(workspace_id);
 CREATE INDEX idx_import_jobs_status ON data_import_jobs(status);
+CREATE INDEX idx_import_jobs_created_by ON data_import_jobs(created_by);
 
 -- Query history
 CREATE TABLE data_queries (
@@ -183,6 +204,30 @@ CREATE TABLE styling_rules (
 
 CREATE INDEX idx_styling_rules_table ON styling_rules(table_id);
 CREATE INDEX idx_styling_rules_active ON styling_rules(table_id, is_active, priority);
+
+-- Workspace sharing table
+CREATE TABLE data_workspace_shares (
+    id SERIAL PRIMARY KEY,
+    share_id VARCHAR(255) UNIQUE NOT NULL,
+    workspace_id VARCHAR(255) NOT NULL REFERENCES data_workspaces(workspace_id) ON DELETE CASCADE,
+    shared_by_user_id VARCHAR(255) NOT NULL,
+    shared_with_user_id VARCHAR(255), -- NULL for team/public shares
+    shared_with_team_id VARCHAR(255), -- UUID as string, NULL for user/public shares
+    permission_level VARCHAR(20) NOT NULL CHECK (permission_level IN ('read', 'write', 'admin')),
+    is_public BOOLEAN DEFAULT FALSE,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    access_count INTEGER DEFAULT 0
+);
+
+CREATE INDEX idx_workspace_shares_workspace ON data_workspace_shares(workspace_id);
+CREATE INDEX idx_workspace_shares_user ON data_workspace_shares(shared_with_user_id);
+CREATE INDEX idx_workspace_shares_team ON data_workspace_shares(shared_with_team_id);
+CREATE INDEX idx_workspace_shares_public ON data_workspace_shares(is_public) WHERE is_public = TRUE;
+
+
+
+
 
 
 

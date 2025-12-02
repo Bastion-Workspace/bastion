@@ -148,7 +148,7 @@ class DatabaseManager:
             # Transactions will be automatically rolled back when connections close
         
         # Close the connection pool
-        if self._pool and not self._pool.is_closed:
+        if self._pool and not self._pool.is_closing():
             await self._pool.close()
             logger.info("🔄 Connection pool closed")
         

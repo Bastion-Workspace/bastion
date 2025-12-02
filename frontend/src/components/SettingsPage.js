@@ -61,10 +61,82 @@ import UserManagement from './UserManagement';
 import ClassificationModelSelector from './ClassificationModelSelector';
 import ImageGenerationModelSelector from './ImageGenerationModelSelector';
 import TextCompletionModelSelector from './TextCompletionModelSelector';
+import { useModel } from '../contexts/ModelContext';
 import TemplateManager from './TemplateManager';
 import SettingsServicesTwitter from './SettingsServicesTwitter';
 import OrgModeSettingsTab from './OrgModeSettingsTab';
 import CyberCatalogSettingsTab from './CyberCatalogSettingsTab';
+
+// Model Status Display Component
+const ModelStatusDisplay = () => {
+  const { data: classificationData, isLoading: loadingClassification } = useQuery(
+    'classificationModel',
+    () => apiService.get('/api/models/classification')
+  );
+
+  const { data: currentModelData, isLoading: loadingCurrent } = useQuery(
+    'currentModel',
+    () => apiService.get('/api/models/current')
+  );
+
+  if (loadingClassification || loadingCurrent) {
+    return (
+      <Box display="flex" alignItems="center" gap={2} p={2}>
+        <CircularProgress size={20} />
+        <Typography variant="body2">Loading model status...</Typography>
+      </Box>
+    );
+  }
+
+  return (
+    <Grid container spacing={2}>
+      <Grid item xs={12} md={6}>
+        <Paper sx={{ p: 2, bgcolor: classificationData?.chat_model_is_fallback ? 'warning.light' : 'success.light' }}>
+          <Typography variant="subtitle2" gutterBottom>
+            Main Chat Model
+            {classificationData?.chat_model_is_fallback && (
+              <Chip label="Fallback" size="small" color="warning" sx={{ ml: 1 }} />
+            )}
+          </Typography>
+          <Typography variant="body2">
+            {classificationData?.effective_chat_model || 'Not configured'}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            Used for general AI conversations and responses
+          </Typography>
+        </Paper>
+      </Grid>
+
+      <Grid item xs={12} md={6}>
+        <Paper sx={{ p: 2, bgcolor: classificationData?.classification_model_is_fallback ? 'warning.light' : 'success.light' }}>
+          <Typography variant="subtitle2" gutterBottom>
+            Classification Model
+            {classificationData?.classification_model_is_fallback && (
+              <Chip label="Fallback" size="small" color="warning" sx={{ ml: 1 }} />
+            )}
+          </Typography>
+          <Typography variant="body2">
+            {classificationData?.effective_classification_model || 'Not configured'}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            Used for fast intent classification and routing
+          </Typography>
+        </Paper>
+      </Grid>
+
+      {(classificationData?.chat_model_is_fallback || classificationData?.classification_model_is_fallback) && (
+        <Grid item xs={12}>
+          <Alert severity="warning">
+            <Typography variant="body2">
+              <strong>Models Using Fallbacks:</strong> Some models are using system defaults instead of explicitly configured models.
+              Configure specific models above to ensure consistent behavior.
+            </Typography>
+          </Alert>
+        </Grid>
+      )}
+    </Grid>
+  );
+};
 
 // Pending Submissions Component for Admin
 const PendingSubmissions = () => {
@@ -244,13 +316,6 @@ const SettingsPage = () => {
   const [userTimezone, setUserTimezone] = useState('UTC');
   const [timezoneLoading, setTimezoneLoading] = useState(false);
 
-  // Calibre integration state
-  const [calibreStatus, setCalibreStatus] = useState(null);
-  const [calibreEnabled, setCalibreEnabled] = useState(false);
-  const [calibreSettings, setCalibreSettings] = useState({
-    search_weight: 0.3,
-    max_results: 50
-  });
 
   // AI Personality state
   const [promptSettings, setPromptSettings] = useState({
@@ -423,49 +488,6 @@ const SettingsPage = () => {
     }
   );
 
-  // Fetch Calibre status
-  const { data: calibreStatusData, refetch: refetchCalibreStatus, isLoading: calibreStatusLoading } = useQuery(
-    'calibreStatus',
-    () => apiService.getCalibreStatus(),
-    {
-      retry: 2, // Retry failed requests
-      staleTime: 2 * 60 * 1000, // Consider data fresh for 2 minutes
-      onSuccess: (data) => {
-        setCalibreStatus(data);
-        setCalibreEnabled(data.enabled || false);
-        if (data.search_weight !== undefined) setCalibreSettings(prev => ({ ...prev, search_weight: data.search_weight }));
-        if (data.max_results !== undefined) setCalibreSettings(prev => ({ ...prev, max_results: data.max_results }));
-      },
-      onError: (error) => {
-        console.error('Failed to fetch Calibre status:', error);
-        setCalibreStatus({ available: false, error: error.message });
-      }
-    }
-  );
-
-  // Calibre mutations
-  const toggleCalibreMutation = useMutation(
-    ({ enabled }) => apiService.toggleCalibreIntegration(enabled),
-    {
-      onSuccess: (data) => {
-        setCalibreEnabled(data.enabled);
-        refetchCalibreStatus();
-        setSnackbar({
-          open: true,
-          message: data.message,
-          severity: 'success'
-        });
-      },
-      onError: (error) => {
-        setSnackbar({
-          open: true,
-          message: `Failed to toggle Calibre integration: ${error.response?.data?.detail || error.message}`,
-          severity: 'error'
-        });
-      }
-    }
-  );
-
   // Timezone update mutation
   const timezoneMutation = useMutation(
     (timezone) => apiService.setUserTimezone({ timezone }),
@@ -594,27 +616,6 @@ const SettingsPage = () => {
     };
     return descriptions[persona] || 'No specific description available for this persona.';
   };
-
-  const updateCalibreSettingsMutation = useMutation(
-    (settings) => apiService.updateCalibreSettings(settings),
-    {
-      onSuccess: (data) => {
-        refetchCalibreStatus();
-        setSnackbar({
-          open: true,
-          message: data.message,
-          severity: 'success'
-        });
-      },
-      onError: (error) => {
-        setSnackbar({
-          open: true,
-          message: `Failed to update Calibre settings: ${error.response?.data?.detail || error.message}`,
-          severity: 'error'
-        });
-      }
-    }
-  );
 
   // Model selection mutation
   const selectModelMutation = useMutation(
@@ -786,11 +787,12 @@ const SettingsPage = () => {
     const isSelected = selectedModel === model.id;
 
     return (
-      <Card 
-        sx={{ 
-          mb: 1, 
-          border: isSelected ? '2px solid #1976d2' : '1px solid #e0e0e0',
-          backgroundColor: isEnabled ? '#f8f9fa' : '#ffffff'
+      <Card
+        sx={{
+          mb: 1,
+          border: isSelected ? '2px solid #1976d2' : '1px solid',
+          borderColor: isSelected ? '#1976d2' : 'divider',
+          backgroundColor: isEnabled ? 'background.secondary' : 'background.paper'
         }}
       >
         <CardContent sx={{ py: 2 }}>
@@ -869,7 +871,6 @@ const SettingsPage = () => {
     { label: 'Report Templates', icon: <DescriptionIcon /> },
     { label: 'System & Models', icon: <Settings /> },
     { label: 'Services', icon: <Settings /> },
-    { label: 'Calibre Integration', icon: <Book /> },
     { label: 'News', icon: <DescriptionIcon /> },
     { label: 'Org-Mode', icon: <ListAlt /> },
     { label: 'Cyber Catalog', icon: <FolderOpen /> },
@@ -1180,6 +1181,23 @@ const SettingsPage = () => {
       {currentTab === 3 && (
         <Grid container spacing={3}>
 
+        {/* Current Model Status - Shows what agents are actually using */}
+        <Grid item xs={12}>
+          <Card sx={{ mb: 3 }}>
+            <CardContent>
+              <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
+                <Psychology sx={{ mr: 1 }} />
+                Current AI Model Configuration
+              </Typography>
+              <Typography variant="body2" color="text.secondary" gutterBottom>
+                This shows the models currently being used by AI agents. Models marked with "Fallback" are system defaults.
+              </Typography>
+
+              {/* We'll add the model status display here */}
+              <ModelStatusDisplay />
+            </CardContent>
+          </Card>
+        </Grid>
 
         {/* Classification Model Selection - Admin Only */}
         {user?.role === 'admin' && (
@@ -1907,152 +1925,8 @@ const SettingsPage = () => {
         </Grid>
       )}
 
-      {/* Calibre Integration Tab */}
-      {currentTab === 5 && (
-        <Grid container spacing={3}>
-          <Grid item xs={12}>
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.1 }}
-            >
-              <Card>
-                <CardContent>
-                  <Box display="flex" alignItems="center" mb={3}>
-                    <Book sx={{ mr: 2, color: 'primary.main' }} />
-                    <Typography variant="h6">Calibre Ebook Library Integration</Typography>
-                    <Chip 
-                      label={calibreStatus?.available ? "Connected" : "Not Available"} 
-                      color={calibreStatus?.available ? "success" : "error"}
-                      size="small" 
-                      sx={{ ml: 2 }}
-                    />
-                  </Box>
-
-                  {calibreStatus?.error && (
-                    <Alert severity="error" sx={{ mb: 3 }}>
-                      <strong>Connection Error:</strong> {calibreStatus.error}
-                    </Alert>
-                  )}
-
-                  {calibreStatus?.available && (
-                    <Alert severity="success" sx={{ mb: 3 }}>
-                      <strong>Calibre Library Connected!</strong> 
-                      {calibreStatus.total_books && ` Found ${calibreStatus.total_books} books in your library.`}
-                    </Alert>
-                  )}
-
-                  <Grid container spacing={3}>
-                    <Grid item xs={12} md={6}>
-                      <FormControlLabel
-                        control={
-                          <Switch
-                            checked={calibreEnabled}
-                            onChange={(e) => toggleCalibreMutation.mutate({ enabled: e.target.checked })}
-                            disabled={toggleCalibreMutation.isLoading}
-                          />
-                        }
-                        label="Enable Calibre Integration"
-                      />
-                      <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
-                        When enabled, Calibre books will be included in search results
-                      </Typography>
-                      {!calibreStatus?.available && calibreEnabled && (
-                        <Alert severity="warning" sx={{ mt: 1 }}>
-                          Calibre library not found at configured path. Please ensure Calibre is installed and the library path is correct.
-                        </Alert>
-                      )}
-                    </Grid>
-
-                    <Grid item xs={12} md={6}>
-                      <TextField
-                        fullWidth
-                        label="Search Weight"
-                        type="number"
-                        value={calibreSettings.search_weight}
-                        onChange={(e) => setCalibreSettings(prev => ({ ...prev, search_weight: parseFloat(e.target.value) }))}
-                        inputProps={{ min: 0, max: 1, step: 0.1 }}
-                        helperText="Weight given to Calibre results in combined search (0.0 - 1.0)"
-                        disabled={updateCalibreSettingsMutation.isLoading}
-                      />
-                    </Grid>
-
-                    <Grid item xs={12} md={6}>
-                      <TextField
-                        fullWidth
-                        label="Max Results"
-                        type="number"
-                        value={calibreSettings.max_results}
-                        onChange={(e) => setCalibreSettings(prev => ({ ...prev, max_results: parseInt(e.target.value) }))}
-                        inputProps={{ min: 1, max: 100 }}
-                        helperText="Maximum number of Calibre results per search"
-                        disabled={updateCalibreSettingsMutation.isLoading}
-                      />
-                    </Grid>
-
-                    <Grid item xs={12}>
-                      <Button
-                        variant="contained"
-                        onClick={() => updateCalibreSettingsMutation.mutate(calibreSettings)}
-                        disabled={updateCalibreSettingsMutation.isLoading}
-                        startIcon={updateCalibreSettingsMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
-                      >
-                        {updateCalibreSettingsMutation.isLoading ? 'Updating...' : 'Update Settings'}
-                      </Button>
-                    </Grid>
-                  </Grid>
-
-                  {calibreStatus?.available && (
-                    <Box mt={3}>
-                      <Typography variant="h6" gutterBottom>
-                        Library Information
-                      </Typography>
-                      <Grid container spacing={2}>
-                        <Grid item xs={12} md={4}>
-                          <Paper sx={{ p: 2, textAlign: 'center' }}>
-                            <Typography variant="h4" color="primary">
-                              📚
-                            </Typography>
-                            <Typography variant="h6">{calibreStatus.total_books || 0}</Typography>
-                            <Typography variant="body2" color="text.secondary">
-                              Total Books
-                            </Typography>
-                          </Paper>
-                        </Grid>
-                        <Grid item xs={12} md={4}>
-                          <Paper sx={{ p: 2, textAlign: 'center' }}>
-                            <Typography variant="h4" color="primary">
-                              👤
-                            </Typography>
-                            <Typography variant="h6">{calibreStatus.total_authors || 0}</Typography>
-                            <Typography variant="body2" color="text.secondary">
-                              Authors
-                            </Typography>
-                          </Paper>
-                        </Grid>
-                        <Grid item xs={12} md={4}>
-                          <Paper sx={{ p: 2, textAlign: 'center' }}>
-                            <Typography variant="h4" color="primary">
-                              📖
-                            </Typography>
-                            <Typography variant="h6">{calibreStatus.total_series || 0}</Typography>
-                            <Typography variant="body2" color="text.secondary">
-                              Series
-                            </Typography>
-                          </Paper>
-                        </Grid>
-                      </Grid>
-                    </Box>
-                  )}
-                </CardContent>
-              </Card>
-            </motion.div>
-          </Grid>
-        </Grid>
-      )}
-
       {/* Org-Mode Settings Tab */}
-      {currentTab === 7 && (
+      {currentTab === 6 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -2063,7 +1937,7 @@ const SettingsPage = () => {
       )}
 
       {/* Cyber Catalog Settings Tab */}
-      {currentTab === 8 && (
+      {currentTab === 7 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -2074,7 +1948,7 @@ const SettingsPage = () => {
       )}
 
       {/* User Management Tab */}
-      {currentTab === 9 && user?.role === 'admin' && (
+      {currentTab === 8 && user?.role === 'admin' && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -2085,7 +1959,7 @@ const SettingsPage = () => {
       )}
 
       {/* Pending Submissions Tab */}
-      {currentTab === 10 && user?.role === 'admin' && (
+      {currentTab === 9 && user?.role === 'admin' && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}

@@ -70,6 +70,13 @@ class DocumentService extends ApiServiceBase {
     return this.put(`/api/documents/${documentId}/metadata`, metadata);
   }
 
+  applyDocumentEditProposal = async (proposalId, selectedOperationIndices = null) => {
+    return this.post('/api/documents/edit-proposals/apply', {
+      proposal_id: proposalId,
+      selected_operation_indices: selectedOperationIndices
+    });
+  }
+
   renameDocument = async (documentId, newFilename) => {
     // Use FileManager API which also normalizes extension and renames disk file
     return this.post('/api/file-manager/rename-file', {

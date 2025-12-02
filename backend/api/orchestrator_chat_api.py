@@ -10,10 +10,12 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 
-from services.langgraph_official_orchestrator import get_official_orchestrator
+# DEPRECATED: Backend orchestrator removed - use gRPC orchestrator via /api/async/orchestrator/stream instead
+# from services.langgraph_official_orchestrator import get_official_orchestrator
 from services.prompt_service import prompt_service
 from services.conversation_service import ConversationService
 from utils.auth_middleware import get_current_user, AuthenticatedUserResponse
+from version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +78,12 @@ async def orchestrator_chat(
         
         logger.info(f"✅ Stored user message before Orchestrator processing")
         
-        # Process through Orchestrator LangGraph
-        orchestrator = await get_official_orchestrator()
+        # DEPRECATED: Backend orchestrator removed
+        # Use /api/async/orchestrator/stream endpoint instead which routes to gRPC orchestrator
+        raise HTTPException(
+            status_code=410,
+            detail="This endpoint is deprecated. Please use /api/async/orchestrator/stream instead."
+        )
 
         # Respect editor preference: if ignore, drop active_editor
         if (request.editor_preference or '').lower() == 'ignore':
@@ -177,7 +183,7 @@ async def orchestrator_status():
                 "chat", "research"
             ],
             "architecture": "big_stick_orchestrator",
-            "version": "1.0.0"
+            "version": __version__
         }
         
     except Exception as e:

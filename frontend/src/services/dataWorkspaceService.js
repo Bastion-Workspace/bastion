@@ -145,6 +145,27 @@ class DataWorkspaceService {
     const response = await this.api.delete(`/tables/${tableId}/rows/${rowId}`);
     return response.data;
   }
+
+  // Sharing methods
+  async shareWorkspace(workspaceId, shareData) {
+    const response = await this.api.post(`/workspaces/${workspaceId}/share`, shareData);
+    return response.data;
+  }
+
+  async listWorkspaceShares(workspaceId) {
+    const response = await this.api.get(`/workspaces/${workspaceId}/shares`);
+    return response.data;
+  }
+
+  async revokeShare(workspaceId, shareId) {
+    const response = await this.api.delete(`/workspaces/${workspaceId}/shares/${shareId}`);
+    return response.data;
+  }
+
+  async listSharedWorkspaces() {
+    const response = await this.api.get('/workspaces/shared');
+    return response.data;
+  }
 }
 
 export default new DataWorkspaceService();

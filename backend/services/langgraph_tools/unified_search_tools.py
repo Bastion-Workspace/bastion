@@ -85,7 +85,7 @@ class UnifiedSearchTools:
             }
         ]
     
-    async def search_local(self, query: str, search_types: List[str] = None, limit: int = 200, user_id: str = None, filter_category: str = None, filter_tags: List[str] = None) -> Dict[str, Any]:
+    async def search_local(self, query: str, search_types: List[str] = None, limit: int = 200, user_id: str = None, filter_category: str = None, filter_tags: List[str] = None, team_ids: List[str] = None) -> Dict[str, Any]:
         """
         Unified search across all local resources with smart tag filtering
         
@@ -137,7 +137,7 @@ class UnifiedSearchTools:
             search_tasks = []
             
             if "vector" in search_types:
-                search_tasks.append(self._search_vector(query, limit, user_id, filter_category, filter_tags))
+                search_tasks.append(self._search_vector(query, limit, user_id, filter_category, filter_tags, team_ids))
             
             if "entities" in search_types:
                 search_tasks.append(self._search_entities(query, limit))
@@ -201,29 +201,40 @@ class UnifiedSearchTools:
                 "count": 0
             }
     
-    async def _search_vector(self, query: str, limit: int, user_id: str = None, filter_category: str = None, filter_tags: List[str] = None) -> Dict[str, Any]:
+    async def _search_vector(self, query: str, limit: int, user_id: str = None, filter_category: str = None, filter_tags: List[str] = None, team_ids: List[str] = None) -> Dict[str, Any]:
         """Search documents using semantic similarity with enhanced citations and optional tag filtering"""
         try:
-            logger.info(f"🔍 Vector search called with user_id: {user_id}, category: {filter_category}, tags: {filter_tags}")
-            embedding_manager = await self._get_embedding_manager()
+            logger.info(f"Vector search called with user_id: {user_id}, teams: {team_ids}, category: {filter_category}, tags: {filter_tags}")
+            embedding_service = await self._get_embedding_manager()
             
-            # Check if embedding manager is properly initialized
-            if not hasattr(embedding_manager, 'qdrant_client') or embedding_manager.qdrant_client is None:
-                logger.warning("⚠️ Embedding manager not properly initialized")
+            if not embedding_service:
+                logger.warning("Embedding service not initialized")
                 return {
                     "success": True,
                     "results": [],
                     "search_type": "vector",
-                    "message": "Vector search not available - embedding manager not initialized"
+                    "message": "Vector search not available - embedding service not initialized"
                 }
             
-            # **ROOSEVELT SMART FILTERING**: Apply tag/category filters if provided
-            logger.info(f"🔍 Calling embedding_manager.search_similar with filters - category: {filter_category}, tags: {filter_tags}")
-            results = await embedding_manager.search_similar(
-                query_text=query,
+            # Generate query embedding
+            query_embeddings = await embedding_service.generate_embeddings([query])
+            if not query_embeddings or len(query_embeddings) == 0:
+                logger.error("Failed to generate query embedding")
+                return {
+                    "success": False,
+                    "results": [],
+                    "search_type": "vector",
+                    "message": "Failed to generate query embedding"
+                }
+            
+            # Search via embedding service (uses VectorStoreService internally)
+            logger.info(f"Searching vector store with filters - category: {filter_category}, tags: {filter_tags}, teams: {team_ids}")
+            results = await embedding_service.search_similar(
+                query_embedding=query_embeddings[0],
                 limit=limit,
+                score_threshold=0.3,
                 user_id=user_id,
-                score_threshold=0.3,  # Lower threshold for LangGraph agents to find more relevant documents
+                team_ids=team_ids,
                 filter_category=filter_category,
                 filter_tags=filter_tags
             )
@@ -725,15 +736,9 @@ async def search_conversation_cache(query: str, conversation_id: str = None, fre
     try:
         logger.info(f"🏆 UNIVERSAL CACHE SEARCH: Checking conversation intelligence for '{query[:50]}...'")
         
-        # Import here to avoid circular dependencies
-        from services.langgraph_official_orchestrator import get_official_orchestrator
-        
-        # Get conversation state from LangGraph checkpointer
-        orchestrator = await get_official_orchestrator()
-        conversation_state = await orchestrator.get_conversation_state(conversation_id) if conversation_id else None
-        
-        if not conversation_state:
-            return "🔍 No conversation cache available - this appears to be a new conversation."
+        # DEPRECATED: Backend orchestrator removed - gRPC orchestrator handles its own state
+        # Conversation state is managed by llm-orchestrator service
+        return "🔍 Conversation cache unavailable - backend orchestrator removed. State is managed by gRPC orchestrator."
         
         # Extract cached intelligence from conversation state
         cache_analysis = await _analyze_conversation_cache(query, conversation_state)

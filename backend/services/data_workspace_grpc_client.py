@@ -101,6 +101,7 @@ class DataWorkspaceGRPCClient:
     async def update_workspace(
         self,
         workspace_id: str,
+        user_id: str,
         name: Optional[str] = None,
         description: Optional[str] = None,
         icon: Optional[str] = None,
@@ -111,6 +112,7 @@ class DataWorkspaceGRPCClient:
         try:
             request = data_service_pb2.UpdateWorkspaceRequest(
                 workspace_id=workspace_id,
+                user_id=user_id,
                 name=name or "",
                 description=description or "",
                 icon=icon or "",
@@ -141,6 +143,7 @@ class DataWorkspaceGRPCClient:
         self,
         workspace_id: str,
         name: str,
+        user_id: str,
         description: Optional[str] = None,
         source_type: str = "imported"
     ) -> Dict[str, Any]:
@@ -149,6 +152,7 @@ class DataWorkspaceGRPCClient:
             request = data_service_pb2.CreateDatabaseRequest(
                 workspace_id=workspace_id,
                 name=name,
+                user_id=user_id,
                 description=description or "",
                 source_type=source_type
             )
@@ -226,6 +230,7 @@ class DataWorkspaceGRPCClient:
         database_id: str,
         table_name: str,
         file_path: str,
+        user_id: str,
         field_mapping: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """Execute import job"""
@@ -235,6 +240,7 @@ class DataWorkspaceGRPCClient:
                 database_id=database_id,
                 table_name=table_name,
                 file_path=file_path,
+                user_id=user_id,
                 field_mapping_json=json.dumps(field_mapping) if field_mapping else ""
             )
             
@@ -298,6 +304,7 @@ class DataWorkspaceGRPCClient:
         self,
         database_id: str,
         name: str,
+        user_id: str,
         description: Optional[str] = None,
         table_schema: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
@@ -306,6 +313,7 @@ class DataWorkspaceGRPCClient:
             request = data_service_pb2.CreateTableRequest(
                 database_id=database_id,
                 name=name,
+                user_id=user_id,
                 description=description or "",
                 schema_json=json.dumps(table_schema) if table_schema else "{}"
             )
@@ -353,13 +361,15 @@ class DataWorkspaceGRPCClient:
     async def insert_table_row(
         self,
         table_id: str,
-        row_data: Dict[str, Any]
+        row_data: Dict[str, Any],
+        user_id: str
     ) -> Dict[str, Any]:
         """Insert a new row"""
         try:
             request = data_service_pb2.InsertRowRequest(
                 table_id=table_id,
-                row_data_json=json.dumps(row_data)
+                row_data_json=json.dumps(row_data),
+                user_id=user_id
             )
             
             response = await self.stub.InsertRow(request)
@@ -376,14 +386,16 @@ class DataWorkspaceGRPCClient:
         self,
         table_id: str,
         row_id: str,
-        row_data: Dict[str, Any]
+        row_data: Dict[str, Any],
+        user_id: str
     ) -> Dict[str, Any]:
         """Update an existing row"""
         try:
             request = data_service_pb2.UpdateRowRequest(
                 table_id=table_id,
                 row_id=row_id,
-                row_data_json=json.dumps(row_data)
+                row_data_json=json.dumps(row_data),
+                user_id=user_id
             )
             
             response = await self.stub.UpdateRow(request)
@@ -401,7 +413,8 @@ class DataWorkspaceGRPCClient:
         table_id: str,
         row_id: str,
         column_name: str,
-        value: Any
+        value: Any,
+        user_id: str
     ) -> Dict[str, Any]:
         """Update a single cell"""
         try:
@@ -409,7 +422,8 @@ class DataWorkspaceGRPCClient:
                 table_id=table_id,
                 row_id=row_id,
                 column_name=column_name,
-                value_json=json.dumps(value)
+                value_json=json.dumps(value),
+                user_id=user_id
             )
             
             response = await self.stub.UpdateCell(request)
@@ -451,7 +465,8 @@ class DataWorkspaceGRPCClient:
             'is_pinned': response.is_pinned,
             'metadata_json': response.metadata_json,
             'created_at': response.created_at,
-            'updated_at': response.updated_at
+            'updated_at': response.updated_at,
+            'updated_by': response.updated_by if hasattr(response, 'updated_by') and response.updated_by else None
         }
     
     def _database_response_to_dict(self, response) -> Dict[str, Any]:
@@ -466,7 +481,9 @@ class DataWorkspaceGRPCClient:
             'total_rows': response.total_rows,
             'created_at': response.created_at,
             'metadata_json': response.metadata_json if hasattr(response, 'metadata_json') else '',
-            'updated_at': response.updated_at if hasattr(response, 'updated_at') else ''
+            'updated_at': response.updated_at if hasattr(response, 'updated_at') else '',
+            'created_by': response.created_by if hasattr(response, 'created_by') and response.created_by else None,
+            'updated_by': response.updated_by if hasattr(response, 'updated_by') and response.updated_by else None
         }
     
     def _table_response_to_dict(self, response) -> Dict[str, Any]:
@@ -481,7 +498,9 @@ class DataWorkspaceGRPCClient:
             'styling_rules_json': response.styling_rules_json if hasattr(response, 'styling_rules_json') else '{}',
             'metadata_json': response.metadata_json if hasattr(response, 'metadata_json') else '{}',
             'created_at': response.created_at if hasattr(response, 'created_at') else '',
-            'updated_at': response.updated_at if hasattr(response, 'updated_at') else ''
+            'updated_at': response.updated_at if hasattr(response, 'updated_at') else '',
+            'created_by': response.created_by if hasattr(response, 'created_by') and response.created_by else None,
+            'updated_by': response.updated_by if hasattr(response, 'updated_by') and response.updated_by else None
         }
     
     def _import_job_response_to_dict(self, response) -> Dict[str, Any]:

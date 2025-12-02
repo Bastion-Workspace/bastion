@@ -5,7 +5,7 @@ Ported from backend with 1:1 functionality for consistent routing across service
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Dict, Any, TypedDict
 
 
 class SimpleIntentResult(BaseModel):
@@ -27,7 +27,7 @@ class SimpleIntentResult(BaseModel):
     permission_required: bool = Field(default=False, description="Whether permission needed for this request")
 
     # Confidence for UI/logging
-    confidence: float = Field(default=0.8, ge=0.0, le=1.0, description="Confidence in classification")
+    confidence: float = Field(default=0.8, description="Confidence in classification (0.0-1.0). Note: Anthropic API doesn't support min/max constraints on number types.")
 
     # Optional human-readable reasoning
     reasoning: Optional[str] = Field(default=None, description="Brief explanation of routing decision")
@@ -69,4 +69,25 @@ class SimpleIntentResult(BaseModel):
             "collaboration_permission": "auto_use",
             "reasoning": self.reasoning or "Primary agent match"
         }]
+
+
+class IntentClassificationState(TypedDict):
+    """State for intent classification workflow"""
+    user_message: str
+    conversation_context: Dict[str, Any]
+    
+    # Stage 1: Domain detection
+    domain: str
+    
+    # Stage 2: Action intent
+    action_intent: str
+    
+    # Stage 3: Routing
+    target_agent: str
+    confidence: float
+    reasoning: str
+    permission_required: bool
+    
+    # Final result
+    result: SimpleIntentResult
 

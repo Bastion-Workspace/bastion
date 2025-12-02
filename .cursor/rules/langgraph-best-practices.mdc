@@ -84,6 +84,11 @@ if has_pending_permission and user_approves:
 
 ## Tool Registry and Access Control
 
+### Tool Documentation
+- **See [agent-tools-reference.mdc](mdc:.cursor/rules/agent-tools-reference.mdc) for complete tool catalog**
+- All available tools are documented with usage examples
+- Tools are categorized by type (gRPC-backed vs pure utilities)
+
 ### Centralized Tool Management
 - Use [backend/services/langgraph_tools/centralized_tool_registry.py](mdc:backend/services/langgraph_tools/centralized_tool_registry.py)
 - Group tools by domain in [backend/services/langgraph_tools/](mdc:backend/services/langgraph_tools/) directory
@@ -130,11 +135,253 @@ def _route_from_intent(self, state: Dict[str, Any]) -> str:
 
 ## Agent Development Standards
 
-### Base Agent Extension
+### LLM Orchestrator Agent Requirements (CRITICAL)
+
+**All agents in llm-orchestrator MUST follow these patterns:**
+
+#### 1. BaseAgent Extension
+- **ALWAYS extend** `orchestrator.agents.base_agent.BaseAgent`
+- **NEVER create ChatOpenAI directly** - always use `self._get_llm(temperature=X, state=state)`
+- **NEVER use chat_service.openai_client** - use centralized `_get_llm()` method
+- **NEVER create custom LLM instances** in `__init__` - use `_get_llm()` for all LLM calls
+
+#### 2. Workflow Structure (MANDATORY)
+Every agent MUST implement:
+```python
+def _build_workflow(self, checkpointer) -> StateGraph:
+    workflow = StateGraph(YourState)
+    
+    # Add nodes (minimum 2, typically 3-5)
+    workflow.add_node("prepare_context", self._prepare_context_node)
+    workflow.add_node("process_request", self._process_request_node)
+    workflow.add_node("format_response", self._format_response_node)
+    
+    # Set entry point
+    workflow.set_entry_point("prepare_context")
+    
+    # Define edges
+    workflow.add_edge("prepare_context", "process_request")
+    workflow.add_edge("process_request", "format_response")
+    workflow.add_edge("format_response", END)
+    
+    # ALWAYS compile with checkpointer
+    return workflow.compile(checkpointer=checkpointer)
+```
+
+#### 3. State TypedDict (REQUIRED)
+```python
+class YourAgentState(TypedDict):
+    """State for your agent LangGraph workflow"""
+    query: str
+    user_id: str
+    metadata: Dict[str, Any]
+    messages: List[Any]
+    shared_memory: Dict[str, Any]  # For cross-agent context
+    # ... agent-specific fields ...
+    response: Dict[str, Any]
+    task_status: str
+    error: str
+```
+
+#### 4. Node Naming Convention
+- **ALL nodes MUST follow pattern**: `async def _*_node(self, state: YourState) -> Dict[str, Any]:`
+- Node names should be descriptive: `_prepare_context_node`, `_analyze_content_node`, `_format_response_node`
+- Nodes return state updates as dictionary
+
+#### 5. Node Error Handling Pattern
+```python
+async def _your_node(self, state: YourState) -> Dict[str, Any]:
+    try:
+        # Node logic here
+        return {
+            "field_name": result,
+            "task_status": "complete"
+        }
+    except Exception as e:
+        logger.error(f"Error in _your_node: {e}")
+        return {
+            "error": str(e),
+            "task_status": "error"
+        }
+```
+
+#### 6. Process Method Pattern (STANDARD)
+All agents MUST implement `process()` following this pattern:
+```python
+async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
+    try:
+        # Get workflow (lazy initialization with checkpointer)
+        workflow = await self._get_workflow()
+        
+        # Extract user_id from metadata
+        metadata = metadata or {}
+        user_id = metadata.get("user_id", "system")
+        
+        # Get checkpoint config (handles thread_id from conversation_id/user_id)
+        config = self._get_checkpoint_config(metadata)
+        
+        # Prepare new messages (current query)
+        new_messages = self._prepare_messages_with_query(messages, query)
+        
+        # Load and merge checkpointed messages to preserve conversation history
+        conversation_messages = await self._load_and_merge_checkpoint_messages(
+            workflow, config, new_messages
+        )
+        
+        # Load shared_memory from checkpoint if available
+        checkpoint_state = await workflow.aget_state(config)
+        existing_shared_memory = {}
+        if checkpoint_state and checkpoint_state.values:
+            existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+        
+        # Merge with any shared_memory from metadata
+        shared_memory = metadata.get("shared_memory", {}) or {}
+        shared_memory.update(existing_shared_memory)
+        
+        # Initialize state for LangGraph workflow
+        initial_state: YourAgentState = {
+            "query": query,
+            "user_id": user_id,
+            "metadata": metadata,
+            "messages": conversation_messages,
+            "shared_memory": shared_memory,
+            # ... other required fields ...
+            "response": {},
+            "task_status": "",
+            "error": ""
+        }
+        
+        # Run LangGraph workflow with checkpointing
+        result_state = await workflow.ainvoke(initial_state, config=config)
+        
+        # Extract final response
+        response = result_state.get("response", {})
+        task_status = result_state.get("task_status", "complete")
+        
+        if task_status == "error":
+            error_msg = result_state.get("error", "Unknown error")
+            logger.error(f"❌ {self.agent_type} failed: {error_msg}")
+            return self._create_error_response(error_msg)
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"❌ {self.agent_type} failed: {e}")
+        return self._create_error_response(str(e))
+```
+
+#### 7. LLM Call Pattern (MANDATORY)
+```python
+# ✅ CORRECT: Use centralized _get_llm()
+llm = self._get_llm(temperature=0.7, state=state)
+response = await llm.ainvoke(messages)
+
+# ❌ WRONG: Direct ChatOpenAI creation
+self.llm = ChatOpenAI(...)  # NEVER DO THIS
+
+# ❌ WRONG: Using chat_service
+response = await chat_service.openai_client.chat.completions.create(...)  # NEVER DO THIS
+```
+
+#### 8. Checkpoint and State Management
+- **ALWAYS use** `_get_checkpoint_config(metadata)` for thread_id management
+- **ALWAYS use** `_load_and_merge_checkpoint_messages()` for conversation history
+- **ALWAYS merge** shared_memory from checkpoints with metadata
+- **ALWAYS pass** `config=config` to `workflow.ainvoke()`
+
+#### 9. Workflow Requirements Checklist
+- [ ] Inherits from `BaseAgent`
+- [ ] Defines `TypedDict` state class
+- [ ] Implements `_build_workflow(checkpointer)` method
+- [ ] Creates `StateGraph(YourState)`
+- [ ] Adds minimum 2 nodes (typically 3-5)
+- [ ] Sets entry point with `workflow.set_entry_point()`
+- [ ] Defines edges with `workflow.add_edge()` or conditional edges
+- [ ] Compiles with `workflow.compile(checkpointer=checkpointer)`
+- [ ] All nodes follow `_*_node` naming pattern
+- [ ] All nodes return `Dict[str, Any]`
+- [ ] Implements `process()` method with standard pattern
+- [ ] Uses `_get_llm()` for all LLM calls
+- [ ] Handles errors gracefully in nodes
+
+### Base Agent Extension (Backend Agents)
 - Extend [backend/services/langgraph_agents/base_agent.py](mdc:backend/services/langgraph_agents/base_agent.py)
 - Override `_process_request()` method for agent-specific logic
 - Use `self.tool_registry` for tool access
 - Implement proper error handling and logging
+
+### Frontmatter Reference Management (CRITICAL)
+
+**When agents need to edit reference documents, they MUST have frontmatter knowledge loaded first.**
+
+**Required Pattern:**
+1. **ALWAYS load referenced files before file editing operations**
+   - Use `load_referenced_files()` from `orchestrator.tools.reference_file_loader`
+   - Store results in state as `referenced_context: Dict[str, Any]`
+   - This ensures agents know what files exist in the project
+
+2. **Workflow Order (MANDATORY):**
+   ```python
+   # ✅ CORRECT: Load context BEFORE file editing
+   workflow.add_node("load_referenced_context", self._load_referenced_context_node)
+   workflow.add_node("route_and_save_content", self._route_and_save_content_node)
+   
+   # Load context ALWAYS happens before file editing
+   workflow.add_edge("load_referenced_context", "...")  # Goes through other nodes
+   workflow.add_edge("...", "route_and_save_content")  # Eventually reaches file editing
+   ```
+
+3. **State Access Pattern:**
+   ```python
+   # In file editing nodes, ALWAYS access both:
+   referenced_context = state.get("referenced_context", {})  # Loaded files with document_ids
+   active_editor = metadata.get("shared_memory", {}).get("active_editor", {})
+   frontmatter = active_editor.get("frontmatter", {})  # File references from frontmatter
+   
+   # Use frontmatter to know what files exist
+   # Use referenced_context to resolve relative paths to document_ids
+   ```
+
+4. **Why This Matters:**
+   - **Path Resolution**: Relative paths like `./component_list.md` must be resolved to document_ids
+   - **File Discovery**: Agents need to know what files are part of the project
+   - **Content Routing**: LLM routing decisions need available file list
+   - **Frontmatter Updates**: When creating new files, must update project plan frontmatter
+
+5. **Safeguard Pattern:**
+   ```python
+   # Always verify frontmatter is available before file operations
+   if not frontmatter and not project_plan_document_id:
+       logger.warning("⚠️ No frontmatter or project plan available - cannot resolve file references")
+       return {}  # Skip file operations
+   ```
+
+**Example Implementation (from electronics_agent):**
+```python
+async def _load_referenced_context_node(self, state: ElectronicsState) -> Dict[str, Any]:
+    """Load referenced files from active editor frontmatter"""
+    active_editor = metadata.get("shared_memory", {}).get("active_editor", {})
+    
+    # Load files referenced in frontmatter
+    result = await load_referenced_files(
+        active_editor=active_editor,
+        user_id=user_id,
+        reference_config=reference_config
+    )
+    
+    return {"referenced_context": result.get("loaded_files", {})}
+
+async def _route_and_save_content_node(self, state: ElectronicsState) -> Dict[str, Any]:
+    """Save content to files - REQUIRES referenced_context to be loaded first"""
+    # Get frontmatter references (from active_editor)
+    frontmatter = active_editor.get("frontmatter", {})
+    
+    # Get loaded files with document_ids (from referenced_context)
+    referenced_context = state.get("referenced_context", {})
+    
+    # Use both to resolve paths and route content
+    # ...
+```
 
 ### Prompt Engineering
 - Include system context and role definition
@@ -323,6 +570,35 @@ async def test_main_graph_with_subgraphs():
     assert result["is_complete"] == True
 ```
 
+## Frontmatter Management
+
+### Always Use Frontmatter Utilities
+- **NEVER use regex or string manipulation** to update frontmatter
+- **ALWAYS use** [orchestrator/utils/frontmatter_utils.py](mdc:llm-orchestrator/orchestrator/utils/frontmatter_utils.py)
+- These utilities preserve all existing fields and handle complex YAML structures
+
+**Required Pattern:**
+```python
+from orchestrator.utils.frontmatter_utils import add_to_frontmatter_list
+from orchestrator.tools.document_tools import get_document_content_tool, update_document_content_tool
+
+# Get content
+content = await get_document_content_tool(document_id, user_id)
+
+# Update frontmatter (preserves all existing fields)
+updated_content, success = await add_to_frontmatter_list(
+    content=content,
+    list_key="components",
+    new_items=["./new_file.md"]
+)
+
+# Save if successful
+if success:
+    await update_document_content_tool(document_id, updated_content, user_id, append=False)
+```
+
+**See [agent-tools-reference.mdc](mdc:.cursor/rules/agent-tools-reference.mdc) for complete frontmatter utility documentation.**
+
 ## File Organization
 
 ### Agent Files
@@ -361,6 +637,79 @@ logger.error(f"❌ ERROR: {agent_name} failed: {error_details}")
 - Track agent_results and shared_memory changes
 - Monitor conversation flow and routing decisions
 
+## Common Patterns and Utilities
+
+### gRPC Client Management
+When agents need backend tools via gRPC:
+```python
+async def _get_grpc_client(self):
+    """Get or create gRPC client for backend tools"""
+    if self._grpc_client is None:
+        from orchestrator.clients.backend_tool_client import get_backend_tool_client
+        self._grpc_client = await get_backend_tool_client()
+    return self._grpc_client
+```
+
+### Active Editor Access Pattern
+```python
+async def _prepare_context_node(self, state: YourState) -> Dict[str, Any]:
+    metadata = state.get("metadata", {})
+    shared_memory = state.get("shared_memory", {})
+    active_editor = shared_memory.get("active_editor", {})
+    
+    if not active_editor:
+        return {
+            "error": "No active editor found",
+            "task_status": "error"
+        }
+    
+    editor_content = active_editor.get("content", "")
+    frontmatter = active_editor.get("frontmatter", {})
+    # ... use editor data
+```
+
+### Reference File Loading Pattern
+```python
+from orchestrator.tools.reference_file_loader import load_referenced_files
+
+async def _load_references_node(self, state: YourState) -> Dict[str, Any]:
+    active_editor = state.get("shared_memory", {}).get("active_editor", {})
+    user_id = state.get("user_id")
+    
+    result = await load_referenced_files(
+        active_editor=active_editor,
+        user_id=user_id,
+        reference_config={"style": True, "characters": True}
+    )
+    
+    return {"referenced_context": result.get("loaded_files", {})}
+```
+
+### Structured Response Parsing Pattern
+```python
+def _parse_json_response(self, content: str) -> Dict[str, Any]:
+    """Parse JSON response from LLM, handling markdown code blocks"""
+    import json
+    import re
+    
+    # Remove markdown code blocks if present
+    json_text = content.strip()
+    if '```json' in json_text:
+        match = re.search(r'```json\s*\n(.*?)\n```', json_text, re.DOTALL)
+        if match:
+            json_text = match.group(1).strip()
+    elif '```' in json_text:
+        match = re.search(r'```\s*\n(.*?)\n```', json_text, re.DOTALL)
+        if match:
+            json_text = match.group(1).strip()
+    
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse JSON response: {e}")
+        return {"task_status": "error", "error_message": f"Invalid JSON: {str(e)}"}
+```
+
 ## Anti-Patterns to Avoid
 
 ### ❌ DON'T DO THESE:
@@ -374,6 +723,14 @@ logger.error(f"❌ ERROR: {agent_name} failed: {error_details}")
 - **Overuse subgraphs** - don't create subgraphs for simple operations
 - **Complex state transformations** - prefer shared state schemas when possible
 - **Nested subgraph chains** - avoid subgraphs calling other subgraphs deeply
+- **Direct ChatOpenAI creation** - always use `_get_llm()` from BaseAgent
+- **chat_service.openai_client usage** - use centralized `_get_llm()` method
+- **Missing checkpointer compilation** - always compile with `checkpointer=checkpointer`
+- **Skipping message history loading** - always use `_load_and_merge_checkpoint_messages()`
+- **Ignoring shared_memory from checkpoints** - always merge checkpointed shared_memory
+- **Nodes that raise exceptions** - nodes should return error states, not raise
+- **Missing entry point** - always set entry point with `workflow.set_entry_point()`
+- **Missing edges** - all nodes must be connected with edges or conditional edges
 
 ### ✅ DO THESE INSTEAD:
 - **Structured Pydantic models** for all agent communication
@@ -386,6 +743,12 @@ logger.error(f"❌ ERROR: {agent_name} failed: {error_details}")
 - **Strategic subgraph usage** - for complex, reusable workflows only
 - **Clear state contracts** - well-defined interfaces between graphs
 - **Parallel subgraph execution** - when workflows are independent
+- **Centralized LLM access** - always use `_get_llm()` from BaseAgent
+- **Proper workflow structure** - nodes, entry point, edges, checkpointer compilation
+- **State persistence** - load and merge checkpointed messages and shared_memory
+- **Error handling in nodes** - return error states, don't raise exceptions
+- **Consistent naming** - follow `_*_node` pattern for all node methods
+- **Standard process method** - implement `process()` with checkpoint management
 
 **Remember: A well-organized LangGraph system ensures every agent knows its role and executes it perfectly.**
 

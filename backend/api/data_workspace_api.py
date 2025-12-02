@@ -10,11 +10,14 @@ from models.data_workspace_models import (
     CreateTableRequest, TableResponse,
     PreviewImportRequest, PreviewImportResponse,
     ExecuteImportRequest, ImportJobResponse,
-    TableDataResponse, InsertRowRequest, UpdateRowRequest, UpdateCellRequest
+    TableDataResponse, InsertRowRequest, UpdateRowRequest, UpdateCellRequest,
+    ShareWorkspaceRequest, WorkspaceShareResponse
 )
 from models.api_models import AuthenticatedUserResponse
 from utils.auth_middleware import get_current_user
 from services.data_workspace_grpc_client import DataWorkspaceGRPCClient
+from services.data_workspace_sharing_service import get_sharing_service
+from services.team_service import TeamService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/data", tags=["data_workspace"])
@@ -29,6 +32,18 @@ def get_grpc_client() -> DataWorkspaceGRPCClient:
     if _grpc_client is None:
         _grpc_client = DataWorkspaceGRPCClient()
     return _grpc_client
+
+
+async def _get_user_team_ids(user_id: str) -> List[str]:
+    """Helper to get user's team IDs"""
+    try:
+        team_service = TeamService()
+        await team_service.initialize()
+        user_teams = await team_service.list_user_teams(user_id)
+        return [team['team_id'] for team in user_teams]
+    except Exception as e:
+        logger.warning(f"Failed to get user teams: {e}")
+        return []
 
 
 # Workspace Endpoints
@@ -55,12 +70,40 @@ async def create_workspace(
 
 @router.get("/workspaces", response_model=List[WorkspaceResponse])
 async def list_workspaces(
+    include_shared: bool = True,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """List all workspaces for the current user"""
+    """List all workspaces for the current user (owned + shared)"""
     try:
         client = get_grpc_client()
+        
+        # Get user's team IDs for shared workspace lookup
+        user_team_ids = None
+        if include_shared:
+            try:
+                team_service = TeamService()
+                await team_service.initialize()
+                user_teams = await team_service.list_user_teams(current_user.user_id)
+                user_team_ids = [team['team_id'] for team in user_teams]
+            except Exception as e:
+                logger.warning(f"Failed to get user teams for shared workspaces: {e}")
+                user_team_ids = []
+        
+        # Get owned workspaces
         workspaces = await client.list_workspaces(current_user.user_id)
+        
+        # Add shared workspaces if requested
+        if include_shared:
+            try:
+                sharing_service = await get_sharing_service()
+                shared_workspaces = await sharing_service.list_shared_workspaces(
+                    current_user.user_id,
+                    user_team_ids
+                )
+                workspaces.extend(shared_workspaces)
+            except Exception as e:
+                logger.warning(f"Failed to get shared workspaces: {e}")
+        
         return workspaces
     except Exception as e:
         logger.error(f"Failed to list workspaces: {e}")
@@ -72,8 +115,18 @@ async def get_workspace(
     workspace_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Get a single workspace"""
+    """Get a single workspace (requires read permission)"""
     try:
+        # Check permission
+        sharing_service = await get_sharing_service()
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        has_access = await sharing_service.check_workspace_permission(
+            workspace_id, current_user.user_id, 'read', user_team_ids
+        )
+        
+        if not has_access:
+            raise HTTPException(status_code=403, detail="Access denied")
+        
         client = get_grpc_client()
         workspace = await client.get_workspace(workspace_id)
         if not workspace:
@@ -92,11 +145,22 @@ async def update_workspace(
     request: UpdateWorkspaceRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Update a workspace"""
+    """Update a workspace (requires write permission)"""
     try:
+        # Check permission
+        sharing_service = await get_sharing_service()
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        has_access = await sharing_service.check_workspace_permission(
+            workspace_id, current_user.user_id, 'write', user_team_ids
+        )
+        
+        if not has_access:
+            raise HTTPException(status_code=403, detail="Write access required")
+        
         client = get_grpc_client()
         workspace = await client.update_workspace(
             workspace_id=workspace_id,
+            user_id=current_user.user_id,
             name=request.name,
             description=request.description,
             icon=request.icon,
@@ -118,8 +182,18 @@ async def delete_workspace(
     workspace_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Delete a workspace"""
+    """Delete a workspace (requires admin permission)"""
     try:
+        # Check permission
+        sharing_service = await get_sharing_service()
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        has_access = await sharing_service.check_workspace_permission(
+            workspace_id, current_user.user_id, 'admin', user_team_ids
+        )
+        
+        if not has_access:
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
         client = get_grpc_client()
         success = await client.delete_workspace(workspace_id)
         if not success:
@@ -144,6 +218,7 @@ async def create_database(
         database = await client.create_database(
             workspace_id=request.workspace_id,
             name=request.name,
+            user_id=current_user.user_id,
             description=request.description,
             source_type=request.source_type
         )
@@ -273,6 +348,7 @@ async def execute_import(
             database_id=request.database_id,
             table_name=request.table_name,
             file_path=request.file_path,
+            user_id=current_user.user_id,
             field_mapping=request.field_mapping
         )
         return job
@@ -312,6 +388,7 @@ async def create_table(
         table = await client.create_table(
             database_id=request.database_id,
             name=request.name,
+            user_id=current_user.user_id,
             description=request.description,
             table_schema=request.table_schema
         )
@@ -401,7 +478,7 @@ async def insert_table_row(
     """Insert a new row into a table"""
     try:
         client = get_grpc_client()
-        row = await client.insert_table_row(table_id, request.row_data)
+        row = await client.insert_table_row(table_id, request.row_data, current_user.user_id)
         return row
     except Exception as e:
         logger.error(f"Failed to insert row: {e}")
@@ -418,7 +495,7 @@ async def update_table_row(
     """Update an existing row in a table"""
     try:
         client = get_grpc_client()
-        row = await client.update_table_row(table_id, row_id, request.row_data)
+        row = await client.update_table_row(table_id, row_id, request.row_data, current_user.user_id)
         return row
     except Exception as e:
         logger.error(f"Failed to update row: {e}")
@@ -436,7 +513,7 @@ async def update_table_cell(
     try:
         client = get_grpc_client()
         result = await client.update_table_cell(
-            table_id, row_id, request.column_name, request.value
+            table_id, row_id, request.column_name, request.value, current_user.user_id
         )
         return result
     except Exception as e:
@@ -461,5 +538,106 @@ async def delete_table_row(
         raise
     except Exception as e:
         logger.error(f"Failed to delete row: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Sharing Endpoints
+@router.post("/workspaces/{workspace_id}/share", response_model=WorkspaceShareResponse)
+async def share_workspace(
+    workspace_id: str,
+    request: ShareWorkspaceRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Share a workspace with a user, team, or make it public"""
+    try:
+        sharing_service = await get_sharing_service()
+        share = await sharing_service.share_workspace(
+            workspace_id=workspace_id,
+            shared_by_user_id=current_user.user_id,
+            shared_with_user_id=request.shared_with_user_id,
+            shared_with_team_id=request.shared_with_team_id,
+            permission_level=request.permission_level.value,
+            is_public=request.is_public,
+            expires_at=request.expires_at
+        )
+        return share
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to share workspace: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/workspaces/{workspace_id}/shares", response_model=List[WorkspaceShareResponse])
+async def list_workspace_shares(
+    workspace_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """List all shares for a workspace"""
+    try:
+        sharing_service = await get_sharing_service()
+        shares = await sharing_service.list_workspace_shares(
+            workspace_id=workspace_id,
+            user_id=current_user.user_id
+        )
+        return shares
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to list workspace shares: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/workspaces/{workspace_id}/shares/{share_id}")
+async def revoke_share(
+    workspace_id: str,
+    share_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Revoke a workspace share"""
+    try:
+        sharing_service = await get_sharing_service()
+        success = await sharing_service.revoke_share(
+            workspace_id=workspace_id,
+            share_id=share_id,
+            user_id=current_user.user_id
+        )
+        if not success:
+            raise HTTPException(status_code=404, detail="Share not found")
+        return {"success": True, "message": "Share revoked successfully"}
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to revoke share: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/workspaces/shared", response_model=List[WorkspaceResponse])
+async def list_shared_workspaces(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """List workspaces shared with the current user"""
+    try:
+        # Get user's team IDs
+        user_team_ids = None
+        try:
+            team_service = TeamService()
+            await team_service.initialize()
+            user_teams = await team_service.list_user_teams(current_user.user_id)
+            user_team_ids = [team['team_id'] for team in user_teams]
+        except Exception as e:
+            logger.warning(f"Failed to get user teams: {e}")
+            user_team_ids = []
+        
+        sharing_service = await get_sharing_service()
+        workspaces = await sharing_service.list_shared_workspaces(
+            current_user.user_id,
+            user_team_ids
+        )
+        return workspaces
+    except Exception as e:
+        logger.error(f"Failed to list shared workspaces: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

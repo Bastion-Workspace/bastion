@@ -97,7 +97,9 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
         total_length: response.total_length
       };
       setDocument(docData);
+      // Always update editContent - CodeMirror will handle the update intelligently
       setEditContent(response.content || '');
+      
       // Auto-enter edit mode for user-created MD/ORG documents
       const fname = (docData.filename || '').toLowerCase();
       const isUserOwned = !!docData.user_id || docData.collection_type === 'user';
@@ -156,16 +158,27 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
           
           // Listen for updates to THIS document
           if (update.type === 'document_status_update' && update.document_id === documentId) {
-            console.log('🔄 ROOSEVELT: Document updated, refreshing content:', update);
+            console.log('🔄 Document updated, refreshing content:', update);
             
-            // Only auto-refresh if NOT currently editing
-            // (to avoid overwriting user's unsaved changes)
-            if (!isEditing || update.status === 'completed') {
-              console.log('🔄 Auto-refreshing document content...');
+            // Always refresh when status is 'completed' (agent finished updating)
+            // This ensures users see agent changes in real-time
+            // CodeMirror will handle the update intelligently without losing cursor position
+            if (update.status === 'completed') {
+              console.log('🔄 Auto-refreshing document content (status: completed)...');
+              fetchDocument();
+            } else if (!isEditing) {
+              // If not editing, always refresh
+              console.log('🔄 Auto-refreshing document content (not editing)...');
               fetchDocument();
             } else {
-              console.log('⏸️ User is editing, skipping auto-refresh');
+              console.log('⏸️ User is editing and status is not completed, skipping auto-refresh');
             }
+          }
+          
+          // Listen for document edit proposals
+          if (update.type === 'document_edit_proposal' && update.document_id === documentId) {
+            console.log('📝 Received edit proposal for this document:', update);
+            handleEditProposal(update);
           }
         } catch (err) {
           console.error('❌ Error parsing WebSocket message:', err);
@@ -191,6 +204,101 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
       }
     };
   }, [documentId, isEditing, fetchDocument]);
+
+  // Handle edit proposals - convert to inline suggestions
+  const handleEditProposal = React.useCallback(async (proposal) => {
+    if (!proposal || !isEditing) return; // Only show suggestions in edit mode
+    
+    try {
+      // Fetch current document content to find text positions
+      const currentContent = editContent || document?.content || '';
+      
+      // Convert proposal to inline suggestions
+      if (proposal.edit_type === 'content' && proposal.content_edit) {
+        const contentEdit = proposal.content_edit;
+        
+        if (contentEdit.edit_mode === 'append') {
+          // Append: show suggestion at end of document
+          const from = currentContent.length;
+          const to = currentContent.length;
+          const original = '';
+          const suggested = contentEdit.content;
+          
+          // Dispatch suggestion event
+          window.dispatchEvent(new CustomEvent('inlineEditSuggestion', {
+            detail: {
+              suggestionId: `suggestion-${proposal.proposal_id}-append`,
+              from,
+              to,
+              original,
+              suggested,
+              proposalId: proposal.proposal_id,
+              onAccept: async (proposalId) => {
+                // Apply the edit
+                await apiService.applyDocumentEditProposal(proposalId);
+              },
+              onReject: async (proposalId) => {
+                // Reject the edit (could mark as rejected in backend)
+                console.log('Rejected proposal:', proposalId);
+              }
+            }
+          }));
+        } else if (contentEdit.edit_mode === 'replace') {
+          // Replace: find the section to replace
+          // For now, show as append if we can't find exact match
+          const from = 0;
+          const to = currentContent.length;
+          const original = currentContent;
+          const suggested = contentEdit.content;
+          
+          window.dispatchEvent(new CustomEvent('inlineEditSuggestion', {
+            detail: {
+              suggestionId: `suggestion-${proposal.proposal_id}-replace`,
+              from,
+              to,
+              original,
+              suggested,
+              proposalId: proposal.proposal_id,
+              onAccept: async (proposalId) => {
+                await apiService.applyDocumentEditProposal(proposalId);
+              },
+              onReject: async (proposalId) => {
+                console.log('Rejected proposal:', proposalId);
+              }
+            }
+          }));
+        }
+      } else if (proposal.edit_type === 'operations' && proposal.operations) {
+        // Operation-based edits: create suggestions for each operation
+        proposal.operations.forEach((op, idx) => {
+          const suggestionId = `suggestion-${proposal.proposal_id}-op-${idx}`;
+          const from = op.start || 0;
+          const to = op.end || 0;
+          const original = op.original_text || currentContent.slice(from, to);
+          const suggested = op.text || '';
+          
+          window.dispatchEvent(new CustomEvent('inlineEditSuggestion', {
+            detail: {
+              suggestionId,
+              from,
+              to,
+              original,
+              suggested,
+              proposalId: proposal.proposal_id,
+              onAccept: async (proposalId) => {
+                await apiService.applyDocumentEditProposal(proposalId, [idx]);
+              },
+              onReject: async (proposalId) => {
+                console.log('Rejected operation:', proposalId, idx);
+              }
+            }
+          }));
+        });
+      }
+    } catch (err) {
+      console.error('❌ Error handling edit proposal:', err);
+    }
+  }, [documentId, isEditing, editContent, document]);
 
   // Handle scrolling to specific line or heading
   useEffect(() => {
@@ -512,6 +620,9 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
       // **BULLY!** Parse frontmatter for proper editor context
       const parsed = parseFrontmatter(editContent || '');
       
+      // **ROOSEVELT'S FRONTMATTER MERGE**: Merge data and lists so array fields (files, components, etc.) are included!
+      const mergedFrontmatter = { ...(parsed.data || {}), ...(parsed.lists || {}) };
+      
       setEditorState((prev) => ({
         ...prev,
         isEditable: true,
@@ -519,7 +630,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
         language: 'markdown',
         content: editContent,
         contentLength: (editContent || '').length,
-        frontmatter: parsed.data || {},
+        frontmatter: mergedFrontmatter,
         canonicalPath: document?.canonical_path || null
       }));
     } else {

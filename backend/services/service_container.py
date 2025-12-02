@@ -20,10 +20,8 @@ from services.knowledge_graph_service import KnowledgeGraphService
 from services.collection_analysis_service import CollectionAnalysisService
 from services.parallel_document_service import ParallelDocumentService
 from services.enhanced_pdf_segmentation_service import EnhancedPDFSegmentationService
-from services.free_form_notes_service import FreeFormNotesService
 from services.category_service import CategoryService
 
-from services.calibre_search_service import CalibreSearchService
 from services.rss_service import get_rss_service
 from services.file_manager import get_file_manager
 from services.folder_service import FolderService
@@ -69,10 +67,8 @@ class ServiceContainer:
         self.collection_analysis_service: Optional[CollectionAnalysisService] = None
         self.document_service: Optional[ParallelDocumentService] = None
         self.enhanced_pdf_service: Optional[EnhancedPDFSegmentationService] = None
-        self.free_form_notes_service: Optional[FreeFormNotesService] = None
         self.category_service: Optional[CategoryService] = None
 
-        self.calibre_search_service: Optional[CalibreSearchService] = None
         self.rss_service: Optional[Any] = None
         self.file_manager: Optional[Any] = None
         self.folder_service: Optional[FolderService] = None
@@ -133,7 +129,7 @@ class ServiceContainer:
         # Auth service will be initialized later with shared pool
         
         # Removed: IntentClassificationService initialization (deprecated - never used)
-        # Current system uses SimpleIntentService via SimpleIntentAgent in LangGraph orchestrator
+        # DEPRECATED: SimpleIntentService removed - intent classification now handled by llm-orchestrator gRPC service
         
         logger.info("✅ Infrastructure services initialized")
     
@@ -257,25 +253,11 @@ class ServiceContainer:
         
 
         
-        # Free Form Notes Service
-        self.free_form_notes_service = FreeFormNotesService()
-        await self._retry_with_backoff(
-            self.free_form_notes_service.initialize,
-            "FreeFormNotesService"
-        )
-        
         # Category Service
         self.category_service = CategoryService()
         await self._retry_with_backoff(
             lambda: self.category_service.initialize(shared_db_pool=self.db_pool),
             "CategoryService"
-        )
-        
-        # Calibre Search Service
-        self.calibre_search_service = CalibreSearchService()
-        await self._retry_with_backoff(
-            self.calibre_search_service.initialize,
-            "CalibreSearchService"
         )
         
         # Context-Aware Services (simplified - no MCP dependency)
@@ -369,10 +351,7 @@ class ServiceContainer:
         # Close services in reverse dependency order
         services_to_close = [
 
-            ("calibre_search_service", self.calibre_search_service),
             ("category_service", self.category_service),
-            ("free_form_notes_service", self.free_form_notes_service),
-
             ("enhanced_pdf_service", self.enhanced_pdf_service),
             ("collection_analysis_service", self.collection_analysis_service),
             ("chat_service", self.chat_service),

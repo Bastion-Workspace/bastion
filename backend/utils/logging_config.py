@@ -220,6 +220,17 @@ rss_log = RSSLogger()
 filemanager_log = FileManagerLogger()
 
 
+class CleanFormatter(logging.Formatter):
+    """Formatter that strips trailing newlines from log messages"""
+    
+    def format(self, record):
+        # Get the formatted message
+        message = super().format(record)
+        # Strip trailing whitespace and newlines, then ensure single newline
+        message = message.rstrip()
+        return message
+
+
 def setup_logging():
     """Configure structured logging for the application"""
     
@@ -246,14 +257,22 @@ def setup_logging():
         cache_logger_on_first_use=True,
     )
     
+    # Create formatter that strips trailing whitespace
+    formatter = CleanFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    
+    # Create handlers with clean formatter
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    
+    file_handler = logging.FileHandler(logs_dir / "codex.log")
+    file_handler.setFormatter(formatter)
+    
     # Configure standard logging
     logging.basicConfig(
         level=getattr(logging, settings.LOG_LEVEL.upper()),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(logs_dir / "codex.log")
-        ]
+        handlers=[console_handler, file_handler],
+        force=True  # Override any existing configuration
     )
     
     # Set specific log levels for noisy libraries

@@ -5,12 +5,28 @@ LangGraph agent for org-mode inbox management through natural language commands
 
 import logging
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, TypedDict
 from langchain_core.messages import AIMessage
 
+from langgraph.graph import StateGraph, END
 from orchestrator.agents.base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
+
+
+class OrgInboxState(TypedDict):
+    """State for org inbox agent LangGraph workflow"""
+    query: str
+    user_id: str
+    metadata: Dict[str, Any]
+    messages: List[Any]
+    shared_memory: Dict[str, Any]
+    user_message: str
+    operation: str
+    payload: Dict[str, Any]
+    response: Dict[str, Any]
+    task_status: str
+    error: str
 
 
 class OrgInboxAgent(BaseAgent):
@@ -19,11 +35,32 @@ class OrgInboxAgent(BaseAgent):
     
     Handles todo/event/contact/checkbox operations through natural language
     with LLM-powered interpretation and org-mode formatting
+    Uses LangGraph workflow for explicit state management
     """
     
     def __init__(self):
         super().__init__("org_inbox_agent")
         self._grpc_client = None
+        logger.info("🗂️ Org Inbox Agent ready!")
+    
+    def _build_workflow(self, checkpointer) -> StateGraph:
+        """Build LangGraph workflow for org inbox agent"""
+        workflow = StateGraph(OrgInboxState)
+        
+        # Add nodes
+        workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("infer_operation", self._infer_operation_node)
+        workflow.add_node("execute_operation", self._execute_operation_node)
+        
+        # Entry point
+        workflow.set_entry_point("prepare_context")
+        
+        # Linear flow: prepare_context -> infer_operation -> execute_operation -> END
+        workflow.add_edge("prepare_context", "infer_operation")
+        workflow.add_edge("infer_operation", "execute_operation")
+        workflow.add_edge("execute_operation", END)
+        
+        return workflow.compile(checkpointer=checkpointer)
     
     async def _get_grpc_client(self):
         """Get or create gRPC client for backend tools"""
@@ -32,33 +69,76 @@ class OrgInboxAgent(BaseAgent):
             self._grpc_client = await get_backend_tool_client()
         return self._grpc_client
     
-    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Process org inbox management commands from chat
-        """
+    async def _prepare_context_node(self, state: OrgInboxState) -> Dict[str, Any]:
+        """Prepare context: extract message"""
         try:
-            logger.info("🗂️ Org Inbox Agent: Starting inbox processing")
+            logger.info("📋 Preparing context for org inbox management...")
             
-            # Extract user message from state
             messages = state.get("messages", [])
             if not messages:
-                return self._create_error_result("No user message found for org inbox processing")
+                return {
+                    "error": "No user message found for org inbox processing",
+                    "task_status": "error"
+                }
             
             latest_message = messages[-1]
             user_message = latest_message.content if hasattr(latest_message, 'content') else str(latest_message)
-            user_id = state.get("user_id")
             
             logger.info(f"🗂️ Org Inbox Agent: Processing message: {user_message[:100]}...")
             
+            return {
+                "user_message": user_message
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to prepare context: {e}")
+            return {
+                "user_message": "",
+                "error": str(e),
+                "task_status": "error"
+            }
+    
+    async def _infer_operation_node(self, state: OrgInboxState) -> Dict[str, Any]:
+        """Infer operation type from message"""
+        try:
+            logger.info("🔍 Inferring operation type...")
+            
+            user_message = state.get("user_message", "")
+            shared_memory = state.get("shared_memory", {})
+            
             # Determine operation type from message
-            operation = await self._infer_operation(user_message, state)
-            payload = state.get("org_inbox_payload", {})
+            operation = await self._infer_operation(user_message, shared_memory)
+            payload = shared_memory.get("org_inbox_payload", {})
             
             logger.info(f"🗂️ Org Inbox Agent: Inferred operation: {operation}")
             
+            return {
+                "operation": operation,
+                "payload": payload
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to infer operation: {e}")
+            return {
+                "operation": "list",  # Default to list
+                "payload": {},
+                "error": str(e)
+            }
+    
+    async def _execute_operation_node(self, state: OrgInboxState) -> Dict[str, Any]:
+        """Execute the inferred operation"""
+        try:
+            logger.info("⚙️ Executing org inbox operation...")
+            
+            operation = state.get("operation", "list")
+            user_message = state.get("user_message", "")
+            user_id = state.get("user_id", "")
+            payload = state.get("payload", {})
+            shared_memory = state.get("shared_memory", {})
+            
             # Execute operation
             if operation == "add":
-                result = await self._handle_add_operation(user_message, user_id, state, payload)
+                result = await self._handle_add_operation(user_message, user_id, shared_memory, payload)
             elif operation == "list":
                 result = await self._handle_list_operation(user_id)
             elif operation == "toggle":
@@ -74,7 +154,74 @@ class OrgInboxAgent(BaseAgent):
                 result = await self._handle_list_operation(user_id)
             
             logger.info("✅ Org Inbox Agent: Completed inbox processing")
-            return result
+            
+            return {
+                "response": result,
+                "task_status": "complete"
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to execute operation: {e}")
+            return {
+                "response": self._create_error_result(f"Org inbox operation failed: {str(e)}"),
+                "task_status": "error",
+                "error": str(e)
+            }
+    
+    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Process org inbox management commands using LangGraph workflow
+        
+        Args:
+            state: Dictionary with messages, shared_memory, user_id, etc.
+            
+        Returns:
+            Dictionary with org inbox operation response and metadata
+        """
+        try:
+            logger.info("🗂️ Org Inbox Agent: Starting inbox processing...")
+            
+            # Extract user message
+            messages = state.get("messages", [])
+            if not messages:
+                return self._create_error_result("No user message found for org inbox processing")
+            
+            latest_message = messages[-1]
+            user_message = latest_message.content if hasattr(latest_message, 'content') else str(latest_message)
+            
+            # Build initial state for LangGraph workflow
+            initial_state: OrgInboxState = {
+                "query": user_message,
+                "user_id": state.get("user_id", "system"),
+                "metadata": state.get("metadata", {}),
+                "messages": messages,
+                "shared_memory": state.get("shared_memory", {}),
+                "user_message": "",
+                "operation": "",
+                "payload": {},
+                "response": {},
+                "task_status": "",
+                "error": ""
+            }
+            
+            # Get workflow (lazy initialization with checkpointer)
+            workflow = await self._get_workflow()
+            
+            # Get checkpoint config (handles thread_id from conversation_id/user_id)
+            config = self._get_checkpoint_config(metadata)
+            
+            # Invoke LangGraph workflow with checkpointing
+            final_state = await workflow.ainvoke(initial_state, config=config)
+            
+            # Return response from final state
+            return final_state.get("response", {
+                "messages": [AIMessage(content="Org inbox operation failed")],
+                "agent_results": {
+                    "agent_type": self.agent_type,
+                    "is_complete": False
+                },
+                "is_complete": False
+            })
             
         except Exception as e:
             logger.error(f"❌ Org Inbox Agent ERROR: {e}")
@@ -374,7 +521,7 @@ class OrgInboxAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """Use LLM to interpret add requests with conversation context"""
         try:
-            chat_service = await self._get_chat_service()
+            from langchain_core.messages import HumanMessage
             
             text = (payload.get("text") or user_message or "").strip()
             
@@ -430,15 +577,15 @@ OUTPUT JSON SCHEMA:
 
 Respond with ONLY the JSON."""
             
-            response = await chat_service.openai_client.chat.completions.create(
-                messages=[{"role": "user", "content": prompt}],
-                model=chat_service.model,
-                temperature=0.2
-            )
+            # Use centralized LLM mechanism
+            llm = self._get_llm(temperature=0.2, state=state)
+            llm_messages = [HumanMessage(content=prompt)]
+            response = await llm.ainvoke(llm_messages)
+            response_content = response.content if hasattr(response, 'content') else str(response)
             
             import json
             try:
-                data = json.loads(response.choices[0].message.content)
+                data = json.loads(response_content)
             except Exception:
                 # Fallback to simple structure
                 data = {

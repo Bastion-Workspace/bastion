@@ -122,6 +122,7 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
         try:
             workspace = await self.workspace_service.update_workspace(
                 workspace_id=request.workspace_id,
+                user_id=request.user_id if request.user_id else None,
                 name=request.name if request.name else None,
                 description=request.description if request.description else None,
                 icon=request.icon if request.icon else None,
@@ -164,6 +165,7 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             database = await self.database_service.create_database(
                 workspace_id=request.workspace_id,
                 name=request.name,
+                user_id=request.user_id if request.user_id else None,
                 description=request.description if request.description else None,
                 source_type=request.source_type if request.source_type else "imported"
             )
@@ -257,6 +259,7 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
                 table_name=request.table_name,
                 file_path=request.file_path,
                 file_type=file_type,
+                user_id=request.user_id if request.user_id else None,
                 field_mapping=field_mapping
             )
             
@@ -321,12 +324,13 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             table = await self.table_service.create_table(
                 database_id=request.database_id,
                 name=request.name,
-                description=request.description,
-                schema=schema
+                schema=schema,
+                user_id=request.user_id if request.user_id else None,
+                description=request.description
             )
             
             # Update database stats (table count)
-            await self.database_service.update_database_stats(request.database_id)
+            await self.database_service.update_database_stats(request.database_id, request.user_id if request.user_id else None)
             
             return data_service_pb2.TableResponse(**table)
             
@@ -386,7 +390,7 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             
             # Update database stats (table count and total rows)
             if success and database_id:
-                await self.database_service.update_database_stats(database_id)
+                await self.database_service.update_database_stats(database_id, None)
             
             return data_service_pb2.DeleteResponse(
                 success=success,
@@ -442,12 +446,13 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             
             row = await self.table_service.insert_row(
                 table_id=request.table_id,
-                row_data=row_data
+                row_data=row_data,
+                user_id=request.user_id if request.user_id else None
             )
             
             # Update database stats (total rows)
             if database_id:
-                await self.database_service.update_database_stats(database_id)
+                await self.database_service.update_database_stats(database_id, request.user_id if request.user_id else None)
             
             return data_service_pb2.RowResponse(
                 row_id=row['row_id'],
@@ -470,7 +475,8 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             row = await self.table_service.update_row(
                 table_id=request.table_id,
                 row_id=request.row_id,
-                row_data=row_data
+                row_data=row_data,
+                user_id=request.user_id if request.user_id else None
             )
             
             return data_service_pb2.RowResponse(
@@ -495,7 +501,8 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
                 table_id=request.table_id,
                 row_id=request.row_id,
                 column_name=request.column_name,
-                value=value
+                value=value,
+                user_id=request.user_id if request.user_id else None
             )
             
             return data_service_pb2.RowResponse(
@@ -525,7 +532,7 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             
             # Update database stats (total rows)
             if success and database_id:
-                await self.database_service.update_database_stats(database_id)
+                await self.database_service.update_database_stats(database_id, None)
             
             return data_service_pb2.DeleteResponse(
                 success=success,

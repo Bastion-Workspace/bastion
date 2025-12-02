@@ -176,36 +176,8 @@ GRANT CREATE ON SCHEMA public TO bastion_user;
 -- Note: CREATE permission is needed for migration files that create tables
 -- This is safe because RLS policies control data access
 
--- Temporarily disable Row Level Security (RLS) for document_metadata to match document_folders
--- This ensures consistent behavior across all tables during development
--- ALTER TABLE document_metadata ENABLE ROW LEVEL SECURITY;
-
--- Create RLS policies for document_metadata (disabled for now)
--- CREATE POLICY document_metadata_select_policy ON document_metadata
---     FOR SELECT USING (
---         current_setting('app.current_user_role', true) = 'admin'
---         OR user_id = current_setting('app.current_user_id', true)::varchar
---         OR collection_type = 'global'
---         OR (user_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
---     );
-
--- CREATE POLICY document_metadata_update_policy ON document_metadata
---     FOR UPDATE USING (
---         current_setting('app.current_user_role', true) = 'admin'
---         OR user_id = current_setting('app.current_user_id', true)::varchar
---         OR (user_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
---     );
-
--- CREATE POLICY document_metadata_delete_policy ON document_metadata
---     FOR DELETE USING (
---         current_setting('app.current_user_role', true) = 'admin'
---         OR user_id = current_setting('app.current_user_id', true)::varchar
---         OR (user_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
---     );
-
--- Allow document creation during upload (INSERT operations)
--- CREATE POLICY document_metadata_insert_policy ON document_metadata
---     FOR INSERT WITH CHECK (true);
+-- Row Level Security (RLS) for document_metadata will be enabled after teams tables are created
+-- See RLS policies section below after teams table creation
 
 -- Insert default settings
 INSERT INTO settings (key, value, data_type, description, category) VALUES
@@ -235,10 +207,6 @@ INSERT INTO settings (key, value, data_type, description, category) VALUES
 ('ocr_enable_review', 'true', 'boolean', 'Enable OCR review interface for low-quality text', 'ocr'),
 ('classification_model', '', 'string', 'Fast LLM model for intent classification (separate from main chat model)', 'intent_classification_model'),
 ('intent_classification_model', '', 'string', 'Fast LLM model for intent classification (alias for classification_model)', 'intent_classification_model'),
-('calibre_enabled', 'false', 'boolean', 'Enable Calibre ebook library integration', 'calibre'),
-('calibre_library_path', '/app/calibre', 'string', 'Path to Calibre library directory (inside Docker container)', 'calibre'),
-('calibre_search_weight', '0.3', 'float', 'Weight for Calibre results in hybrid search (0.0-1.0)', 'calibre'),
-('calibre_max_results', '50', 'integer', 'Maximum number of Calibre results per search', 'calibre'),
 -- News defaults
 ('news.synthesis_model', '', 'string', 'Model used for news synthesis', 'news'),
 ('news.min_sources', '3', 'integer', 'Minimum sources per cluster', 'news'),
@@ -340,51 +308,6 @@ GRANT ALL PRIVILEGES ON segment_relationships_id_seq TO bastion_user;
 
 -- Free-form Notes System
 -- Table to store user-created notes that integrate with the search system
-CREATE TABLE IF NOT EXISTS free_form_notes (
-    id SERIAL PRIMARY KEY,
-    note_id VARCHAR(255) UNIQUE NOT NULL, -- UUID for the note
-    title VARCHAR(500) NOT NULL,
-    content TEXT NOT NULL, -- The main notes content
-    note_date DATE, -- User-specified date for the note
-    tags TEXT[], -- Optional tags for categorization
-    category VARCHAR(100), -- Optional category
-    folder_id VARCHAR(255), -- Folder ID for organization (NULL for root notes)
-    metadata_json JSONB, -- Additional metadata
-    embedding_processed BOOLEAN DEFAULT FALSE, -- Track if processed for search
-    user_id VARCHAR(255) NOT NULL, -- User who created this note
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- Indexes for free-form notes performance
-CREATE INDEX IF NOT EXISTS idx_free_form_notes_note_id ON free_form_notes(note_id);
-CREATE INDEX IF NOT EXISTS idx_free_form_notes_title ON free_form_notes(title);
-CREATE INDEX IF NOT EXISTS idx_free_form_notes_note_date ON free_form_notes(note_date);
-CREATE INDEX IF NOT EXISTS idx_free_form_notes_tags ON free_form_notes USING GIN(tags);
-CREATE INDEX IF NOT EXISTS idx_free_form_notes_category ON free_form_notes(category);
-CREATE INDEX IF NOT EXISTS idx_free_form_notes_metadata ON free_form_notes USING GIN(metadata_json);
-CREATE INDEX IF NOT EXISTS idx_free_form_notes_embedding_processed ON free_form_notes(embedding_processed);
-CREATE INDEX IF NOT EXISTS idx_free_form_notes_user_id ON free_form_notes(user_id);
-CREATE INDEX IF NOT EXISTS idx_free_form_notes_created_at ON free_form_notes(created_at);
-CREATE INDEX IF NOT EXISTS idx_free_form_notes_folder_id ON free_form_notes(folder_id);
-
--- Grant permissions on free-form notes table
-GRANT ALL PRIVILEGES ON free_form_notes TO bastion_user;
-GRANT ALL PRIVILEGES ON free_form_notes_id_seq TO bastion_user;
-
--- Enable RLS for free_form_notes
-ALTER TABLE free_form_notes ENABLE ROW LEVEL SECURITY;
-
--- Create RLS policy for free_form_notes
-CREATE POLICY notes_user_policy ON free_form_notes
-    FOR ALL USING (
-        user_id = current_setting('app.current_user_id', true)::varchar
-        OR current_setting('app.current_user_role', true) = 'admin'
-    );
-
--- Allow note creation (INSERT) with check on user context or admin role
-CREATE POLICY notes_insert_policy ON free_form_notes
-    FOR INSERT WITH CHECK (true);
 
 -- Users table for authentication and multi-user support
 CREATE TABLE IF NOT EXISTS users (
@@ -474,12 +397,13 @@ CREATE POLICY sessions_insert_policy ON user_sessions
 CREATE TABLE IF NOT EXISTS document_folders (
     id SERIAL PRIMARY KEY,
     folder_id VARCHAR(255) UNIQUE NOT NULL, -- UUID for the folder
-    user_id VARCHAR(255) REFERENCES users(user_id) ON DELETE CASCADE, -- NULL for global folders
+    user_id VARCHAR(255) REFERENCES users(user_id) ON DELETE CASCADE, -- NULL for global/team folders
+    team_id UUID, -- NULL for user/global folders, set for team folders (FK added after teams table exists)
     name VARCHAR(255) NOT NULL,
     description TEXT,
     color VARCHAR(7), -- Hex color code
     parent_folder_id VARCHAR(255) REFERENCES document_folders(folder_id) ON DELETE CASCADE, -- For nested folder structure
-    collection_type VARCHAR(50) DEFAULT 'user' CHECK (collection_type IN ('user', 'global')), -- Collection type
+    collection_type VARCHAR(50) DEFAULT 'user' CHECK (collection_type IN ('user', 'global', 'team')), -- Collection type
     sort_order INTEGER DEFAULT 0,
     -- **ROOSEVELT FOLDER TAGGING**: Metadata for automatic tag inheritance
     category VARCHAR(100), -- Folder category (inherited by documents uploaded to this folder)
@@ -487,10 +411,11 @@ CREATE TABLE IF NOT EXISTS document_folders (
     inherit_tags BOOLEAN DEFAULT TRUE, -- Whether documents uploaded to this folder should inherit its tags
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    -- Ensure user_id is provided for user folders, but can be NULL for global folders
+    -- Ensure user_id is provided for user folders, but can be NULL for global/team folders
     CONSTRAINT check_user_id_for_collection_type CHECK (
-        (collection_type = 'user' AND user_id IS NOT NULL) OR
-        (collection_type = 'global' AND user_id IS NULL)
+        (collection_type = 'user' AND user_id IS NOT NULL AND team_id IS NULL) OR
+        (collection_type = 'global' AND user_id IS NULL AND team_id IS NULL) OR
+        (collection_type = 'team' AND team_id IS NOT NULL AND user_id IS NULL)
     )
     -- Note: Unique constraint for non-root folders handled by partial index below
     -- Cannot use simple UNIQUE constraint because PostgreSQL treats NULL as distinct
@@ -531,6 +456,16 @@ WHERE parent_folder_id IS NULL AND user_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_document_folders_unique_global_root 
 ON document_folders(name, collection_type)
 WHERE parent_folder_id IS NULL AND user_id IS NULL;
+
+-- For TEAM root folders (parent_folder_id IS NULL AND team_id IS NOT NULL)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_document_folders_unique_team_root 
+ON document_folders(team_id, name, collection_type)
+WHERE parent_folder_id IS NULL AND team_id IS NOT NULL;
+
+-- For TEAM non-root folders (parent_folder_id IS NOT NULL AND team_id IS NOT NULL)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_document_folders_unique_team_with_parent
+ON document_folders(team_id, name, parent_folder_id, collection_type)
+WHERE parent_folder_id IS NOT NULL AND team_id IS NOT NULL;
 
 -- Grant permissions on document folders
 GRANT ALL PRIVILEGES ON document_folders TO bastion_user;
@@ -663,6 +598,55 @@ CREATE INDEX IF NOT EXISTS idx_shares_shared_by ON conversation_shares(shared_by
 CREATE INDEX IF NOT EXISTS idx_shares_shared_with ON conversation_shares(shared_with_user_id);
 CREATE INDEX IF NOT EXISTS idx_shares_public ON conversation_shares(is_public);
 CREATE INDEX IF NOT EXISTS idx_shares_expires ON conversation_shares(expires_at);
+
+-- Additional indexes for conversation sharing performance
+CREATE INDEX IF NOT EXISTS idx_conversation_shares_shared_with 
+  ON conversation_shares(shared_with_user_id, created_at DESC);
+  
+CREATE INDEX IF NOT EXISTS idx_conversation_shares_conversation 
+  ON conversation_shares(conversation_id);
+  
+CREATE INDEX IF NOT EXISTS idx_conversation_shares_expires 
+  ON conversation_shares(expires_at) 
+  WHERE expires_at IS NOT NULL;
+
+-- Helper function to get all conversation participants
+CREATE OR REPLACE FUNCTION get_conversation_participants(p_conversation_id VARCHAR)
+RETURNS TABLE (
+    user_id VARCHAR,
+    username VARCHAR,
+    email VARCHAR,
+    share_type VARCHAR,
+    is_owner BOOLEAN
+) AS $$
+BEGIN
+    RETURN QUERY
+    -- Get owner
+    SELECT 
+        c.user_id,
+        u.username,
+        u.email,
+        'edit'::VARCHAR as share_type,
+        TRUE as is_owner
+    FROM conversations c
+    LEFT JOIN users u ON c.user_id = u.user_id
+    WHERE c.conversation_id = p_conversation_id
+    
+    UNION ALL
+    
+    -- Get shared users
+    SELECT 
+        cs.shared_with_user_id as user_id,
+        u2.username,
+        u2.email,
+        cs.share_type,
+        FALSE as is_owner
+    FROM conversation_shares cs
+    LEFT JOIN users u2 ON cs.shared_with_user_id = u2.user_id
+    WHERE cs.conversation_id = p_conversation_id
+    AND (cs.expires_at IS NULL OR cs.expires_at > NOW());
+END;
+$$ LANGUAGE plpgsql;
 
 CREATE INDEX IF NOT EXISTS idx_folders_folder_id ON conversation_folders(folder_id);
 CREATE INDEX IF NOT EXISTS idx_folders_user_id ON conversation_folders(user_id);
@@ -1484,10 +1468,6 @@ BEGIN
         SELECT COUNT(*) INTO global_doc_count FROM document_metadata WHERE collection_type = 'global';
     END IF;
     
-    -- Get notes count if table exists
-    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'free_form_notes') THEN
-        SELECT COUNT(*) INTO notes_count FROM free_form_notes WHERE user_id = p_user_id;
-    END IF;
     
     -- Get conversations count if table exists
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'conversations') THEN
@@ -1952,6 +1932,21 @@ CREATE TABLE IF NOT EXISTS message_reactions (
     UNIQUE(message_id, user_id, emoji)
 );
 
+-- Message attachments table
+CREATE TABLE IF NOT EXISTS message_attachments (
+    attachment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    message_id UUID NOT NULL REFERENCES chat_messages(message_id) ON DELETE CASCADE,
+    room_id UUID NOT NULL REFERENCES chat_rooms(room_id) ON DELETE CASCADE,
+    filename VARCHAR(255) NOT NULL,
+    file_path VARCHAR(512) NOT NULL,
+    mime_type VARCHAR(100) NOT NULL,
+    file_size BIGINT NOT NULL,
+    width INTEGER,
+    height INTEGER,
+    is_animated BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Room encryption keys table (for future E2EE with agent as participant)
 CREATE TABLE IF NOT EXISTS room_encryption_keys (
     room_id UUID PRIMARY KEY REFERENCES chat_rooms(room_id) ON DELETE CASCADE,
@@ -1980,6 +1975,8 @@ CREATE INDEX IF NOT EXISTS idx_chat_messages_created_at ON chat_messages(created
 CREATE INDEX IF NOT EXISTS idx_chat_messages_room_created ON chat_messages(room_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_message_reactions_message_id ON message_reactions(message_id);
 CREATE INDEX IF NOT EXISTS idx_message_reactions_user_id ON message_reactions(user_id);
+CREATE INDEX IF NOT EXISTS idx_message_attachments_message_id ON message_attachments(message_id);
+CREATE INDEX IF NOT EXISTS idx_message_attachments_room_id ON message_attachments(room_id);
 CREATE INDEX IF NOT EXISTS idx_user_presence_status ON user_presence(status);
 CREATE INDEX IF NOT EXISTS idx_user_presence_last_seen ON user_presence(last_seen_at DESC);
 
@@ -1988,6 +1985,7 @@ GRANT ALL PRIVILEGES ON chat_rooms TO bastion_user;
 GRANT ALL PRIVILEGES ON room_participants TO bastion_user;
 GRANT ALL PRIVILEGES ON chat_messages TO bastion_user;
 GRANT ALL PRIVILEGES ON message_reactions TO bastion_user;
+GRANT ALL PRIVILEGES ON message_attachments TO bastion_user;
 GRANT ALL PRIVILEGES ON room_encryption_keys TO bastion_user;
 GRANT ALL PRIVILEGES ON user_presence TO bastion_user;
 
@@ -1996,6 +1994,7 @@ ALTER TABLE chat_rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE room_participants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE message_reactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE message_attachments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE room_encryption_keys ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_presence ENABLE ROW LEVEL SECURITY;
 
@@ -2116,6 +2115,34 @@ CREATE POLICY message_reactions_delete_policy ON message_reactions
         OR current_setting('app.current_user_role', true) = 'admin'
     );
 
+-- RLS policies for message_attachments
+CREATE POLICY message_attachments_select_policy ON message_attachments
+    FOR SELECT USING (
+        room_id IN (
+            SELECT room_id FROM room_participants 
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+        )
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+CREATE POLICY message_attachments_insert_policy ON message_attachments
+    FOR INSERT WITH CHECK (
+        room_id IN (
+            SELECT room_id FROM room_participants 
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+        )
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+CREATE POLICY message_attachments_delete_policy ON message_attachments
+    FOR DELETE USING (
+        room_id IN (
+            SELECT room_id FROM room_participants 
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+        )
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
 -- RLS policies for room_encryption_keys
 CREATE POLICY room_encryption_keys_select_policy ON room_encryption_keys
     FOR SELECT USING (
@@ -2168,6 +2195,382 @@ COMMENT ON TABLE chat_messages IS 'Messages sent in chat rooms with optional enc
 COMMENT ON TABLE message_reactions IS 'Emoji reactions to messages';
 COMMENT ON TABLE room_encryption_keys IS 'Encryption keys for rooms (future E2EE support)';
 COMMENT ON TABLE user_presence IS 'User online/offline/away status tracking';
+
+-- ========================================
+-- TEAMS SYSTEM
+-- Team Collaboration Platform
+-- ========================================
+
+-- Create enums for teams system (idempotent)
+DO $$ BEGIN
+    CREATE TYPE team_role_enum AS ENUM ('admin', 'member', 'viewer');
+EXCEPTION
+    WHEN duplicate_object THEN 
+        RAISE NOTICE 'Type team_role_enum already exists, skipping';
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE invitation_status_enum AS ENUM ('pending', 'accepted', 'rejected', 'expired');
+EXCEPTION
+    WHEN duplicate_object THEN 
+        RAISE NOTICE 'Type invitation_status_enum already exists, skipping';
+END $$;
+
+DO $$ BEGIN
+    CREATE TYPE post_type_enum AS ENUM ('text', 'image', 'file');
+EXCEPTION
+    WHEN duplicate_object THEN 
+        RAISE NOTICE 'Type post_type_enum already exists, skipping';
+END $$;
+
+-- Teams table
+CREATE TABLE IF NOT EXISTS teams (
+    team_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    team_name VARCHAR(255) NOT NULL,
+    description TEXT,
+    created_by VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    avatar_url VARCHAR(500),
+    settings JSONB DEFAULT '{}'::jsonb
+);
+
+-- Team members table
+CREATE TABLE IF NOT EXISTS team_members (
+    team_id UUID NOT NULL REFERENCES teams(team_id) ON DELETE CASCADE,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    role team_role_enum NOT NULL DEFAULT 'member',
+    joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    invited_by VARCHAR(255) REFERENCES users(user_id) ON DELETE SET NULL,
+    PRIMARY KEY (team_id, user_id)
+);
+
+-- Team invitations table
+CREATE TABLE IF NOT EXISTS team_invitations (
+    invitation_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    team_id UUID NOT NULL REFERENCES teams(team_id) ON DELETE CASCADE,
+    invited_user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    invited_by VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    status invitation_status_enum NOT NULL DEFAULT 'pending',
+    message_id UUID REFERENCES chat_messages(message_id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP WITH TIME ZONE DEFAULT (CURRENT_TIMESTAMP + INTERVAL '7 days'),
+    responded_at TIMESTAMP WITH TIME ZONE
+);
+
+-- Team posts table
+CREATE TABLE IF NOT EXISTS team_posts (
+    post_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    team_id UUID NOT NULL REFERENCES teams(team_id) ON DELETE CASCADE,
+    author_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    post_type post_type_enum NOT NULL DEFAULT 'text',
+    attachments JSONB DEFAULT '[]'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP WITH TIME ZONE
+);
+
+-- Post reactions table
+CREATE TABLE IF NOT EXISTS post_reactions (
+    post_id UUID NOT NULL REFERENCES team_posts(post_id) ON DELETE CASCADE,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    reaction_type VARCHAR(10) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (post_id, user_id, reaction_type)
+);
+
+-- Post comments table
+CREATE TABLE IF NOT EXISTS post_comments (
+    comment_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    post_id UUID NOT NULL REFERENCES team_posts(post_id) ON DELETE CASCADE,
+    author_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    deleted_at TIMESTAMP WITH TIME ZONE
+);
+
+-- Update existing tables to support teams
+
+-- Add team_id to document_metadata
+DO $$ 
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'document_metadata' AND column_name = 'team_id'
+    ) THEN
+        ALTER TABLE document_metadata ADD COLUMN team_id UUID REFERENCES teams(team_id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+-- team_id column is now included in the initial CREATE TABLE statement above
+-- Add foreign key constraint after teams table exists (for fresh installs)
+-- This DO block also handles backwards compatibility with existing databases
+DO $$ 
+BEGIN
+    -- Add column if it doesn't exist (for existing databases)
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'document_folders' AND column_name = 'team_id'
+    ) THEN
+        ALTER TABLE document_folders ADD COLUMN team_id UUID;
+    END IF;
+    
+    -- Add foreign key constraint if it doesn't exist
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint 
+        WHERE conname = 'document_folders_team_id_fkey'
+    ) THEN
+        ALTER TABLE document_folders 
+        ADD CONSTRAINT document_folders_team_id_fkey 
+        FOREIGN KEY (team_id) REFERENCES teams(team_id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+-- Add team_id to chat_rooms
+DO $$ 
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'chat_rooms' AND column_name = 'team_id'
+    ) THEN
+        ALTER TABLE chat_rooms ADD COLUMN team_id UUID REFERENCES teams(team_id) ON DELETE SET NULL;
+    END IF;
+END $$;
+
+-- Update message_type_enum to include 'team_invitation'
+DO $$ 
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_enum 
+        WHERE enumlabel = 'team_invitation' 
+        AND enumtypid = (SELECT oid FROM pg_type WHERE typname = 'message_type_enum')
+    ) THEN
+        ALTER TYPE message_type_enum ADD VALUE 'team_invitation';
+    END IF;
+END $$;
+
+-- Create indexes for teams performance
+CREATE INDEX IF NOT EXISTS idx_teams_created_by ON teams(created_by);
+CREATE INDEX IF NOT EXISTS idx_teams_created_at ON teams(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_members_team_id ON team_members(team_id);
+CREATE INDEX IF NOT EXISTS idx_team_members_user_id ON team_members(user_id);
+CREATE INDEX IF NOT EXISTS idx_team_members_role ON team_members(role);
+CREATE INDEX IF NOT EXISTS idx_team_invitations_team_id ON team_invitations(team_id);
+CREATE INDEX IF NOT EXISTS idx_team_invitations_invited_user_id ON team_invitations(invited_user_id);
+CREATE INDEX IF NOT EXISTS idx_team_invitations_status ON team_invitations(status);
+CREATE INDEX IF NOT EXISTS idx_team_invitations_message_id ON team_invitations(message_id);
+CREATE INDEX IF NOT EXISTS idx_team_invitations_expires_at ON team_invitations(expires_at);
+CREATE INDEX IF NOT EXISTS idx_team_posts_team_id ON team_posts(team_id);
+CREATE INDEX IF NOT EXISTS idx_team_posts_author_id ON team_posts(author_id);
+CREATE INDEX IF NOT EXISTS idx_team_posts_created_at ON team_posts(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_posts_team_created ON team_posts(team_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_team_posts_deleted_at ON team_posts(deleted_at) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_post_reactions_post_id ON post_reactions(post_id);
+CREATE INDEX IF NOT EXISTS idx_post_reactions_user_id ON post_reactions(user_id);
+CREATE INDEX IF NOT EXISTS idx_post_comments_post_id ON post_comments(post_id);
+CREATE INDEX IF NOT EXISTS idx_post_comments_author_id ON post_comments(author_id);
+CREATE INDEX IF NOT EXISTS idx_post_comments_created_at ON post_comments(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_post_comments_deleted_at ON post_comments(deleted_at) WHERE deleted_at IS NULL;
+
+-- Indexes for updated tables
+CREATE INDEX IF NOT EXISTS idx_document_metadata_team_id ON document_metadata(team_id) WHERE team_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_document_folders_team_id ON document_folders(team_id) WHERE team_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_chat_rooms_team_id ON chat_rooms(team_id) WHERE team_id IS NOT NULL;
+
+-- Row-Level Security policies for document_metadata (requires teams tables to exist)
+ALTER TABLE document_metadata ENABLE ROW LEVEL SECURITY;
+
+-- Drop existing policies if they exist (idempotent)
+DROP POLICY IF EXISTS document_metadata_select_policy ON document_metadata;
+DROP POLICY IF EXISTS document_metadata_update_policy ON document_metadata;
+DROP POLICY IF EXISTS document_metadata_delete_policy ON document_metadata;
+DROP POLICY IF EXISTS document_metadata_insert_policy ON document_metadata;
+
+-- RLS policies for document_metadata
+-- Users can see: their own docs, global docs, and docs from teams they're members of
+CREATE POLICY document_metadata_select_policy ON document_metadata
+    FOR SELECT USING (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+        OR collection_type = 'global'
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members 
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+        ))
+        OR (user_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    );
+
+-- Users can update: their own docs, admins can update global docs, team admins can update team docs
+CREATE POLICY document_metadata_update_policy ON document_metadata
+    FOR UPDATE USING (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members 
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar 
+            AND role = 'admin'
+        ))
+        OR (user_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    );
+
+-- Users can delete: their own docs, admins can delete any docs, team admins can delete team docs
+CREATE POLICY document_metadata_delete_policy ON document_metadata
+    FOR DELETE USING (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members 
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar 
+            AND role = 'admin'
+        ))
+        OR (user_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    );
+
+-- Allow inserts (ownership will be enforced at application layer)
+CREATE POLICY document_metadata_insert_policy ON document_metadata
+    FOR INSERT WITH CHECK (true);
+
+-- Row-Level Security policies for teams
+ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
+ALTER TABLE team_members ENABLE ROW LEVEL SECURITY;
+ALTER TABLE team_invitations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE team_posts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE post_reactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE post_comments ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policy: Users can see teams they are members of
+CREATE POLICY teams_select_policy ON teams
+    FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM team_members 
+            WHERE team_members.team_id = teams.team_id 
+            AND team_members.user_id = current_setting('app.current_user_id', true)
+        )
+    );
+
+-- RLS Policy: Users can see their own team memberships
+CREATE POLICY team_members_select_policy ON team_members
+    FOR SELECT
+    USING (user_id = current_setting('app.current_user_id', true));
+
+-- RLS Policy: Users can see invitations sent to them
+CREATE POLICY team_invitations_select_policy ON team_invitations
+    FOR SELECT
+    USING (
+        invited_user_id = current_setting('app.current_user_id', true)
+        OR EXISTS (
+            SELECT 1 FROM team_members 
+            WHERE team_members.team_id = team_invitations.team_id 
+            AND team_members.user_id = current_setting('app.current_user_id', true)
+            AND team_members.role = 'admin'
+        )
+    );
+
+-- RLS Policy: Users can see posts from teams they are members of
+CREATE POLICY team_posts_select_policy ON team_posts
+    FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM team_members 
+            WHERE team_members.team_id = team_posts.team_id 
+            AND team_members.user_id = current_setting('app.current_user_id', true)
+        )
+    );
+
+-- RLS Policy: Users can see reactions on posts they can see
+CREATE POLICY post_reactions_select_policy ON post_reactions
+    FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM team_posts tp
+            JOIN team_members tm ON tm.team_id = tp.team_id
+            WHERE tp.post_id = post_reactions.post_id
+            AND tm.user_id = current_setting('app.current_user_id', true)
+        )
+    );
+
+-- RLS Policy: Users can see comments on posts they can see
+CREATE POLICY post_comments_select_policy ON post_comments
+    FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM team_posts tp
+            JOIN team_members tm ON tm.team_id = tp.team_id
+            WHERE tp.post_id = post_comments.post_id
+            AND tm.user_id = current_setting('app.current_user_id', true)
+        )
+    );
+
+-- Grant permissions
+GRANT SELECT, INSERT, UPDATE, DELETE ON teams TO bastion_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON team_members TO bastion_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON team_invitations TO bastion_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON team_posts TO bastion_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON post_reactions TO bastion_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON post_comments TO bastion_user;
+
+-- Add comments for documentation
+COMMENT ON TABLE teams IS 'Teams for collaboration and document sharing';
+COMMENT ON TABLE team_members IS 'Team membership with roles (admin, member, viewer)';
+COMMENT ON TABLE team_invitations IS 'Team invitations linked to chat messages';
+COMMENT ON TABLE team_posts IS 'Social posts in team feeds';
+COMMENT ON TABLE post_reactions IS 'Emoji reactions on team posts';
+COMMENT ON TABLE post_comments IS 'Comments on team posts';
+
+-- ========================================
+-- EMAIL AGENT SYSTEM
+-- Email verification and sending infrastructure
+-- ========================================
+
+-- Add email verification fields to users table
+DO $$ BEGIN
+    ALTER TABLE users 
+    ADD COLUMN email_verified BOOLEAN DEFAULT FALSE,
+    ADD COLUMN email_verification_token VARCHAR(255),
+    ADD COLUMN email_verification_sent_at TIMESTAMP WITH TIME ZONE,
+    ADD COLUMN email_verification_expires_at TIMESTAMP WITH TIME ZONE;
+EXCEPTION
+    WHEN duplicate_column THEN 
+        RAISE NOTICE 'Email verification columns already exist, skipping';
+END $$;
+
+-- Create indexes for email verification
+CREATE INDEX IF NOT EXISTS idx_users_email_verified ON users(email_verified);
+CREATE INDEX IF NOT EXISTS idx_users_verification_token ON users(email_verification_token);
+
+-- Email audit log table
+CREATE TABLE IF NOT EXISTS email_audit_log (
+    id SERIAL PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    from_email VARCHAR(255) NOT NULL,
+    to_email VARCHAR(255) NOT NULL,
+    cc TEXT,
+    bcc TEXT,
+    subject TEXT,
+    body_preview TEXT,
+    sent_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    conversation_id UUID,
+    agent_type VARCHAR(50) DEFAULT 'email_agent',
+    send_status VARCHAR(50),
+    error_message TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_audit_user ON email_audit_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_email_audit_sent_at ON email_audit_log(sent_at);
+
+-- Email rate limiting table
+CREATE TABLE IF NOT EXISTS email_rate_limits (
+    id SERIAL PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    sent_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    recipient_email VARCHAR(255) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_email_rate_limits_user ON email_rate_limits(user_id);
+CREATE INDEX IF NOT EXISTS idx_email_rate_limits_sent_at ON email_rate_limits(sent_at);
 
 -- ========================================
 -- DATABASE INITIALIZATION COMPLETE

@@ -137,7 +137,7 @@ class DocumentService:
         except Exception as e:
             logger.error(f"❌ Failed to emit document status update: {e}")
     
-    async def upload_and_process(self, file: UploadFile, doc_type: str = None, user_id: str = None, folder_id: str = None) -> DocumentUploadResponse:
+    async def upload_and_process(self, file: UploadFile, doc_type: str = None, user_id: str = None, folder_id: str = None, team_id: str = None) -> DocumentUploadResponse:
         """Upload and process a document with optional user isolation"""
         start_time = time.time()
         
@@ -164,7 +164,10 @@ class DocumentService:
             
             # Determine file path using folder structure
             # No need for ID prefix - folder isolation provides uniqueness
-            collection_type = "user" if user_id else "global"
+            if team_id:
+                collection_type = "team"
+            else:
+                collection_type = "user" if user_id else "global"
             
             # Get folder service to determine proper file path
             from services.service_container import get_service_container
@@ -175,7 +178,8 @@ class DocumentService:
                 filename=file.filename,
                 folder_id=folder_id,
                 user_id=user_id,
-                collection_type=collection_type
+                collection_type=collection_type,
+                team_id=team_id
             )
             
             logger.info(f"📁 Saving file to: {file_path}")
@@ -199,7 +203,8 @@ class DocumentService:
                 file_hash=file_hash,
                 status=ProcessingStatus.PROCESSING,
                 user_id=user_id,  # Track document ownership
-                collection_type=collection_type  # Set correct collection type
+                collection_type=collection_type,  # Set correct collection type
+                team_id=team_id  # Track team ownership if applicable
             )
             
             # ROOSEVELT FIX: Save to database and assign folder in a single transaction
@@ -642,16 +647,23 @@ class DocumentService:
         doc_info = await self.document_repository.get_by_id(document_id)
         document_category = doc_info.category.value if doc_info and doc_info.category else None
         document_tags = doc_info.tags if doc_info else None
+        team_id = doc_info.team_id if doc_info and hasattr(doc_info, 'team_id') else None
         
         # Generate and store embeddings in appropriate collection with metadata
         if result.chunks:
             await self.embedding_manager.embed_and_store_chunks(
                 result.chunks, 
                 user_id=user_id,
+                team_id=team_id,
                 document_category=document_category,
                 document_tags=document_tags
             )
-            collection_type = "user" if user_id else "global"
+            if team_id:
+                collection_type = "team"
+            elif user_id:
+                collection_type = "user"
+            else:
+                collection_type = "global"
             logger.info(f"📊 Stored {len(result.chunks)} chunks in {collection_type} collection for document {document_id}")
         
         # Store entities in knowledge graph
@@ -1150,17 +1162,27 @@ class DocumentService:
             logger.info(f"✅ Updated PostgreSQL metadata for document {document_id}")
             
             # **ROOSEVELT'S VECTOR METADATA SYNC**: Update Qdrant vector chunks with new metadata
-            # NOTE: Vector metadata update is optional - PostgreSQL is the source of truth
-            # Vectors will get refreshed metadata on next search automatically
+            # This ensures tag/category filters work immediately without reprocessing!
             try:
-                # Get the updated document info for domain detection
+                # Get the updated document info
                 doc_info = await self.document_repository.get_by_id(document_id)
-                if not doc_info:
+                if doc_info:
+                    # Update Qdrant payloads with new metadata
+                    await self._update_qdrant_metadata(
+                        document_id=document_id,
+                        document_category=doc_info.category.value if doc_info.category else None,
+                        document_tags=doc_info.tags if doc_info.tags else None,
+                        document_title=doc_info.title,
+                        document_author=doc_info.author,
+                        document_filename=doc_info.filename,
+                        user_id=doc_info.user_id
+                    )
+                    logger.info(f"✅ Updated Qdrant metadata for document {document_id}")
+                else:
                     logger.warning(f"⚠️ Could not fetch updated document info for {document_id}")
-                    # Don't return - we can still do KG re-extraction
-            except Exception as doc_fetch_error:
-                logger.error(f"⚠️ Failed to fetch updated document info: {doc_fetch_error}")
-                doc_info = None
+            except Exception as qdrant_error:
+                logger.error(f"⚠️ Failed to update Qdrant metadata: {qdrant_error}")
+                # Don't fail the whole operation - PostgreSQL is updated
             
             # **ROOSEVELT'S SMART DOMAIN RE-EXTRACTION!** 🎬📊
             # Check if domain membership changed and re-extract KG if needed
@@ -1268,6 +1290,77 @@ class DocumentService:
         except Exception as e:
             logger.error(f"❌ Qdrant health check failed: {e}")
             return False
+    
+    async def _update_qdrant_metadata(
+        self,
+        document_id: str,
+        document_category: Optional[str] = None,
+        document_tags: Optional[List[str]] = None,
+        document_title: Optional[str] = None,
+        document_author: Optional[str] = None,
+        document_filename: Optional[str] = None,
+        user_id: Optional[str] = None
+    ):
+        """
+        Update metadata in Qdrant vector payloads for all chunks of a document.
+        This ensures tag/category filters work without reprocessing!
+        """
+        try:
+            from qdrant_client.models import Filter, FieldCondition, MatchValue, SetPayload
+            
+            # Determine which collection to update
+            if user_id:
+                from services.vector_store_service import VectorStoreService
+                vector_store = VectorStoreService()
+                collection_name = vector_store._get_user_collection_name(user_id)
+            else:
+                collection_name = settings.VECTOR_COLLECTION_NAME
+            
+            # Check if collection exists
+            collections = self.qdrant_client.get_collections()
+            collection_names = [col.name for col in collections.collections]
+            if collection_name not in collection_names:
+                logger.warning(f"⚠️ Collection {collection_name} doesn't exist for metadata update")
+                return
+            
+            # Build the metadata payload to update
+            payload_updates = {}
+            if document_category is not None:
+                payload_updates["document_category"] = document_category
+            if document_tags is not None:
+                payload_updates["document_tags"] = document_tags
+            if document_title is not None:
+                payload_updates["document_title"] = document_title
+            if document_author is not None:
+                payload_updates["document_author"] = document_author
+            if document_filename is not None:
+                payload_updates["document_filename"] = document_filename
+            
+            if not payload_updates:
+                logger.info(f"⚠️ No metadata to update for document {document_id}")
+                return
+            
+            # Use Qdrant's set_payload to update all points matching document_id
+            # This updates the payload without re-vectorizing!
+            self.qdrant_client.set_payload(
+                collection_name=collection_name,
+                payload=payload_updates,
+                points=Filter(
+                    must=[
+                        FieldCondition(
+                            key="document_id",
+                            match=MatchValue(value=document_id)
+                        )
+                    ]
+                )
+            )
+            
+            logger.info(f"✅ Updated Qdrant payloads for document {document_id} in {collection_name}")
+            logger.info(f"   Updated fields: {list(payload_updates.keys())}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to update Qdrant metadata for {document_id}: {e}")
+            raise
     
     def _detect_document_type(self, filename: str) -> str:
         """Detect document type from filename"""

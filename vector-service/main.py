@@ -58,9 +58,15 @@ async def serve():
         logger.info("Initializing service components...")
         await service_impl.initialize()
         
-        # Create gRPC server
+        # Create gRPC server with increased message size limits
+        # Default is 4MB, increase to 100MB for large batch embedding responses
+        options = [
+            ('grpc.max_send_message_length', 100 * 1024 * 1024),  # 100 MB
+            ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100 MB
+        ]
         server = grpc.aio.server(
-            futures.ThreadPoolExecutor(max_workers=settings.PARALLEL_WORKERS)
+            futures.ThreadPoolExecutor(max_workers=settings.PARALLEL_WORKERS),
+            options=options
         )
         
         # Add service

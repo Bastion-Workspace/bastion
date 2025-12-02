@@ -57,11 +57,9 @@ class CyberCatalogService:
     async def initialize(self):
         """Initialize the cyber catalog service"""
         try:
-            # Initialize OpenRouter client for LLM categorization
-            self.openrouter_client = AsyncOpenAI(
-                api_key=settings.OPENROUTER_API_KEY,
-                base_url="https://openrouter.ai/api/v1"
-            )
+            # Initialize OpenRouter client for LLM categorization with automatic reasoning support
+            from utils.openrouter_client import get_openrouter_client
+            self.openrouter_client = get_openrouter_client()
             
             # Initialize document processor for text extraction
             self.document_processor = DocumentProcessor()

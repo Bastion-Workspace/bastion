@@ -39,13 +39,6 @@ import {
   getPendingSubmissions,
   reviewSubmission,
   
-  // Calibre methods
-  getCalibreStatus,
-  toggleCalibreIntegration,
-  updateCalibreSettings,
-  searchCalibreLibrary,
-  getCalibreFilters,
-  
   // Folder methods
   getFolderTree,
   getFolderContents,
@@ -123,13 +116,6 @@ class ApiService {
   changePassword = changePassword;
   getPendingSubmissions = getPendingSubmissions;
   reviewSubmission = reviewSubmission;
-
-  // Calibre methods
-  getCalibreStatus = getCalibreStatus;
-  toggleCalibreIntegration = toggleCalibreIntegration;
-  updateCalibreSettings = updateCalibreSettings;
-  searchCalibreLibrary = searchCalibreLibrary;
-  getCalibreFilters = getCalibreFilters;
 
   // Folder methods
   getFolderTree = getFolderTree;

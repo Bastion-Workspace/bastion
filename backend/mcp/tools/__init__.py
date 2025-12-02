@@ -5,7 +5,6 @@ Individual tools for LLM knowledge base interaction
 
 from mcp.tools.search_tool import SearchTool
 from mcp.tools.document_tool import DocumentTool
-from mcp.tools.calibre_search_tool import CalibreSearchTool
 # from mcp.tools.metadata_tool import MetadataTool
 # from mcp.tools.entity_tool import EntityTool
 # from mcp.tools.analysis_tool import AnalysisTool
@@ -13,7 +12,6 @@ from mcp.tools.calibre_search_tool import CalibreSearchTool
 __all__ = [
     "SearchTool",
     "DocumentTool",
-    "CalibreSearchTool",
     # "MetadataTool",
     # "EntityTool",
     # "AnalysisTool"

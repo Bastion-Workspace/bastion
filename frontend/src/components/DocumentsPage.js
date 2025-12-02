@@ -123,7 +123,7 @@ const DocumentsPage = () => {
   useEffect(() => {
     try {
       localStorage.setItem('sidebarCollapsed', JSON.stringify(sidebarCollapsed));
-      console.log('💾 ROOSEVELT: Persisted sidebar collapsed state:', sidebarCollapsed);
+      console.log('💾 Persisted sidebar collapsed state:', sidebarCollapsed);
     } catch (error) {
       console.error('Failed to persist sidebar collapsed state:', error);
     }
@@ -132,7 +132,7 @@ const DocumentsPage = () => {
   useEffect(() => {
     try {
       localStorage.setItem('sidebarWidth', sidebarWidth.toString());
-      console.log('💾 ROOSEVELT: Persisted sidebar width:', sidebarWidth);
+      console.log('💾 Persisted sidebar width:', sidebarWidth);
     } catch (error) {
       console.error('Failed to persist sidebar width:', error);
     }
@@ -142,10 +142,10 @@ const DocumentsPage = () => {
     try {
       if (selectedFolderId) {
         localStorage.setItem('selectedFolderId', selectedFolderId);
-        console.log('💾 ROOSEVELT: Persisted selected folder:', selectedFolderId);
+        console.log('💾 Persisted selected folder:', selectedFolderId);
       } else {
         localStorage.removeItem('selectedFolderId');
-        console.log('💾 ROOSEVELT: Cleared selected folder from persistence');
+        console.log('💾 Cleared selected folder from persistence');
       }
     } catch (error) {
       console.error('Failed to persist selected folder:', error);

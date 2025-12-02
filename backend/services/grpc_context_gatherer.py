@@ -77,9 +77,15 @@ class GRPCContextGatherer:
             if agent_type:
                 grpc_request.agent_type = agent_type
                 logger.info(f"🎯 CONTEXT GATHERER: Explicit routing to {agent_type}")
-            
+
             if routing_reason:
                 grpc_request.routing_reason = routing_reason
+
+            # Check if models are properly configured
+            models_configured = request_context.get("models_configured", True)  # Default to True for backward compatibility
+            if not models_configured:
+                grpc_request.metadata["models_not_configured_warning"] = "AI models are using system fallback defaults. Consider configuring specific models in Settings > AI Models for better performance and consistency."
+                logger.warning("⚠️ CONTEXT GATHERER: Models not explicitly configured - using fallbacks")
             
             # Initialize request context if not provided
             request_context = request_context or {}
@@ -108,6 +114,9 @@ class GRPCContextGatherer:
             # === CHECKPOINTING (Conditional) ===
             await self._add_checkpoint_info(grpc_request, request_context)
             
+            # === PRIMARY AGENT SELECTED (for conversation continuity) ===
+            await self._add_primary_agent_selected(grpc_request, state)
+            
             # Log summary
             self._log_context_summary(grpc_request)
             
@@ -132,10 +141,40 @@ class GRPCContextGatherer:
     ) -> None:
         """Add conversation history to request"""
         try:
-            # Extract messages from state if available
             messages = []
+            
+            # First, try to extract from state if available
             if state and "messages" in state:
                 messages = state["messages"]
+            else:
+                # Load conversation history from database when state is not available
+                try:
+                    from services.conversation_service import ConversationService
+                    conversation_service = ConversationService()
+                    conversation_service.set_current_user(user_id)
+                    
+                    messages_data = await conversation_service.get_conversation_messages(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        skip=0,
+                        limit=20  # Last 20 messages for context
+                    )
+                    
+                    # Convert database messages to LangChain format
+                    if messages_data and "messages" in messages_data:
+                        from langchain_core.messages import HumanMessage, AIMessage
+                        for msg_dict in messages_data["messages"]:
+                            role = msg_dict.get("message_type", "user")
+                            content = msg_dict.get("content", "")
+                            
+                            if role == "user":
+                                messages.append(HumanMessage(content=content))
+                            elif role == "assistant":
+                                messages.append(AIMessage(content=content))
+                    
+                    logger.info(f"📚 CONTEXT: Loaded {len(messages)} messages from database for conversation {conversation_id}")
+                except Exception as db_error:
+                    logger.warning(f"⚠️ CONTEXT: Failed to load conversation history from database: {db_error}")
             
             # Limit to last 20 messages for context window
             recent_messages = messages[-20:] if len(messages) > 20 else messages
@@ -180,6 +219,24 @@ class GRPCContextGatherer:
                 )
                 logger.info(f"✅ CONTEXT: Added persona (ai_name={user_settings.ai_name})")
             
+            # Add model preferences from settings service
+            from services.settings_service import settings_service
+            try:
+                chat_model = await settings_service.get_llm_model()
+                fast_model = await settings_service.get_classification_model()
+                image_model = await settings_service.get_image_generation_model()
+                
+                if chat_model:
+                    grpc_request.metadata["user_chat_model"] = chat_model
+                if fast_model:
+                    grpc_request.metadata["user_fast_model"] = fast_model
+                if image_model:
+                    grpc_request.metadata["user_image_model"] = image_model
+                
+                logger.info(f"✅ CONTEXT: Added model preferences (chat={chat_model}, fast={fast_model}, image={image_model})")
+            except Exception as e:
+                logger.warning(f"⚠️ CONTEXT: Failed to add model preferences: {e}")
+            
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add persona: {e}")
     
@@ -193,23 +250,32 @@ class GRPCContextGatherer:
             active_editor = request_context.get("active_editor")
             editor_preference = request_context.get("editor_preference", "prefer")
             
+            logger.info(f"🔍 EDITOR CONTEXT CHECK: request_context keys={list(request_context.keys())}, active_editor={active_editor is not None}, editor_preference={editor_preference}")
+            
             # Skip if user said to ignore editor
             if editor_preference == "ignore":
+                logger.info(f"⚠️ EDITOR CONTEXT: Skipping - editor_preference is 'ignore'")
                 return
             
             # Skip if no editor context
             if not active_editor:
+                logger.info(f"⚠️ EDITOR CONTEXT: Skipping - no active_editor in request_context")
                 return
             
             # Validate editor context
             if not isinstance(active_editor, dict):
+                logger.warning(f"⚠️ EDITOR CONTEXT: Skipping - active_editor is not a dict (type={type(active_editor)})")
                 return
             
-            if not active_editor.get("is_editable"):
+            # CRITICAL: Reject if is_editable is False or missing - this ensures stale editor data is cleared
+            is_editable = active_editor.get("is_editable")
+            if not is_editable or is_editable is False:
+                logger.info(f"⚠️ EDITOR CONTEXT: Skipping - active_editor.is_editable is False or missing (editor tab likely closed)")
                 return
             
             filename = active_editor.get("filename", "")
             if not filename.endswith(".md"):
+                logger.warning(f"⚠️ EDITOR CONTEXT: Skipping - filename '{filename}' does not end with .md")
                 return
             
             # Parse frontmatter
@@ -227,11 +293,25 @@ class GRPCContextGatherer:
                 frontmatter.tags.extend(tags)
             
             # Add custom fields
+            custom_fields_added = []
             for key, value in frontmatter_data.items():
                 if key not in ["type", "title", "author", "tags", "status"]:
                     frontmatter.custom_fields[key] = str(value)
+                    custom_fields_added.append(key)
+                    if key in ["files", "components", "protocols", "schematics", "specifications"]:
+                        logger.info(f"🔍 ADDING CUSTOM FIELD: {key} = {str(value)[:200]} (original type: {type(value).__name__})")
+            if custom_fields_added:
+                logger.info(f"✅ CONTEXT: Added {len(custom_fields_added)} custom frontmatter field(s): {custom_fields_added}")
+            else:
+                logger.info(f"⚠️ CONTEXT: No custom frontmatter fields found (frontmatter keys: {list(frontmatter_data.keys())})")
             
             # Build editor message
+            canonical_path = active_editor.get("canonical_path") or active_editor.get("canonicalPath") or ""
+            if canonical_path:
+                logger.info(f"✅ CONTEXT: Active editor canonical_path: {canonical_path}")
+            else:
+                logger.warning(f"⚠️ CONTEXT: Active editor has no canonical_path - relative references may fail!")
+            
             grpc_request.active_editor.CopyFrom(
                 orchestrator_pb2.ActiveEditor(
                     is_editable=True,
@@ -240,7 +320,8 @@ class GRPCContextGatherer:
                     content=active_editor.get("content", ""),
                     content_length=len(active_editor.get("content", "")),
                     frontmatter=frontmatter,
-                    editor_preference=editor_preference
+                    editor_preference=editor_preference,
+                    canonical_path=canonical_path
                 )
             )
             
@@ -393,6 +474,41 @@ class GRPCContextGatherer:
             
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add checkpoint info: {e}")
+    
+    async def _add_primary_agent_selected(
+        self,
+        grpc_request: orchestrator_pb2.ChatRequest,
+        state: Optional[Dict[str, Any]]
+    ) -> None:
+        """Add primary_agent_selected and last_agent from shared_memory for conversation continuity"""
+        try:
+            if not state:
+                logger.warning(f"⚠️ CONTEXT: No state provided to _add_primary_agent_selected")
+                return
+            
+            shared_memory = state.get("shared_memory", {}) or {}
+            primary_agent = shared_memory.get("primary_agent_selected")
+            last_agent = shared_memory.get("last_agent")
+            last_response = shared_memory.get("last_response")
+            
+            logger.info(f"📋 CONTEXT: Checking shared_memory for continuity - primary_agent={primary_agent}, last_agent={last_agent}, last_response_length={len(last_response) if last_response else 0}")
+            
+            if primary_agent:
+                # Add to metadata dict (proto metadata field)
+                grpc_request.metadata["primary_agent_selected"] = primary_agent
+                logger.info(f"✅ CONTEXT: Added primary_agent_selected ({primary_agent}) to gRPC metadata for intent classifier continuity")
+            else:
+                logger.warning(f"⚠️ CONTEXT: No primary_agent_selected in shared_memory (keys: {list(shared_memory.keys())})")
+            
+            if last_agent:
+                # Add last_agent to metadata for intent classifier continuity
+                grpc_request.metadata["last_agent"] = last_agent
+                logger.info(f"✅ CONTEXT: Added last_agent ({last_agent}) to gRPC metadata for intent classifier continuity")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ CONTEXT: Failed to add agent continuity fields: {e}")
+            import traceback
+            logger.debug(f"Traceback: {traceback.format_exc()}")
     
     def _log_context_summary(self, grpc_request: orchestrator_pb2.ChatRequest) -> None:
         """Log summary of what context was included"""

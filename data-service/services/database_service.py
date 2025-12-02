@@ -19,6 +19,7 @@ class DatabaseService:
         self,
         workspace_id: str,
         name: str,
+        user_id: str,
         description: Optional[str] = None,
         source_type: str = "imported"
     ) -> Dict[str, Any]:
@@ -30,16 +31,16 @@ class DatabaseService:
             query = """
                 INSERT INTO custom_databases 
                 (database_id, workspace_id, name, description, source_type, 
-                 table_count, total_rows, metadata_json, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                 table_count, total_rows, metadata_json, created_at, updated_at, created_by, updated_by)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                 RETURNING database_id, workspace_id, name, description, source_type,
-                          table_count, total_rows, metadata_json, created_at, updated_at
+                          table_count, total_rows, metadata_json, created_at, updated_at, created_by, updated_by
             """
             
             row = await self.db.fetchrow(
                 query,
                 database_id, workspace_id, name, description, source_type,
-                0, 0, json.dumps({}), now, now
+                0, 0, json.dumps({}), now, now, user_id, user_id
             )
             
             logger.info(f"Created database: {database_id} in workspace: {workspace_id}")
@@ -54,7 +55,7 @@ class DatabaseService:
         try:
             query = """
                 SELECT database_id, workspace_id, name, description, source_type,
-                       table_count, total_rows, metadata_json, created_at, updated_at
+                       table_count, total_rows, metadata_json, created_at, updated_at, created_by, updated_by
                 FROM custom_databases
                 WHERE workspace_id = $1
                 ORDER BY created_at DESC
@@ -72,7 +73,7 @@ class DatabaseService:
         try:
             query = """
                 SELECT database_id, workspace_id, name, description, source_type,
-                       table_count, total_rows, metadata_json, created_at, updated_at
+                       table_count, total_rows, metadata_json, created_at, updated_at, created_by, updated_by
                 FROM custom_databases
                 WHERE database_id = $1
             """
@@ -84,7 +85,7 @@ class DatabaseService:
             logger.error(f"Failed to get database {database_id}: {e}")
             raise
     
-    async def update_database_stats(self, database_id: str) -> bool:
+    async def update_database_stats(self, database_id: str, user_id: Optional[str] = None) -> bool:
         """Update table count and total rows for a database"""
         try:
             # Count tables
@@ -104,7 +105,7 @@ class DatabaseService:
             # Update database
             update_query = """
                 UPDATE custom_databases
-                SET table_count = $2, total_rows = $3, updated_at = $4
+                SET table_count = $2, total_rows = $3, updated_at = $4, updated_by = $5
                 WHERE database_id = $1
             """
             await self.db.execute(
@@ -112,7 +113,8 @@ class DatabaseService:
                 database_id,
                 table_count,
                 total_rows,
-                datetime.utcnow()
+                datetime.utcnow(),
+                user_id
             )
             
             logger.info(f"Updated database stats: {database_id} - {table_count} tables, {total_rows} rows")
@@ -188,8 +190,14 @@ class DatabaseService:
             'total_rows': row['total_rows'],
             'metadata_json': row['metadata_json'] if isinstance(row['metadata_json'], str) else json.dumps(row['metadata_json']),
             'created_at': row['created_at'].isoformat() if row['created_at'] else None,
-            'updated_at': row['updated_at'].isoformat() if row['updated_at'] else None
+            'updated_at': row['updated_at'].isoformat() if row['updated_at'] else None,
+            'created_by': row.get('created_by'),
+            'updated_by': row.get('updated_by')
         }
+
+
+
+
 
 
 

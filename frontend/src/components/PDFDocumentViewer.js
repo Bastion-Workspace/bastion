@@ -3,8 +3,7 @@
  * 
  * Features:
  * - Zoom controls (zoom in, out, fit width, fit page)
- * - Pan/scroll for large PDFs
- * - Multi-page navigation
+ * - Continuous scroll through all pages
  * - Download PDF
  * - Responsive layout
  */
@@ -30,8 +29,6 @@ import {
   ZoomOut,
   ZoomOutMap,
   FitScreen,
-  NavigateBefore,
-  NavigateNext,
   Download,
   Description
 } from '@mui/icons-material';
@@ -41,7 +38,6 @@ pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/$
 
 const PDFDocumentViewer = ({ documentId, filename }) => {
   const [numPages, setNumPages] = useState(null);
-  const [pageNumber, setPageNumber] = useState(1);
   const [scale, setScale] = useState(1.0);
   const [loading, setLoading] = useState(false);  // Start false to let Document component render and load
   const [error, setError] = useState(null);
@@ -148,15 +144,6 @@ const PDFDocumentViewer = ({ documentId, filename }) => {
     setScale(1.0);
   }, []);
 
-  // Page navigation
-  const handlePreviousPage = useCallback(() => {
-    setPageNumber(prev => Math.max(prev - 1, 1));
-  }, []);
-
-  const handleNextPage = useCallback(() => {
-    setPageNumber(prev => Math.min(prev + 1, numPages || prev));
-  }, [numPages]);
-
   // Download PDF
   const handleDownload = useCallback(() => {
     const link = document.createElement('a');
@@ -243,38 +230,14 @@ const PDFDocumentViewer = ({ documentId, filename }) => {
 
           <Divider orientation="vertical" flexItem />
 
-          {/* Page Navigation */}
-          {numPages && numPages > 1 && (
-            <>
-              <Tooltip title="Previous Page">
-                <span>
-                  <IconButton 
-                    onClick={handlePreviousPage} 
-                    disabled={pageNumber <= 1}
-                    size="small"
-                  >
-                    <NavigateBefore />
-                  </IconButton>
-                </span>
-              </Tooltip>
-              <Typography variant="body2" sx={{ minWidth: 80, textAlign: 'center' }}>
-                Page {pageNumber} of {numPages}
-              </Typography>
-              <Tooltip title="Next Page">
-                <span>
-                  <IconButton 
-                    onClick={handleNextPage} 
-                    disabled={pageNumber >= numPages}
-                    size="small"
-                  >
-                    <NavigateNext />
-                  </IconButton>
-                </span>
-              </Tooltip>
-
-              <Divider orientation="vertical" flexItem />
-            </>
+          {/* Page Count Display */}
+          {numPages && (
+            <Typography variant="body2" sx={{ minWidth: 80, textAlign: 'center', color: 'text.secondary' }}>
+              {numPages} {numPages === 1 ? 'page' : 'pages'}
+            </Typography>
           )}
+
+          <Divider orientation="vertical" flexItem />
 
           {/* Download */}
           <Tooltip title="Download PDF">
@@ -330,11 +293,16 @@ const PDFDocumentViewer = ({ documentId, filename }) => {
           >
             <Box
               sx={{
-                backgroundColor: 'white',
-                boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                gap: 2,
                 '& .react-pdf__Page': {
                   display: 'flex',
-                  justifyContent: 'center'
+                  justifyContent: 'center',
+                  backgroundColor: 'white',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+                  marginBottom: 2
                 },
                 '& .react-pdf__Page__canvas': {
                   maxWidth: '100%',
@@ -342,12 +310,16 @@ const PDFDocumentViewer = ({ documentId, filename }) => {
                 }
               }}
             >
-              <Page
-                pageNumber={pageNumber}
-                scale={scale}
-                renderTextLayer={true}
-                renderAnnotationLayer={true}
-              />
+              {Array.from(new Array(numPages), (el, index) => (
+                <Page
+                  key={`page_${index + 1}`}
+                  pageNumber={index + 1}
+                  scale={scale}
+                  renderTextLayer={true}
+                  renderAnnotationLayer={true}
+                  width={containerWidth || undefined}
+                />
+              ))}
             </Box>
           </Document>
         )}

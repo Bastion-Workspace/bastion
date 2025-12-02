@@ -57,6 +57,7 @@ import {
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { motion, AnimatePresence } from 'framer-motion';
 import apiService from '../services/apiService';
+import folderService from '../services/folder/FolderService';
 import { useAuth } from '../contexts/AuthContext';
 import DocumentMetadataPane from './DocumentMetadataPane';
 import FolderMetadataPane from './FolderMetadataPane';
@@ -95,6 +96,10 @@ const FileTreeSidebar = ({
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderParent, setNewFolderParent] = useState(null);
   const [newFolderCollectionType, setNewFolderCollectionType] = useState('user');
+  const [newProjectDialog, setNewProjectDialog] = useState(false);
+  const [projectName, setProjectName] = useState('');
+  const [projectType, setProjectType] = useState('electronics');
+  const [projectParentFolder, setProjectParentFolder] = useState(null);
   const [uploadDialog, setUploadDialog] = useState(false);
   const [uploadFiles, setUploadFiles] = useState([]);
   const [uploadTargetFolder, setUploadTargetFolder] = useState(null);
@@ -592,7 +597,7 @@ const FileTreeSidebar = ({
                   // **BULLY!** Also re-check for org files if this might be a new org file
                   if (update.metadata?.filename?.toLowerCase().endsWith('.org')) {
                     setHasOrgFiles(true);
-                    console.log('📋 ROOSEVELT: Detected new org file, enabling Org Tools');
+                    console.log('📋 Detected new org file, enabling Org Tools');
                   }
                 })
                 .catch(error => {
@@ -775,7 +780,7 @@ const FileTreeSidebar = ({
         // This queries the backend directly instead of relying on loaded folder contents
         const response = await apiService.getUserDocuments(0, 1000); // Get all user docs
         
-        console.log('🔍 ROOSEVELT: Checking for org files, response:', response);
+        console.log('🔍 Checking for org files, response:', response);
         
         // **TRUST BUST!** The API returns {documents: [...], total: N}, not a direct array!
         const documents = response?.documents || [];
@@ -783,7 +788,7 @@ const FileTreeSidebar = ({
         if (Array.isArray(documents)) {
           const hasOrg = documents.some(doc => doc.filename?.toLowerCase().endsWith('.org'));
           setHasOrgFiles(hasOrg);
-          console.log(`📋 ROOSEVELT: Found org files? ${hasOrg} (checked ${documents.length} documents)`);
+          console.log(`📋 Found org files? ${hasOrg} (checked ${documents.length} documents)`);
         } else {
           console.warn('⚠️ ROOSEVELT: Response.documents is not an array:', documents);
           setHasOrgFiles(false);
@@ -838,7 +843,7 @@ const FileTreeSidebar = ({
         id !== 'my_documents_root' && id !== 'global_documents_root'
       );
       localStorage.setItem('expandedFolders', JSON.stringify(expandedArray));
-      console.log('💾 ROOSEVELT: Saved expanded folders:', expandedArray);
+      console.log('💾 Saved expanded folders:', expandedArray);
     } catch (error) {
       console.error('❌ Failed to save expanded folders:', error);
     }
@@ -890,6 +895,26 @@ const FileTreeSidebar = ({
   );
 
   // Mutations
+  const createProjectMutation = useMutation(
+    (data) => apiService.createProject(data.parent_folder_id, data.project_name, data.project_type),
+    {
+      onSuccess: (response) => {
+        setNewProjectDialog(false);
+        setProjectName('');
+        setProjectType('electronics');
+        setProjectParentFolder(null);
+        showToast(`✅ Project "${response.project_name || projectName}" created successfully!`, 'success');
+        // Invalidate folder tree to refresh
+        queryClient.invalidateQueries(['folders', 'tree']);
+        queryClient.invalidateQueries(['folders', 'contents']);
+      },
+      onError: (error) => {
+        console.error('❌ Project creation failed:', error);
+        alert(`Failed to create project: ${error.message || 'Unknown error'}`);
+      }
+    }
+  );
+
   const createFolderMutation = useMutation(
     (data) => apiService.post('/api/folders', data),
     {
@@ -1240,6 +1265,21 @@ const FileTreeSidebar = ({
     }
   );
 
+  const renameFolderMutation = useMutation(
+    ({ folderId, newName }) => folderService.updateFolder(folderId, { name: newName }),
+    {
+      onSuccess: () => {
+        // Invalidate folder tree to refresh with new name
+        queryClient.invalidateQueries(['folders', 'tree']);
+        setContextMenu(null);
+      },
+      onError: (error) => {
+        console.error('❌ Folder rename failed:', error);
+        alert(`Failed to rename folder: ${error?.message || 'Unknown error'}`);
+      }
+    }
+  );
+
   const createNoteMutation = useMutation(
     (noteData) => apiService.createNote(noteData),
     {
@@ -1349,6 +1389,16 @@ const FileTreeSidebar = ({
     });
   }, [newFolderName, newFolderParent, newFolderCollectionType, createFolderMutation]);
 
+  const handleCreateProject = useCallback(() => {
+    if (!projectName.trim()) return;
+    
+    createProjectMutation.mutate({
+      parent_folder_id: projectParentFolder,
+      project_name: projectName.trim(),
+      project_type: projectType
+    });
+  }, [projectName, projectParentFolder, projectType, createProjectMutation]);
+
   const handleCreateDefaultFolders = useCallback(() => {
     createDefaultFoldersMutation.mutate();
   }, [createDefaultFoldersMutation]);
@@ -1359,6 +1409,12 @@ const FileTreeSidebar = ({
     // Prevent deletion of virtual root folders
     if (contextMenuTarget.folder_id.includes('_root')) {
       alert('Cannot delete system folders (My Documents, Global Documents)');
+      return;
+    }
+    
+    // Prevent deletion of team root folders (must delete team instead)
+    if (contextMenuTarget.collection_type === 'team' && !contextMenuTarget.parent_folder_id) {
+      alert('Cannot delete team root folder. Delete the team instead to remove the folder.');
       return;
     }
     
@@ -1454,7 +1510,14 @@ const FileTreeSidebar = ({
     }
   }, [contextMenuTarget, renameDocumentMutation]);
 
-
+  const handleRenameFolder = useCallback(() => {
+    if (!contextMenuTarget?.folder_id) return;
+    const currentName = contextMenuTarget.name || '';
+    const newName = prompt('Enter new folder name:', currentName);
+    if (newName && newName.trim() && newName.trim() !== currentName) {
+      renameFolderMutation.mutate({ folderId: contextMenuTarget.folder_id, newName: newName.trim() });
+    }
+  }, [contextMenuTarget, renameFolderMutation]);
 
   const handleCreateMarkdown = useCallback((folderId) => {
     const input = prompt('Enter file name (optionally with .md or .org extension):');
@@ -1894,7 +1957,7 @@ const FileTreeSidebar = ({
     const getStatusIcon = (status) => {
       // ROOSEVELT DEBUG: Log the status for debugging
       if (status) {
-        console.log(`🔍 ROOSEVELT: File status icon for status: "${status}" (type: ${typeof status})`);
+        console.log(`🔍 File status icon for status: "${status}" (type: ${typeof status})`);
       }
       
       const getStatusIconWithTooltip = (icon, title) => (
@@ -2083,7 +2146,7 @@ const FileTreeSidebar = ({
                     );
                     if (!confirmed) return;
                     
-                    console.log('🔍 ROOSEVELT: Starting file rescan...');
+                    console.log('🔍 Starting file rescan...');
                     const response = await apiService.post('/api/user/documents/rescan');
                     
                     if (response.success) {
@@ -2385,6 +2448,19 @@ const FileTreeSidebar = ({
             
             <MenuItem
               onClick={() => {
+                setProjectParentFolder(contextMenuTarget.folder_id);
+                setNewProjectDialog(true);
+                handleContextMenuClose();
+              }}
+            >
+              <ListItemIcon>
+                <Add fontSize="small" />
+              </ListItemIcon>
+              New Project
+            </MenuItem>
+            
+            <MenuItem
+              onClick={() => {
                 // Don't allow uploading to virtual roots
                 if (contextMenuTarget.folder_id === 'global_documents_root' || contextMenuTarget.folder_id === 'my_documents_root') {
                   alert('Cannot upload files directly to root folders. Please upload to specific folders.');
@@ -2456,10 +2532,7 @@ const FileTreeSidebar = ({
                 <Divider />
                 
                 <MenuItem
-                  onClick={() => {
-                    // TODO: Implement rename
-                    handleContextMenuClose();
-                  }}
+                  onClick={handleRenameFolder}
                 >
                   <ListItemIcon>
                     <Edit fontSize="small" />
@@ -2482,15 +2555,18 @@ const FileTreeSidebar = ({
                 
                 <Divider />
                 
-                <MenuItem
-                  onClick={handleDeleteFolder}
-                  sx={{ color: 'error.main' }}
-                >
-                  <ListItemIcon>
-                    <Delete fontSize="small" color="error" />
-                  </ListItemIcon>
-                  Delete
-                </MenuItem>
+                {/* Hide delete option for team root folders */}
+                {!(contextMenuTarget.collection_type === 'team' && !contextMenuTarget.parent_folder_id) && (
+                  <MenuItem
+                    onClick={handleDeleteFolder}
+                    sx={{ color: 'error.main' }}
+                  >
+                    <ListItemIcon>
+                      <Delete fontSize="small" color="error" />
+                    </ListItemIcon>
+                    Delete
+                  </MenuItem>
+                )}
               </>
             )}
           </>
@@ -2660,6 +2736,55 @@ const FileTreeSidebar = ({
           <Button 
             onClick={handleCreateFolder}
             disabled={!newFolderName.trim() || createFolderMutation.isLoading}
+          >
+            Create
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* New Project Dialog */}
+      <Dialog open={newProjectDialog} onClose={() => setNewProjectDialog(false)}>
+        <DialogTitle>Create New Project</DialogTitle>
+        <DialogContent>
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="body2" color="text.secondary">
+              {projectParentFolder ? 
+                `Create project in: ${contextMenuTarget?.name || 'Selected folder'}` :
+                'Create project at root level'
+              }
+            </Typography>
+          </Box>
+          
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Project Name"
+            fullWidth
+            variant="outlined"
+            value={projectName}
+            onChange={(e) => setProjectName(e.target.value)}
+            onKeyPress={(e) => e.key === 'Enter' && handleCreateProject()}
+            sx={{ mb: 2 }}
+          />
+          
+          <FormControl fullWidth margin="dense">
+            <InputLabel>Project Type</InputLabel>
+            <Select
+              value={projectType}
+              onChange={(e) => setProjectType(e.target.value)}
+              label="Project Type"
+            >
+              <MenuItem value="electronics">Electronics</MenuItem>
+              <MenuItem value="general">General</MenuItem>
+            </Select>
+          </FormControl>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setNewProjectDialog(false)}>Cancel</Button>
+          <Button 
+            onClick={handleCreateProject}
+            disabled={!projectName.trim() || createProjectMutation.isLoading}
+            variant="contained"
           >
             Create
           </Button>

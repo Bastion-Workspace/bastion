@@ -12,6 +12,8 @@ import { EditorProvider } from './contexts/EditorContext';
 import { ModelProvider } from './contexts/ModelContext';
 import { ChatSidebarProvider, useChatSidebar } from './contexts/ChatSidebarContext';
 import { MessagingProvider } from './contexts/MessagingContext';
+import { TeamProvider } from './contexts/TeamContext';
+import ModelConfigurationNotification from './components/ModelConfigurationNotification';
 import Navigation from './components/Navigation';
 import ChatSidebar from './components/ChatSidebar';
 import MessagingDrawer from './components/messaging/MessagingDrawer';
@@ -21,6 +23,8 @@ import HomePage from './components/HomePage';
 import DocumentsPage from './components/DocumentsPage';
 import ChatPage from './components/ChatPage';
 import SettingsPage from './components/SettingsPage';
+import TeamsPage from './components/teams/TeamsPage';
+import TeamDetailPage from './components/teams/TeamDetailPage';
 import OrgQuickCapture from './components/OrgQuickCapture';
 
 import PDFTextLayerEditor from './components/PDFTextLayerEditor';
@@ -103,6 +107,8 @@ const MainContent = () => {
               <Route path="/news/:newsId" element={<NewsDetailPage />} />
 
               <Route path="/chat" element={<ChatPage />} />
+              <Route path="/teams" element={<TeamsPage />} />
+              <Route path="/teams/:teamId" element={<TeamDetailPage />} />
               <Route path="/pdf-text-editor/:documentId" element={<PDFTextLayerEditor />} />
               <Route path="/settings" element={<SettingsPage />} />
             </Routes>
@@ -116,14 +122,14 @@ const MainContent = () => {
         <Box sx={{
           position: 'fixed',
           right: 0,
-          top: '64px',
-          bottom: 0,
+          top: '66px',
+          height: { xs: 'calc(var(--appvh, 100vh) - 66px)', md: 'calc(100dvh - 66px)' },
           width: isCollapsed ? 0 : (isFullWidth ? '100vw' : `${sidebarWidth}px`),
           backgroundColor: 'background.paper',
           borderLeft: '1px solid',
           borderColor: 'divider',
           zIndex: 1200,
-          boxShadow: '-2px 0 8px rgba(0,0,0,0.1)',
+          boxShadow: 'none',
           transition: 'width 0.3s ease-in-out',
           overflow: 'hidden',
           display: isCollapsed ? 'none' : 'flex',
@@ -137,7 +143,7 @@ const MainContent = () => {
       <SwipeableDrawer
         anchor="right"
         open={!isCollapsed && isMobile}
-        onOpen={() => {}}
+        onOpen={toggleSidebar}
         onClose={toggleSidebar}
         disableSwipeToOpen={false}
         ModalProps={{ keepMounted: true }}
@@ -146,7 +152,7 @@ const MainContent = () => {
         <ChatSidebar />
       </SwipeableDrawer>
 
-      {/* Collapsed Chat Sidebar Toggle Button (desktop only) */}
+      {/* Collapsed Chat Sidebar Toggle Button */}
       {isCollapsed && (
         <Box sx={{
           position: 'fixed',
@@ -157,7 +163,7 @@ const MainContent = () => {
           width: 'auto',
           height: 'auto',
           backgroundColor: 'transparent',
-          display: { xs: 'none', md: 'block' }
+          display: 'block'
         }}>
           <Tooltip title="Open Chat">
             <IconButton
@@ -197,6 +203,7 @@ function App() {
         <ModelProvider>
         <ChatSidebarProvider>
           <MessagingProvider>
+          <TeamProvider>
           <EditorProvider>
           <div className="App">
             <Routes>
@@ -209,11 +216,13 @@ function App() {
                   <Navigation />
                   <MainContent />
                   <MessagingDrawer />
+                  <ModelConfigurationNotification />
                 </ProtectedRoute>
               } />
             </Routes>
           </div>
           </EditorProvider>
+          </TeamProvider>
           </MessagingProvider>
         </ChatSidebarProvider>
         </ModelProvider>

@@ -9,9 +9,9 @@ import time
 from datetime import datetime
 from typing import List, AsyncGenerator, Dict, Any, Optional
 import redis.asyncio as redis
-from openai import AsyncOpenAI
 
 from config import settings
+from utils.openrouter_client import get_openrouter_client
 from models.api_models import *
 from models.conversation_models import *
 from services.embedding_service_wrapper import get_embedding_service
@@ -45,10 +45,8 @@ class ChatService:
         logger.info("🔧 Initializing Chat Service with ROOSEVELT'S PARALLEL OPTIMIZATION...")
         
         # Initialize synchronous components first (fast)
-        self.openai_client = AsyncOpenAI(
-            api_key=settings.OPENROUTER_API_KEY,
-            base_url="https://openrouter.ai/api/v1"
-        )
+        # Use OpenRouterClient wrapper for automatic reasoning support
+        self.openai_client = get_openrouter_client()
         self.redis_client = redis.from_url(settings.REDIS_URL)
         self.conversation_service = ConversationService()
         
@@ -828,6 +826,7 @@ Please create a detailed summary that captures all the important information, th
             logger.info(f"🤖 Content length: {len(full_content)} characters")
             
             try:
+                # Reasoning automatically added by OpenRouterClient wrapper
                 response = await asyncio.wait_for(
                     self.openai_client.chat.completions.create(
                         model=self.current_model,
@@ -918,6 +917,7 @@ Please let me know that no relevant documents were found and suggest that the us
             logger.info(f"🤖 Context length: {len(context)} characters")
             
             try:
+                # Reasoning automatically added by OpenRouterClient wrapper
                 # Add generous timeout for comprehensive processing
                 logger.info(f"🤖 Starting LLM API call...")
                 response = await asyncio.wait_for(
@@ -1133,7 +1133,6 @@ Please let me know that no relevant documents were found and suggest that the us
                 query_text=query,
                 limit=settings.MAX_RETRIEVAL_RESULTS,
                 score_threshold=0.3,
-                use_query_expansion=False
             )
     
     async def _enhanced_procedural_retrieval(self, query: str) -> List[Dict[str, Any]]:
@@ -1146,7 +1145,6 @@ Please let me know that no relevant documents were found and suggest that the us
                 query_text=query,
                 limit=500,  # Increased query results limit
                 score_threshold=0.25,
-                use_query_expansion=False
             )
             
             logger.info(f"🔧 Primary search found {len(primary_chunks)} chunks")
@@ -1165,7 +1163,6 @@ Please let me know that no relevant documents were found and suggest that the us
                     query_text=term,
                     limit=50,  # Increased for better coverage
                     score_threshold=0.2,
-                    use_query_expansion=False
                 )
                 term_search_tasks.append(task)
             
@@ -1612,7 +1609,6 @@ Only return the JSON array, no other text."""
                         query_text=suggested_query,
                         limit=80,  # Increased guided search results
                         score_threshold=0.15,  # Lower threshold for guided searches
-                        use_query_expansion=False
                     )
                     
                     # Add unique chunks with adjusted scoring
@@ -2028,7 +2024,6 @@ Only return the JSON array, no other text."""
                 query_text=query,
                 limit=500,  # Increased initial set for comprehensive results
                 score_threshold=0.1,  # Lower threshold to catch more results
-                use_query_expansion=False
             )
             
             logger.info(f"📧 Primary metadata search: {len(primary_results)} results")
@@ -2048,7 +2043,6 @@ Only return the JSON array, no other text."""
                         query_text=term,
                         limit=200,  # Increased metadata search results
                         score_threshold=0.05,  # Very low threshold for metadata
-                        use_query_expansion=False
                     )
                     
                     for chunk in term_results:
@@ -2086,7 +2080,6 @@ Only return the JSON array, no other text."""
                 query_text=query,
                 limit=500,  # Increased query results
                 score_threshold=0.2,
-                use_query_expansion=True  # LEGACY: Chat service still uses internal expansion (research agents use agent-level expansion)
             )
             
             # Step 2: Extract entity terms
@@ -2102,7 +2095,6 @@ Only return the JSON array, no other text."""
                         query_text=term,
                         limit=100,  # Increased term search results
                         score_threshold=0.15,
-                        use_query_expansion=False
                     )
                     
                     for chunk in entity_results:
@@ -2134,7 +2126,6 @@ Only return the JSON array, no other text."""
                 query_text=query,
                 limit=100,
                 score_threshold=0.2,
-                use_query_expansion=False
             )
             
             # Step 2: Extract temporal terms
@@ -2150,7 +2141,6 @@ Only return the JSON array, no other text."""
                         query_text=term,
                         limit=50,
                         score_threshold=0.15,
-                        use_query_expansion=False
                     )
                     
                     for chunk in temporal_results:
@@ -2182,7 +2172,6 @@ Only return the JSON array, no other text."""
                 query_text=query,
                 limit=500,  # Increased comprehensive search results
                 score_threshold=0.25,
-                use_query_expansion=True  # LEGACY: Chat service still uses internal expansion
             )
             
             # Step 2: Secondary search with reformulated query
@@ -2192,7 +2181,6 @@ Only return the JSON array, no other text."""
                     query_text=reformulated_query,
                     limit=100,  # Increased reformulated query results
                     score_threshold=0.2,
-                    use_query_expansion=False
                 )
                 
                 # Merge results
@@ -2378,7 +2366,6 @@ Only return the JSON array, no other text."""
             query_text=query,
             limit=settings.MAX_RETRIEVAL_RESULTS,
             score_threshold=0.3,
-            use_query_expansion=False
         )
 
     async def _hybrid_retrieval(self, query: str, entity_names: List[str]) -> List[Dict[str, Any]]:
@@ -2407,7 +2394,6 @@ Only return the JSON array, no other text."""
                     query_text=query,
                     limit=settings.MAX_RETRIEVAL_RESULTS,  # Use configurable limit (500)
                     score_threshold=0.20,  # Slightly lower threshold for broader coverage
-                    use_query_expansion=True,  # LEGACY: Chat service still uses internal expansion
                     expansion_model=self.current_model
                 )
             )
@@ -2472,7 +2458,6 @@ Only return the JSON array, no other text."""
                 query_text=query,
                 limit=500,  # Increased simple search results
                 score_threshold=0.3,
-                use_query_expansion=True  # LEGACY: Chat service still uses internal expansion
             )
     
     async def _rerank_by_entity_relevance(self, chunks: List[Dict[str, Any]], entity_names: List[str]) -> List[Dict[str, Any]]:
@@ -3197,7 +3182,6 @@ Top chunks:
                 query_text=query,
                 limit=500,  # Increased fallback search results
                 score_threshold=0.3,
-                use_query_expansion=False
             )
             
             # Get document IDs from top chunks
@@ -3212,7 +3196,6 @@ Top chunks:
                     query_text="news headlines wall street journal",
                     limit=100,  # Increased news search results
                     score_threshold=0.2,
-                    use_query_expansion=False
                 )
                 for chunk in news_chunks:
                     document_candidates.add(chunk['document_id'])
@@ -3929,15 +3912,10 @@ OR
                 category_lower = category.lower() if category else ''
                 title_lower = title.lower() if title else ''
                 
-                # Check for Calibre-specific fiction indicators
-                calibre_metadata = metadata.get('calibre_metadata', {})
-                calibre_tags = calibre_metadata.get('tags', []) if calibre_metadata else []
-                calibre_tags_lower = ' '.join(calibre_tags).lower()
-                
-                # Enhanced fiction detection including Calibre metadata
-                is_fiction = any(indicator in tags_lower or indicator in category_lower or indicator in title_lower or indicator in calibre_tags_lower
+                # Enhanced fiction detection
+                is_fiction = any(indicator in tags_lower or indicator in category_lower or indicator in title_lower
                                for indicator in fiction_indicators)
-                is_non_fiction = any(indicator in tags_lower or indicator in category_lower or indicator in title_lower or indicator in calibre_tags_lower
+                is_non_fiction = any(indicator in tags_lower or indicator in category_lower or indicator in title_lower
                                    for indicator in non_fiction_indicators)
                 
                 # Determine source credibility
@@ -3959,17 +3937,6 @@ OR
                 elif doc_type in ['pdf', 'docx', 'txt'] and not tags:
                     source_type = "DOCUMENT"
                     credibility_note = "This is a document with limited metadata - assess credibility based on content."
-                elif calibre_metadata:
-                    # Calibre book with metadata
-                    if is_fiction:
-                        source_type = "CALIBRE_FICTION"
-                        credibility_note = "This is a Calibre book marked as fiction - use for literary analysis, not factual claims."
-                    elif is_non_fiction:
-                        source_type = "CALIBRE_NON_FICTION"
-                        credibility_note = "This is a Calibre book marked as non-fiction - suitable for research and analysis."
-                    else:
-                        source_type = "CALIBRE_BOOK"
-                        credibility_note = "This is a Calibre book - assess credibility based on tags and content."
                 
                 # Build source information
                 source_info = f"Source {i+1}: {title}"
@@ -3978,7 +3945,7 @@ OR
                 if publication_date:
                     source_info += f" ({publication_date})"
                 
-                # Add Calibre-specific metadata if available
+                # Add metadata if available
                 if metadata.get('series'):
                     source_info += f"\nSeries: {metadata['series']}"
                     if metadata.get('series_index'):
@@ -3999,10 +3966,6 @@ OR
                 
                 if tags:
                     source_info += f"\nTags: {', '.join(tags)}"
-                
-                # Add Calibre tags if different from document tags
-                if calibre_tags and set(calibre_tags) != set(tags):
-                    source_info += f"\nCalibre Tags: {', '.join(calibre_tags)}"
                 
                 source_info += f"\nCredibility Note: {credibility_note}"
                 source_info += f"\nContent: {chunk.get('content', '')[:300]}..."

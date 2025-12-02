@@ -18,7 +18,8 @@ from services.celery_utils import (
     create_progress_meta,
     safe_task_wrapper
 )
-from services.langgraph_official_orchestrator import get_official_orchestrator
+# DEPRECATED: Backend orchestrator removed
+# from services.langgraph_official_orchestrator import get_official_orchestrator
 from services.conversation_service import ConversationService
 from services.prompt_service import PromptService
 
@@ -157,86 +158,26 @@ async def _async_process_orchestrator_query(
     # Update progress - Processing with orchestrator
     update_task_progress(task, 3, 5, "Orchestrator analyzing request and delegating to agents...")
     
-    # Process through official orchestrator
-    orchestrator = await get_official_orchestrator()
-    # Process through official LangGraph orchestrator
-    result = await orchestrator.process_user_query(
-        user_message=query,
-        user_id=user_id,
-        conversation_id=conversation_id,
-        persona=persona,
-        base_checkpoint_id=base_checkpoint_id
+    # DEPRECATED: Backend orchestrator removed
+    # Celery tasks should use gRPC orchestrator instead
+    logger.warning("⚠️ DEPRECATED: Backend orchestrator removed. Celery task cannot process query.")
+    
+    safe_update_task_state(
+        task,
+        TaskStatus.FAILURE,
+        {
+            "error": "Backend orchestrator removed. Use gRPC orchestrator instead.",
+            "message": "This task type is no longer supported",
+            "timestamp": datetime.now().isoformat()
+        }
     )
-    final_result = result.get("final_state", {})
     
-    # Update progress - Saving results
-    update_task_progress(task, 4, 5, "Saving orchestrator results...")
-    
-    if final_result and final_result.get("messages"):
-        # Extract final assistant message
-        messages = final_result.get("messages", [])
-        last_message = messages[-1] if messages else None
-        response_content = last_message.content if last_message and hasattr(last_message, 'content') else "No response generated"
-        
-        # Save assistant response to conversation
-        message_result = await conversation_service.add_message(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            role="assistant",
-            content=response_content,
-            metadata={
-                "async_orchestrator": True,
-                "task_id": task.request.id,
-                "delegated_agent": final_result.get("active_agent", "unknown"),
-                "background_processing": True
-            }
-        )
-        
-        # Update progress - Complete
-        update_task_progress(task, 5, 5, "Processing completed successfully!")
-        
-        # Final success state with safe serialization
-        success_meta = clean_result_for_storage({
-            "result": {
-                "response": response_content,
-                "delegated_agent": final_result.get("active_agent", "unknown"),
-                "success": True
-            },
-            "message": "Orchestrator processing completed successfully",
-            "delegated_agent": final_result.get("active_agent", "unknown"),
-            "message_id": message_result.get("message_id") if message_result else None,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        safe_update_task_state(task, TaskStatus.SUCCESS, success_meta)
-        
-        return clean_result_for_storage({
-            "success": True,
-            "response": response_content,
-            "delegated_agent": final_result.get("active_agent", "unknown"),
-            "message_id": message_result.get("message_id") if message_result else None,
-            "task_id": task.request.id
-        })
-    else:
-        # Handle orchestrator failure
-        error_msg = "Orchestrator failed to process query or returned no results"
-        
-        safe_update_task_state(
-            task,
-            TaskStatus.FAILURE,
-            {
-                "error": str(error_msg)[:1000],  # Limit error message length
-                "message": "Orchestrator processing failed",
-                "timestamp": datetime.now().isoformat()
-            }
-        )
-        
-        return clean_result_for_storage({
-            "success": False,
-            "error": str(error_msg),
-            "message": "Orchestrator processing failed",
-            "timestamp": datetime.now().isoformat()
-        })
+    return clean_result_for_storage({
+        "status": "error",
+        "error": "Backend orchestrator removed. Use gRPC orchestrator instead.",
+        "response": "This task type is no longer supported.",
+        "timestamp": datetime.now().isoformat()
+    })
 
 
 @celery_app.task(bind=True, name="orchestrator.get_task_status")
