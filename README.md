@@ -17,7 +17,7 @@ Think of it as your personal AI command center - whether you're researching docu
 ## ✨ Core Features
 
 ### 🤖 **LangGraph Agent System**
-- **25+ Specialized Agents**: Research, chat, coding, weather, RSS, entertainment, fiction editing, proofreading, wargaming, image generation, messaging, and more
+- **25+ Specialized Agents**: Research, chat, coding, weather, RSS, entertainment, fiction editing, proofreading, image generation, messaging, and more
 - **Intelligent Routing**: Automatic intent classification routes queries to the appropriate agent
 - **Human-in-the-Loop (HITL)**: Permission-based workflows for sensitive operations
 - **PostgreSQL State Persistence**: Full conversation history and state management
@@ -90,12 +90,11 @@ Think of it as your personal AI command center - whether you're researching docu
 - **Natural Language**: "What's the weather in San Francisco?"
 
 ### 🎨 **Image Generation**
-- **Image Generation Agent**: Create images via DALL-E or Stable Diffusion
+- **Image Generation Agent**: Create images via OpenRouter-supported image generation models
 - **Natural Language Prompts**: Describe what you want to create
-- **Multiple Styles**: Support for different artistic styles
+- **Multiple Styles**: Support for different artistic styles and parameters
 
 ### 🎲 **Specialized Agents**
-- **Wargaming Agent**: Military strategy and wargaming analysis
 - **Data Formatting Agent**: Format data into tables, charts, and structured outputs
 - **Content Analysis Agent**: Deep content analysis and summarization
 - **Fact Checking Agent**: Verify claims and check facts
@@ -135,7 +134,7 @@ Think of it as your personal AI command center - whether you're researching docu
 ### AI & LLM Integration
 - **LLM Providers**: OpenAI, Anthropic (Claude), OpenRouter
 - **Embeddings**: OpenAI text-embedding-3-small (for vectorization)
-- **Image Generation**: DALL-E, Stable Diffusion
+- **Image Generation**: OpenRouter-supported image generation models
 - **Speech**: OpenAI Whisper (transcription), TTS (future)
 - **Intent Classification**: Fast model (Claude Haiku) for routing
 - **Agent Execution**: Configurable model per agent
