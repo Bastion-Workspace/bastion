@@ -68,6 +68,7 @@ class GeneralProjectState(TypedDict):
     information_needs: Optional[Dict[str, Any]]
     search_queries: List[Dict[str, Any]]
     search_quality_assessment: Optional[Dict[str, Any]]
+    search_retry_count: int  # Counter to prevent infinite re-search loops
     project_plan_action: Optional[str]
     project_structure_plan: Optional[Dict[str, Any]]
     response: Dict[str, Any]
@@ -390,8 +391,18 @@ class GeneralProjectAgent(BaseAgent):
         is_simple_query = self._is_simple_query(query) or len(query.split()) <= 5
         quality_threshold = 0.65 if is_simple_query else 0.75  # Lower threshold for simple queries
         
-        if should_re_search and quality_score < 0.5:
-            logger.info(f"Low quality results (score: {quality_score:.2f}) - re-searching with refined queries")
+        search_retry_count = state.get("search_retry_count", 0)
+        max_search_retries = 3  # Maximum number of re-search attempts
+        
+        # Prevent infinite re-search loops - check retry count for ANY should_re_search case
+        if should_re_search:
+            if search_retry_count >= max_search_retries:
+                logger.warning(f"Max search retries ({max_search_retries}) reached (score: {quality_score:.2f}, should_re_search=True) - routing to web search")
+                return "perform_web_search"
+            if quality_score < 0.5:
+                logger.info(f"Low quality results (score: {quality_score:.2f}, retry {search_retry_count + 1}/{max_search_retries}) - re-searching with refined queries")
+            else:
+                logger.info(f"Re-search requested (score: {quality_score:.2f}, retry {search_retry_count + 1}/{max_search_retries}) - re-searching with refined queries")
             return "re_search"
         elif needs_web_search or web_search_explicit:
             logger.info("Web search needed - routing directly to web search")
@@ -1034,6 +1045,7 @@ Return ONLY valid JSON:
                 "information_needs": None,
                 "search_queries": [],
                 "search_quality_assessment": None,
+                "search_retry_count": 0,
                 "project_plan_action": None,
                 "project_structure_plan": None,
                 "response": {},

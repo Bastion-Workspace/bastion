@@ -316,6 +316,44 @@ summary: {file_summary}
             
             logger.info(f"Saved content to {len(saved_files)} files: {', '.join(saved_files)}")
             
+            # **PHASE 4: RELOAD REFERENCED CONTEXT** (Critical for subsequent operations)
+            # After creating files and updating frontmatter, reload referenced_context so:
+            # 1. Newly created files are available for any post-save operations
+            # 2. Next agent run has fresh context with all referenced files
+            # 3. Verification/gap analysis in future runs can see newly created files
+            reloaded_context = referenced_context  # Default to existing context
+            if new_files_created or project_plan_doc_id:
+                try:
+                    logger.info(f"Reloading referenced context after file creation/updates...")
+                    from orchestrator.tools.reference_file_loader import load_referenced_files
+                    
+                    # General project reference configuration
+                    reference_config = {
+                        "specifications": ["specifications", "spec", "specs", "specification"],
+                        "design": ["design", "design_docs", "architecture"],
+                        "tasks": ["tasks", "task", "todo", "checklist"],
+                        "notes": ["notes", "note", "documentation", "docs"],
+                        "other": ["references", "reference", "files", "related", "documents"]
+                    }
+                    
+                    # Reload referenced files from updated frontmatter
+                    reload_result = await load_referenced_files(
+                        active_editor=active_editor,
+                        user_id=user_id,
+                        reference_config=reference_config,
+                        doc_type_filter="project"
+                    )
+                    
+                    reloaded_context = reload_result.get("loaded_files", {})
+                    reloaded_count = sum(len(docs) for docs in reloaded_context.values() if isinstance(docs, list))
+                    logger.info(f"✅ Reloaded referenced context: {reloaded_count} file(s) (including {len(new_files_created)} newly created)")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to reload referenced context after file creation: {e}")
+                    # Continue with existing context - not critical for this run
+                    import traceback
+                    logger.debug(f"Traceback: {traceback.format_exc()}")
+            
             # Update response to include saved files information
             response = state.get("response", {})
             if isinstance(response, dict):
@@ -333,7 +371,8 @@ summary: {file_summary}
             return {
                 "task_status": "complete",
                 "saved_files": saved_files,
-                "response": response
+                "response": response,
+                "referenced_context": reloaded_context  # Update state with fresh context
             }
             
         except Exception as e:

@@ -15,6 +15,7 @@ RUN npm install --production=false
 # Copy source code
 COPY public/ ./public/
 COPY src/ ./src/
+COPY scripts/ ./scripts/
 COPY .env* ./
 
 # Build the app

@@ -139,6 +139,70 @@ def find_chapter_ranges(text: str) -> List[ChapterRange]:
 # Simplified Resolver (Progressive Search)
 # ============================================
 
+def _assess_reference_quality(content: str, ref_type: str) -> Tuple[float, List[str]]:
+    """
+    Assess reference quality and return (quality_score, warnings).
+    Returns quality score 0.0-1.0 and list of warnings.
+    """
+    if not content or len(content.strip()) < 50:
+        return 0.0, ["Reference content is too short or empty"]
+    
+    quality_score = 0.5  # Base score for existing content
+    warnings = []
+    
+    content_length = len(content.strip())
+    
+    if ref_type == "rules":
+        # Good rules have structure and specificity
+        if "## " in content or "- " in content:  # Has structure
+            quality_score += 0.2
+        else:
+            warnings.append("Rules lack clear structure (no headings or bullets)")
+        
+        if content_length > 500:  # Substantial content
+            quality_score += 0.3
+        elif content_length < 200:
+            warnings.append("Rules content is quite brief")
+        
+        # Check for key rule indicators
+        rule_keywords = ["rule", "constraint", "limit", "cannot", "must", "cannot", "forbidden"]
+        if any(kw in content.lower() for kw in rule_keywords):
+            quality_score += 0.1
+    
+    elif ref_type == "style":
+        # Good style guides have examples and specifics
+        if "example" in content.lower() or "```" in content:
+            quality_score += 0.2
+        else:
+            warnings.append("Style guide lacks examples")
+        
+        if content_length > 300:
+            quality_score += 0.3
+        elif content_length < 150:
+            warnings.append("Style guide is quite brief")
+        
+        # Check for style indicators
+        style_keywords = ["voice", "tone", "pacing", "dialogue", "narrative", "tense", "pov"]
+        if any(kw in content.lower() for kw in style_keywords):
+            quality_score += 0.1
+    
+    elif ref_type == "characters":
+        # Good character profiles have detail
+        if content_length > 400:
+            quality_score += 0.3
+        elif content_length < 200:
+            warnings.append("Character profile is quite brief")
+        
+        # Check for character depth indicators
+        char_keywords = ["motivation", "personality", "goal", "backstory", "trait", "relationship"]
+        if any(kw in content.lower() for kw in char_keywords):
+            quality_score += 0.2
+        else:
+            warnings.append("Character profile lacks depth indicators")
+    
+    return min(1.0, quality_score), warnings
+
+
 def _resolve_operation_simple(
     outline: str,
     op_dict: Dict[str, Any],
@@ -237,6 +301,22 @@ class OutlineEditingState(TypedDict):
     response: Dict[str, Any]
     task_status: str
     error: str
+    # NEW: Mode tracking
+    generation_mode: str  # "fully_referenced" | "partial_references" | "freehand"
+    available_references: Dict[str, bool]  # Which refs loaded successfully
+    reference_summary: str  # Human-readable summary
+    mode_guidance: str  # Dynamic prompt guidance
+    reference_quality: Dict[str, float]  # Quality scores (0-1)
+    reference_warnings: List[str]  # Quality warnings
+    # NEW: Structure analysis
+    outline_completeness: float  # 0.0-1.0
+    chapter_count: int
+    structure_warnings: List[str]
+    structure_guidance: str
+    has_synopsis: bool
+    has_notes: bool
+    has_characters: bool
+    has_outline_section: bool
 
 
 # ============================================
@@ -264,6 +344,8 @@ class OutlineEditingAgent(BaseAgent):
         # Add nodes
         workflow.add_node("prepare_context", self._prepare_context_node)
         workflow.add_node("load_references", self._load_references_node)
+        workflow.add_node("analyze_mode", self._analyze_mode_node)
+        workflow.add_node("analyze_outline_structure", self._analyze_outline_structure_node)
         workflow.add_node("generate_edit_plan", self._generate_edit_plan_node)
         workflow.add_node("resolve_operations", self._resolve_operations_node)
         workflow.add_node("format_response", self._format_response_node)
@@ -271,18 +353,22 @@ class OutlineEditingAgent(BaseAgent):
         # Entry point
         workflow.set_entry_point("prepare_context")
         
-        # Flow: prepare_context -> load_references -> generate_edit_plan -> resolve_operations -> format_response -> END
+        # Flow: prepare_context -> load_references -> analyze_mode -> analyze_outline_structure -> generate_edit_plan -> resolve_operations -> format_response -> END
         workflow.add_edge("prepare_context", "load_references")
-        workflow.add_edge("load_references", "generate_edit_plan")
+        workflow.add_edge("load_references", "analyze_mode")
+        workflow.add_edge("analyze_mode", "analyze_outline_structure")
+        workflow.add_edge("analyze_outline_structure", "generate_edit_plan")
         workflow.add_edge("generate_edit_plan", "resolve_operations")
         workflow.add_edge("resolve_operations", "format_response")
         workflow.add_edge("format_response", END)
         
         return workflow.compile(checkpointer=checkpointer)
     
-    def _build_system_prompt(self) -> str:
-        """Build system prompt for outline editing"""
-        return (
+    def _build_system_prompt(self, state: Optional[OutlineEditingState] = None) -> str:
+        """Build context-aware system prompt for outline editing"""
+        
+        # Base prompt (always included)
+        base_prompt = (
             "You are an Outline Development Assistant for type: outline files. Persona disabled."
             " Preserve frontmatter; operate on Markdown body only.\n\n"
             "BEST EFFORT DOCTRINE:\n"
@@ -401,6 +487,76 @@ class OutlineEditingAgent(BaseAgent):
             '❌ WRONG: "- Beat 1\\n\\n- Beat 2"  ← Double \\n\\n between items creates blank line!\n\n'
             "IRON-CLAD RULE: After last line = ZERO \\n (nothing!)\n"
         )
+        
+        # If no state provided, return base prompt
+        if not state:
+            return base_prompt
+        
+        # Build dynamic sections based on mode and structure
+        mode_guidance = state.get("mode_guidance", "")
+        structure_guidance = state.get("structure_guidance", "")
+        generation_mode = state.get("generation_mode", "freehand")
+        available_references = state.get("available_references", {})
+        reference_summary = state.get("reference_summary", "")
+        
+        # Build dynamic prompt sections
+        sections = [base_prompt]
+        
+        # Add mode section
+        if mode_guidance:
+            sections.append("\n\n=== GENERATION MODE ===\n")
+            sections.append(mode_guidance)
+        
+        # Add reference summary
+        if reference_summary:
+            sections.append(f"\n\n=== REFERENCE STATUS ===\n{reference_summary}\n")
+        
+        # Add structure guidance
+        if structure_guidance:
+            sections.append("\n\n=== OUTLINE STRUCTURE STATUS ===\n")
+            sections.append(structure_guidance)
+        
+        # Add reference-specific instructions
+        has_style = available_references.get("style", False)
+        has_rules = available_references.get("rules", False)
+        has_characters = available_references.get("characters", False)
+        
+        if has_style and not has_rules and not has_characters:
+            sections.append(
+                "\n\n=== REFERENCE-SPECIFIC INSTRUCTIONS ===\n"
+                "You have ONLY a style guide available:\n"
+                "- Match narrative voice and writing style from the style guide\n"
+                "- Create original universe rules and character profiles as needed\n"
+                "- Use style guide to inform tone, pacing, and narrative approach\n"
+            )
+        elif has_rules and not has_style and not has_characters:
+            sections.append(
+                "\n\n=== REFERENCE-SPECIFIC INSTRUCTIONS ===\n"
+                "You have ONLY universe rules available:\n"
+                "- Respect all universe constraints and rules strictly\n"
+                "- Develop appropriate narrative style that fits the universe\n"
+                "- Create character profiles that work within the established rules\n"
+            )
+        elif has_style and has_rules and not has_characters:
+            sections.append(
+                "\n\n=== REFERENCE-SPECIFIC INSTRUCTIONS ===\n"
+                "You have style guide and universe rules:\n"
+                "- Maintain consistent universe with both style and rules\n"
+                "- Develop character profiles that fit the established universe\n"
+                "- Ensure narrative voice matches style guide\n"
+            )
+        elif has_style and has_rules and has_characters:
+            sections.append(
+                "\n\n=== REFERENCE-SPECIFIC INSTRUCTIONS ===\n"
+                "You have COMPLETE reference set (style, rules, characters):\n"
+                "- Full consistency validation required across all references\n"
+                "- All plot points must respect universe rules\n"
+                "- All character actions must match established profiles\n"
+                "- Narrative style must align with style guide\n"
+                "- Flag ANY inconsistencies immediately\n"
+            )
+        
+        return "".join(sections)
     
     async def _prepare_context_node(self, state: OutlineEditingState) -> Dict[str, Any]:
         """Prepare context: extract active editor, validate outline type"""
@@ -512,31 +668,68 @@ class OutlineEditingAgent(BaseAgent):
             
             loaded_files = result.get("loaded_files", {})
             
-            # Extract content from loaded files
+            # Extract content from loaded files and assess quality
             style_body = None
+            style_quality = 0.0
+            style_warnings = []
+            
             if loaded_files.get("style") and len(loaded_files["style"]) > 0:
                 style_body = loaded_files["style"][0].get("content", "")
                 if style_body:
                     style_body = _strip_frontmatter_block(style_body)
+                    style_quality, style_warnings = _assess_reference_quality(style_body, "style")
             
             rules_body = None
+            rules_quality = 0.0
+            rules_warnings = []
+            
             if loaded_files.get("rules") and len(loaded_files["rules"]) > 0:
                 rules_body = loaded_files["rules"][0].get("content", "")
                 if rules_body:
                     rules_body = _strip_frontmatter_block(rules_body)
+                    rules_quality, rules_warnings = _assess_reference_quality(rules_body, "rules")
             
             characters_bodies = []
+            characters_qualities = []
+            characters_warnings = []
+            
             if loaded_files.get("characters"):
                 for char_file in loaded_files["characters"]:
                     char_content = char_file.get("content", "")
                     if char_content:
                         char_content = _strip_frontmatter_block(char_content)
+                        char_quality, char_warnings = _assess_reference_quality(char_content, "characters")
                         characters_bodies.append(char_content)
+                        characters_qualities.append(char_quality)
+                        characters_warnings.extend(char_warnings)
+            
+            # Calculate average character quality
+            avg_character_quality = sum(characters_qualities) / len(characters_qualities) if characters_qualities else 0.0
+            
+            # Collect all warnings
+            all_warnings = []
+            if style_quality < 0.4 and style_body:
+                all_warnings.append(f"Style guide quality is low ({style_quality:.0%})")
+            all_warnings.extend(style_warnings)
+            
+            if rules_quality < 0.4 and rules_body:
+                all_warnings.append(f"Rules quality is low ({rules_quality:.0%})")
+            all_warnings.extend(rules_warnings)
+            
+            if avg_character_quality < 0.4 and characters_bodies:
+                all_warnings.append(f"Character profiles quality is low ({avg_character_quality:.0%})")
+            all_warnings.extend(characters_warnings)
             
             return {
                 "rules_body": rules_body,
                 "style_body": style_body,
-                "characters_bodies": characters_bodies
+                "characters_bodies": characters_bodies,
+                "reference_quality": {
+                    "style": style_quality,
+                    "rules": rules_quality,
+                    "characters": avg_character_quality
+                },
+                "reference_warnings": all_warnings
             }
             
         except Exception as e:
@@ -547,7 +740,220 @@ class OutlineEditingAgent(BaseAgent):
                 "rules_body": None,
                 "style_body": None,
                 "characters_bodies": [],
+                "reference_quality": {},
+                "reference_warnings": [],
                 "error": str(e)
+            }
+    
+    async def _analyze_mode_node(self, state: OutlineEditingState) -> Dict[str, Any]:
+        """Analyze generation mode based on available references and quality"""
+        try:
+            logger.info("Analyzing outline generation mode...")
+            
+            rules_body = state.get("rules_body")
+            style_body = state.get("style_body")
+            characters_bodies = state.get("characters_bodies", [])
+            reference_quality = state.get("reference_quality", {})
+            reference_warnings = state.get("reference_warnings", [])
+            current_request = state.get("current_request", "").lower()
+            
+            # Detect available references (consider quality - low quality < 0.4 treated as not present)
+            style_quality = reference_quality.get("style", 0.0)
+            rules_quality = reference_quality.get("rules", 0.0)
+            characters_quality = reference_quality.get("characters", 0.0)
+            
+            has_style = style_body is not None and len(style_body.strip()) > 50 and style_quality >= 0.4
+            has_rules = rules_body is not None and len(rules_body.strip()) > 50 and rules_quality >= 0.4
+            has_characters = len(characters_bodies) > 0 and characters_quality >= 0.4
+            
+            available_references = {
+                "style": has_style,
+                "rules": has_rules,
+                "characters": has_characters
+            }
+            
+            # Detect creative freedom keywords
+            freehand_keywords = ["freehand", "creative freedom", "ignore references", 
+                                  "new direction", "fresh start", "brainstorm", "from scratch"]
+            creative_freedom_requested = any(kw in current_request for kw in freehand_keywords)
+            
+            # Determine mode
+            ref_count = sum(available_references.values())
+            has_any_refs = ref_count > 0
+            
+            if creative_freedom_requested:
+                generation_mode = "freehand"
+                mode_guidance = (
+                    "USER REQUESTED CREATIVE FREEDOM - Prioritize creativity and new ideas.\n"
+                    "References are available for consistency checks but DO NOT constrain your imagination.\n"
+                    "Feel free to suggest bold new directions, character arcs, or plot twists.\n"
+                    "Focus on compelling narrative structure and original storytelling.\n"
+                )
+            elif has_any_refs and ref_count == 3:
+                generation_mode = "fully_referenced"
+                mode_guidance = (
+                    "FULLY REFERENCED MODE - You have complete universe context.\n"
+                    "STRICT CONSISTENCY REQUIRED:\n"
+                    "- ALL plot points must respect universe rules\n"
+                    "- ALL character actions must match established profiles\n"
+                    "- Narrative style must align with style guide\n"
+                    "- Flag ANY inconsistencies rather than proceeding\n"
+                    "- Use references to ensure continuity and coherence\n"
+                )
+            elif has_any_refs:
+                generation_mode = "partial_references"
+                refs_available = [k for k, v in available_references.items() if v]
+                mode_guidance = (
+                    f"PARTIAL REFERENCES MODE - Available references: {', '.join(refs_available)}\n"
+                    "Balance creativity with consistency:\n"
+                    "- Follow available references strictly where they exist\n"
+                    "- Use reasonable creativity for missing context\n"
+                    "- Flag conflicts with available references\n"
+                    "- Develop appropriate elements where references are missing\n"
+                )
+                
+                # Add specific guidance based on what's available
+                if has_style and not has_rules and not has_characters:
+                    mode_guidance += "\n- Match narrative voice from style guide\n- Create original universe and characters\n"
+                elif has_rules and not has_style and not has_characters:
+                    mode_guidance += "\n- Respect universe constraints from rules\n- Develop appropriate narrative style\n"
+                elif has_style and has_rules and not has_characters:
+                    mode_guidance += "\n- Consistent universe with style and rules\n- Develop character profiles as needed\n"
+            else:
+                generation_mode = "freehand"
+                mode_guidance = (
+                    "FREEHAND MODE - No references available.\n"
+                    "Full creative freedom to develop original story structure.\n"
+                    "Focus on:\n"
+                    "- Compelling narrative arc and character development\n"
+                    "- Clear plot progression and story beats\n"
+                    "- Engaging conflict and resolution\n"
+                    "- Original and creative storytelling\n"
+                )
+            
+            # Build reference summary
+            ref_parts = []
+            if has_style:
+                ref_parts.append(f"Style guide (quality: {style_quality:.0%})")
+            if has_rules:
+                ref_parts.append(f"Universe rules (quality: {rules_quality:.0%})")
+            if has_characters:
+                ref_parts.append(f"{len(characters_bodies)} character profile(s) (quality: {characters_quality:.0%})")
+            
+            if ref_parts:
+                reference_summary = f"Available: {', '.join(ref_parts)}"
+            else:
+                reference_summary = "No references available - freehand mode"
+            
+            if reference_warnings:
+                reference_summary += f"\nWarnings: {'; '.join(reference_warnings[:3])}"  # Limit to 3 warnings
+            
+            logger.info(f"Outline generation mode: {generation_mode}")
+            logger.info(f"Available references: {', '.join([k for k, v in available_references.items() if v]) or 'none'}")
+            if not has_any_refs:
+                logger.info("Freehand mode - no references available")
+            
+            return {
+                "generation_mode": generation_mode,
+                "available_references": available_references,
+                "reference_summary": reference_summary,
+                "mode_guidance": mode_guidance
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to analyze mode: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {
+                "generation_mode": "freehand",
+                "available_references": {},
+                "reference_summary": "Error analyzing references - defaulting to freehand",
+                "mode_guidance": "Freehand mode - proceed with creative freedom."
+            }
+    
+    async def _analyze_outline_structure_node(self, state: OutlineEditingState) -> Dict[str, Any]:
+        """Analyze existing outline structure and quality"""
+        try:
+            logger.info("Analyzing outline structure...")
+            
+            body_only = state.get("body_only", "")
+            
+            # Detect existing sections
+            has_synopsis = bool(re.search(r"^#\s+(Overall\s+)?Synopsis\s*$", body_only, re.MULTILINE | re.IGNORECASE))
+            has_notes = bool(re.search(r"^#\s+Notes\s*$", body_only, re.MULTILINE | re.IGNORECASE))
+            has_characters = bool(re.search(r"^#\s+Characters?\s*$", body_only, re.MULTILINE | re.IGNORECASE))
+            has_outline = bool(re.search(r"^#\s+Outline\s*$", body_only, re.MULTILINE | re.IGNORECASE))
+            
+            # Count chapters
+            chapter_matches = list(CHAPTER_PATTERN.finditer(body_only))
+            chapter_count = len(chapter_matches)
+            
+            # Assess completeness
+            sections_present = sum([has_synopsis, has_notes, has_characters, has_outline])
+            completeness_score = sections_present / 4.0 if sections_present > 0 else 0.0
+            
+            # Detect structural issues
+            structure_warnings = []
+            if chapter_count == 0 and has_outline:
+                structure_warnings.append("Outline section exists but no chapters defined")
+            if not has_synopsis and chapter_count > 0:
+                structure_warnings.append("Chapters exist without Overall Synopsis")
+            if has_characters and not re.search(r"Protagonist|Antagonist|Supporting", body_only, re.IGNORECASE):
+                structure_warnings.append("Characters section missing protagonist/antagonist designation")
+            if chapter_count > 0:
+                # Check chapter numbering
+                chapter_nums = []
+                for m in chapter_matches:
+                    try:
+                        chapter_nums.append(int(m.group(1)))
+                    except Exception:
+                        pass
+                if chapter_nums:
+                    expected = list(range(1, len(chapter_nums) + 1))
+                    if chapter_nums != expected:
+                        structure_warnings.append(f"Chapter numbering is non-sequential: {chapter_nums}")
+            
+            # Generate structure-specific guidance
+            if completeness_score < 0.25:
+                structure_guidance = "OUTLINE IS EMPTY OR VERY INCOMPLETE - Focus on establishing core structure first:\n- Create Overall Synopsis\n- Add Notes section\n- Define Characters\n- Set up Outline section with initial chapters"
+            elif completeness_score < 0.5:
+                structure_guidance = "OUTLINE IS INCOMPLETE - Complete missing sections before expanding:\n- Ensure all core sections exist\n- Fill in basic content for each section\n- Then proceed with detailed development"
+            elif completeness_score < 0.75:
+                structure_guidance = "OUTLINE IS PARTIALLY COMPLETE - Continue developing existing sections:\n- Expand incomplete sections\n- Add more detail to existing content\n- Ensure all sections have meaningful content"
+            elif structure_warnings:
+                structure_guidance = f"OUTLINE STRUCTURE HAS ISSUES - Address these first:\n{'; '.join(structure_warnings)}\nThen proceed with requested edits."
+            else:
+                structure_guidance = "OUTLINE STRUCTURE IS SOLID - Proceed with requested edits and improvements."
+            
+            logger.info(f"Outline completeness: {completeness_score:.0%} ({sections_present}/4 sections)")
+            logger.info(f"Chapter count: {chapter_count}")
+            if structure_warnings:
+                logger.warning(f"Structure issues: {'; '.join(structure_warnings)}")
+            
+            return {
+                "outline_completeness": completeness_score,
+                "chapter_count": chapter_count,
+                "structure_warnings": structure_warnings,
+                "structure_guidance": structure_guidance,
+                "has_synopsis": has_synopsis,
+                "has_notes": has_notes,
+                "has_characters": has_characters,
+                "has_outline_section": has_outline
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to analyze outline structure: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {
+                "outline_completeness": 0.0,
+                "chapter_count": 0,
+                "structure_warnings": [],
+                "structure_guidance": "Unable to analyze structure - proceed with caution.",
+                "has_synopsis": False,
+                "has_notes": False,
+                "has_characters": False,
+                "has_outline_section": False
             }
     
     async def _generate_edit_plan_node(self, state: OutlineEditingState) -> Dict[str, Any]:
@@ -569,8 +975,13 @@ class OutlineEditingAgent(BaseAgent):
             selection_start = state.get("selection_start", -1)
             selection_end = state.get("selection_end", -1)
             
-            # Build system prompt
-            system_prompt = self._build_system_prompt()
+            # Get mode and structure context
+            mode_guidance = state.get("mode_guidance", "")
+            structure_guidance = state.get("structure_guidance", "")
+            reference_summary = state.get("reference_summary", "")
+            
+            # Build dynamic system prompt
+            system_prompt = self._build_system_prompt(state)
             
             # Build context message
             context_parts = [
@@ -578,6 +989,16 @@ class OutlineEditingAgent(BaseAgent):
                 f"File: {filename}\n\n",
                 "Current Outline (frontmatter stripped):\n" + body_only + "\n\n"
             ]
+            
+            # Add mode and structure context
+            if mode_guidance:
+                context_parts.append(f"\n=== GENERATION MODE ===\n{mode_guidance}\n")
+            
+            if structure_guidance:
+                context_parts.append(f"\n=== OUTLINE STATUS ===\n{structure_guidance}\n")
+            
+            if reference_summary:
+                context_parts.append(f"\n=== REFERENCE STATUS ===\n{reference_summary}\n")
             
             if rules_body:
                 context_parts.append(f"=== RULES ===\n{rules_body}\n\n")
@@ -957,7 +1378,23 @@ class OutlineEditingAgent(BaseAgent):
                 "editor_operations": [],
                 "response": {},
                 "task_status": "",
-                "error": ""
+                "error": "",
+                # NEW: Mode tracking
+                "generation_mode": "freehand",
+                "available_references": {},
+                "reference_summary": "",
+                "mode_guidance": "",
+                "reference_quality": {},
+                "reference_warnings": [],
+                # NEW: Structure analysis
+                "outline_completeness": 0.0,
+                "chapter_count": 0,
+                "structure_warnings": [],
+                "structure_guidance": "",
+                "has_synopsis": False,
+                "has_notes": False,
+                "has_characters": False,
+                "has_outline_section": False
             }
             
             # Get workflow (lazy initialization with checkpointer)

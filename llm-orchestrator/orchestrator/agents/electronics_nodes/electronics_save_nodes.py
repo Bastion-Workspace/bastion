@@ -77,6 +77,8 @@ class ElectronicsSaveNodes:
             logger.info(f"🔌 Routing to project_plan (document_id: {doc_id})")
         else:
             # Find in referenced context
+            # For save operations, we can work with files that are referenced OR create new ones
+            # But for routing to existing files, we only use referenced_context
             for category, file_list in referenced_context.items():
                 if isinstance(file_list, list):
                     for file_doc in file_list:
@@ -261,6 +263,9 @@ summary: {file_summary}
             saved_files = [f"{filename} (new)" for filename in new_files_created]
             batch_results = []
             
+            # Track cleanup operations (edits/replaces, not appends) for summary reporting
+            cleanup_operations = []  # List of (filename, section_name, action) tuples
+            
             for doc_id, edits in edits_by_doc.items():
                 from orchestrator.utils.document_batch_editor import DocumentEditBatch
                 
@@ -280,9 +285,11 @@ summary: {file_summary}
                     
                     if action == "remove":
                         batch.add_section_delete(section)
+                        cleanup_operations.append((target_file, section, "removed"))
                     
                     elif action == "replace":
                         batch.add_section_replace(section, content)
+                        cleanup_operations.append((target_file, section, "updated"))
                     
                     else:  # append
                         batch.add_section_append(section, content)
@@ -303,7 +310,63 @@ summary: {file_summary}
             logger.info(f"✅ Batch editor processed {len(batch_results)} document(s) with {sum(r.get('operations_succeeded', 0) for r in batch_results)} total operations")
             logger.info(f"✅ Saved content to {len(saved_files)} files: {', '.join(saved_files)}")
             
-            # **PHASE 4: VERIFICATION LOOP** (Electronics-specific)
+            # **PHASE 4: RELOAD REFERENCED CONTEXT** (Critical for subsequent operations)
+            # After creating files and updating frontmatter, reload referenced_context so:
+            # 1. Newly created files are available for any post-save operations
+            # 2. Next agent run has fresh context with all referenced files
+            # 3. Maintenance/verification in future runs can see newly created files
+            reloaded_context = referenced_context  # Default to existing context
+            if new_files_created or project_plan_doc_id:
+                try:
+                    logger.info(f"🔌 Reloading referenced context after file creation/updates...")
+                    from orchestrator.tools.reference_file_loader import load_referenced_files
+                    
+                    # Electronics reference configuration
+                    reference_config = {
+                        "components": ["components", "component", "component_docs"],
+                        "protocols": ["protocols", "protocol", "protocol_docs"],
+                        "schematics": ["schematics", "schematic", "schematic_docs"],
+                        "specifications": ["specifications", "spec", "specs", "specification"],
+                        "other": ["references", "reference", "docs", "documents", "related", "files"]
+                    }
+                    
+                    # Reload referenced files from updated frontmatter
+                    reload_result = await load_referenced_files(
+                        active_editor=active_editor,
+                        user_id=user_id,
+                        reference_config=reference_config,
+                        doc_type_filter="electronics"
+                    )
+                    
+                    reloaded_context = reload_result.get("loaded_files", {})
+                    reloaded_count = sum(len(docs) for docs in reloaded_context.values() if isinstance(docs, list))
+                    logger.info(f"✅ Reloaded referenced context: {reloaded_count} file(s) (including {len(new_files_created)} newly created)")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to reload referenced context after file creation: {e}")
+                    # Continue with existing context - not critical for this run
+                    import traceback
+                    logger.debug(f"Traceback: {traceback.format_exc()}")
+            
+            # Generate cleanup summary if cleanup operations occurred
+            cleanup_summary = None
+            if cleanup_operations:
+                # Count operations by type
+                updates_count = sum(1 for _, _, action in cleanup_operations if action == "updated")
+                removals_count = sum(1 for _, _, action in cleanup_operations if action == "removed")
+                
+                # Build summary message
+                summary_parts = []
+                if updates_count > 0:
+                    summary_parts.append(f"{updates_count} section{'s' if updates_count != 1 else ''} updated")
+                if removals_count > 0:
+                    summary_parts.append(f"{removals_count} section{'s' if removals_count != 1 else ''} removed")
+                
+                if summary_parts:
+                    cleanup_summary = f"Documentation cleanup: {', '.join(summary_parts)} with corrections."
+                    logger.info(f"🔌 {cleanup_summary}")
+            
+            # **PHASE 5: VERIFICATION LOOP** (Electronics-specific)
             # Check for any remaining outdated/incorrect references
             user_query = state.get("query", "")
             old_components = self._extract_old_components_from_query(user_query)
@@ -315,6 +378,18 @@ summary: {file_summary}
             ]
             has_changes = any(re.search(pattern, user_query, re.IGNORECASE) for pattern in change_indicators)
             
+            # Build return value with cleanup summary and reloaded context
+            return_data = {
+                "task_status": "complete",
+                "saved_files": saved_files,
+                "verification_needed": False,
+                "referenced_context": reloaded_context  # Update state with fresh context
+            }
+            
+            # Add cleanup summary if available
+            if cleanup_summary:
+                return_data["cleanup_summary"] = cleanup_summary
+            
             if old_components or has_changes:
                 if old_components:
                     logger.info(f"🔍 Verifying that old component references were removed: {old_components}")
@@ -323,18 +398,10 @@ summary: {file_summary}
                 
                 # Store verification info for possible maintenance node processing
                 # The maintenance node can do a comprehensive check if needed
-                return {
-                    "task_status": "complete",
-                    "saved_files": saved_files,
-                    "verification_needed": True,
-                    "old_components": old_components if old_components else []
-                }
+                return_data["verification_needed"] = True
+                return_data["old_components"] = old_components if old_components else []
             
-            return {
-                "task_status": "complete",
-                "saved_files": saved_files,
-                "verification_needed": False
-            }
+            return return_data
             
         except Exception as e:
             logger.error(f"❌ Content saving failed: {e}")

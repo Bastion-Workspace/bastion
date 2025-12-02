@@ -195,6 +195,16 @@ class ElectronicsContentNodes:
 {existing_content_context}
 
 **CRITICAL INSTRUCTIONS**:
+
+**EXAMPLE: CORRECTION SCENARIO**
+User says: "Actually, use component ADW221S instead of AQV252G"
+Existing section: "## PhotoMOS SSR Driver Circuit (AQV252G)\nThe AQV252G provides 400V isolation..."
+Correct routing: 
+- Action: "replace" (NOT "append")
+- Section: "PhotoMOS SSR Driver Circuit (AQV252G)"
+- New content: "## PhotoMOS SSR Driver Circuit (ADW221S)\nThe ADW221S provides 400V isolation..." (NO mention of AQV252G)
+- Result: Section is updated with correct component, old component removed
+
 1. **EXTRACT ALL TECHNICAL DETAILS**: 
    - Voltage/current values, resistance, power ratings
    - Component specifications and part numbers
@@ -224,16 +234,19 @@ class ElectronicsContentNodes:
    - **If no clear match**: Use the file whose description/summary best matches the content type
    - **Multiple matches**: Split content logically across multiple files if appropriate
 
-4. **DETECT REVISIONS AND CORRECTIONS**: 
+4. **DETECT REVISIONS AND CORRECTIONS** (CRITICAL FOR CLEANUP): 
    - **CRITICAL: REVIEW EXISTING SECTION CONTENT ABOVE** - The "EXISTING SECTION CONTENT" section shows you what's currently in the files
    - **Compare new information with existing content** - Look at what's there now and decide what needs to change
-   - **Revisions**: 'instead of X, use Y' or 'change X to Y' means REPLACE existing content
-   - **Corrections**: 'Actually, it is X not Y' or 'That is wrong, it should be X' means CORRECT existing content
-   - **Removals**: 'Remove X' or 'Delete Y' or 'We are not using Z anymore' means REMOVE content (replace section with corrected version or note)
-   - **Error Detection**: If user says something contradicts existing content, DETECT the conflict and CORRECT it
-   - **Bad Concepts**: If user indicates a previous assumption/plan was wrong, UPDATE or REMOVE that content
+   - **CONFLICT DETECTION**: If new information contradicts existing content, you MUST use "replace" action, NOT "append"
+   - **Revisions**: 'instead of X, use Y' or 'change X to Y' means REPLACE existing content (action: "replace")
+   - **Corrections**: 'Actually, it is X not Y' or 'That is wrong, it should be X' means CORRECT existing content (action: "replace")
+   - **Wrong Path**: 'Not that way', 'Different approach', 'That won't work' means UPDATE sections describing the wrong approach (action: "replace")
+   - **Removals**: 'Remove X' or 'Delete Y' or 'We are not using Z anymore' means REMOVE content (action: "remove")
+   - **Error Detection**: If user says something contradicts existing content, DETECT the conflict and CORRECT it (action: "replace")
+   - **Bad Concepts**: If user indicates a previous assumption/plan was wrong, UPDATE or REMOVE that content (action: "replace" or "remove")
    - **Always check existing content** in files before adding - if it conflicts, CORRECT it rather than creating duplicates
    - **Update all related sections** - When correcting/updating, find ALL sections that reference the changed content and update them together
+   - **USE "replace" ACTION FOR CORRECTIONS** - When correcting errors or updating wrong information, use "replace" to update the section, not "append" to add new content
    
    **CRITICAL: COMPONENT REPLACEMENTS**:
    - **REVIEW EXISTING SECTIONS ABOVE** - Look at ALL sections that mention the old component
@@ -310,12 +323,25 @@ class ElectronicsContentNodes:
   ]
 }}
 
-**ACTION FIELD**:
-- **append**: Add new content to a new or existing section (default if section doesn't exist)
-- **replace**: Replace existing section content (use when correcting errors, updating values, or revising)
+**ACTION FIELD** (CRITICAL - Choose the right action):
+- **replace** (PREFERRED for corrections): Replace existing section content with corrected/updated information
+  - **USE THIS** when correcting errors, updating values, revising approaches, or fixing wrong information
+  - **USE THIS** when new information conflicts with existing content
+  - **USE THIS** when user indicates wrong path or incorrect approach
   - **IMPORTANT**: When replacing due to component change, the new content must NOT include the old component name
   - Example: If replacing "AQV252G" with "ADW221S", new content should only mention ADW221S
+  - Example: If correcting "12V" to "5V", replace the section with corrected voltage specification
+  - Example: If user says "that approach won't work", replace sections describing that approach with the correct approach
+  - **CRITICAL**: "replace" means "update this section with corrected information" - preserve useful context but fix errors
+  
+- **append**: Add new content to a new or existing section (default if section doesn't exist)
+  - **USE THIS** only when adding genuinely new information that doesn't conflict with existing content
+  - **DO NOT USE** when correcting errors or updating wrong information - use "replace" instead
+  - **DO NOT USE** when new information contradicts existing content - use "replace" instead
+  
 - **remove**: Remove section content entirely (use when user explicitly requests removal or content is obsolete)
+  - **USE THIS** when user explicitly says to remove/delete something
+  - **USE THIS** when section is completely obsolete with no useful context to preserve
 """
             
             try:
@@ -395,16 +421,37 @@ class ElectronicsContentNodes:
             query_lower = user_query.lower()
             response_lower = agent_response.lower() if agent_response else ""
             
-            # Check for change indicators
+            # Check for change indicators - expanded to catch more correction scenarios
             change_indicators = [
                 'instead of', 'replace', 'switch from', 'change', 'actually',
                 'wrong', 'should be', 'not anymore', 'remove', 'delete',
-                'update', 'correct', 'no longer'
+                'update', 'correct', 'no longer',
+                # Wrong path indicators
+                'not that way', 'different approach', 'actually no', "that won't work",
+                'that doesn\'t work', 'not going that route', 'wrong direction',
+                # Conceptual changes
+                'changed my mind', 'better to', 'prefer', 'rather',
+                'not using', 'abandon', 'scrap', 'forget about',
+                # Correction phrases
+                'correction', 'fix', 'mistake', 'error', 'incorrect',
+                'not correct', 'that\'s wrong', 'that is wrong',
+                # Direction changes
+                'going with', 'switching to', 'moving to', 'changing to',
+                'revised', 'revision', 'updated approach'
             ]
             has_change_indicators = any(indicator in query_lower for indicator in change_indicators)
             
-            # If no change indicators and no old components, skip analysis
-            if not has_change_indicators and not old_components:
+            # Lower threshold for triggering analysis when user indicates dissatisfaction or corrections
+            # Check for dissatisfaction indicators that suggest wrong path was taken
+            dissatisfaction_indicators = [
+                'not right', 'not correct', 'that\'s not', 'that is not',
+                'doesn\'t work', 'won\'t work', 'can\'t use', 'shouldn\'t',
+                'problem with', 'issue with', 'concern about'
+            ]
+            has_dissatisfaction = any(indicator in query_lower for indicator in dissatisfaction_indicators)
+            
+            # If no change indicators, no old components, and no dissatisfaction, skip analysis
+            if not has_change_indicators and not old_components and not has_dissatisfaction:
                 return []
             
             user_id = state.get("user_id", "")
@@ -451,7 +498,19 @@ class ElectronicsContentNodes:
                                 change_indicators_list = [
                                     'instead of', 'replace', 'switch from', 'change', 'actually',
                                     'wrong', 'should be', 'not anymore', 'remove', 'delete',
-                                    'update', 'correct', 'no longer'
+                                    'update', 'correct', 'no longer',
+                                    # Wrong path indicators
+                                    'not that way', 'different approach', 'actually no', "that won't work",
+                                    'that doesn\'t work', 'not going that route', 'wrong direction',
+                                    # Conceptual changes
+                                    'changed my mind', 'better to', 'prefer', 'rather',
+                                    'not using', 'abandon', 'scrap', 'forget about',
+                                    # Correction phrases
+                                    'correction', 'fix', 'mistake', 'error', 'incorrect',
+                                    'not correct', 'that\'s wrong', 'that is wrong',
+                                    # Direction changes
+                                    'going with', 'switching to', 'moving to', 'changing to',
+                                    'revised', 'revision', 'updated approach'
                                 ]
                                 has_change_indicators_local = any(indicator in query_lower for indicator in change_indicators_list)
                                 
@@ -558,7 +617,19 @@ class ElectronicsContentNodes:
                                 change_indicators_local = [
                                     'instead of', 'replace', 'switch from', 'change', 'actually',
                                     'wrong', 'should be', 'not anymore', 'remove', 'delete',
-                                    'update', 'correct', 'no longer'
+                                    'update', 'correct', 'no longer',
+                                    # Wrong path indicators
+                                    'not that way', 'different approach', 'actually no', "that won't work",
+                                    'that doesn\'t work', 'not going that route', 'wrong direction',
+                                    # Conceptual changes
+                                    'changed my mind', 'better to', 'prefer', 'rather',
+                                    'not using', 'abandon', 'scrap', 'forget about',
+                                    # Correction phrases
+                                    'correction', 'fix', 'mistake', 'error', 'incorrect',
+                                    'not correct', 'that\'s wrong', 'that is wrong',
+                                    # Direction changes
+                                    'going with', 'switching to', 'moving to', 'changing to',
+                                    'revised', 'revision', 'updated approach'
                                 ]
                                 has_change_indicators_local = any(indicator in query_lower for indicator in change_indicators_local)
                                 
@@ -699,19 +770,34 @@ class ElectronicsContentNodes:
 **ANALYSIS REQUIRED**:
 For EACH section, compare it with the user query and agent response. Determine if the section needs updates:
 
-1. **DELETE**: Section is obsolete, incorrect, or contradicts new information
-   - Example: Section describes old approach that's been replaced
-   - Example: Section is exclusively about something being removed
-   → Action: DELETE entire section
+**PRIORITY: EDIT FOR CORRECTIONS** - When user indicates corrections, replacements, or "wrong path" changes:
+- **EDIT is the DEFAULT action** for sections that mention old/incorrect information
+- Preserve useful context, formatting, diagrams, code, and structure
+- Replace incorrect information with correct information
+- Update ALL references to changed components, specifications, or approaches
+- Example: If user says "use component Y instead of X", EDIT sections mentioning X to mention Y instead
+- Example: If user corrects a specification, EDIT the section with the corrected value
+- Example: If user says "that approach won't work", EDIT sections describing that approach
+
+1. **EDIT** (PREFERRED for corrections): Section has useful content but needs updates
+   - **MOST COMMON ACTION** when user provides corrections or indicates wrong path
+   - Section mentions old component/approach that needs replacement → EDIT to replace old with new
+   - Section has incorrect specifications that need correction → EDIT to correct the values
+   - Section describes old direction that needs updating → EDIT to reflect new direction
+   - Section has mixed correct/incorrect content → EDIT to fix incorrect parts, preserve correct parts
+   - **Action**: Provide FULL edited section content with corrections applied, preserving useful context
+   - **Critical**: When editing, compare existing content with new information to detect ALL conflicts
+   - **Critical**: Update ALL related sections that reference the changed information
    
-2. **EDIT**: Section has useful content but needs updates
-   - Example: Section mentions old component/approach that needs replacement
-   - Example: Section has incorrect specifications that need correction
-   - Example: Section describes old direction that needs updating
-   → Action: EDIT section - update incorrect/outdated parts, preserve useful content
+2. **DELETE**: Section is completely obsolete, exclusively incorrect, or contradicts new information
+   - Only use if section is ENTIRELY about something being removed
+   - Example: Section describes old approach that's been completely replaced with no useful context
+   - Example: Section is exclusively about something being removed
+   - **Action**: DELETE entire section
    
 3. **NO CHANGE**: Section is still accurate and doesn't conflict with new information
-   → Action: SKIP (don't include in operations)
+   - Only use if section is completely accurate and unrelated to the changes
+   - **Action**: SKIP (don't include in operations)
 
 **OUTPUT FORMAT** (JSON only - array of analyses, one per section):
 [
@@ -721,7 +807,7 @@ For EACH section, compare it with the user query and agent response. Determine i
     "filename": "filename.md",
     "action": "delete|edit|skip",
     "reasoning": "Why this action (1-2 sentences)",
-    "edited_content": "If action is 'edit', provide the FULL edited section content. If 'delete' or 'skip', this field is empty."
+    "edited_content": "If action is 'edit', provide the FULL edited section content with corrections applied. If 'delete' or 'skip', this field is empty."
   }},
   {{
     "section_index": 2,
@@ -729,14 +815,16 @@ For EACH section, compare it with the user query and agent response. Determine i
   }}
 ]
 
-**CRITICAL RULES**:
-- DELETE only if section is obsolete or exclusively about something being removed
-- EDIT if section has useful content but needs updates (replace old with new, correct errors, update specifications)
+**CRITICAL RULES FOR CORRECTIONS**:
+- **EDIT is the default** when user provides corrections or indicates wrong path
+- **Compare existing content with new information** - detect ALL conflicts and contradictions
+- **Update ALL related sections** - if one section mentions changed information, find ALL sections that reference it
 - When editing, preserve ALL useful content, formatting, diagrams, code, structure
-- Only update what needs to change - don't rewrite unnecessarily
+- Replace incorrect information with correct information - don't just append
 - Keep section structure and organization intact
-- Be granular - update specific parts, not entire sections unless necessary
+- Be thorough - update specific parts that need correction, preserve parts that are still accurate
 - Analyze ALL sections in the batch - return one analysis per section
+- **Don't skip sections that mention old/incorrect information** - they need to be edited
 """
                 
                 try:

@@ -247,7 +247,7 @@ const RoomChat = () => {
           <Typography variant="subtitle1">
             {currentRoom.display_name || currentRoom.room_name}
           </Typography>
-          {otherParticipants.length > 0 && (
+          {!currentRoom.team_id && otherParticipants.length > 0 && (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
               <PresenceIndicator
                 status={presence[otherParticipants[0].user_id]?.status || 'offline'}

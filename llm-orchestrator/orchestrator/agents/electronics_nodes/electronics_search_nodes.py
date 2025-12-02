@@ -141,6 +141,15 @@ class ElectronicsSearchNodes:
             metadata = state.get("metadata", {})
             user_id = state.get("user_id", "")
             
+            # Check if this is a retry (re-search) - increment counter if so
+            search_retry_count = state.get("search_retry_count", 0)
+            has_previous_quality_assessment = bool(state.get("search_quality_assessment"))
+            
+            if has_previous_quality_assessment:
+                # This is a retry - increment counter
+                search_retry_count += 1
+                logger.info(f"🔌 Re-search attempt {search_retry_count} - refining queries based on previous results")
+            
             # Extract project context
             shared_memory = metadata.get("shared_memory", {})
             active_editor = shared_memory.get("active_editor", {})
@@ -191,7 +200,8 @@ class ElectronicsSearchNodes:
             
             return {
                 "search_queries": search_queries,
-                "query_expansion_used": result_dict.get("query_expansion_used", False)
+                "query_expansion_used": result_dict.get("query_expansion_used", False),
+                "search_retry_count": search_retry_count
             }
             
         except Exception as e:

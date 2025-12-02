@@ -48,7 +48,7 @@
     "reactflow": "^11.10.1"
   },
   "scripts": {
-    "prebuild": "node ../scripts/update_package_version.js",
+    "prebuild": "node scripts/update_version_if_available.js",
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",

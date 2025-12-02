@@ -23,6 +23,9 @@ import {
 import {
   Close,
   Add,
+  Fullscreen,
+  FullscreenExit,
+  ChatBubbleOutline,
 } from '@mui/icons-material';
 import { useMessaging } from '../../contexts/MessagingContext';
 import PresenceIndicator from './PresenceIndicator';
@@ -43,6 +46,8 @@ const MessagingDrawer = () => {
     currentRoomId,
     presence,
     deleteRoom,
+    isMessagingFullScreen,
+    toggleFullScreen,
   } = useMessaging();
 
   const [showCreateRoom, setShowCreateRoom] = useState(false);
@@ -107,22 +112,10 @@ const MessagingDrawer = () => {
     setShowAddParticipantModal(true);
   };
 
-  return (
+  // Room list component (reusable for both drawer and full-screen modes)
+  const RoomList = ({ showHeader = true }) => (
     <>
-      {/* Messaging drawer */}
-      <Drawer
-        anchor="right"
-        open={isDrawerOpen}
-        onClose={closeDrawer}
-        PaperProps={{
-          sx: {
-            width: { xs: '100%', sm: 400, md: 480 },
-            display: 'flex',
-            flexDirection: 'column',
-          },
-        }}
-      >
-        {/* Header */}
+      {showHeader && (
         <Box
           sx={{
             p: 2,
@@ -140,6 +133,20 @@ const MessagingDrawer = () => {
                 <Add />
               </IconButton>
             </Tooltip>
+            {!isMessagingFullScreen && (
+              <Tooltip title="Full Screen">
+                <IconButton size="small" onClick={toggleFullScreen}>
+                  <Fullscreen />
+                </IconButton>
+              </Tooltip>
+            )}
+            {isMessagingFullScreen && (
+              <Tooltip title="Exit Full Screen">
+                <IconButton size="small" onClick={toggleFullScreen}>
+                  <FullscreenExit />
+                </IconButton>
+              </Tooltip>
+            )}
             <Tooltip title="Close">
               <IconButton size="small" onClick={closeDrawer}>
                 <Close />
@@ -147,74 +154,199 @@ const MessagingDrawer = () => {
             </Tooltip>
           </Box>
         </Box>
-
-        {/* Content */}
-        {currentRoomId ? (
-          <RoomChat />
-        ) : (
-          <Box sx={{ flex: 1, overflow: 'auto' }}>
-            <List>
-              {rooms.length === 0 ? (
-                <ListItem>
-                  <ListItemText
-                    primary="No conversations yet"
-                    secondary="Start a new conversation to get started"
-                  />
-                </ListItem>
-              ) : (
-                rooms.map((room) => {
-                  const otherUser = room.participants?.find(p => p.user_id !== room.created_by);
-                  const displayName = room.display_name || room.room_name || 'Unnamed Room';
-                  const userStatus = otherUser ? getUserPresence(otherUser.user_id) : 'offline';
-                  
-                  return (
-                    <ListItemButton
-                      key={room.room_id}
-                      onClick={() => selectRoom(room.room_id)}
-                      onContextMenu={(e) => handleContextMenu(e, room)}
-                      selected={currentRoomId === room.room_id}
-                    >
-                      <ListItemAvatar>
-                        <Box sx={{ position: 'relative' }}>
-                          <Avatar>
-                            {displayName.charAt(0).toUpperCase()}
-                          </Avatar>
-                          <Box
-                            sx={{
-                              position: 'absolute',
-                              bottom: 0,
-                              right: 0,
-                            }}
-                          >
-                            <PresenceIndicator
-                              status={userStatus}
-                              size="small"
-                              showTooltip={false}
-                            />
-                          </Box>
+      )}
+      <Box sx={{ flex: 1, overflow: 'auto' }}>
+        <List>
+          {rooms.length === 0 ? (
+            <ListItem>
+              <ListItemText
+                primary="No conversations yet"
+                secondary="Start a new conversation to get started"
+              />
+            </ListItem>
+          ) : (
+            rooms.map((room) => {
+              const otherUser = room.participants?.find(p => p.user_id !== room.created_by);
+              const displayName = room.display_name || room.room_name || 'Unnamed Room';
+              const userStatus = otherUser ? getUserPresence(otherUser.user_id) : 'offline';
+              const isTeamRoom = !!room.team_id;
+              
+              return (
+                <ListItemButton
+                  key={room.room_id}
+                  onClick={() => selectRoom(room.room_id)}
+                  onContextMenu={(e) => handleContextMenu(e, room)}
+                  selected={currentRoomId === room.room_id}
+                >
+                  <ListItemAvatar>
+                    <Box sx={{ position: 'relative' }}>
+                      <Avatar>
+                        {displayName.charAt(0).toUpperCase()}
+                      </Avatar>
+                      {!isTeamRoom && (
+                        <Box
+                          sx={{
+                            position: 'absolute',
+                            bottom: 0,
+                            right: 0,
+                          }}
+                        >
+                          <PresenceIndicator
+                            status={userStatus}
+                            size="small"
+                            showTooltip={false}
+                          />
                         </Box>
-                      </ListItemAvatar>
-                      <ListItemText
-                        primary={
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            <Typography variant="body1" noWrap sx={{ flex: 1 }}>
-                              {displayName}
-                            </Typography>
-                            {room.unread_count > 0 && (
-                              <Badge badgeContent={room.unread_count} color="error" />
-                            )}
-                          </Box>
-                        }
-                        secondary={formatLastMessage(room.last_message_at)}
-                      />
-                    </ListItemButton>
-                  );
-                })
-              )}
-            </List>
+                      )}
+                    </Box>
+                  </ListItemAvatar>
+                  <ListItemText
+                    primary={
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <Typography variant="body1" noWrap sx={{ flex: 1 }}>
+                          {displayName}
+                        </Typography>
+                        {room.unread_count > 0 && (
+                          <Badge badgeContent={room.unread_count} color="error" />
+                        )}
+                      </Box>
+                    }
+                    secondary={formatLastMessage(room.last_message_at)}
+                  />
+                </ListItemButton>
+              );
+            })
+          )}
+        </List>
+      </Box>
+    </>
+  );
+
+  // Empty state component for when no room is selected in full-screen mode
+  const EmptyChatState = () => (
+    <Box
+      sx={{
+        flex: 1,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 2,
+        p: 4,
+      }}
+    >
+      <ChatBubbleOutline sx={{ fontSize: 64, color: 'text.secondary', opacity: 0.5 }} />
+      <Typography variant="h6" color="text.secondary">
+        Select a conversation to start chatting
+      </Typography>
+    </Box>
+  );
+
+  return (
+    <>
+      {/* Full-screen mode */}
+      {isDrawerOpen && isMessagingFullScreen && (
+        <Box
+          sx={{
+            position: 'fixed',
+            right: 0,
+            top: '66px',
+            height: { xs: 'calc(var(--appvh, 100vh) - 66px)', md: 'calc(100dvh - 66px)' },
+            width: '100vw',
+            backgroundColor: 'background.paper',
+            borderLeft: '1px solid',
+            borderColor: 'divider',
+            zIndex: 1200,
+            boxShadow: 'none',
+            display: 'flex',
+            flexDirection: 'row',
+            overflow: 'hidden',
+          }}
+        >
+          {/* Left panel - Room List */}
+          <Box
+            sx={{
+              width: 350,
+              display: 'flex',
+              flexDirection: 'column',
+              borderRight: 1,
+              borderColor: 'divider',
+              backgroundColor: 'background.paper',
+            }}
+          >
+            <RoomList showHeader={true} />
           </Box>
-        )}
-      </Drawer>
+
+          {/* Right panel - Chat Area */}
+          <Box
+            sx={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              overflow: 'hidden',
+            }}
+          >
+            {currentRoomId ? (
+              <RoomChat />
+            ) : (
+              <EmptyChatState />
+            )}
+          </Box>
+        </Box>
+      )}
+
+      {/* Drawer mode */}
+      {isDrawerOpen && !isMessagingFullScreen && (
+        <Drawer
+          anchor="right"
+          open={isDrawerOpen}
+          onClose={closeDrawer}
+          PaperProps={{
+            sx: {
+              width: { xs: '100%', sm: 400, md: 480 },
+              display: 'flex',
+              flexDirection: 'column',
+            },
+          }}
+        >
+          {currentRoomId ? (
+            <>
+              <Box
+                sx={{
+                  p: 2,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  borderBottom: 1,
+                  borderColor: 'divider',
+                }}
+              >
+                <Typography variant="h6">Messages</Typography>
+                <Box>
+                  <Tooltip title="New Conversation">
+                    <IconButton size="small" onClick={() => setShowCreateRoom(true)}>
+                      <Add />
+                    </IconButton>
+                  </Tooltip>
+                  <Tooltip title="Full Screen">
+                    <IconButton size="small" onClick={toggleFullScreen}>
+                      <Fullscreen />
+                    </IconButton>
+                  </Tooltip>
+                  <Tooltip title="Close">
+                    <IconButton size="small" onClick={closeDrawer}>
+                      <Close />
+                    </IconButton>
+                  </Tooltip>
+                </Box>
+              </Box>
+              <RoomChat />
+            </>
+          ) : (
+            <RoomList showHeader={true} />
+          )}
+        </Drawer>
+      )}
 
       {/* Create Room Modal */}
       <CreateRoomModal 

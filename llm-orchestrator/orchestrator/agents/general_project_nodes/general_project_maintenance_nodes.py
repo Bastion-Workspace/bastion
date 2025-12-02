@@ -85,22 +85,33 @@ class GeneralProjectMaintenanceNodes:
                         continue
                     
                     # Resolve document_id from file path
+                    # CRITICAL: Only work with files that are referenced in the project plan frontmatter
+                    # We do NOT work with files that aren't referenced - they should be created first via content routing
                     doc_id = None
                     
                     # Try to find document_id from referenced_context
+                    # referenced_context is structured as: {"specifications": [files], "design": [files], ...}
                     for category, file_list in referenced_context.items():
                         if isinstance(file_list, list):
                             for file_doc in file_list:
                                 if isinstance(file_doc, dict):
-                                    filename = file_doc.get("filename", "")
-                                    if file_path in filename or filename in file_path:
-                                        doc_id = file_doc.get("document_id")
+                                    file_filename = file_doc.get("filename", "")
+                                    file_doc_id = file_doc.get("document_id")
+                                    
+                                    # Match by filename (exact or partial)
+                                    if (file_path == file_filename or 
+                                        file_path.endswith(file_filename) or 
+                                        file_filename.endswith(file_path) or
+                                        file_path in file_filename or
+                                        file_filename in file_path):
+                                        doc_id = file_doc_id
+                                        logger.info(f"Found {file_path} in referenced files ({category} category, document_id: {doc_id})")
                                         break
-                        if doc_id:
-                            break
+                            if doc_id:
+                                break
                     
                     if not doc_id:
-                        logger.warning(f"Could not resolve document_id for {file_path} - skipping")
+                        logger.warning(f"File {file_path} is not referenced in project plan frontmatter - skipping maintenance operation. Files must be created and referenced before maintenance operations can be performed.")
                         continue
                     
                     # Get existing content

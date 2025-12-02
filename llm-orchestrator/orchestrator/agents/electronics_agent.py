@@ -71,6 +71,7 @@ class ElectronicsState(TypedDict):
     information_needs: Optional[Dict[str, Any]]  # NEW: Analysis of what information is needed
     search_queries: List[Dict[str, Any]]  # NEW: Project-aware search queries
     search_quality_assessment: Optional[Dict[str, Any]]  # NEW: Quality assessment of search results
+    search_retry_count: int  # Counter to prevent infinite re-search loops
     project_plan_action: Optional[str]  # "create", "open", "plan", or None
     project_structure_plan: Optional[Dict[str, Any]]  # LLM-generated plan for project files and structure
     response: Dict[str, Any]
@@ -399,6 +400,8 @@ class ElectronicsAgent(BaseAgent):
         needs_web_search = quality_result.get("needs_web_search", False)
         should_re_search = quality_result.get("should_re_search", False)
         web_search_explicit = state.get("web_search_explicit", False)
+        search_retry_count = state.get("search_retry_count", 0)
+        max_search_retries = 3  # Maximum number of re-search attempts
         
         # Check for verification keywords in query
         query = state.get("query", "").lower()
@@ -413,8 +416,12 @@ class ElectronicsAgent(BaseAgent):
         is_simple_query = self._is_simple_query(query) or len(query.split()) <= 5
         quality_threshold = 0.65 if is_simple_query else 0.75  # Lower threshold for simple queries
         
+        # Prevent infinite re-search loops
         if should_re_search and quality_score < 0.5:
-            logger.info(f"🔌 Low quality results (score: {quality_score:.2f}) - re-searching with refined queries")
+            if search_retry_count >= max_search_retries:
+                logger.warning(f"🔌 Max search retries ({max_search_retries}) reached (score: {quality_score:.2f}) - routing to web search")
+                return "perform_web_search"
+            logger.info(f"🔌 Low quality results (score: {quality_score:.2f}, retry {search_retry_count + 1}/{max_search_retries}) - re-searching with refined queries")
             return "re_search"
         elif needs_web_search or web_search_explicit:
             # Web search is automatic - no permission required
@@ -446,6 +453,26 @@ class ElectronicsAgent(BaseAgent):
         query = state.get("query", "").lower()
         project_plan_action = state.get("project_plan_action")
         
+        # Check for change indicators that suggest corrections/revisions
+        change_indicators = [
+            'instead of', 'replace', 'switch from', 'change', 'actually',
+            'wrong', 'should be', 'not anymore', 'remove', 'delete',
+            'update', 'correct', 'no longer',
+            # Wrong path indicators
+            'not that way', 'different approach', 'actually no', "that won't work",
+            'that doesn\'t work', 'not going that route', 'wrong direction',
+            # Conceptual changes
+            'changed my mind', 'better to', 'prefer', 'rather',
+            'not using', 'abandon', 'scrap', 'forget about',
+            # Correction phrases
+            'correction', 'fix', 'mistake', 'error', 'incorrect',
+            'not correct', 'that\'s wrong', 'that is wrong',
+            # Direction changes
+            'going with', 'switching to', 'moving to', 'changing to',
+            'revised', 'revision', 'updated approach'
+        ]
+        has_corrections = any(indicator in query for indicator in change_indicators)
+        
         # Check if query involves decisions (component selection, design choices, etc.)
         involves_decisions = any(keyword in query for keyword in [
             "use", "select", "choose", "decide", "replace", "change", "switch",
@@ -469,9 +496,14 @@ class ElectronicsAgent(BaseAgent):
             should_save = True
             logger.info("🔌 Query indicates content should be saved")
         
-        # Extract decisions if query involves decision-making, then verify documentation
-        if should_save and involves_decisions:
-            logger.info("🔌 Query involves decisions - routing to extract_decisions")
+        # Route to extract_decisions (which leads to verification) when:
+        # 1. Corrections are detected (to ensure cleanup happens)
+        # 2. Query involves decision-making
+        if should_save and (has_corrections or involves_decisions):
+            if has_corrections:
+                logger.info("🔌 Corrections detected - routing to extract_decisions for verification")
+            else:
+                logger.info("🔌 Query involves decisions - routing to extract_decisions")
             return "extract_decisions"
         elif should_save:
             logger.info("🔌 Routing to extract_and_route_content")
@@ -1917,6 +1949,7 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 "should_search": False,
                 "has_explicit_search": False,
                 "documents": [],
+                "segments": [],
                 "referenced_context": {
                     "components": [],
                     "protocols": [],
@@ -1924,6 +1957,10 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     "specifications": [],
                     "other": []
                 },
+                "information_needs": None,
+                "search_queries": [],
+                "search_quality_assessment": None,
+                "search_retry_count": 0,
                 "has_project_plan": False,
                 "project_plan_needed": False,
                 "project_plan_action": None,
@@ -1988,6 +2025,11 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     except (json.JSONDecodeError, ValueError):
                         # Not valid JSON, use as-is
                         pass
+                
+                # Append cleanup summary if available (from save_content_node)
+                cleanup_summary = result_state.get("cleanup_summary")
+                if cleanup_summary:
+                    response_text = f"{response_text}\n\n{cleanup_summary}"
                 
                 # Build final response with only allowed keys
                 final_response = {

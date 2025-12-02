@@ -29,6 +29,15 @@ export const MessagingProvider = ({ children }) => {
   const [presence, setPresence] = useState({}); // user_id -> presence info
   const [unreadCounts, setUnreadCounts] = useState({}); // room_id -> count
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
+  const [isMessagingFullScreen, setIsMessagingFullScreen] = useState(() => {
+    try {
+      const saved = localStorage.getItem('messagingFullScreen');
+      return saved !== null ? JSON.parse(saved) : false;
+    } catch (error) {
+      console.error('Failed to load messaging full-screen state from localStorage:', error);
+      return false;
+    }
+  });
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
   
@@ -345,6 +354,33 @@ export const MessagingProvider = ({ children }) => {
   }, []);
 
   // =====================
+  // FULL-SCREEN MANAGEMENT
+  // =====================
+
+  const toggleFullScreen = useCallback(() => {
+    setIsMessagingFullScreen(prev => !prev);
+  }, []);
+
+  // Load full-screen preference from localStorage
+  useEffect(() => {
+    const savedFullScreen = localStorage.getItem('messagingFullScreen');
+    if (savedFullScreen !== null) {
+      setIsMessagingFullScreen(JSON.parse(savedFullScreen));
+    }
+    // Auto-disable full-screen on small screens
+    try {
+      if (window && window.matchMedia && window.matchMedia('(max-width: 900px)').matches) {
+        setIsMessagingFullScreen(false);
+      }
+    } catch {}
+  }, []);
+
+  // Save full-screen preference to localStorage
+  useEffect(() => {
+    localStorage.setItem('messagingFullScreen', JSON.stringify(isMessagingFullScreen));
+  }, [isMessagingFullScreen]);
+
+  // =====================
   // COMPUTED VALUES
   // =====================
 
@@ -487,6 +523,7 @@ export const MessagingProvider = ({ children }) => {
     unreadCounts,
     totalUnreadCount,
     isDrawerOpen,
+    isMessagingFullScreen,
     isLoading,
     error,
     
@@ -517,6 +554,10 @@ export const MessagingProvider = ({ children }) => {
     toggleDrawer,
     openDrawer,
     closeDrawer,
+    
+    // Full-screen management
+    setIsMessagingFullScreen,
+    toggleFullScreen,
   };
 
   return (
