@@ -418,7 +418,7 @@ Models are configurable in the chat sidebar dropdown.
   - Automatic enforcement: Database-level policies prevent unauthorized access even if application logic fails
 - **Path Traversal Protection**: Filename sanitization prevents directory traversal attacks
 - **Authorization Checks**: All document endpoints verify user access before operations
-- **Password Requirements**: Minimum 8 characters enforced
+- **Password Requirements**: Minimum 8 characters enforced at API level (user creation and password changes)
 - **Parameterized Queries**: All database queries use parameterized statements to prevent SQL injection
 
 ## Monitoring & Observability
