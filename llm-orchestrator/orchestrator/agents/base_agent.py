@@ -152,20 +152,23 @@ class BaseAgent:
         self, 
         workflow: Any, 
         config: Dict[str, Any], 
-        new_messages: List[Any]
+        new_messages: List[Any],
+        look_back_limit: int = 6
     ) -> List[Any]:
         """
         Load checkpointed messages and merge with new messages
         
         This ensures conversation history is preserved across requests.
+        Uses a standardized look-back limit (default 6 messages) to keep context manageable.
         
         Args:
             workflow: Compiled LangGraph workflow
             config: Checkpoint configuration with thread_id
             new_messages: New messages to add (typically just the current query)
+            look_back_limit: Maximum number of previous messages to keep (default: 6)
             
         Returns:
-            Merged list of messages with checkpointed history + new messages
+            Merged list of messages with checkpointed history + new messages (limited to look_back_limit)
         """
         try:
             # Try to load existing checkpoint state
@@ -176,7 +179,14 @@ class BaseAgent:
                 checkpointed_messages = checkpoint_state.values.get("messages", [])
                 
                 if checkpointed_messages:
-                    logger.info(f"📚 Loaded {len(checkpointed_messages)} messages from checkpoint")
+                    # Apply look-back limit: keep only the last N messages
+                    # This ensures we have recent context without overwhelming the LLM
+                    if len(checkpointed_messages) > look_back_limit:
+                        checkpointed_messages = checkpointed_messages[-look_back_limit:]
+                        logger.info(f"📚 Loaded {len(checkpointed_messages)} messages from checkpoint (limited from larger history)")
+                    else:
+                        logger.info(f"📚 Loaded {len(checkpointed_messages)} messages from checkpoint")
+                    
                     # Merge: use checkpointed messages + new messages
                     # Filter out duplicates by checking if the last checkpointed message matches the first new message
                     merged_messages = list(checkpointed_messages)
@@ -193,6 +203,10 @@ class BaseAgent:
                         
                         if not is_duplicate:
                             merged_messages.append(new_msg)
+                    
+                    # Apply look-back limit to final merged messages too
+                    if len(merged_messages) > look_back_limit:
+                        merged_messages = merged_messages[-look_back_limit:]
                     
                     return merged_messages
                 else:
@@ -249,6 +263,71 @@ class BaseAgent:
         except Exception as e:
             logger.error(f"Failed to extract conversation history: {e}")
             return []
+    
+    def _format_conversation_history_for_prompt(
+        self, 
+        messages: List[Any], 
+        look_back_limit: int = 6,
+        max_message_length: int = 500
+    ) -> str:
+        """
+        Format conversation history as a string for inclusion in prompts
+        
+        **STANDARDIZED METHOD FOR ALL AGENTS** - Use this to include conversation context in prompts.
+        This ensures consistent conversation history handling across all agents with a standardized
+        6-message look-back limit.
+        
+        **Usage in agents:**
+        ```python
+        # In your prompt building code:
+        messages = state.get("messages", [])
+        conversation_history = self._format_conversation_history_for_prompt(messages, look_back_limit=6)
+        if conversation_history:
+            context_parts.append(conversation_history)
+        ```
+        
+        Args:
+            messages: List of LangChain messages from state (typically state.get("messages", []))
+            look_back_limit: Maximum number of messages to include (default: 6, standardized across all agents)
+            max_message_length: Maximum length per message to include (default: 500 chars)
+            
+        Returns:
+            Formatted conversation history string with "=== CONVERSATION HISTORY ===" header,
+            or empty string if no history available. Ready to append to context_parts.
+        """
+        if not messages or len(messages) <= 1:
+            return ""
+        
+        try:
+            # Get last N messages (standardized look-back)
+            recent_messages = messages[-look_back_limit:] if len(messages) > look_back_limit else messages
+            
+            history_parts = ["=== CONVERSATION HISTORY ===\n"]
+            for msg in recent_messages:
+                if hasattr(msg, 'content') and msg.content:
+                    # Determine role
+                    if isinstance(msg, HumanMessage):
+                        role = "USER"
+                    elif isinstance(msg, AIMessage):
+                        role = "ASSISTANT"
+                    elif isinstance(msg, SystemMessage):
+                        role = "SYSTEM"
+                    else:
+                        role = "UNKNOWN"
+                    
+                    # Truncate long messages
+                    content = msg.content
+                    if len(content) > max_message_length:
+                        content = content[:max_message_length] + "..."
+                    
+                    history_parts.append(f"{role}: {content}\n")
+            
+            history_parts.append("\n")
+            return "".join(history_parts)
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to format conversation history: {e}")
+            return ""
     
     def _prepare_messages_with_query(self, messages: Optional[List[Any]], query: str) -> List[Any]:
         """
@@ -438,8 +517,9 @@ class BaseAgent:
         except json.JSONDecodeError as e:
             logger.warning(f"Failed to parse JSON response: {e}")
             # Return the raw content wrapped in a simple structure
+            # Use "response" key to match what agents expect
             return {
-                "message": content if content else "I apologize, but I didn't receive a valid response.",
+                "response": content if content else "I apologize, but I didn't receive a valid response.",
                 "task_status": "complete",
                 "parsing_fallback": True
             }
@@ -488,7 +568,13 @@ class BaseAgent:
             # Default to professional for unknown styles
             return """COMMUNICATION STYLE: Professional, clear, and respectful. Maintain a helpful and courteous tone."""
     
-    async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
+    async def process(
+        self, 
+        query: str, 
+        metadata: Dict[str, Any] = None, 
+        messages: List[Any] = None,
+        cancellation_token: Optional[asyncio.Event] = None
+    ) -> Dict[str, Any]:
         """
         Process agent request - to be implemented by subclasses
         
@@ -496,9 +582,152 @@ class BaseAgent:
             query: User query string
             metadata: Optional metadata dictionary (persona, editor context, etc.)
             messages: Optional conversation history
+            cancellation_token: Optional asyncio.Event that will be set when cancellation is requested
             
         Returns:
             Dictionary with agent response
         """
         raise NotImplementedError("Subclasses must implement process() method")
+    
+    async def process_with_cancellation(
+        self,
+        query: str,
+        metadata: Dict[str, Any] = None,
+        messages: List[Any] = None,
+        cancellation_token: Optional[asyncio.Event] = None
+    ) -> Dict[str, Any]:
+        """
+        Process agent request with cancellation support
+        
+        This method wraps the standard process() method and adds:
+        - Checkpoint save before processing
+        - Checkpoint restore on cancellation
+        - Cancellation checks during workflow execution
+        
+        Args:
+            query: User query string
+            metadata: Optional metadata dictionary
+            messages: Optional conversation history
+            cancellation_token: asyncio.Event that will be set when cancellation is requested
+            
+        Returns:
+            Dictionary with agent response or cancellation error
+        """
+        if cancellation_token is None:
+            # No cancellation support - use standard process
+            return await self.process(query, metadata, messages)
+        
+        try:
+            # Get workflow and config
+            workflow = await self._get_workflow()
+            config = self._get_checkpoint_config(metadata)
+            
+            # Save checkpoint state BEFORE starting (for restoration on cancellation)
+            pre_checkpoint_state = await workflow.aget_state(config)
+            pre_checkpoint_id = None
+            if pre_checkpoint_state and pre_checkpoint_state.config:
+                pre_checkpoint_id = pre_checkpoint_state.config.get("checkpoint_id")
+            
+            logger.info(f"💾 Saved pre-processing checkpoint: {pre_checkpoint_id}")
+            
+            # Process with cancellation checks
+            result = await self._process_with_cancellation_checks(
+                query, metadata, messages, cancellation_token, workflow, config
+            )
+            
+            return result
+            
+        except asyncio.CancelledError:
+            logger.info(f"🛑 {self.agent_type} cancelled - restoring checkpoint")
+            await self._restore_checkpoint(workflow, config, pre_checkpoint_id)
+            return self._create_error_response("Operation cancelled by user", TaskStatus.INCOMPLETE)
+        except Exception as e:
+            logger.error(f"❌ {self.agent_type} error: {e}")
+            return self._create_error_response(str(e))
+    
+    async def _process_with_cancellation_checks(
+        self,
+        query: str,
+        metadata: Dict[str, Any],
+        messages: List[Any],
+        cancellation_token: asyncio.Event,
+        workflow: Any,
+        config: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Internal method to process with cancellation checks using astream
+        
+        Uses astream() instead of ainvoke() to allow cancellation checks between chunks.
+        """
+        # Check cancellation before starting
+        if cancellation_token.is_set():
+            raise asyncio.CancelledError("Cancellation requested before processing")
+        
+        # Use standard process for now - will enhance with astream later
+        # For now, we'll check cancellation token periodically in a wrapper
+        process_task = asyncio.create_task(
+            self.process(query, metadata, messages)
+        )
+        
+        # Wait for either completion or cancellation
+        done, pending = await asyncio.wait(
+            [process_task, asyncio.create_task(cancellation_token.wait())],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+        
+        # Cancel pending tasks
+        for task in pending:
+            task.cancel()
+        
+        # Check if cancellation was requested
+        if cancellation_token.is_set():
+            process_task.cancel()
+            try:
+                await process_task
+            except asyncio.CancelledError:
+                pass
+            raise asyncio.CancelledError("Operation cancelled")
+        
+        # Return result
+        return await process_task
+    
+    async def _restore_checkpoint(
+        self,
+        workflow: Any,
+        config: Dict[str, Any],
+        checkpoint_id: Optional[str]
+    ):
+        """
+        Handle checkpoint restoration on cancellation
+        
+        Note: LangGraph checkpoints are automatically saved during workflow execution.
+        On cancellation, we can't directly "delete" checkpoints, but we can:
+        1. Log the cancellation checkpoint ID for reference
+        2. The next workflow invocation will naturally use the last valid checkpoint
+        3. Any partial state from the cancelled run will be in the checkpoint system
+        
+        The key is that we don't save the user message to the conversation database
+        until after successful completion, so cancellation means no conversation update.
+        
+        Args:
+            workflow: LangGraph workflow instance
+            config: Checkpoint configuration
+            checkpoint_id: Checkpoint ID before processing started
+        """
+        try:
+            if checkpoint_id:
+                logger.info(f"🔄 Cancellation checkpoint reference: {checkpoint_id}")
+            
+            # Get current state to see what was saved
+            current_state = await workflow.aget_state(config)
+            if current_state and current_state.config:
+                current_checkpoint_id = current_state.config.get("checkpoint_id")
+                logger.info(f"📋 Current checkpoint after cancellation: {current_checkpoint_id}")
+            
+            # Note: The checkpoint system will naturally use the last valid checkpoint
+            # on the next invocation. We don't need to manually delete anything.
+            # The important part is that we don't save conversation messages on cancellation.
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to handle checkpoint restoration: {e}")
 

@@ -1340,6 +1340,59 @@ class BackendToolClient:
         except Exception as e:
             logger.error(f"Unexpected error in cache search: {e}")
             return {'cache_hit': False, 'entries': []}
+    
+    # ===== Conversation Operations =====
+    
+    async def update_conversation_title(
+        self,
+        conversation_id: str,
+        title: str,
+        user_id: str = "system"
+    ) -> Dict[str, Any]:
+        """
+        Update conversation title
+        
+        Args:
+            conversation_id: Conversation ID to update
+            title: New title
+            user_id: User ID (required - must match conversation owner)
+        
+        Returns:
+            Dict with success, conversation_id, title, and message
+        """
+        try:
+            await self._ensure_connected()
+            
+            request = tool_service_pb2.UpdateConversationTitleRequest(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                title=title
+            )
+            
+            response = await self._stub.UpdateConversationTitle(request)
+            
+            return {
+                "success": response.success,
+                "conversation_id": response.conversation_id,
+                "title": response.title,
+                "message": response.message,
+                "error": response.error if hasattr(response, 'error') and response.error else None
+            }
+            
+        except grpc.RpcError as e:
+            logger.error(f"Update conversation title failed: {e.code()} - {e.details()}")
+            return {
+                "success": False,
+                "error": f"{e.code()}: {e.details()}",
+                "message": "Failed to update conversation title"
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error updating conversation title: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "message": "Failed to update conversation title"
+            }
 
 
 # Global client instance

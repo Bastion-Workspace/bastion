@@ -127,7 +127,8 @@ async def load_file_by_path(
         # Get full content
         content = await get_document_content_tool(document_id, user_id)
         
-        if not content or "Document not found" in content or "Error" in content:
+        # Check for SPECIFIC error messages from get_document_content_tool, not arbitrary "Error" in content
+        if not content or content.startswith("Document not found:") or content.startswith("Error getting document content:"):
             logger.warning(f"⚠️ Could not load content for document: {document_id}")
             return None
         

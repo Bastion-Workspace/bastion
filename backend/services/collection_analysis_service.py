@@ -541,7 +541,7 @@ class CollectionAnalysisService:
             
             # Create meta-summary prompt
             system_prompt = add_datetime_context_to_system_prompt(
-                """You are Codex, an AI assistant specialized in analyzing large document collections. You are creating a comprehensive overview of a document collection based on individual document summaries.
+                """You are Alex, an AI assistant specialized in analyzing large document collections. You are creating a comprehensive overview of a document collection based on individual document summaries.
 
 Your task is to:
 1. Identify overarching themes and patterns across all documents
@@ -626,7 +626,7 @@ Structure your response with clear sections and use markdown formatting for read
             from utils.system_prompt_utils import add_datetime_context_to_system_prompt
             
             system_prompt = add_datetime_context_to_system_prompt(
-                """You are Codex, an AI assistant specialized in temporal analysis of document collections. You excel at identifying patterns, trends, and insights across time periods.
+                """You are Alex, an AI assistant specialized in temporal analysis of document collections. You excel at identifying patterns, trends, and insights across time periods.
 
 Your task is to analyze a collection of documents with temporal information and provide comprehensive insights about:
 1. Communication patterns and volume trends over time

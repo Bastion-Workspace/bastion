@@ -775,31 +775,45 @@ class RulesEditingAgent(BaseAgent):
                 "error": str(e)
             }
     
-    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
         """Process rules editing query using LangGraph workflow"""
         try:
-            # Extract query from state
-            messages = state.get("messages", [])
-            query = ""
-            if messages:
-                latest_message = messages[-1]
-                query = latest_message.content if hasattr(latest_message, 'content') else str(latest_message)
-            else:
-                query = state.get("query", "")
-            
             logger.info(f"Rules editing agent processing: {query[:100]}...")
             
-            shared_memory = state.get("shared_memory", {}) or {}
-            metadata = state.get("metadata", {}) or {}
-            user_id = state.get("user_id", metadata.get("user_id", "system"))
+            # Extract user_id and shared_memory from metadata
+            metadata = metadata or {}
+            user_id = metadata.get("user_id", "system")
+            shared_memory = metadata.get("shared_memory", {}) or {}
+            
+            # Prepare new messages (current query)
+            new_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Get workflow to access checkpoint
+            workflow = await self._get_workflow()
+            config = self._get_checkpoint_config(metadata)
+            
+            # Load and merge checkpointed messages to preserve conversation history
+            conversation_messages = await self._load_and_merge_checkpoint_messages(
+                workflow, config, new_messages
+            )
+            
+            # Load shared_memory from checkpoint if available
+            checkpoint_state = await workflow.aget_state(config)
+            existing_shared_memory = {}
+            if checkpoint_state and checkpoint_state.values:
+                existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+            
+            # Merge shared_memory: start with checkpoint, then update with NEW data (so new active_editor overwrites old)
+            shared_memory_merged = existing_shared_memory.copy()
+            shared_memory_merged.update(shared_memory)  # New data (including updated active_editor) takes precedence
             
             # Initialize state for LangGraph workflow
             initial_state: RulesEditingState = {
                 "query": query,
                 "user_id": user_id,
                 "metadata": metadata,
-                "messages": messages,
-                "shared_memory": shared_memory,
+                "messages": conversation_messages,
+                "shared_memory": shared_memory_merged,
                 "active_editor": {},
                 "rules": "",
                 "filename": "rules.md",
@@ -821,18 +835,6 @@ class RulesEditingAgent(BaseAgent):
                 "task_status": "",
                 "error": ""
             }
-            
-            # Get workflow (lazy initialization with checkpointer)
-            workflow = await self._get_workflow()
-            
-            # Get checkpoint config
-            config = self._get_checkpoint_config(metadata)
-            
-            # Load checkpointed messages and merge with new messages
-            merged_messages = await self._load_and_merge_checkpoint_messages(
-                workflow, config, messages
-            )
-            initial_state["messages"] = merged_messages
             
             # Invoke LangGraph workflow with checkpointing
             final_state = await workflow.ainvoke(initial_state, config=config)

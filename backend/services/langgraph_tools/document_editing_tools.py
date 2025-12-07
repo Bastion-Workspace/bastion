@@ -384,6 +384,19 @@ async def update_document_content_tool(
             len(new_content.encode('utf-8'))
         )
         
+        # Check if document is exempt from vectorization BEFORE processing
+        is_exempt = await document_service.document_repository.is_document_exempt(document_id)
+        if is_exempt:
+            logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping embedding and KG extraction")
+            await document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
+            await document_service._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+            return {
+                "success": True,
+                "document_id": document_id,
+                "content_length": len(new_content),
+                "message": f"Document content updated successfully ({'appended' if append else 'replaced'}) - exempt from vectorization"
+            }
+        
         # Re-embed the document (trigger reprocessing)
         # Update status to embedding to trigger reprocessing
         await document_service.document_repository.update_status(document_id, ProcessingStatus.EMBEDDING)
@@ -716,6 +729,19 @@ async def apply_operations_directly(
             document_id,
             len(new_content.encode('utf-8'))
         )
+        
+        # Check if document is exempt from vectorization BEFORE processing
+        is_exempt = await document_service.document_repository.is_document_exempt(document_id)
+        if is_exempt:
+            logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping embedding and KG extraction")
+            await document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
+            await document_service._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+            return {
+                "success": True,
+                "document_id": document_id,
+                "applied_count": len(sorted_ops),
+                "message": f"Applied {len(sorted_ops)} operation(s) directly to document - exempt from vectorization"
+            }
         
         # Re-embed the document
         await document_service.document_repository.update_status(document_id, ProcessingStatus.EMBEDDING)

@@ -52,6 +52,45 @@ class ResearchGapAnalysis(BaseModel):
     )
 
 
+class QuickAnswerAssessment(BaseModel):
+    """Structured output for quick answer evaluation - determining if query can be answered from general knowledge"""
+    can_answer_quickly: bool = Field(
+        description="Whether this query can be answered accurately from general knowledge without searching"
+    )
+    confidence: float = Field(
+        description="Confidence in the quick answer (0.0-1.0). Note: Anthropic API doesn't support min/max constraints on number types."
+    )
+    quick_answer: Optional[str] = Field(
+        default=None,
+        description="The quick answer text if can_answer_quickly=true, otherwise None"
+    )
+    reasoning: str = Field(
+        default="",
+        description="Explanation of why this can or cannot be answered quickly"
+    )
+
+
+class QueryTypeDetection(BaseModel):
+    """Structured output for query type detection - determining if query should synthesize or present options"""
+    query_type: Literal["objective", "subjective", "mixed"] = Field(
+        description="Type of query: 'objective' for factual queries that benefit from synthesis, 'subjective' for preference-based queries that benefit from multiple options, 'mixed' for queries that need both"
+    )
+    confidence: float = Field(
+        description="Confidence in the query type classification (0.0-1.0)"
+    )
+    reasoning: str = Field(
+        default="",
+        description="Explanation of why this query type was chosen"
+    )
+    should_present_options: bool = Field(
+        description="Whether to present 2-3 distinct options/approaches instead of synthesizing a single answer"
+    )
+    num_options: Optional[int] = Field(
+        default=3,
+        description="Number of options to present if should_present_options=true (typically 2-3)"
+    )
+
+
 
 
 

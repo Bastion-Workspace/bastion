@@ -56,6 +56,10 @@ class UpdatePresenceRequest(BaseModel):
     status_message: Optional[str] = Field(None, max_length=255, description="Optional status message")
 
 
+class UpdateNotificationSettingsRequest(BaseModel):
+    settings: Dict[str, Any] = Field(..., description="Notification settings (e.g., {'muted': True})")
+
+
 # =====================
 # ROOM ENDPOINTS
 # =====================
@@ -161,6 +165,37 @@ async def update_room_name(
     except Exception as e:
         logger.error(f"❌ Failed to update room name: {e}")
         raise HTTPException(status_code=500, detail="Failed to update room name")
+
+
+@router.put("/rooms/{room_id}/notifications")
+async def update_notification_settings(
+    room_id: str,
+    request: UpdateNotificationSettingsRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Update notification settings for a room"""
+    try:
+        if not settings.MESSAGING_ENABLED:
+            raise HTTPException(status_code=503, detail="Messaging is not enabled")
+        
+        success = await messaging_service.update_notification_settings(
+            room_id=room_id,
+            user_id=current_user.user_id,
+            settings=request.settings
+        )
+        
+        if not success:
+            raise HTTPException(status_code=403, detail="Not authorized or room not found")
+        
+        logger.info(f"🔕 Updated notification settings for room {room_id} by {current_user.username}")
+        
+        return {"success": True, "room_id": room_id, "settings": request.settings}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to update notification settings: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update notification settings")
 
 
 @router.delete("/rooms/{room_id}")

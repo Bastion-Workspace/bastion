@@ -20,6 +20,7 @@ class HelpState(TypedDict):
     user_id: str
     metadata: Dict[str, Any]
     messages: List[Any]
+    shared_memory: Dict[str, Any]
     persona: Optional[Dict[str, Any]]
     system_prompt: str
     conversation_history: List[Dict[str, str]]
@@ -55,7 +56,7 @@ class HelpAgent(BaseAgent):
     
     def _build_help_prompt(self, persona: Optional[Dict[str, Any]] = None) -> str:
         """Build system prompt for help agent with embedded documentation"""
-        ai_name = persona.get("ai_name", "Codex") if persona else "Codex"
+        ai_name = persona.get("ai_name", "Alex") if persona else "Alex"
         persona_style = persona.get("persona_style", "professional") if persona else "professional"
         
         # Build style instruction based on persona_style
@@ -449,9 +450,9 @@ Remember: Be helpful, clear, and practical. Provide actionable guidance that use
                     "response": {}
                 }
             
-            # Call LLM with lower temperature for consistent help responses
+            # Call LLM with lower temperature for consistent help responses - pass state to access user's model selection
             start_time = datetime.now()
-            llm = self._get_llm(temperature=0.3)
+            llm = self._get_llm(temperature=0.3, state=state)
             response = await llm.ainvoke(llm_messages)
             processing_time = (datetime.now() - start_time).total_seconds()
             
@@ -467,6 +468,11 @@ Remember: Be helpful, clear, and practical. Provide actionable guidance that use
             # Add assistant response to messages for checkpoint persistence
             state = self._add_assistant_response_to_messages(state, final_message)
             
+            # Update shared_memory to track agent selection for conversation continuity
+            shared_memory = state.get("shared_memory", {}) or {}
+            shared_memory["primary_agent_selected"] = "help_agent"
+            shared_memory["last_agent"] = "help_agent"
+            
             # Build result
             result = {
                 "response": {
@@ -479,7 +485,8 @@ Remember: Be helpful, clear, and practical. Provide actionable guidance that use
                 "timestamp": datetime.now().isoformat()
                 },
                 "task_status": structured_response.get("task_status", "complete"),
-                "messages": state.get("messages", [])
+                "messages": state.get("messages", []),
+                "shared_memory": shared_memory
             }
             
             logger.info(f"✅ Help response generated in {processing_time:.2f}s (category: {help_category})")
@@ -502,13 +509,38 @@ Remember: Be helpful, clear, and practical. Provide actionable guidance that use
             metadata = metadata or {}
             user_id = metadata.get("user_id", "system")
             
+            # Get workflow (lazy initialization with checkpointer)
+            workflow = await self._get_workflow()
+            
+            # Get checkpoint config (handles thread_id from conversation_id/user_id)
+            config = self._get_checkpoint_config(metadata)
+            
+            # Prepare new messages (current query)
+            new_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Load and merge checkpointed messages to preserve conversation history
+            conversation_messages = await self._load_and_merge_checkpoint_messages(
+                workflow, config, new_messages
+            )
+            
+            # Load shared_memory from checkpoint if available
+            checkpoint_state = await workflow.aget_state(config)
+            existing_shared_memory = {}
+            if checkpoint_state and checkpoint_state.values:
+                existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+            
+            # Merge with any shared_memory from metadata
+            shared_memory = metadata.get("shared_memory", {}) or {}
+            shared_memory.update(existing_shared_memory)
+            metadata["shared_memory"] = shared_memory
+            
             # Initialize state for LangGraph workflow
             initial_state: HelpState = {
                 "query": query,
                 "user_id": user_id,
                 "metadata": metadata,
-                # Add current user query to messages for checkpoint persistence
-                "messages": (list(messages) if messages else []) + [HumanMessage(content=query)] if HumanMessage else messages or [],
+                "messages": conversation_messages,
+                "shared_memory": shared_memory,
                 "persona": None,
                 "system_prompt": "",
                 "conversation_history": [],
@@ -517,10 +549,6 @@ Remember: Be helpful, clear, and practical. Provide actionable guidance that use
                 "task_status": "",
                 "error": ""
             }
-            
-            # Get workflow and checkpoint config
-            workflow = await self._get_workflow()
-            config = self._get_checkpoint_config(metadata)
             
             # Run LangGraph workflow with checkpointing
             result_state = await workflow.ainvoke(initial_state, config=config)

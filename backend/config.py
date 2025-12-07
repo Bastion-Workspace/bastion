@@ -140,9 +140,22 @@ class Settings(BaseSettings):
         "image/jpeg",
         "image/png",
         "image/gif",
-        "image/webp"
+        "image/webp",
+        "audio/mpeg",  # MP3
+        "audio/wav",
+        "audio/wave",
+        "audio/x-wav",
+        "audio/aac",
+        "audio/aacp",
+        "audio/flac",
+        "audio/ogg",
+        "audio/opus",
+        "audio/mp4",  # M4A
+        "audio/x-m4a",
+        "audio/x-ms-wma"
     ]
     MESSAGING_ATTACHMENT_STORAGE_PATH: str = "/app/uploads/messaging"
+    AUDIO_ATTACHMENT_MAX_SIZE: int = 100 * 1024 * 1024  # 100MB
     
     # OCR Configuration
     OCR_LANGUAGES: List[str] = ["eng", "fra", "deu"]

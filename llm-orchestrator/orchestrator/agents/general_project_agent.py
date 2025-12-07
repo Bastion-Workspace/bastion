@@ -6,7 +6,7 @@ Handles general project planning, management, and documentation for non-electron
 import logging
 import json
 import re
-from typing import Dict, Any, List, Optional, TypedDict
+from typing import Dict, Any, List, Optional, TypedDict, Tuple
 
 from langgraph.graph import StateGraph, END
 from .base_agent import BaseAgent, TaskStatus
@@ -61,6 +61,7 @@ class GeneralProjectState(TypedDict):
     metadata: Dict[str, Any]
     messages: List[Any]
     query_type: str
+    query_intent: str  # "informational" or "action" - determined by LLM
     search_needed: bool
     documents: List[Dict[str, Any]]
     segments: List[Dict[str, Any]]
@@ -130,6 +131,8 @@ class GeneralProjectAgent(BaseAgent):
         workflow.add_node("execute_maintenance", self.maintenance_nodes.execute_maintenance_node)
         workflow.add_node("extract_and_route_content", self.content_nodes.extract_and_route_content_node)
         workflow.add_node("save_content", self.save_nodes.save_content_node)
+        workflow.add_node("resolve_plan_operations", self._resolve_plan_operations_node)  # NEW: Resolve plan edits to editor operations
+        workflow.add_node("format_response", self._format_response_node)  # NEW: Format response with editor operations
         
         # Entry point
         workflow.set_entry_point("analyze_intent")
@@ -240,7 +243,23 @@ class GeneralProjectAgent(BaseAgent):
         
         # Extract and route goes to save
         workflow.add_edge("extract_and_route_content", "save_content")
-        workflow.add_edge("save_content", END)
+        
+        # Save content routes conditionally: if editing mode with plan edits, resolve operations; otherwise format response
+        workflow.add_conditional_edges(
+            "save_content",
+            self._route_from_save,
+            {
+                "resolve_operations": "resolve_plan_operations",
+                "format": "format_response",
+                "end": END
+            }
+        )
+        
+        # Resolve operations goes to format response
+        workflow.add_edge("resolve_plan_operations", "format_response")
+        
+        # Format response goes to end
+        workflow.add_edge("format_response", END)
         
         return workflow.compile(checkpointer=checkpointer)
     
@@ -292,6 +311,18 @@ class GeneralProjectAgent(BaseAgent):
             return "plan_execution"
         
         return "load_context"
+    
+    def _route_from_save(self, state: GeneralProjectState) -> str:
+        """Route from save_content: resolve operations if editing mode with plan edits, otherwise format response"""
+        editing_mode = state.get("editing_mode", False)
+        plan_edits = state.get("plan_edits")
+        
+        if editing_mode and plan_edits and len(plan_edits) > 0:
+            return "resolve_operations"
+        elif editing_mode or plan_edits:
+            return "format"
+        else:
+            return "end"
     
     def _route_from_execution_plan(self, state: GeneralProjectState) -> str:
         """Route from execution planning - always load context"""
@@ -435,17 +466,23 @@ class GeneralProjectAgent(BaseAgent):
             "instead of", "design", "architecture", "approach", "requirement"
         ]) or state.get("query_type", "") in ["design", "planning", "requirements"]
         
+        # Use LLM's query_intent decision (set during analyze_intent_node)
+        query_intent = state.get("query_intent", "action")  # Default to action for safety
+        
         should_save = False
         
         if project_plan_action == "create":
             should_save = True
             logger.info("New project created - will save content")
-        elif len(response_text) > 200:
+        elif query_intent == "informational":
+            should_save = False
+            logger.info("LLM classified as informational query - will not save content")
+        elif query_intent == "action" and len(response_text) > 200:
             should_save = True
-            logger.info(f"Response has substantial content ({len(response_text)} chars) - will save")
-        elif any(keyword in query for keyword in ["save", "create", "update", "add", "document", "project"]):
+            logger.info(f"LLM classified as action query with substantial content ({len(response_text)} chars) - will save")
+        elif query_intent == "action":
             should_save = True
-            logger.info("Query indicates content should be saved")
+            logger.info("LLM classified as action query - will save content")
         
         if should_save and involves_decisions:
             logger.info("Query involves decisions - routing to extract_decisions")
@@ -473,8 +510,8 @@ class GeneralProjectAgent(BaseAgent):
         
         # Early exit optimization: If we have a pending operation, skip LLM call
         pending_save_plan = state.get("pending_save_plan")
-        maintenance_plan = state.get("documentation_maintenance_plan", {})
-        maintenance_items = maintenance_plan.get("maintenance_items", [])
+        maintenance_plan = state.get("documentation_maintenance_plan") or {}
+        maintenance_items = maintenance_plan.get("maintenance_items", []) if maintenance_plan else []
         
         is_approval = self._is_approval_response(query)
         if is_approval and (pending_save_plan or maintenance_items):
@@ -540,6 +577,15 @@ class GeneralProjectAgent(BaseAgent):
 7. **relevant_design**: Which project design elements are relevant? (list from project context)
 8. **content_type**: "new"|"update"|"both" - Is this for new content or updating existing?
 9. **detail_level**: "overview"|"detailed"|"implementation" - What level of detail is needed?
+10. **query_intent**: "informational"|"action" - Is this asking for information/status/explanation (informational) or requesting changes/additions/creation (action)?
+
+Examples:
+- "What's the project status?" → informational
+- "Show me the timeline" → informational
+- "Explain the requirements" → informational
+- "Add a new milestone" → action
+- "Update the budget" → action  
+- "Create a task breakdown" → action
 
 Return ONLY valid JSON:
 {{
@@ -552,6 +598,7 @@ Return ONLY valid JSON:
   "relevant_design": ["design1"],
   "content_type": "new",
   "detail_level": "detailed",
+  "query_intent": "action",
   "reasoning": "Brief explanation"
 }}"""
             else:
@@ -571,6 +618,15 @@ Return ONLY valid JSON:
 2. **is_follow_up**: Is this a follow-up to previous conversation?
 3. **project_plan_action**: "create" if new project, null otherwise
 4. **search_needed**: Does this query need semantic search?
+5. **query_intent**: "informational"|"action" - Is this asking for information/status/explanation (informational) or requesting changes/additions/creation (action)?
+
+Examples:
+- "What's the project status?" → informational
+- "Show me the timeline" → informational
+- "Explain the requirements" → informational
+- "Add a new milestone" → action
+- "Update the budget" → action
+- "Create a task breakdown" → action
 
 **NOTE**: All queries routed to general_project_agent are project-oriented by definition.
 
@@ -580,6 +636,7 @@ Return ONLY valid JSON:
   "is_follow_up": false,
   "project_plan_action": null,
   "search_needed": true,
+  "query_intent": "action",
   "reasoning": "Brief explanation"
 }}"""
             
@@ -597,9 +654,10 @@ Return ONLY valid JSON:
                         "relevant_design": {"type": "array", "items": {"type": "string"}},
                         "content_type": {"type": "string"},
                         "detail_level": {"type": "string"},
+                        "query_intent": {"type": "string"},
                         "reasoning": {"type": "string"}
                     },
-                    "required": ["query_type", "is_follow_up", "project_plan_action", "search_needed"]
+                    "required": ["query_type", "is_follow_up", "project_plan_action", "search_needed", "query_intent"]
                 }
             else:
                 schema = {
@@ -609,9 +667,10 @@ Return ONLY valid JSON:
                         "is_follow_up": {"type": "boolean"},
                         "project_plan_action": {"type": ["string", "null"]},
                         "search_needed": {"type": "boolean"},
+                        "query_intent": {"type": "string"},
                         "reasoning": {"type": "string"}
                     },
-                    "required": ["query_type", "is_follow_up", "project_plan_action", "search_needed"]
+                    "required": ["query_type", "is_follow_up", "project_plan_action", "search_needed", "query_intent"]
                 }
             
             try:
@@ -630,7 +689,8 @@ Return ONLY valid JSON:
                 "query_type": result_dict.get("query_type", "general"),
                 "search_needed": result_dict.get("search_needed", False),
                 "project_plan_action": result_dict.get("project_plan_action"),
-                "query_is_project_related": query_is_project_related
+                "query_is_project_related": query_is_project_related,
+                "query_intent": result_dict.get("query_intent", "action")  # Default to action for safety
             }
             
             # If we did combined analysis, include information needs to skip separate node
@@ -739,14 +799,300 @@ Return ONLY valid JSON:
             
             logger.info(f"Loaded {len(referenced_context)} referenced files")
             
+            # Detect editing mode: check if project plan has content after frontmatter
+            editor_content = active_editor.get("content", "")
+            editing_mode = False
+            if editor_content:
+                frontmatter_end = self._get_frontmatter_end(editor_content)
+                has_content_after_frontmatter = len(editor_content) > frontmatter_end + 10
+                editing_mode = has_content_after_frontmatter
+            
+            logger.info(f"General project agent mode: {'EDITING' if editing_mode else 'GENERATION'}")
+            
             return {
-                "referenced_context": referenced_context
+                "referenced_context": referenced_context,
+                "editing_mode": editing_mode,
+                "editor_operations": [],
+                "plan_edits": None
             }
             
         except Exception as e:
             logger.error(f"Context loading failed: {e}")
             return {
                 "referenced_context": {}
+            }
+    
+    def _get_frontmatter_end(self, content: str) -> int:
+        """Find frontmatter end position"""
+        import re
+        match = re.match(r'^---\s*\n[\s\S]*?\n---\s*\n', content)
+        return match.end() if match else 0
+    
+    def _find_section_in_content(self, content: str, section_name: str) -> tuple:
+        """Find section boundaries in markdown content. Returns (start, end) or (0, 0) if not found."""
+        import re
+        
+        # Try to find section by heading (## Section Name or # Section Name)
+        patterns = [
+            rf'^##\s+{re.escape(section_name)}\s*$',  # Exact match with ##
+            rf'^#\s+{re.escape(section_name)}\s*$',   # Exact match with #
+            rf'^##\s+.*{re.escape(section_name)}.*$',  # Contains section name with ##
+            rf'^#\s+.*{re.escape(section_name)}.*$',  # Contains section name with #
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, content, re.MULTILINE | re.IGNORECASE)
+            if match:
+                section_start = match.start()
+                # Find the end of this section (next heading of same or higher level, or end of document)
+                section_end = len(content)
+                
+                # Look for next heading at same or higher level
+                next_heading_pattern = re.compile(r'^#{1,2}\s+', re.MULTILINE)
+                next_match = next_heading_pattern.search(content, match.end())
+                if next_match:
+                    section_end = next_match.start()
+                
+                return (section_start, section_end)
+        
+        return (0, 0)
+    
+    def _convert_section_edit_to_operation(self, edit: Dict[str, Any], content: str, frontmatter_end: int) -> Optional[Dict[str, Any]]:
+        """Convert a section-based edit to a position-based editor operation"""
+        section = edit.get("section", "")
+        action = edit.get("action", "append")
+        edit_content = edit.get("content", "")
+        
+        if not section:
+            return None
+        
+        # Find section boundaries
+        section_start, section_end = self._find_section_in_content(content, section)
+        
+        if section_start == 0 and section_end == 0:
+            # Section not found - skip
+            logger.warning(f"Section '{section}' not found in content - skipping")
+            return None
+        
+        # Build operation based on action
+        if action == "replace":
+            # Replace entire section
+            original_text = content[section_start:section_end].strip()
+            return {
+                "op_type": "replace_range",
+                "start": section_start,
+                "end": section_end,
+                "text": edit_content,
+                "original_text": original_text[:200] if len(original_text) > 200 else original_text,
+                "left_context": content[max(0, section_start-50):section_start],
+                "right_context": content[section_end:min(len(content), section_end+50)]
+            }
+        elif action == "remove":
+            # Delete section
+            original_text = content[section_start:section_end].strip()
+            return {
+                "op_type": "delete_range",
+                "start": section_start,
+                "end": section_end,
+                "text": "",
+                "original_text": original_text[:200] if len(original_text) > 200 else original_text,
+                "left_context": content[max(0, section_start-50):section_start],
+                "right_context": content[section_end:min(len(content), section_end+50)]
+            }
+        elif action == "append":
+            # Insert after section
+            section_end_line = content.rfind("\n", section_start, section_end)
+            if section_end_line == -1:
+                anchor_pos = section_end
+            else:
+                anchor_pos = section_end_line + 1
+            
+            anchor_text = content[max(0, anchor_pos-100):anchor_pos].strip()
+            return {
+                "op_type": "insert_after_heading",
+                "start": anchor_pos,
+                "end": anchor_pos,
+                "text": edit_content,
+                "anchor_text": anchor_text[-50:] if len(anchor_text) > 50 else anchor_text,
+                "left_context": content[max(0, anchor_pos-50):anchor_pos],
+                "right_context": content[anchor_pos:min(len(content), anchor_pos+50)]
+            }
+        
+        return None
+    
+    def _resolve_operation_simple(
+        self,
+        content: str,
+        op_dict: Dict[str, Any],
+        frontmatter_end: int = 0
+    ) -> Tuple[int, int, str, float]:
+        """Resolve operation to exact positions using progressive search"""
+        import re
+        
+        op_type = op_dict.get("op_type", "replace_range")
+        original_text = op_dict.get("original_text")
+        anchor_text = op_dict.get("anchor_text")
+        occurrence_index = op_dict.get("occurrence_index", 0)
+        text = op_dict.get("text", "")
+        
+        # Strategy 1: Exact match with original_text
+        if original_text and op_type in ("replace_range", "delete_range"):
+            count = 0
+            search_from = 0
+            while True:
+                pos = content.find(original_text, search_from)
+                if pos == -1:
+                    break
+                if count == occurrence_index:
+                    end_pos = pos + len(original_text)
+                    pos = max(pos, frontmatter_end)
+                    end_pos = max(end_pos, pos)
+                    return pos, end_pos, text, 1.0
+                count += 1
+                search_from = pos + 1
+        
+        # Strategy 2: Anchor text for insert_after_heading
+        if anchor_text and op_type == "insert_after_heading":
+            pos = content.find(anchor_text)
+            if pos != -1:
+                end_pos = content.find("\n", pos)
+                if end_pos == -1:
+                    end_pos = len(content)
+                else:
+                    end_pos += 1
+                end_pos = max(end_pos, frontmatter_end)
+                return end_pos, end_pos, text, 0.9
+        
+        # Fallback: use approximate positions
+        start = op_dict.get("start", 0)
+        end = op_dict.get("end", 0)
+        start = max(start, frontmatter_end)
+        end = max(end, start)
+        
+        return start, end, text, 0.5
+    
+    async def _resolve_plan_operations_node(self, state: GeneralProjectState) -> Dict[str, Any]:
+        """Resolve plan edits to position-based editor operations"""
+        try:
+            logger.info("📝 Resolving plan edits to editor operations...")
+            
+            plan_edits = state.get("plan_edits", [])
+            if not plan_edits:
+                return {
+                    "editor_operations": [],
+                    "task_status": "complete"
+                }
+            
+            # Get editor content
+            metadata = state.get("metadata", {})
+            active_editor = metadata.get("active_editor") or metadata.get("shared_memory", {}).get("active_editor", {})
+            editor_content = active_editor.get("content", "")
+            
+            if not editor_content:
+                logger.warning("No editor content available for operation resolution")
+                return {
+                    "editor_operations": [],
+                    "task_status": "error",
+                    "error": "No editor content available"
+                }
+            
+            frontmatter_end = self._get_frontmatter_end(editor_content)
+            editor_operations = []
+            
+            for edit in plan_edits:
+                operation = self._convert_section_edit_to_operation(edit, editor_content, frontmatter_end)
+                if not operation:
+                    continue
+                
+                try:
+                    resolved_start, resolved_end, resolved_text, resolved_confidence = self._resolve_operation_simple(
+                        editor_content,
+                        operation,
+                        frontmatter_end=frontmatter_end
+                    )
+                    
+                    import hashlib
+                    pre_slice = editor_content[resolved_start:resolved_end]
+                    pre_hash = hashlib.sha256(pre_slice.encode()).hexdigest()[:16]
+                    
+                    final_op = {
+                        "op_type": operation["op_type"],
+                        "from": resolved_start,
+                        "to": resolved_end,
+                        "text": resolved_text,
+                        "pre_hash": pre_hash
+                    }
+                    
+                    editor_operations.append(final_op)
+                    logger.info(f"✅ Resolved {operation['op_type']} [{resolved_start}:{resolved_end}] confidence={resolved_confidence:.2f}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Failed to resolve operation: {e}")
+                    continue
+            
+            logger.info(f"✅ Resolved {len(editor_operations)} plan operations")
+            
+            return {
+                "editor_operations": editor_operations,
+                "task_status": "complete"
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to resolve plan operations: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {
+                "editor_operations": [],
+                "task_status": "error",
+                "error": str(e)
+            }
+    
+    async def _format_response_node(self, state: GeneralProjectState) -> Dict[str, Any]:
+        """Format final response with editor operations if in editing mode"""
+        try:
+            editing_mode = state.get("editing_mode", False)
+            editor_operations = state.get("editor_operations", [])
+            saved_files = state.get("saved_files", [])
+            
+            response = state.get("response", {})
+            response_text = response.get("response", "") if isinstance(response, dict) else str(response)
+            
+            if editing_mode and editor_operations:
+                response_text = "I've generated edits for the project plan. Review and accept the changes below.\n\n" + response_text
+                
+                response = {
+                    "response": response_text,
+                    "editor_operations": editor_operations,
+                    "manuscript_edit": {
+                        "target_filename": state.get("metadata", {}).get("active_editor", {}).get("filename", "project_plan.md"),
+                        "scope": "section",
+                        "summary": f"Updated {len(editor_operations)} section(s) in project plan"
+                    },
+                    "saved_files": saved_files,
+                    "task_status": "complete"
+                }
+            else:
+                if saved_files:
+                    files_list = ", ".join(saved_files)
+                    response_text = f"I've updated the project files: {files_list}\n\n" + response_text
+                
+                response = {
+                    "response": response_text,
+                    "saved_files": saved_files,
+                    "task_status": "complete"
+                }
+            
+            return {
+                "response": response,
+                "task_status": "complete"
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to format response: {e}")
+            return {
+                "response": {"response": "Error formatting response", "task_status": "error"},
+                "task_status": "error",
+                "error": str(e)
             }
     
     async def _perform_web_search_node(self, state: GeneralProjectState) -> Dict[str, Any]:
@@ -1056,6 +1402,10 @@ Return ONLY valid JSON:
                 "documentation_maintenance_plan": None,
                 "documentation_verification_result": None,
                 "pending_save_plan": pending_save_plan,
+                "editing_mode": False,
+                "editor_operations": [],
+                "manuscript_edit": None,
+                "plan_edits": None,
                 "task_status": "",
                 "error": ""
             }
@@ -1079,8 +1429,18 @@ Return ONLY valid JSON:
                     "task_status": task_status
                 }
                 
+                # Extract editor_operations and manuscript_edit from state (for inline editing)
+                editor_operations = result_state.get("editor_operations", [])
+                manuscript_edit = result_state.get("manuscript_edit")
+                
+                # Add editor_operations and manuscript_edit if present
+                if editor_operations:
+                    final_response["editor_operations"] = editor_operations
+                if manuscript_edit:
+                    final_response["manuscript_edit"] = manuscript_edit
+                
                 # Add allowed keys from response dict
-                allowed_keys = {"query_type", "confidence", "design_type", "components", "code_snippets", "calculations", "recommendations"}
+                allowed_keys = {"query_type", "confidence", "design_type", "components", "code_snippets", "calculations", "recommendations", "editor_operations", "manuscript_edit", "saved_files"}
                 for key, value in response.items():
                     if key == "response":
                         continue

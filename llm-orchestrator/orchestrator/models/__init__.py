@@ -11,7 +11,9 @@ Provides Pydantic models for structured data:
 from orchestrator.models.intent_models import SimpleIntentResult
 from orchestrator.models.research_models import (
     ResearchAssessmentResult,
-    ResearchGapAnalysis
+    ResearchGapAnalysis,
+    QuickAnswerAssessment,
+    QueryTypeDetection
 )
 from orchestrator.models.electronics_models import (
     FileRouteItem,
@@ -31,6 +33,8 @@ __all__ = [
     'SimpleIntentResult',
     'ResearchAssessmentResult',
     'ResearchGapAnalysis',
+    'QuickAnswerAssessment',
+    'QueryTypeDetection',
     'FileRouteItem',
     'FileRoutingPlan',
     'ContentStructure',

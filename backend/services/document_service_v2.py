@@ -454,9 +454,17 @@ class DocumentService:
         # Ensure score is between 0 and 1
         return max(0.0, min(1.0, quality_score))
 
-    async def _process_native_pdf(self, document_id: str, file_path: Path):
+    async def _process_native_pdf(self, document_id: str, file_path: Path, user_id: str = None):
         """Fast processing for native digital PDFs"""
         logger.info(f"🚀 Fast-track processing native PDF: {document_id}")
+        
+        # Check if document is exempt from vectorization BEFORE processing
+        is_exempt = await self.document_repository.is_document_exempt(document_id)
+        if is_exempt:
+            logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping all processing")
+            await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
+            await self._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+            return
         
         # Standard text extraction only
         result = await self.document_processor.process_document(str(file_path), 'pdf', document_id)
@@ -493,9 +501,17 @@ class DocumentService:
         
         logger.info(f"✅ Native PDF processed: {len(result.chunks)} chunks")
 
-    async def _process_segmentation_candidate(self, document_id: str, file_path: Path, analysis: dict):
+    async def _process_segmentation_candidate(self, document_id: str, file_path: Path, analysis: dict, user_id: str = None):
         """Process OCR candidates using enhanced PDF segmentation"""
         logger.info(f"🔄 OCR candidate processing: {document_id}")
+        
+        # Check if document is exempt from vectorization BEFORE processing
+        is_exempt = await self.document_repository.is_document_exempt(document_id)
+        if is_exempt:
+            logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping all processing")
+            await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
+            await self._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+            return
         
         # Use enhanced PDF segmentation service for better processing
         try:
@@ -620,13 +636,13 @@ class DocumentService:
 
     async def _process_standard_document(self, document_id: str, file_path: Path, doc_type: str, user_id: str = None):
         """Standard processing for non-PDF documents with user isolation support"""
-        # Process document
-        result = await self.document_processor.process_document(str(file_path), doc_type, document_id)
-        
         # ROOSEVELT DOCTRINE: Org Mode files skip vectorization entirely!
         if doc_type == 'org':
-            logger.info(f"📋 BULLY! Org file stored for structured access: {document_id}")
-            logger.info(f"🏇 Use OrgInboxAgent or OrgProjectAgent for task management operations")
+            logger.info(f"📋 Org file stored for structured access: {document_id}")
+            logger.info(f"Use OrgInboxAgent or OrgProjectAgent for task management operations")
+            
+            # Process document for metadata only (no vectorization)
+            result = await self.document_processor.process_document(str(file_path), doc_type, document_id)
             
             # Update quality metrics if available
             if result.quality_metrics:
@@ -637,6 +653,18 @@ class DocumentService:
             await self._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
             logger.info(f"✅ Org file ready for structured queries: {document_id}")
             return
+        
+        # Check if document is exempt from vectorization BEFORE processing
+        # This prevents unnecessary processing work for exempt documents
+        is_exempt = await self.document_repository.is_document_exempt(document_id)
+        if is_exempt:
+            logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping all processing")
+            await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
+            await self._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+            return
+        
+        # Process document (only if not exempt)
+        result = await self.document_processor.process_document(str(file_path), doc_type, document_id)
         
         # Update status to embedding for regular documents
         await self.document_repository.update_status(document_id, ProcessingStatus.EMBEDDING)
@@ -793,6 +821,13 @@ class DocumentService:
             
             if not self.embedding_manager:
                 self.embedding_manager = await get_embedding_service()
+            
+            # Check if document is exempt from vectorization BEFORE processing
+            is_exempt = await self.document_repository.is_document_exempt(document_id)
+            if is_exempt:
+                logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping all processing")
+                await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
+                return
             
             # Process the content with the detected file type
             result = await self.document_processor.process_document(str(temp_file_path), file_type, document_id)
@@ -1472,6 +1507,146 @@ class DocumentService:
             
         except Exception as e:
             logger.error(f"❌ Failed to delete document {document_id}: {e}")
+            return False
+    
+    async def exempt_document_from_vectorization(self, document_id: str, user_id: str = None) -> bool:
+        """Exempt document from vectorization and delete existing vectors/entities"""
+        try:
+            logger.info(f"🚫 Exempting document {document_id} from vectorization")
+            
+            # Mark document as exempt
+            success = await self.document_repository.update_document_exemption_status(document_id, True)
+            if not success:
+                logger.error(f"Failed to update exemption status for document {document_id}")
+                return False
+            
+            # Delete existing vectors
+            try:
+                await self.embedding_manager.delete_document_chunks(document_id, user_id)
+                logger.info(f"Deleted vectors for exempted document {document_id}")
+            except Exception as e:
+                logger.warning(f"Failed to delete vectors for {document_id}: {e}")
+            
+            # Delete existing knowledge graph entities
+            if self.kg_service:
+                try:
+                    await self.kg_service.delete_document_entities(document_id)
+                    logger.info(f"Deleted knowledge graph entities for exempted document {document_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete KG entities for {document_id}: {e}")
+            
+            # Emit WebSocket notification
+            await self._emit_document_status_update(document_id, "exempted", user_id)
+            
+            logger.info(f"✅ Document {document_id} exempted from vectorization")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to exempt document {document_id}: {e}")
+            return False
+    
+    async def remove_document_exemption(self, document_id: str, user_id: str = None, inherit: bool = False) -> bool:
+        """
+        Remove exemption and immediately re-process document.
+        
+        Args:
+            document_id: Document ID
+            user_id: User ID
+            inherit: If True, set to inherit from folder (NULL). If False, set to explicit vectorize (FALSE).
+        """
+        try:
+            if inherit:
+                logger.info(f"✅ Setting document {document_id} to inherit from folder")
+                exempt_status = None
+            else:
+                logger.info(f"✅ Removing exemption for document {document_id} - re-processing (explicit vectorize)")
+                exempt_status = False
+            
+            # Update document exemption status
+            success = await self.document_repository.update_document_exemption_status(document_id, exempt_status)
+            if not success:
+                logger.error(f"Failed to update exemption status for document {document_id}")
+                return False
+            
+            # If setting to inherit, we're done - no need to re-process
+            if inherit:
+                logger.info(f"✅ Document {document_id} now inherits from folder")
+                return True
+            
+            # Get document info
+            doc_info = await self.document_repository.get_by_id(document_id)
+            if not doc_info:
+                logger.error(f"Document {document_id} not found")
+                return False
+            
+            # Get file path
+            from services.service_container import get_service_container
+            container = await get_service_container()
+            folder_service = container.folder_service
+            
+            file_path = await folder_service.get_document_file_path(
+                filename=doc_info.filename,
+                folder_id=doc_info.folder_id,
+                user_id=doc_info.user_id,
+                collection_type=doc_info.collection_type
+            )
+            
+            if not file_path or not file_path.exists():
+                logger.warning(f"File not found for document {document_id}, cannot re-process")
+                return False
+            
+            # Re-process document
+            await self.document_repository.update_status(document_id, ProcessingStatus.EMBEDDING)
+            
+            # Process document
+            result = await self.document_processor.process_document(
+                str(file_path), 
+                doc_info.doc_type.value, 
+                document_id
+            )
+            
+            # Generate and store embeddings
+            if result.chunks:
+                document_category = doc_info.category.value if doc_info.category else None
+                document_tags = doc_info.tags if doc_info.tags else None
+                document_title = doc_info.title if doc_info.title else None
+                document_author = doc_info.author if doc_info.author else None
+                document_filename = doc_info.filename if doc_info.filename else None
+                
+                await self.embedding_manager.embed_and_store_chunks(
+                    result.chunks,
+                    user_id=user_id or doc_info.user_id,
+                    document_category=document_category,
+                    document_tags=document_tags,
+                    document_title=document_title,
+                    document_author=document_author,
+                    document_filename=document_filename
+                )
+                logger.info(f"Re-embedded {len(result.chunks)} chunks for document {document_id}")
+            
+            # Extract and store entities
+            if self.kg_service and result.chunks:
+                try:
+                    entities = await self.document_processor._extract_entities(
+                        result.text_content or "",
+                        result.chunks or []
+                    )
+                    if entities:
+                        await self.kg_service.store_entities(entities, document_id)
+                        logger.info(f"Extracted and stored {len(entities)} entities for document {document_id}")
+                except Exception as e:
+                    logger.warning(f"Failed to extract/store entities for {document_id}: {e}")
+            
+            # Update status
+            await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
+            await self.document_repository.update_chunk_count(document_id, len(result.chunks) if result.chunks else 0)
+            
+            # Emit WebSocket notification
+            await self._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+            
+            logger.info(f"✅ Document {document_id} exemption removed and re-processed")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to remove exemption for document {document_id}: {e}")
             return False
     
     async def get_documents_stats(self) -> Dict[str, Any]:

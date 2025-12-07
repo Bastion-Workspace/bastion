@@ -90,6 +90,9 @@ async def stream_from_grpc_orchestrator(
     Yields:
         SSE-formatted events
     """
+    # Track if title was updated (for sending conversation_updated event even on errors)
+    title_updated = False
+    
     try:
         # Connect to gRPC orchestrator service
         orchestrator_host = 'llm-orchestrator'
@@ -125,6 +128,7 @@ async def stream_from_grpc_orchestrator(
             logger.info(f"Forwarding to gRPC orchestrator: {query[:100]}")
             
             # Save user message to conversation BEFORE processing
+            # This will also trigger title generation if it's the first message
             try:
                 from services.conversation_service import ConversationService
                 conversation_service = ConversationService()
@@ -138,6 +142,11 @@ async def stream_from_grpc_orchestrator(
                     metadata={"orchestrator_system": True, "streaming": True}
                 )
                 logger.info(f"✅ Saved user message to conversation {conversation_id}")
+                
+                # Check if title was updated (first message triggers title generation)
+                # The add_message method updates the title if it was "New Conversation"
+                # We'll emit a conversation_updated event after streaming completes
+                title_updated = True
             except Exception as save_error:
                 logger.warning(f"⚠️ Failed to save user message: {save_error}")
                 # Continue even if message save fails
@@ -188,6 +197,18 @@ async def stream_from_grpc_orchestrator(
                         'agent': chunk.agent_name
                     })
                 
+                elif chunk.type == "editor_operations":
+                    # Parse JSON from message field and forward as editor_operations type
+                    try:
+                        editor_ops_data = json.loads(chunk.message)
+                        yield format_sse_message({
+                            'type': 'editor_operations',
+                            'operations': editor_ops_data.get('operations', []),
+                            'manuscript_edit': editor_ops_data.get('manuscript_edit')
+                        })
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Failed to parse editor_operations JSON: {e}")
+                
                 # Flush immediately
                 await asyncio.sleep(0)
             
@@ -220,10 +241,12 @@ async def stream_from_grpc_orchestrator(
             # NOTE: gRPC orchestrator handles its own state management via LangGraph checkpointing
             # No need to manually update backend orchestrator state
             
-            # Send final complete event
+            # Send final complete event with conversation update flag
+            # This signals the frontend to refresh the conversation list (title may have been updated)
             yield format_sse_message({
                 'type': 'done',
-                'conversation_id': conversation_id
+                'conversation_id': conversation_id,
+                'conversation_updated': True  # Signal that conversation metadata may have changed
             })
             
     except grpc.RpcError as e:
@@ -232,6 +255,13 @@ async def stream_from_grpc_orchestrator(
             'type': 'error',
             'content': f"gRPC Orchestrator Error: {e.details()}"
         })
+        # Send done event if title was updated (title generation happens before streaming)
+        if title_updated:
+            yield format_sse_message({
+                'type': 'done',
+                'conversation_id': conversation_id,
+                'conversation_updated': True
+            })
     
     except Exception as e:
         logger.error(f"Error streaming from gRPC orchestrator: {e}")
@@ -241,6 +271,13 @@ async def stream_from_grpc_orchestrator(
             'type': 'error',
             'content': f"Orchestrator error: {str(e)}"
         })
+        # Send done event if title was updated (title generation happens before streaming)
+        if title_updated:
+            yield format_sse_message({
+                'type': 'done',
+                'conversation_id': conversation_id,
+                'conversation_updated': True
+            })
 
 
 @router.post("/api/async/orchestrator/grpc/stream")
@@ -343,88 +380,24 @@ async def grpc_orchestrator_health():
 
 async def _load_conversation_state(user_id: str, conversation_id: str) -> Optional[Dict[str, Any]]:
     """
-    Load conversation state for continuity between requests
-
-    This ensures the LLM orchestrator has access to:
-    - primary_agent_selected: Which agent was last used
-    - last_agent: Previous agent for context
-    - Other conversation metadata
-
+    DEPRECATED: This function is no longer needed.
+    
+    The llm-orchestrator loads shared_memory (including primary_agent_selected, 
+    last_agent, etc.) directly from the LangGraph checkpoint in its StreamChat handler.
+    
+    Returning None here - orchestrator handles all checkpoint loading.
+    
     Args:
         user_id: User UUID
         conversation_id: Conversation UUID
 
     Returns:
-        Dict with conversation state or None if no state available
+        None - orchestrator loads checkpoint directly
     """
-    try:
-        # Get conversation service to load state
-        from services.conversation_service import ConversationService
-        conversation_service = ConversationService()
-        conversation_service.set_current_user(user_id)
-
-        # Load recent messages to determine conversation context
-        messages_data = await conversation_service.get_conversation_messages(
-            conversation_id=conversation_id,
-            user_id=user_id,
-            skip=0,
-            limit=10  # Get last 10 messages for context
-        )
-
-        if not messages_data or not messages_data.get("messages"):
-            logger.debug(f"No conversation history found for {conversation_id}")
-            return None
-
-        messages = messages_data["messages"]
-
-        # Find the last assistant message to determine which agent was used
-        last_assistant_message = None
-        for msg in reversed(messages):
-            if msg.get("message_type") == "assistant":
-                last_assistant_message = msg.get("content", "")
-                break
-
-        # Determine primary_agent_selected based on conversation patterns
-        # This is a simplified heuristic - in production you might want more sophisticated logic
-        primary_agent_selected = None
-        last_agent = None
-
-        if last_assistant_message:
-            # Simple pattern matching to determine which agent was likely used
-            # This could be enhanced with more sophisticated analysis
-            message_lower = last_assistant_message.lower()
-
-            # Check for electronics agent patterns
-            if any(keyword in message_lower for keyword in [
-                "circuit", "arduino", "esp32", "voltage", "resistor", "component",
-                "electronics", "microcontroller", "sensor", "pcb", "schematic"
-            ]):
-                primary_agent_selected = "electronics_agent"
-                last_agent = "electronics_agent"
-
-            # Check for other agent patterns as needed
-            elif any(keyword in message_lower for keyword in [
-                "weather", "temperature", "forecast"
-            ]):
-                primary_agent_selected = "weather_agent"
-                last_agent = "weather_agent"
-
-            # Add more agent pattern matching as needed...
-
-        if primary_agent_selected:
-            logger.info(f"📋 LOADED CONVERSATION STATE: primary_agent_selected={primary_agent_selected}, last_agent={last_agent}")
-            return {
-                "shared_memory": {
-                    "primary_agent_selected": primary_agent_selected,
-                    "last_agent": last_agent,
-                    "last_response": last_assistant_message
-                }
-            }
-        else:
-            logger.debug(f"No primary agent determined from conversation history")
-            return None
-
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to load conversation state: {e}")
-        return None
+    # The llm-orchestrator microservice loads checkpoint shared_memory directly
+    # in grpc_service.py::StreamChat() at line ~580 via _load_checkpoint_shared_memory()
+    # This includes primary_agent_selected, last_agent, and all continuity data.
+    # No need for backend to duplicate this loading.
+    logger.debug(f"Conversation state loading delegated to llm-orchestrator for {conversation_id}")
+    return None
 

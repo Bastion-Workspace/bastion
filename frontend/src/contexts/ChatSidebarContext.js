@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { useLocation } from 'react-router-dom';
 import apiService from '../services/apiService';
 import BackgroundJobService from '../services/backgroundJobService';
+import tabNotificationManager from '../utils/tabNotification';
 
 // Format agent type to display name
 const formatAgentName = (agentType) => {
@@ -31,6 +32,7 @@ export const ChatSidebarProvider = ({ children }) => {
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(420);
   const [isFullWidth, setIsFullWidth] = useState(false);
+  const [isResizing, setIsResizing] = useState(false);
   // ROOSEVELT: Load current conversation from localStorage for session persistence
   const [currentConversationId, setCurrentConversationId] = useState(() => {
     try {
@@ -59,6 +61,7 @@ export const ChatSidebarProvider = ({ children }) => {
   const useLangGraphSystem = true; // Always use LangGraph
   const [currentJobId, setCurrentJobId] = useState(null); // Track current job for cancellation
   const [activeTasks, setActiveTasks] = useState(new Map()); // Track active async tasks
+  const messagesConversationIdRef = React.useRef(null); // Track which conversation the current messages belong to
   
   // **ROOSEVELT'S PREFERENCE MANAGEMENT**: Store user preferences separately from what gets sent to backend
   // User preference: what the user actually toggled (persists across navigation)
@@ -297,14 +300,30 @@ export const ChatSidebarProvider = ({ children }) => {
             ...message
           }));
           
-          // ROOSEVELT'S RESTORATION FIX: Always load messages during conversation restoration
+          // CRITICAL FIX: Always load messages when conversation changes, only prevent overwrite for same conversation
           setMessages(prevMessages => {
-            // During conversation restoration (when conversation ID changes), always load database messages
-            // Only prevent overwrite if we have pending/streaming messages that haven't been saved yet
+            // Check if we're switching to a different conversation (or initial load)
+            const isConversationSwitch = messagesConversationIdRef.current !== currentConversationId;
+            
+            // If switching conversations or initial load, always load database messages
+            if (isConversationSwitch) {
+              console.log('✅ Loading messages for conversation:', {
+                previousConversationId: messagesConversationIdRef.current,
+                newConversationId: currentConversationId,
+                messageCount: normalizedMessages.length,
+                isInitialLoad: messagesConversationIdRef.current === null
+              });
+              messagesConversationIdRef.current = currentConversationId;
+              return normalizedMessages;
+            }
+            
+            // Same conversation: only prevent overwrite if we have truly unsaved messages (pending/streaming, not system)
             const hasUnsavedMessages = prevMessages.some(msg => 
-              msg.isPending || msg.isStreaming || msg.role === 'system'
+              msg.isPending || msg.isStreaming
             );
             
+            // Only prevent overwrite if we have unsaved messages AND database has fewer messages
+            // This protects against losing messages during active streaming/pending operations
             if (hasUnsavedMessages && normalizedMessages.length < prevMessages.length) {
               console.log('🔄 Keeping unsaved messages to prevent loss during active conversation:', {
                 localCount: prevMessages.length,
@@ -314,10 +333,11 @@ export const ChatSidebarProvider = ({ children }) => {
               return prevMessages;
             }
             
-            // For conversation restoration, always use database messages
+            // For same conversation with no unsaved messages, or when database has more messages, use database
             console.log('✅ Loading messages from database:', {
               messageCount: normalizedMessages.length,
-              conversationId: currentConversationId
+              conversationId: currentConversationId,
+              isSameConversation: !isConversationSwitch
             });
             return normalizedMessages;
           });
@@ -359,6 +379,7 @@ export const ChatSidebarProvider = ({ children }) => {
       onSuccess: (newConversation) => {
         setCurrentConversationId(newConversation.conversation.conversation_id); // Access conversation_id through the conversation field
         setMessages([]);
+        messagesConversationIdRef.current = null; // Reset ref for new conversation
         setQuery('');
         queryClient.invalidateQueries(['conversations']);
       },
@@ -412,25 +433,42 @@ export const ChatSidebarProvider = ({ children }) => {
     }
     
     // Find and update the pending message (fallback for immediate UI update)
-    setMessages(prev => prev.map(msg => {
-      if (msg.jobId === jobData.job_id) {
-        const updatedMessage = {
-          ...msg,
-          content: jobData.result?.answer || jobData.answer || 'Job completed successfully',
-          isResearchJob: false,
-          timestamp: new Date().toISOString(),
-        };
-        
-        // Add research plan data if present
-        if (jobData.result?.research_plan) {
-          updatedMessage.research_plan = jobData.result.research_plan;
-          updatedMessage.planApproved = jobData.result.plan_approved || false;
+    setMessages(prev => {
+      let hasNewContent = false;
+      const updated = prev.map(msg => {
+        if (msg.jobId === jobData.job_id) {
+          const newContent = jobData.result?.answer || jobData.answer || 'Job completed successfully';
+          // Check if this is actually new content (not just a status update)
+          if (newContent && newContent.trim().length > 0 && 
+              (!msg.content || msg.content !== newContent)) {
+            hasNewContent = true;
+          }
+          
+          const updatedMessage = {
+            ...msg,
+            content: newContent,
+            isResearchJob: false,
+            timestamp: new Date().toISOString(),
+          };
+          
+          // Add research plan data if present
+          if (jobData.result?.research_plan) {
+            updatedMessage.research_plan = jobData.result.research_plan;
+            updatedMessage.planApproved = jobData.result.plan_approved || false;
+          }
+          
+          return updatedMessage;
         }
-        
-        return updatedMessage;
+        return msg;
+      });
+      
+      // Flash tab if new content was added and tab is hidden
+      if (hasNewContent) {
+        tabNotificationManager.startFlashing('New message');
       }
-      return msg;
-    }));
+      
+      return updated;
+    });
     
     // Remove from executing plans
     setExecutingPlans(prev => {
@@ -688,6 +726,9 @@ export const ChatSidebarProvider = ({ children }) => {
     setQuery('');
     setIsLoading(false); // ✅ Clear loading state to prevent cross-conversation thinking wheel
     
+    // Reset the messages conversation ID ref to trigger fresh load
+    messagesConversationIdRef.current = null;
+    
     // Update background job service with new conversation ID
     if (backgroundJobService) {
       console.log('🔄 ChatSidebarContext: Updating background job service conversation ID');
@@ -739,6 +780,11 @@ export const ChatSidebarProvider = ({ children }) => {
           // Task completed successfully
           const result = statusResponse.result;
           console.log('✅ Async task completed:', result);
+          
+          // Flash tab if tab is hidden when async response completes
+          if (result.response && result.response.trim().length > 0) {
+            tabNotificationManager.startFlashing('New message');
+          }
           
           // Replace pending message with final result
           setMessages(prev => prev.map(msg => {
@@ -1069,6 +1115,9 @@ export const ChatSidebarProvider = ({ children }) => {
       
       setMessages(prev => [...prev, streamingMessage]);
       
+      // Track if we've notified for this message to avoid multiple notifications during streaming
+      let hasNotified = false;
+      
       // Create EventSource for Server-Sent Events  
       const token = localStorage.getItem('auth_token'); // Match apiService token key
       console.log('🔑 Using auth_token for streaming:', token ? 'TOKEN_PRESENT' : 'NO_TOKEN');
@@ -1178,7 +1227,33 @@ export const ChatSidebarProvider = ({ children }) => {
                 const data = JSON.parse(line.slice(6));
                 console.log('🌊 Stream data:', data);
 
-                if (data.type === 'status') {
+                if (data.type === 'title') {
+                  // Handle conversation title update - update immediately in UI
+                  if (data.message && conversationId) {
+                    console.log('🔤 Received title update:', data.message);
+                    // Optimistically update the conversation title in React Query cache
+                    // Update both the specific conversation query and the conversations list
+                    queryClient.setQueryData(['conversation', conversationId], (old) => {
+                      if (!old?.conversation) return old;
+                      return { ...old, conversation: { ...old.conversation, title: data.message } };
+                    });
+                    // Also update the conversations list cache to update sidebar immediately
+                    queryClient.setQueryData(['conversations'], (old) => {
+                      if (!old?.conversations) return old;
+                      return {
+                        ...old,
+                        conversations: old.conversations.map(conv =>
+                          conv.conversation_id === conversationId
+                            ? { ...conv, title: data.message }
+                            : conv
+                        )
+                      };
+                    });
+                    // Invalidate to ensure fresh data on next fetch
+                    queryClient.invalidateQueries(['conversations']);
+                    queryClient.invalidateQueries(['conversation', conversationId]);
+                  }
+                } else if (data.type === 'status') {
                   // Update message with status and capture agent_type if available
                   setMessages(prev => prev.map(msg => {
                     if (msg.id === streamingMessage.id) {
@@ -1242,6 +1317,13 @@ export const ChatSidebarProvider = ({ children }) => {
                 } else if (data.type === 'content_stream') {
                   // Real-time streaming content
                   accumulatedContent += data.content;
+                  
+                  // Flash tab if this is the first content chunk and tab is hidden
+                  if (!hasNotified && accumulatedContent.trim().length > 0) {
+                    hasNotified = true;
+                    tabNotificationManager.startFlashing('New message');
+                  }
+                  
                   setMessages(prev => prev.map(msg => 
                     msg.id === streamingMessage.id 
                       ? { ...msg, content: accumulatedContent, isStreaming: true }
@@ -1250,6 +1332,13 @@ export const ChatSidebarProvider = ({ children }) => {
                 } else if (data.type === 'content') {
                   // ROOSEVELT'S NEWLINE FIX: Don't add spaces between chunks!
                   accumulatedContent += data.content;
+                  
+                  // Flash tab if this is the first content chunk and tab is hidden
+                  if (!hasNotified && accumulatedContent.trim().length > 0) {
+                    hasNotified = true;
+                    tabNotificationManager.startFlashing('New message');
+                  }
+                  
                   setMessages(prev => prev.map(msg => 
                     msg.id === streamingMessage.id 
                       ? { ...msg, content: accumulatedContent, isStreaming: true }
@@ -1269,6 +1358,22 @@ export const ChatSidebarProvider = ({ children }) => {
                         }
                       : msg
                   ));
+                  
+                  // Emit event for live diff display in editor
+                  if (ops.length > 0) {
+                    console.log('🔍 ChatSidebarContext emitting editorOperationsLive:', {
+                      operationsCount: ops.length,
+                      messageId: streamingMessage.id,
+                      firstOp: ops[0]
+                    });
+                    window.dispatchEvent(new CustomEvent('editorOperationsLive', {
+                      detail: { 
+                        operations: ops,
+                        manuscriptEdit: mEdit,
+                        messageId: streamingMessage.id
+                      }
+                    }));
+                  }
                 } else if (data.type === 'citations') {
                   // **ROOSEVELT'S CITATION CAVALRY**: Capture citations from research agent!
                   console.log('🔗 Citations received:', data.citations);
@@ -1355,9 +1460,23 @@ export const ChatSidebarProvider = ({ children }) => {
                   // ROOSEVELT'S CANCEL BUTTON FIX: Clear job ID when streaming completes
                   setCurrentJobId(null);
                   
-                  // Refresh conversations
+                  // Refresh conversations - title may have been updated from "New Conversation"
+                  // Force a refetch to ensure we get the latest title
                   queryClient.invalidateQueries(['conversations']);
                   queryClient.invalidateQueries(['conversation', conversationId]);
+                  
+                  // Also refetch the conversation list to ensure title updates are visible
+                  queryClient.refetchQueries(['conversations']);
+                  break;
+                } else if (data.type === 'done') {
+                  // Streaming complete - check if conversation was updated (title generation)
+                  if (data.conversation_updated) {
+                    console.log('🔄 Conversation updated - refreshing to get new title');
+                    // Invalidate and refetch conversations to get updated title
+                    queryClient.invalidateQueries(['conversations']);
+                    queryClient.invalidateQueries(['conversation', conversationId]);
+                    queryClient.refetchQueries(['conversations']);
+                  }
                   break;
                 } else if (data.type === 'error') {
                   throw new Error(data.message || 'Streaming error');
@@ -1458,6 +1577,7 @@ export const ChatSidebarProvider = ({ children }) => {
 
   const clearChat = () => {
     setMessages([]);
+    messagesConversationIdRef.current = null; // Reset ref when clearing chat
     setQuery('');
     setCurrentJobId(null); // Clear current job when clearing chat
   };
@@ -1525,6 +1645,8 @@ export const ChatSidebarProvider = ({ children }) => {
     setSidebarWidth, // Export setSidebarWidth for resize functionality
     isFullWidth,
     setIsFullWidth,
+    isResizing,
+    setIsResizing,
     currentConversationId,
     messages,
     setMessages,

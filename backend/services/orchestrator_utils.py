@@ -174,12 +174,20 @@ def get_latest_user_message(state: Dict[str, Any]) -> str:
 
 
 async def update_conversation_metadata(ctx, state: Dict[str, Any], user_message: str, is_complete: bool) -> None:
+    """
+    Update conversation metadata in state.
+    
+    NOTE: Title generation moved to LLM orchestrator. This function now only sets
+    a simple fallback title. The LLM orchestrator will generate the proper title
+    after the first agent response.
+    """
     try:
         state["conversation_updated_at"] = datetime.now().isoformat()
         if not state.get("conversation_title") and user_message and len(user_message.strip()) > 0:
-            title = await ctx._generate_conversation_title(user_message)
+            # Simple fallback title - LLM orchestrator will replace with proper title
+            title = user_message[:60] + "..." if len(user_message) > 60 else user_message
             state["conversation_title"] = title
-            logger.info(f"✅ Generated conversation title: '{title}'")
+            logger.debug(f"Set fallback conversation title: '{title}'")
         if user_message and len(user_message.strip()) > 0:
             topic = user_message[:50] + "..." if len(user_message) > 50 else user_message
             state["conversation_topic"] = topic.strip()
@@ -188,16 +196,13 @@ async def update_conversation_metadata(ctx, state: Dict[str, Any], user_message:
 
 
 async def generate_conversation_title(user_message: str) -> str:
-    try:
-        from services.title_generation_service import TitleGenerationService
-        title_service = TitleGenerationService()
-        title = await title_service.generate_title(user_message)
-        if not title or len(title.strip()) == 0:
-            title = user_message[:60] + "..." if len(user_message) > 60 else user_message
-        return title.strip()
-    except Exception as e:
-        logger.warning(f"⚠️ Title generation failed: {e}")
-        return user_message[:60] + "..." if len(user_message) > 60 else user_message
+    """
+    DEPRECATED: Title generation moved to LLM orchestrator.
+    This function now just returns a simple fallback title.
+    The LLM orchestrator will generate the proper title after the first agent response.
+    """
+    # Simple fallback - orchestrator will replace with proper title
+    return user_message[:60] + "..." if len(user_message) > 60 else user_message
 
 
 def normalize_thread_id(user_id: str, conversation_id: str) -> str:

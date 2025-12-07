@@ -27,6 +27,122 @@ from orchestrator.services.agent_capabilities import (
 logger = logging.getLogger(__name__)
 
 
+# ============================================
+# Utility Functions for Context Analysis
+# ============================================
+
+def calculate_agent_switches(messages: list) -> int:
+    """
+    Count how many times the agent changed in conversation history
+    
+    Args:
+        messages: List of conversation messages with role/content
+    
+    Returns:
+        Number of agent switches detected
+    """
+    if not messages or len(messages) < 2:
+        return 0
+    
+    # Extract agent mentions from assistant messages
+    # This is a simple heuristic - could be enhanced with actual agent tracking
+    agent_mentions = []
+    for msg in messages:
+        if msg.get("role") == "assistant":
+            content = msg.get("content", "")
+            # Look for agent indicators in response
+            # This is a placeholder - actual implementation would track agent per message
+            pass
+    
+    # For now, return 0 as we don't have explicit agent tracking per message
+    # This can be enhanced when we have better message metadata
+    return 0
+
+
+def infer_action_from_agent(agent_name: str) -> Optional[str]:
+    """
+    Map agent type to typical action intent
+    
+    Args:
+        agent_name: Name of the agent
+    
+    Returns:
+        Typical action intent for this agent, or None
+    """
+    agent_action_map = {
+        "fiction_editing_agent": "generation",
+        "story_analysis_agent": "analysis",
+        "content_analysis_agent": "analysis",
+        "research_agent": "query",
+        "chat_agent": "observation",
+        "electronics_agent": "generation",
+        "outline_editing_agent": "generation",
+        "rules_editing_agent": "generation",
+        "character_development_agent": "generation",
+        "proofreading_agent": "modification",
+        "org_inbox_agent": "management",
+        "org_project_agent": "management",
+        "website_crawler_agent": "management",
+        "substack_agent": "generation",
+        "podcast_script_agent": "generation",
+        "email_agent": "generation",
+        "data_formatting_agent": "modification",
+    }
+    return agent_action_map.get(agent_name)
+
+
+def should_boost_continuity(
+    primary_agent: Optional[str],
+    last_agent: Optional[str],
+    last_response: Optional[str],
+    user_message: str
+) -> bool:
+    """
+    Determine if strong continuity signal is present
+    
+    Args:
+        primary_agent: Primary agent from previous turn
+        last_agent: Last agent used
+        last_response: Last agent response content
+        user_message: Current user message
+    
+    Returns:
+        True if continuity should be strongly weighted
+    """
+    # Strong continuity signals
+    if not primary_agent:
+        return False
+    
+    # Check if user message is clearly a follow-up
+    follow_up_indicators = [
+        "yes", "no", "ok", "okay", "sure", "please", "continue", "more",
+        "that", "this", "it", "what about", "how about", "tell me more",
+        "show me", "save", "update", "change", "modify", "edit that"
+    ]
+    
+    message_lower = user_message.lower().strip()
+    
+    # Short responses are likely continuations
+    if len(message_lower.split()) <= 3:
+        if any(indicator in message_lower for indicator in follow_up_indicators):
+            return True
+    
+    # Check for explicit continuation phrases
+    continuation_phrases = [
+        "continue", "go on", "more details", "expand", "elaborate",
+        "what's next", "and then", "also", "additionally"
+    ]
+    
+    if any(phrase in message_lower for phrase in continuation_phrases):
+        return True
+    
+    # If same agent and short message, likely continuation
+    if primary_agent == last_agent and len(message_lower.split()) <= 5:
+        return True
+    
+    return False
+
+
 class IntentClassifier:
 	"""
 	Intent Classification Service using LangGraph workflow
@@ -71,23 +187,53 @@ class IntentClassifier:
 		return self._classification_model
 	
 	def _build_workflow(self) -> StateGraph:
-		"""Build LangGraph workflow for intent classification"""
+		"""Build enhanced LangGraph workflow for intent classification with context awareness"""
 		workflow = StateGraph(IntentClassificationState)
 		
-		# Add nodes
+		# Add all nodes
+		workflow.add_node("prepare_context", self._prepare_context_node)
+		workflow.add_node("detect_new_conversation", self._detect_new_conversation_node)
+		workflow.add_node("generate_title", self._generate_title_node)
 		workflow.add_node("detect_domain", self._detect_domain_node)
 		workflow.add_node("classify_action_intent", self._classify_action_intent_node)
 		workflow.add_node("route_agent", self._route_agent_node)
+		workflow.add_node("merge_results", self._merge_results_node)
 		
 		# Entry point
-		workflow.set_entry_point("detect_domain")
+		workflow.set_entry_point("prepare_context")
 		
-		# Flow: detect_domain -> classify_action_intent -> route_agent -> END
+		# Flow: prepare_context -> detect_new_conversation
+		workflow.add_edge("prepare_context", "detect_new_conversation")
+		
+		# Conditional: route to title generation if new conversation, otherwise skip to domain detection
+		# Title generation is fast, so we route through it for new conversations
+		workflow.add_conditional_edges(
+			"detect_new_conversation",
+			self._should_generate_title,
+			{
+				"generate_title": "generate_title",
+				"skip_title": "detect_domain"
+			}
+		)
+		
+		# Title generation always flows to domain detection (title is fast, won't block)
+		workflow.add_edge("generate_title", "detect_domain")
+		
+		# Classification flow
 		workflow.add_edge("detect_domain", "classify_action_intent")
 		workflow.add_edge("classify_action_intent", "route_agent")
-		workflow.add_edge("route_agent", END)
+		workflow.add_edge("route_agent", "merge_results")
+		
+		# Merge results is the final node
+		workflow.add_edge("merge_results", END)
 		
 		return workflow.compile()
+	
+	def _should_generate_title(self, state: IntentClassificationState) -> str:
+		"""Determine if we should generate title (route to title node) or skip to domain detection"""
+		if state.get("is_new_conversation", False):
+			return "generate_title"
+		return "skip_title"
 	
 	async def classify_intent(
 		self, 
@@ -128,12 +274,15 @@ class IntentClassifier:
 			initial_state: IntentClassificationState = {
 				"user_message": user_message,
 				"conversation_context": context,
+				"prepared_context": {},
+				"is_new_conversation": False,
 				"domain": "",
 				"action_intent": "",
 				"target_agent": "",
 				"confidence": 0.0,
 				"reasoning": "",
 				"permission_required": False,
+				"generated_title": None,
 				"result": None
 			}
 			
@@ -148,33 +297,244 @@ class IntentClassifier:
 			# Simple fallback
 			return self._create_simple_fallback(user_message, conversation_context)
 	
+	async def _prepare_context_node(self, state: IntentClassificationState) -> IntentClassificationState:
+		"""
+		Prepare and structure all context explicitly for LLM prompts
+		
+		Extracts last response, last agent, active editor, and creates structured summary.
+		"""
+		try:
+			context = state["conversation_context"]
+			shared_memory = context.get('shared_memory', {}) or {}
+			messages = context.get('messages', [])
+			
+			# Extract last LLM response
+			last_response = shared_memory.get('last_response')
+			
+			# Extract agent continuity info
+			primary_agent = shared_memory.get('primary_agent_selected')
+			last_agent = shared_memory.get('last_agent')
+			
+			# Extract editor context
+			active_editor = shared_memory.get('active_editor', {}) or {}
+			editor_preference = shared_memory.get('editor_preference', 'prefer')
+			editor_type = None
+			if active_editor:
+				fm = active_editor.get('frontmatter', {}) or {}
+				editor_type = fm.get('type', '').strip().lower()
+			
+			# Build structured context
+			prepared_context = {
+				"has_history": bool(messages) and len(messages) > 0,
+				"message_count": len(messages),
+				"last_response": {
+					"content": last_response[:500] if last_response else None,
+					"summary": f"Last response was {len(last_response)} chars" if last_response else None,
+					"exists": bool(last_response)
+				},
+				"agent_continuity": {
+					"primary_agent": primary_agent,
+					"last_agent": last_agent,
+					"same_agent": primary_agent == last_agent if (primary_agent and last_agent) else False,
+					"agent_switch_count": calculate_agent_switches(messages),
+					"has_continuity": bool(primary_agent or last_agent)
+				},
+				"editor_context": {
+					"active": bool(active_editor),
+					"type": editor_type,
+					"preference": editor_preference,
+					"should_use": editor_preference != "ignore"
+				}
+			}
+			
+			logger.info(f"📋 CONTEXT PREPARED: history={prepared_context['has_history']}, "
+			           f"primary_agent={primary_agent}, editor_type={editor_type}, "
+			           f"has_response={prepared_context['last_response']['exists']}")
+			
+			state["prepared_context"] = prepared_context
+			return state
+			
+		except Exception as e:
+			logger.error(f"❌ Context preparation failed: {e}")
+			# Return empty context on error
+			state["prepared_context"] = {
+				"has_history": False,
+				"message_count": 0,
+				"last_response": {"content": None, "summary": None, "exists": False},
+				"agent_continuity": {"primary_agent": None, "last_agent": None, "same_agent": False, "agent_switch_count": 0, "has_continuity": False},
+				"editor_context": {"active": False, "type": None, "preference": "prefer", "should_use": True}
+			}
+			return state
+	
+	async def _detect_new_conversation_node(self, state: IntentClassificationState) -> IntentClassificationState:
+		"""
+		Detect if this is a new conversation (no previous agent, no message history)
+		
+		Determines whether to fork for parallel title generation.
+		"""
+		try:
+			prepared_context = state.get("prepared_context", {})
+			agent_continuity = prepared_context.get("agent_continuity", {})
+			has_history = prepared_context.get("has_history", False)
+			
+			# New conversation if no primary agent and no message history
+			is_new = (
+				not agent_continuity.get("primary_agent") and
+				not agent_continuity.get("last_agent") and
+				not has_history
+			)
+			
+			logger.info(f"🔍 NEW CONVERSATION DETECTION: is_new={is_new} "
+			           f"(primary_agent={agent_continuity.get('primary_agent')}, "
+			           f"has_history={has_history})")
+			
+			state["is_new_conversation"] = is_new
+			return state
+			
+		except Exception as e:
+			logger.error(f"❌ New conversation detection failed: {e}")
+			state["is_new_conversation"] = False
+			return state
+	
+	async def _generate_title_node(self, state: IntentClassificationState) -> IntentClassificationState:
+		"""
+		Generate conversation title for new conversations (runs in parallel)
+		
+		Only executes if is_new_conversation == True.
+		Uses fast model for quick title generation.
+		"""
+		try:
+			# Only generate if new conversation
+			if not state.get("is_new_conversation", False):
+				logger.debug("⏭️ Skipping title generation (not a new conversation)")
+				state["generated_title"] = None
+				return state
+			
+			user_message = state["user_message"]
+			
+			# Import title generation service
+			from orchestrator.services.title_generation_service import get_title_generation_service
+			title_service = get_title_generation_service()
+			
+			# Generate title using fast model
+			title = await title_service.generate_title(user_message)
+			
+			logger.info(f"🔤 TITLE GENERATED: {title}")
+			
+			state["generated_title"] = title
+			return state
+			
+		except Exception as e:
+			logger.error(f"❌ Title generation failed: {e}")
+			# Fallback: use first few words of user message
+			words = state["user_message"].strip().split()[:5]
+			fallback_title = " ".join(words) + ("..." if len(words) == 5 else "")
+			if len(fallback_title) > 50:
+				fallback_title = fallback_title[:47] + "..."
+			state["generated_title"] = fallback_title.capitalize()
+			return state
+	
+	async def _merge_results_node(self, state: IntentClassificationState) -> IntentClassificationState:
+		"""
+		Merge classification results and title generation into final result
+		
+		Waits for both classification and title generation (if parallel).
+		"""
+		try:
+			# Check if result already exists (from route_agent_node, possibly with error fallback)
+			existing_result = state.get("result")
+			if existing_result:
+				# Result already exists, just add title if missing
+				if not existing_result.conversation_title:
+					generated_title = state.get("generated_title")
+					if generated_title:
+						# Update existing result with title
+						existing_result.conversation_title = generated_title
+						logger.info(f"✅ RESULTS MERGED: Added title to existing result - agent={existing_result.target_agent}, title={generated_title}")
+				else:
+					logger.info(f"✅ RESULTS MERGED: Using existing result - agent={existing_result.target_agent}, title={existing_result.conversation_title}")
+				return state
+			
+			# No existing result, create new one from state fields
+			target_agent = state.get("target_agent", "")
+			action_intent = state.get("action_intent", "query")
+			confidence = state.get("confidence", 0.0)
+			reasoning = state.get("reasoning", "")
+			permission_required = state.get("permission_required", False)
+			
+			# Get generated title (if any)
+			generated_title = state.get("generated_title")
+			
+			# Fallback if target_agent is empty
+			if not target_agent:
+				logger.warning("⚠️ No target_agent in state, using chat_agent fallback")
+				target_agent = "chat_agent"
+				confidence = 0.5
+				reasoning = "Fallback to chat_agent (no agent selected)"
+			
+			# Create result with title
+			result = SimpleIntentResult(
+				target_agent=target_agent,
+				action_intent=action_intent,
+				permission_required=permission_required,
+				confidence=confidence,
+				reasoning=reasoning,
+				conversation_title=generated_title
+			)
+			
+			logger.info(f"✅ RESULTS MERGED: agent={target_agent}, title={generated_title}")
+			
+			state["result"] = result
+			return state
+			
+		except Exception as e:
+			logger.error(f"❌ Results merge failed: {e}")
+			# Create fallback result
+			result = SimpleIntentResult(
+				target_agent=state.get("target_agent", "chat_agent"),
+				action_intent=state.get("action_intent", "query"),
+				permission_required=False,
+				confidence=0.5,
+				reasoning=f"Merge error: {str(e)}",
+				conversation_title=state.get("generated_title")
+			)
+			state["result"] = result
+			return state
+	
 	async def _detect_domain_node(self, state: IntentClassificationState) -> IntentClassificationState:
 		"""
-		Stage 1: Detect domain using LLM
+		Stage 1: Detect domain using LLM (ENHANCED with explicit context)
 		
 		Uses LLM for semantic understanding of domain, not just keyword matching.
+		Now uses prepared_context for better continuity awareness.
 		"""
 		try:
 			user_message = state["user_message"]
 			context = state["conversation_context"]
+			prepared_context = state.get("prepared_context", {})
 			
-			# Extract editor context
-			shared_memory = context.get('shared_memory', {})
-			active_editor = shared_memory.get('active_editor', {}) or {}
+			# Extract editor context from prepared_context
+			editor_context_data = prepared_context.get("editor_context", {})
 			editor_context = {}
-			if active_editor:
-				fm = active_editor.get('frontmatter', {}) or {}
-				editor_type = fm.get('type', '').strip().lower()
-				if editor_type:
-					editor_context = {'type': editor_type}
+			if editor_context_data.get("should_use") and editor_context_data.get("type"):
+				editor_context = {'type': editor_context_data["type"]}
 			
-			# Log primary agent for domain detection
-			primary_agent = shared_memory.get('primary_agent_selected')
+			# Get agent continuity info from prepared_context
+			agent_continuity = prepared_context.get("agent_continuity", {})
+			primary_agent = agent_continuity.get("primary_agent")
+			last_response_data = prepared_context.get("last_response", {})
+			last_response = last_response_data.get("content")
+			
 			if primary_agent:
 				logger.info(f"🔍 DOMAIN DETECTION: Analyzing with primary_agent = '{primary_agent}' (will consider for continuity)")
 			
-			# Build domain detection prompt
-			prompt = self._build_domain_detection_prompt(user_message, editor_context, context)
+			# Build enhanced domain detection prompt with explicit context
+			prompt = self._build_domain_detection_prompt(
+				user_message, 
+				editor_context, 
+				context,
+				prepared_context
+			)
 			
 			# Get LLM classification
 			openai_client = await self._get_openai_client()
@@ -229,14 +589,17 @@ class IntentClassifier:
 	
 	async def _classify_action_intent_node(self, state: IntentClassificationState) -> IntentClassificationState:
 		"""
-		Stage 2: Classify action intent using LLM
+		Stage 2: Classify action intent using LLM (ENHANCED with follow-up detection)
+		
+		Now uses prepared_context to detect follow-up questions and infer action intent from context.
 		"""
 		try:
 			user_message = state["user_message"]
 			context = state["conversation_context"]
+			prepared_context = state.get("prepared_context", {})
 			
-			# Build action intent prompt
-			prompt = self._build_action_intent_prompt(user_message, context)
+			# Build enhanced action intent prompt with follow-up detection
+			prompt = self._build_action_intent_prompt(user_message, context, prepared_context)
 			
 			# Get LLM classification
 			openai_client = await self._get_openai_client()
@@ -282,39 +645,50 @@ class IntentClassifier:
 	
 	async def _route_agent_node(self, state: IntentClassificationState) -> IntentClassificationState:
 		"""
-		Stage 3: Route to agent using capability matching
+		Stage 3: Route to agent using capability matching (ENHANCED with context-aware scoring)
+		
+		Now uses prepared_context for explicit continuity scoring and editor preference handling.
 		"""
 		try:
 			domain = state["domain"]
 			action_intent = state["action_intent"]
 			user_message = state["user_message"]
 			context = state["conversation_context"]
+			prepared_context = state.get("prepared_context", {})
 			
-			# Extract editor context
-			shared_memory = context.get('shared_memory', {})
-			active_editor = shared_memory.get('active_editor', {}) or {}
+			# Extract editor context from prepared_context
+			editor_context_data = prepared_context.get("editor_context", {})
 			editor_context = {}
-			if active_editor:
-				fm = active_editor.get('frontmatter', {}) or {}
-				editor_type = fm.get('type', '').strip().lower()
-				if editor_type:
-					editor_context = {'type': editor_type}
+			if editor_context_data.get("should_use") and editor_context_data.get("type"):
+				editor_context = {'type': editor_context_data["type"]}
 			
-			# Extract conversation history
-			primary_agent = shared_memory.get('primary_agent_selected')
-			last_agent = shared_memory.get('last_agent')
+			# Extract conversation history from prepared_context
+			agent_continuity = prepared_context.get("agent_continuity", {})
+			primary_agent = agent_continuity.get("primary_agent")
+			last_agent = agent_continuity.get("last_agent")
 			conversation_history = {
 				'last_agent': last_agent,
 				'primary_agent_selected': primary_agent
 			}
 			
-			# Log primary agent for routing
+			# Check if we should boost continuity
+			last_response_data = prepared_context.get("last_response", {})
+			last_response = last_response_data.get("content")
+			should_boost = should_boost_continuity(
+				primary_agent,
+				last_agent,
+				last_response,
+				user_message
+			)
+			
+			# Log routing context
 			if primary_agent:
-				logger.info(f"🔄 AGENT ROUTING: Using primary_agent = '{primary_agent}' for capability matching (continuity boost)")
+				continuity_msg = " (continuity boost)" if should_boost else ""
+				logger.info(f"🔄 AGENT ROUTING: Using primary_agent = '{primary_agent}' for capability matching{continuity_msg}")
 			else:
 				logger.info(f"🔄 AGENT ROUTING: No primary_agent (new conversation)")
 			
-			# Route using capability matching
+			# Route using capability matching (with enhanced context)
 			target_agent, confidence = find_best_agent_match(
 				domain=domain,
 				action_intent=action_intent,
@@ -322,6 +696,12 @@ class IntentClassifier:
 				editor_context=editor_context if editor_context.get('type') else None,
 				conversation_history=conversation_history
 			)
+			
+			# Apply explicit continuity boost if needed
+			if should_boost and primary_agent and target_agent != primary_agent:
+				# Re-check with continuity boost
+				# The capability matching already handles this, but we log it explicitly
+				logger.info(f"🔄 CONTINUITY CHECK: Query appears to be follow-up, but routed to {target_agent} instead of {primary_agent}")
 			
 			logger.info(f"📊 STAGE 3 - ROUTING: {target_agent} (confidence: {confidence:.2f})")
 			
@@ -349,6 +729,8 @@ class IntentClassifier:
 			)
 			
 			# Check if permission already exists in shared_memory
+			context = state.get("conversation_context", {})
+			shared_memory = context.get('shared_memory', {}) if context else {}
 			web_permission_granted = shared_memory.get('web_search_permission', False)
 			
 			# Set permission_required flag
@@ -384,7 +766,9 @@ class IntentClassifier:
 		except Exception as e:
 			logger.error(f"❌ Agent routing failed: {e}")
 			# Fallback - check permissions even in error case
-			shared_memory = context.get('shared_memory', {}) if 'context' in locals() else {}
+			prepared_context = state.get("prepared_context", {})
+			context = state.get("conversation_context", {})
+			shared_memory = context.get('shared_memory', {}) if context else {}
 			web_permission_granted = shared_memory.get('web_search_permission', False)
 			fallback_agent = "chat_agent"
 			permission_required = False
@@ -392,6 +776,12 @@ class IntentClassifier:
 			# If fallback is to research_agent, check permissions
 			if fallback_agent == 'research_agent' and not web_permission_granted:
 				permission_required = True
+			
+			# Set state fields for merge_results node
+			state["target_agent"] = fallback_agent
+			state["confidence"] = 0.5
+			state["reasoning"] = f"Fallback due to error: {str(e)}"
+			state["permission_required"] = permission_required
 			
 			result = SimpleIntentResult(
 				target_agent=fallback_agent,
@@ -403,29 +793,57 @@ class IntentClassifier:
 			state["result"] = result
 			return state
 	
-	def _build_domain_detection_prompt(self, user_message: str, editor_context: Dict[str, Any], conversation_context: Dict[str, Any]) -> str:
+	def _build_domain_detection_prompt(
+		self, 
+		user_message: str, 
+		editor_context: Dict[str, Any], 
+		conversation_context: Dict[str, Any],
+		prepared_context: Optional[Dict[str, Any]] = None
+	) -> str:
 		"""
-		Build prompt for domain detection
+		Build enhanced prompt for domain detection with explicit context
 		"""
 		editor_hint = ""
 		if editor_context.get('type'):
 			editor_hint = f"\n\n**EDITOR CONTEXT**: User has a '{editor_context['type']}' editor open. This is a STRONG signal for domain detection."
 		
-		shared_memory = conversation_context.get('shared_memory', {})
-		primary_agent = shared_memory.get('primary_agent_selected')
-		continuity_hint = ""
-		if primary_agent:
-			continuity_hint = f"\n\n**CONVERSATION CONTEXT**: Previous agent was '{primary_agent}'. Consider if this is a continuation."
+		# Enhanced continuity context from prepared_context
+		continuity_section = ""
+		if prepared_context:
+			agent_continuity = prepared_context.get("agent_continuity", {})
+			primary_agent = agent_continuity.get("primary_agent")
+			last_agent = agent_continuity.get("last_agent")
+			last_response_data = prepared_context.get("last_response", {})
+			last_response = last_response_data.get("content")
+			
+			if primary_agent or last_agent:
+				continuity_section = "\n\n**CONVERSATION CONTINUITY CONTEXT**:"
+				if primary_agent:
+					continuity_section += f"\n- Previous primary agent: '{primary_agent}'"
+					# Infer typical action from agent
+					typical_action = infer_action_from_agent(primary_agent)
+					if typical_action:
+						continuity_section += f" (typically handles {typical_action} actions)"
+				if last_agent and last_agent != primary_agent:
+					continuity_section += f"\n- Last agent used: '{last_agent}'"
+				if last_response:
+					response_preview = last_response[:200] + "..." if len(last_response) > 200 else last_response
+					continuity_section += f"\n- Previous response summary: \"{response_preview}\""
+				continuity_section += "\n- **IMPORTANT**: If user is asking a follow-up question, prefer the same domain as the previous agent."
 		
 		return f"""Classify the DOMAIN of this user message:
 
-**USER MESSAGE**: "{user_message}"{editor_hint}{continuity_hint}
+**USER MESSAGE**: "{user_message}"{editor_hint}{continuity_section}
 
 **DOMAIN OPTIONS** (choose ONE):
 
 1. **electronics** - Electronics, circuits, embedded systems, Arduino, ESP32, microcontrollers, sensors, components
 2. **fiction** - Fiction writing, stories, manuscripts, chapters, characters, plots, worldbuilding
-3. **weather** - Weather conditions, forecasts, temperature, climate
+3. **weather** - ONLY when user is EXPLICITLY ASKING about weather conditions, forecasts, or temperature
+   - User must be requesting weather information, not just mentioning weather in passing
+   - Examples of weather queries: "What's the weather?", "Tell me the forecast", "What's the temperature in X?"
+   - Examples that are NOT weather: "It's cold and snowy" (just mentioning weather), "The weather is nice today" (casual statement)
+   - If user mentions weather but isn't asking about it → "general"
 4. **content** - Content creation (articles, podcasts, blog posts)
 5. **management** - Task management, project organization, system configuration
 6. **general** - General queries, research, information gathering, or unclear domain
@@ -434,7 +852,8 @@ class IntentClassifier:
 - Editor context is PRIMARY signal - if editor type matches a domain, use that domain
 - "our electronics project" or "electronics project" → electronics
 - "chapter", "scene", "manuscript" → fiction
-- "weather", "temperature", "forecast" → weather
+- Weather domain ONLY when user EXPLICITLY ASKS about weather (e.g., "What's the weather?", "Tell me the forecast")
+- If user just mentions weather conditions without asking about them → "general"
 - If unclear, default to "general"
 
 **OUTPUT FORMAT** (JSON ONLY):
@@ -443,35 +862,61 @@ class IntentClassifier:
   "reasoning": "Brief explanation of domain choice"
 }}"""
 	
-	def _build_action_intent_prompt(self, user_message: str, conversation_context: Dict[str, Any]) -> str:
+	def _build_action_intent_prompt(
+		self, 
+		user_message: str, 
+		conversation_context: Dict[str, Any],
+		prepared_context: Optional[Dict[str, Any]] = None
+	) -> str:
 		"""
-		Build focused prompt for action intent classification only
+		Build enhanced prompt for action intent classification with follow-up detection
 		
 		Much simpler than full routing prompt - just classifies HOW user wants to interact.
+		Now includes explicit follow-up detection from prepared_context.
 		"""
-		# Get conversation context hints
-		shared = conversation_context.get('shared_memory', {}) or {}
-		primary_agent = shared.get('primary_agent_selected')
-		last_response = shared.get('last_response')
-		
-		continuity_hint = ""
-		if primary_agent and last_response:
-			response_preview = last_response[:400] + "..." if len(last_response) > 400 else last_response
-			continuity_hint = f"\n\n**CONTEXT**: Previous agent '{primary_agent}' responded: \"{response_preview}\"\nIf this is a continuation/response to that, consider that context."
+		# Enhanced continuity context from prepared_context
+		continuity_section = ""
+		if prepared_context:
+			agent_continuity = prepared_context.get("agent_continuity", {})
+			primary_agent = agent_continuity.get("primary_agent")
+			last_response_data = prepared_context.get("last_response", {})
+			last_response = last_response_data.get("content")
+			
+			if primary_agent and last_response:
+				response_preview = last_response[:400] + "..." if len(last_response) > 400 else last_response
+				typical_action = infer_action_from_agent(primary_agent)
+				
+				continuity_section = f"\n\n**FOLLOW-UP DETECTION CONTEXT**:"
+				continuity_section += f"\n- Previous agent: '{primary_agent}'"
+				if typical_action:
+					continuity_section += f" (typically handles {typical_action} actions)"
+				continuity_section += f"\n- Previous response: \"{response_preview}\""
+				continuity_section += "\n\n**FOLLOW-UP RULES**:"
+				continuity_section += "\n- If user asks 'more details', 'expand that', 'tell me more' → likely OBSERVATION (not new generation)"
+				continuity_section += "\n- If user says 'yes', 'ok', 'continue', 'that works' → likely OBSERVATION (acknowledgment)"
+				continuity_section += "\n- If user asks to 'change', 'modify', 'update' something from previous response → likely MODIFICATION"
+				continuity_section += "\n- If user asks a NEW question unrelated to previous response → classify based on query content"
+				continuity_section += "\n- If user is clearly continuing the conversation → prefer same action type as previous agent"
 		
 		return f"""Classify the ACTION INTENT of this user message:
 
-**USER MESSAGE**: "{user_message}"{continuity_hint}
+**USER MESSAGE**: "{user_message}"{continuity_section}
 
 **ACTION INTENT OPTIONS** (choose ONE):
 
-1. **observation** - User wants to see/check/review/confirm existing content
-   - Examples: "Do you see...", "Show me...", "What's in...", "How is...", "Is there..."
-   - Intent: View/confirm what exists, NOT create/modify
+1. **observation** - User wants to see/check/review/confirm existing content OR initiating conversation OR making conversational statements
+   - Examples: "Do you see...", "Show me...", "What's in...", "How is...", "Is there...", "Hello", "Hi", "Greetings", "Hey"
+   - Conversational statements: "I'm going to...", "I plan to...", "I want to...", "Let me...", "I should..."
+   - Intent: View/confirm what exists, OR conversational greetings/initiation/statements (NOT create/modify, NOT seeking external info)
+   - **CRITICAL**: 
+     - Greetings like "Hello", "Hi", "Greetings, friend!" → **observation** (conversational initiation, NOT query)
+     - Conversational statements about plans/actions without explicit creation verbs → **observation** (NOT generation)
+     - "Eat nothing but beans on Tuesday. Then visit an old-folks home." → **observation** (conversational statement, NOT generation)
 
-2. **generation** - User wants to CREATE/WRITE/DRAFT NEW content
-   - Examples: "Write...", "Create...", "Draft...", "Generate...", "Compose..."
-   - Intent: Create something new
+2. **generation** - User wants to CREATE/WRITE/DRAFT NEW content with EXPLICIT creation verbs
+   - Examples: "Write...", "Create...", "Draft...", "Generate...", "Compose...", "Make a...", "Build a..."
+   - Intent: Create something new (document, code, content, etc.)
+   - **CRITICAL**: Must have explicit creation verbs. Conversational statements about plans are NOT generation.
 
 3. **modification** - User wants to CHANGE/EDIT/REVISE EXISTING content
    - Examples: "Edit...", "Revise...", "Change...", "Improve...", "Update...", "Fix..."
@@ -490,10 +935,15 @@ class IntentClassifier:
    - Intent: System, task, or project file management
 
 **CRITICAL RULES**:
+- **Greetings and conversational initiation** (Hello, Hi, Greetings, Hey, etc.) → **observation** (NOT query)
+- **Conversational statements** about plans/actions without explicit creation verbs → **observation** (NOT generation, NOT query)
+  - Examples: "I'm going to...", "I plan to...", "Eat nothing but beans on Tuesday" → **observation**
+- **Explicit creation requests** with verbs like "Write", "Create", "Draft", "Generate" → **generation**
 - Document-specific queries (mentions specific files/documents) → **analysis** (NOT query)
 - "How is X looking?" or "How is X going?" → **observation** (checking status)
 - "Save what we discussed" → **management** (project file operation)
 - Comparison/contrast queries → **analysis** (NOT query)
+- Seeking information about topics (not documents) → **query**
 
 **OUTPUT FORMAT** (JSON ONLY):
 {{
@@ -543,13 +993,16 @@ The '{primary_agent}' agent previously responded with:
    - These are responses to the agent's previous message, not new topics.
 
 2. **TOPIC CHANGE DETECTION**: If the user's message is clearly a NEW topic unrelated to the above conversation, route to the appropriate agent for that new topic.
-   - Examples of topic changes: "What's the weather?" (after electronics discussion) → weather_agent
+   - Examples of topic changes: "What's the weather?" (after electronics discussion) → weather_agent (explicit weather query)
    - "Tell me about Napoleon" (after project discussion) → research_agent
    - The user is explicitly changing topics, not continuing the conversation.
+   - **WEATHER ROUTING**: Only route to weather_agent when user EXPLICITLY ASKS about weather (e.g., "What's the weather?", "Tell me the forecast")
+   - **NOT WEATHER ROUTING**: "It's cold and snowy" → chat_agent (just mentioning weather, not asking about it)
 
 3. **SEMANTIC UNDERSTANDING**: Use semantic analysis, not keyword matching:
    - "Save what we discussed" after electronics_agent response → electronics_agent (continuation)
-   - "What's the weather?" after electronics_agent response → weather_agent (topic change)
+   - "What's the weather?" after electronics_agent response → weather_agent (explicit weather query)
+   - "It's cold and snowy but great for football" → chat_agent (weather mentioned but not the primary query)
    - "Update the project" after electronics_agent response → electronics_agent (continuation)
 
 **BALANCED ROUTING PRIORITY**:
@@ -560,7 +1013,8 @@ The '{primary_agent}' agent previously responded with:
 
 **EXAMPLES**:
 - "What do we anticipate the effects of tariff checks would be?" → research_agent (research query, even if continuing chat)
-- "What's the weather?" → weather_agent (clear topic change)
+- "What's the weather?" → weather_agent (explicit weather query)
+- "It's cold and snowy. But seems like a great day for football!" → chat_agent (weather mentioned but not the query - user is making a statement about football)
 - "Yes, please continue" → {primary_agent} (clear continuation)
 - "Tell me more about that" → {primary_agent} (clear continuation)
 - "What are the implications of X?" → research_agent (research query, switch even if continuing)"""
@@ -664,10 +1118,13 @@ The '{primary_agent}' agent previously responded with:
 
 Every query has a PRIMARY action intent that determines routing behavior:
 
-**1. OBSERVATION** - User wants to see/check/review/confirm existing content
-   - Language: "Do you see...", "Show me...", "What's in...", "Does this have...", "Can you see...", "Is there..."
-   - Intent: Confirm or view what exists, NOT create/modify
+**1. OBSERVATION** - User wants to see/check/review/confirm existing content OR initiating conversation
+   - Language: "Do you see...", "Show me...", "What's in...", "Does this have...", "Can you see...", "Is there...", "Hello", "Hi", "Greetings", "Hey"
+   - Intent: Confirm or view what exists, OR conversational greetings/initiation (NOT create/modify)
+   - **CRITICAL**: Greetings like "Hello", "Hi", "Greetings, friend!" → **observation** (conversational initiation, NOT query)
    - Examples:
+     * "Hello, friend" → observation (conversational greeting)
+     * "Hi there" → observation (conversational greeting)
      * "Do you see our outline" → observation (checking content)
      * "Show me what's in the manuscript" → observation (viewing)
      * "Does this chapter have dialogue?" → observation (checking)
@@ -832,9 +1289,10 @@ Every query has a PRIMARY action intent that determines routing behavior:
 
 - **chat_agent**
   - ACTION INTENTS: observation, query
-  - USE FOR: Conversational queries, observation checks, quick lookups, general questions
+  - USE FOR: Conversational queries, greetings, observation checks, quick lookups, general questions
   - CAN READ: org-mode TODOs (list_org_todos), search by tag (search_org_by_tag)
-  - TRIGGERS: "do you see", "show me", "what's in", "explain"
+  - TRIGGERS: "Hello", "Hi", "Greetings", "Hey", "do you see", "show me", "what's in", "explain"
+  - **CRITICAL**: Greetings and conversational initiation → chat_agent (NOT research_agent)
   - USE AS FALLBACK: When no specialized agent fits
 
 - **help_agent**
@@ -913,6 +1371,18 @@ Every query has a PRIMARY action intent that determines routing behavior:
               "compare Breaking Bad and The Wire", "what should I watch", "movies similar to"
   - AVOID: non-entertainment queries
 
+- **weather_agent**
+  - ACTION INTENTS: query (weather information requests ONLY)
+  - USE FOR: ONLY when user EXPLICITLY ASKS about weather conditions, forecasts, or temperature
+  - TRIGGERS: "What's the weather?", "Tell me the forecast", "What's the temperature in [location]?", 
+              "How's the weather?", "Weather forecast for", "Current conditions in"
+  - **CRITICAL**: User must be EXPLICITLY REQUESTING weather information, not just mentioning weather
+  - **AVOID**: 
+    * Casual mentions of weather: "It's cold and snowy" → chat_agent (just mentioning weather, not asking)
+    * Weather in context of other topics: "It's cold but great for football" → chat_agent (weather mentioned but not the query)
+    * Statements about weather: "The weather is nice today" → chat_agent (statement, not a request)
+  - **ROUTING RULE**: Only route to weather_agent when the user's PRIMARY INTENT is to get weather information
+
 - **electronics_agent**
   - ACTION INTENTS: generation, query, modification, analysis, **management** (project file operations)
   - USE FOR: Circuit design, embedded programming, component selection, electronics troubleshooting, electronics project planning/design, **saving/updating electronics project files**
@@ -953,7 +1423,7 @@ ROUTING HINTS FOR PROJECT CAPTURE:
 **STRICT OUTPUT FORMAT - JSON ONLY (NO MARKDOWN, NO EXPLANATION):**
 You MUST respond with a single JSON object matching this schema:
 {{
-  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|data_formatting_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_inbox_agent|org_project_agent|website_crawler_agent|podcast_script_agent|substack_agent|entertainment_agent|electronics_agent",
+  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|data_formatting_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_inbox_agent|org_project_agent|website_crawler_agent|podcast_script_agent|substack_agent|entertainment_agent|weather_agent|electronics_agent",
   "action_intent": "observation|generation|modification|analysis|query|management",
   "permission_required": false,
   "confidence": 0.0,
@@ -1030,87 +1500,92 @@ You MUST respond with a single JSON object matching this schema:
 			except Exception:
 				shared = {}
 			try:
-				active_editor = shared.get('active_editor', {}) or {}
-				fm = (active_editor.get('frontmatter') or {})
-				doc_type = str((fm.get('type') or '')).strip().lower()
-				
-				# Get primary_agent for conversation continuity check
-				primary_agent = shared.get('primary_agent_selected')
-				
-				# **EDITOR CONTEXT OVERRIDE**: Editor type is PRIMARY signal for domain-specific routing
-				# If user has a specialized editor open, route to that agent (with exceptions for analysis)
-				# This fixes cases like "How is our electronics project looking?" → should go to electronics_agent
-				current_agent = data.get('target_agent', 'chat_agent')
-				
-				if doc_type == 'electronics':
-					# STRICT GATING: Only route to electronics_agent if project_plan.md is open
-					filename = active_editor.get('filename', '').lower()
+				# Check editor_preference - skip editor overrides if "ignore"
+				editor_preference = shared.get('editor_preference', 'prefer')
+				if editor_preference == 'ignore':
+					logger.info(f"📝 EDITOR CONTEXT: Skipping editor overrides - editor_preference is 'ignore'")
+				else:
+					active_editor = shared.get('active_editor', {}) or {}
+					fm = (active_editor.get('frontmatter') or {})
+					doc_type = str((fm.get('type') or '')).strip().lower()
 					
-					# Check if this is actually a project_plan file
-					if 'project_plan' in filename or filename == 'project_plan.md':
-						# Valid electronics project plan open → route electronics queries
-						query_lower = user_message.lower()
-						electronics_keywords = ['electronics', 'circuit', 'arduino', 'esp32', 'project', 'component', 'sensor', 'microcontroller', 'firmware', 'embedded', 'voltage', 'resistor', 'pcb', 'schematic', 'design', 'our', 'the project']
-						non_electronics_keywords = ['weather', 'temperature', 'forecast', 'rain', 'snow']
+					# Get primary_agent for conversation continuity check
+					primary_agent = shared.get('primary_agent_selected')
+					
+					# **EDITOR CONTEXT OVERRIDE**: Editor type is PRIMARY signal for domain-specific routing
+					# If user has a specialized editor open, route to that agent (with exceptions for analysis)
+					# This fixes cases like "How is our electronics project looking?" → should go to electronics_agent
+					current_agent = data.get('target_agent', 'chat_agent')
+				
+					if doc_type == 'electronics':
+						# STRICT GATING: Only route to electronics_agent if project_plan.md is open
+						filename = active_editor.get('filename', '').lower()
 						
-						# Check if query is clearly NOT electronics-related
-						if any(kw in query_lower for kw in non_electronics_keywords):
-							# Non-electronics query, don't override routing
-							logger.info(f"📝 Electronics project open, but query is non-electronics")
-						elif any(kw in query_lower for kw in electronics_keywords):
-							# Electronics query with project open → electronics_agent
-							if current_agent != 'electronics_agent':
-								logger.info(f"🔄 EDITOR GATING: {current_agent} → electronics_agent (project_plan.md open)")
+						# Check if this is actually a project_plan file
+						if 'project_plan' in filename or filename == 'project_plan.md':
+							# Valid electronics project plan open → route electronics queries
+							query_lower = user_message.lower()
+							electronics_keywords = ['electronics', 'circuit', 'arduino', 'esp32', 'project', 'component', 'sensor', 'microcontroller', 'firmware', 'embedded', 'voltage', 'resistor', 'pcb', 'schematic', 'design', 'our', 'the project']
+							non_electronics_keywords = ['weather', 'temperature', 'forecast', 'rain', 'snow']
+							
+							# Check if query is clearly NOT electronics-related
+							if any(kw in query_lower for kw in non_electronics_keywords):
+								# Non-electronics query, don't override routing
+								logger.info(f"📝 Electronics project open, but query is non-electronics")
+							elif any(kw in query_lower for kw in electronics_keywords):
+								# Electronics query with project open → electronics_agent
+								if current_agent != 'electronics_agent':
+									logger.info(f"🔄 EDITOR GATING: {current_agent} → electronics_agent (project_plan.md open)")
+									data['target_agent'] = 'electronics_agent'
+									data['reasoning'] = f"Electronics project plan open. Routing to electronics_agent."
+							else:
+								# Ambiguous query with electronics project open → electronics_agent
+								logger.info(f"🔄 EDITOR GATING: Ambiguous query with electronics project → electronics_agent")
 								data['target_agent'] = 'electronics_agent'
 								data['reasoning'] = f"Electronics project plan open. Routing to electronics_agent."
 						else:
-							# Ambiguous query with electronics project open → electronics_agent
-							logger.info(f"🔄 EDITOR GATING: Ambiguous query with electronics project → electronics_agent")
-							data['target_agent'] = 'electronics_agent'
-							data['reasoning'] = f"Electronics project plan open. Routing to electronics_agent."
+							# Electronics document open, but NOT project_plan → don't route to electronics_agent
+							logger.info(f"📝 Electronics doc open ({filename}), but not project_plan - no electronics_agent override")
+							
+							# Check if informational query → research_agent
+							from orchestrator.services.agent_capabilities import is_information_lookup_query
+							if is_information_lookup_query(user_message):
+								logger.info(f"🔍 Informational query detected → research_agent")
+								data['target_agent'] = 'research_agent'
+								data['reasoning'] = f"Electronics document open but not project_plan. Informational query → research_agent."
+							# Otherwise let natural domain classification decide (likely chat_agent)
+					
+					elif doc_type == 'fiction':
+						# Fiction queries go to fiction_editing_agent (unless analysis)
+						if action_intent == 'analysis':
+							if current_agent not in ['story_analysis_agent', 'content_analysis_agent']:
+								logger.info(f"🔄 EDITOR OVERRIDE: {current_agent} → story_analysis_agent (editor type: fiction, action: analysis)")
+								data['target_agent'] = 'story_analysis_agent'
+								data['reasoning'] = f"Editor context (fiction) + analysis intent → story_analysis_agent"
+						else:
+							# Non-analysis fiction queries → fiction_editing_agent
+							if current_agent not in ['fiction_editing_agent', 'outline_editing_agent', 'character_development_agent', 'rules_editing_agent']:
+								logger.info(f"🔄 EDITOR OVERRIDE: {current_agent} → fiction_editing_agent (editor type: fiction, action: {action_intent})")
+								data['target_agent'] = 'fiction_editing_agent'
+								data['reasoning'] = f"Editor context (fiction) + {action_intent} intent → fiction_editing_agent"
+					
+					elif doc_type in ['outline', 'character', 'rules']:
+						# Specialized fiction editors → their specific agents
+						editor_agent_map = {
+							'outline': 'outline_editing_agent',
+							'character': 'character_development_agent',
+							'rules': 'rules_editing_agent'
+						}
+						target_agent = editor_agent_map.get(doc_type)
+						if target_agent and current_agent != target_agent and action_intent != 'analysis':
+							logger.info(f"🔄 EDITOR OVERRIDE: {current_agent} → {target_agent} (editor type: {doc_type})")
+							data['target_agent'] = target_agent
+							data['reasoning'] = f"Editor context ({doc_type}) → {target_agent}"
+					
+					if doc_type:
+						logger.info(f"📝 EDITOR CONTEXT: type={doc_type}, action_intent={action_intent}, primary_agent={primary_agent}, final_agent={data.get('target_agent')}")
 					else:
-						# Electronics document open, but NOT project_plan → don't route to electronics_agent
-						logger.info(f"📝 Electronics doc open ({filename}), but not project_plan - no electronics_agent override")
-						
-						# Check if informational query → research_agent
-						from orchestrator.services.agent_capabilities import is_information_lookup_query
-						if is_information_lookup_query(user_message):
-							logger.info(f"🔍 Informational query detected → research_agent")
-							data['target_agent'] = 'research_agent'
-							data['reasoning'] = f"Electronics document open but not project_plan. Informational query → research_agent."
-						# Otherwise let natural domain classification decide (likely chat_agent)
-				
-				elif doc_type == 'fiction':
-					# Fiction queries go to fiction_editing_agent (unless analysis)
-					if action_intent == 'analysis':
-						if current_agent not in ['story_analysis_agent', 'content_analysis_agent']:
-							logger.info(f"🔄 EDITOR OVERRIDE: {current_agent} → story_analysis_agent (editor type: fiction, action: analysis)")
-							data['target_agent'] = 'story_analysis_agent'
-							data['reasoning'] = f"Editor context (fiction) + analysis intent → story_analysis_agent"
-					else:
-						# Non-analysis fiction queries → fiction_editing_agent
-						if current_agent not in ['fiction_editing_agent', 'outline_editing_agent', 'character_development_agent', 'rules_editing_agent']:
-							logger.info(f"🔄 EDITOR OVERRIDE: {current_agent} → fiction_editing_agent (editor type: fiction, action: {action_intent})")
-							data['target_agent'] = 'fiction_editing_agent'
-							data['reasoning'] = f"Editor context (fiction) + {action_intent} intent → fiction_editing_agent"
-				
-				elif doc_type in ['outline', 'character', 'rules']:
-					# Specialized fiction editors → their specific agents
-					editor_agent_map = {
-						'outline': 'outline_editing_agent',
-						'character': 'character_development_agent',
-						'rules': 'rules_editing_agent'
-					}
-					target_agent = editor_agent_map.get(doc_type)
-					if target_agent and current_agent != target_agent and action_intent != 'analysis':
-						logger.info(f"🔄 EDITOR OVERRIDE: {current_agent} → {target_agent} (editor type: {doc_type})")
-						data['target_agent'] = target_agent
-						data['reasoning'] = f"Editor context ({doc_type}) → {target_agent}"
-				
-				if doc_type:
-					logger.info(f"📝 EDITOR CONTEXT: type={doc_type}, action_intent={action_intent}, primary_agent={primary_agent}, final_agent={data.get('target_agent')}")
-				else:
-					logger.info(f"✅ NO EDITOR CONTEXT: → {data.get('target_agent')}")
+						logger.info(f"✅ NO EDITOR CONTEXT: → {data.get('target_agent')}")
 					
 					
 			except Exception as e:
@@ -1224,9 +1699,10 @@ You MUST respond with a single JSON object matching this schema:
 		try:
 			context = conversation_context or {}
 			shared_memory = context.get('shared_memory', {})
+			editor_preference = shared_memory.get('editor_preference', 'prefer')
 			active_editor = shared_memory.get('active_editor', {}) or {}
 			editor_context = {}
-			if active_editor:
+			if active_editor and editor_preference != 'ignore':
 				fm = active_editor.get('frontmatter', {}) or {}
 				editor_context = {'type': fm.get('type', '').strip().lower()}
 			

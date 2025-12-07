@@ -17,6 +17,8 @@ import {
   Edit,
   Delete,
   PersonAdd,
+  NotificationsOff,
+  Notifications,
 } from '@mui/icons-material';
 
 const RoomContextMenu = ({ 
@@ -25,7 +27,9 @@ const RoomContextMenu = ({
   onClose, 
   onRename, 
   onDelete, 
-  onAddParticipant 
+  onAddParticipant,
+  onToggleMute,
+  isMuted
 }) => {
   const handleRename = () => {
     onRename();
@@ -39,6 +43,11 @@ const RoomContextMenu = ({
 
   const handleAddParticipant = () => {
     onAddParticipant();
+    onClose();
+  };
+
+  const handleToggleMute = () => {
+    onToggleMute();
     onClose();
   };
 
@@ -70,6 +79,21 @@ const RoomContextMenu = ({
           <PersonAdd fontSize="small" />
         </ListItemIcon>
         <ListItemText>Add Participant</ListItemText>
+      </MenuItem>
+
+      <Divider />
+
+      <MenuItem onClick={handleToggleMute}>
+        <ListItemIcon>
+          {isMuted ? (
+            <Notifications fontSize="small" />
+          ) : (
+            <NotificationsOff fontSize="small" />
+          )}
+        </ListItemIcon>
+        <ListItemText>
+          {isMuted ? 'Unmute Notifications' : 'Mute Notifications'}
+        </ListItemText>
       </MenuItem>
 
       <Divider />

@@ -1088,7 +1088,7 @@ Be concise and focus on preventing topic contamination while preserving relevant
         if not persona:
             return ""
         
-        ai_name = persona.get("ai_name", "Codex")
+        ai_name = persona.get("ai_name", "Alex")
         persona_style = persona.get("persona_style", "professional")
         political_bias = persona.get("political_bias", "neutral")
         

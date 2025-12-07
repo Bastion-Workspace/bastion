@@ -3,15 +3,17 @@ LLM Orchestrator gRPC Service Implementation
 Handles incoming gRPC requests for LLM orchestration
 """
 
+import asyncio
 import logging
 from datetime import datetime
-from typing import AsyncIterator, Optional, Dict, Any
+from typing import AsyncIterator, Optional, Dict, Any, List
 
 import grpc
 from protos import orchestrator_pb2, orchestrator_pb2_grpc
 from orchestrator.agents import (
     get_full_research_agent,
     ChatAgent,
+    DictionaryAgent,
     DataFormattingAgent,
     get_weather_agent,
     get_image_generation_agent,
@@ -31,7 +33,6 @@ from orchestrator.agents import (
     get_site_crawl_agent,
     get_rules_editing_agent,
     get_proofreading_agent,
-    get_report_formatting_agent,
     get_general_project_agent
 )
 from orchestrator.services import get_intent_classifier
@@ -51,6 +52,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         self.is_initialized = False
         self.research_agent = None
         self.chat_agent = None
+        self.dictionary_agent = None
         self.data_formatting_agent = None
         self.help_agent = None
         self.weather_agent = None
@@ -71,106 +73,111 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         self.site_crawl_agent = None
         self.rules_editing_agent = None
         self.proofreading_agent = None
-        self.report_formatting_agent = None
         self.general_project_agent = None
         logger.info("Initializing OrchestratorGRPCService...")
     
     def _ensure_agents_loaded(self):
         """Lazy load agents"""
+        agents_loaded = 0
+        total_agents = 25  # Total number of agents to load
+        
         if self.research_agent is None:
             self.research_agent = get_full_research_agent()
-            logger.info("✅ Full research agent loaded")
+            agents_loaded += 1
         
         if self.chat_agent is None:
             self.chat_agent = ChatAgent()
-            logger.info("✅ Chat agent loaded")
+            agents_loaded += 1
+        
+        if self.dictionary_agent is None:
+            self.dictionary_agent = DictionaryAgent()
+            agents_loaded += 1
         
         if self.data_formatting_agent is None:
             self.data_formatting_agent = DataFormattingAgent()
-            logger.info("✅ Data formatting agent loaded")
+            agents_loaded += 1
         
         if self.help_agent is None:
             from orchestrator.agents import HelpAgent
             self.help_agent = HelpAgent()
-            logger.info("✅ Help agent loaded")
+            agents_loaded += 1
         
         if self.weather_agent is None:
             self.weather_agent = get_weather_agent()
-            logger.info("✅ Weather agent loaded")
+            agents_loaded += 1
         
         if self.image_generation_agent is None:
             self.image_generation_agent = get_image_generation_agent()
-            logger.info("✅ Image generation agent loaded")
+            agents_loaded += 1
         
         # FactCheckingAgent removed - not actively used
         
         if self.rss_agent is None:
             self.rss_agent = get_rss_agent()
-            logger.info("✅ RSS agent loaded")
+            agents_loaded += 1
         
         if self.org_inbox_agent is None:
             self.org_inbox_agent = get_org_inbox_agent()
-            logger.info("✅ Org inbox agent loaded")
+            agents_loaded += 1
         
         if self.substack_agent is None:
             self.substack_agent = get_substack_agent()
-            logger.info("✅ Substack agent loaded")
+            agents_loaded += 1
         
         if self.podcast_script_agent is None:
             self.podcast_script_agent = get_podcast_script_agent()
-            logger.info("✅ Podcast script agent loaded")
+            agents_loaded += 1
         
         if self.org_project_agent is None:
             self.org_project_agent = get_org_project_agent()
-            logger.info("✅ Org project agent loaded")
+            agents_loaded += 1
         
         if self.entertainment_agent is None:
             self.entertainment_agent = get_entertainment_agent()
-            logger.info("✅ Entertainment agent loaded")
+            agents_loaded += 1
 
         if self.electronics_agent is None:
             self.electronics_agent = get_electronics_agent()
-            logger.info("✅ Electronics agent loaded")
+            agents_loaded += 1
         
         if self.character_development_agent is None:
             self.character_development_agent = get_character_development_agent()
-            logger.info("✅ Character development agent loaded")
+            agents_loaded += 1
         
         if self.content_analysis_agent is None:
             self.content_analysis_agent = get_content_analysis_agent()
-            logger.info("✅ Content analysis agent loaded")
+            agents_loaded += 1
         
         if self.fiction_editing_agent is None:
             self.fiction_editing_agent = get_fiction_editing_agent()
-            logger.info("✅ Fiction editing agent loaded")
+            agents_loaded += 1
         
         if self.outline_editing_agent is None:
             self.outline_editing_agent = get_outline_editing_agent()
-            logger.info("✅ Outline editing agent loaded")
+            agents_loaded += 1
         
         if self.story_analysis_agent is None:
             self.story_analysis_agent = get_story_analysis_agent()
-            logger.info("✅ Story analysis agent loaded")
+            agents_loaded += 1
         
         if self.site_crawl_agent is None:
             self.site_crawl_agent = get_site_crawl_agent()
-            logger.info("✅ Site crawl agent loaded")
+            agents_loaded += 1
         
         if self.rules_editing_agent is None:
             self.rules_editing_agent = get_rules_editing_agent()
-            logger.info("✅ Rules editing agent loaded")
+            agents_loaded += 1
         
         if self.proofreading_agent is None:
             self.proofreading_agent = get_proofreading_agent()
-            logger.info("✅ Proofreading agent loaded")
-        
-        if self.report_formatting_agent is None:
-            self.report_formatting_agent = get_report_formatting_agent()
-            logger.info("✅ Report formatting agent loaded")
+            agents_loaded += 1
         
         if self.general_project_agent is None:
             self.general_project_agent = get_general_project_agent()
-            logger.info("✅ General project agent loaded")
+            agents_loaded += 1
+        
+        if agents_loaded > 0:
+            logger.info(f"✅ Loaded {agents_loaded}/{total_agents} agents")
     
     def _extract_shared_memory(self, request: orchestrator_pb2.ChatRequest, existing_shared_memory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -346,6 +353,115 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         
         return context
     
+    def _is_first_user_message(self, conversation_history) -> bool:
+        """
+        Check if this is the first user message in the conversation
+        
+        Args:
+            conversation_history: List of conversation messages from request
+            
+        Returns:
+            True if this is the first user message, False otherwise
+        """
+        # Count user messages in history (current message is not in history yet)
+        user_message_count = sum(1 for msg in conversation_history if msg.role == "user")
+        return user_message_count == 0
+    
+    def _extract_response_text(self, result: Any) -> str:
+        """
+        Extract response text from agent result
+        
+        Handles different response formats from different agents.
+        Works with both dict and string results.
+        
+        Args:
+            result: Agent result (dict, string, or other)
+            
+        Returns:
+            Response text string
+        """
+        # If result is not a dict, convert to string
+        if not isinstance(result, dict):
+            return str(result)
+        
+        # Try messages first (most common format)
+        agent_messages = result.get("messages", [])
+        if agent_messages:
+            last_message = agent_messages[-1]
+            if hasattr(last_message, 'content'):
+                return last_message.content
+            return str(last_message)
+        
+        # Try response field
+        response = result.get("response", "")
+        if isinstance(response, dict):
+            return response.get("response", "") or response.get("message", "")
+        if isinstance(response, str):
+            return response
+        
+        # Fallback
+        return "Response generated"
+    
+    async def _process_agent_with_cancellation(
+        self,
+        agent,
+        query: str,
+        metadata: Dict[str, Any],
+        messages: List[Any],
+        cancellation_token: asyncio.Event
+    ) -> Dict[str, Any]:
+        """
+        Process agent request with cancellation support
+        
+        Wraps agent.process() with cancellation token handling.
+        If agent supports process_with_cancellation(), uses that; otherwise falls back to standard process().
+        
+        Args:
+            agent: Agent instance to process request
+            query: User query
+            metadata: Metadata dictionary
+            messages: Conversation messages
+            cancellation_token: Cancellation event token
+            
+        Returns:
+            Agent result dictionary
+        """
+        # Check if agent supports cancellation-aware processing
+        if hasattr(agent, 'process_with_cancellation'):
+            return await agent.process_with_cancellation(
+                query=query,
+                metadata=metadata,
+                messages=messages,
+                cancellation_token=cancellation_token
+            )
+        else:
+            # Fallback to standard process with cancellation monitoring
+            process_task = asyncio.create_task(
+                agent.process(query=query, metadata=metadata, messages=messages)
+            )
+            
+            # Wait for either completion or cancellation
+            done, pending = await asyncio.wait(
+                [process_task, asyncio.create_task(cancellation_token.wait())],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+            
+            # Cancel pending tasks
+            for task in pending:
+                task.cancel()
+            
+            # Check if cancellation was requested
+            if cancellation_token.is_set():
+                process_task.cancel()
+                try:
+                    await process_task
+                except asyncio.CancelledError:
+                    pass
+                raise asyncio.CancelledError("Operation cancelled")
+            
+            # Return result
+            return await process_task
+    
     async def _load_checkpoint_shared_memory(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
         Load shared_memory from checkpoint state for conversation continuity
@@ -390,7 +506,24 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         Stream chat responses back to client
         
         Supports multiple agent types: research, chat, data_formatting
+        Includes cancellation support - detects client disconnect and cancels operations
         """
+        # Create cancellation token for this request
+        cancellation_token = asyncio.Event()
+        
+        # Monitor for client disconnect
+        async def monitor_cancellation():
+            """Monitor gRPC context for client disconnect"""
+            while not context.cancelled():
+                await asyncio.sleep(0.1)  # Check every 100ms
+            # Client disconnected - signal cancellation
+            if not cancellation_token.is_set():
+                logger.info("🛑 Client disconnected - signalling cancellation")
+                cancellation_token.set()
+        
+        # Start cancellation monitor
+        monitor_task = asyncio.create_task(monitor_cancellation())
+        
         try:
             query_preview = request.query[:100] if len(request.query) > 100 else request.query
             logger.info(f"📨 StreamChat request from user {request.user_id}: {query_preview}")
@@ -420,7 +553,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             # Extract persona from proto request and add to metadata (for all agents)
             if request.HasField("persona"):
                 persona_dict = {
-                    "ai_name": request.persona.ai_name if request.persona.ai_name else "Codex",
+                    "ai_name": request.persona.ai_name if request.persona.ai_name else "Alex",
                     "persona_style": request.persona.persona_style if request.persona.persona_style else "professional",
                     "political_bias": request.persona.political_bias if request.persona.political_bias else "neutral",
                     "timezone": request.persona.timezone if request.persona.timezone else "UTC"
@@ -430,7 +563,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             else:
                 # Default persona if not provided
                 metadata["persona"] = {
-                    "ai_name": "Codex",
+                    "ai_name": "Alex",
                     "persona_style": "professional",
                     "political_bias": "neutral",
                     "timezone": "UTC"
@@ -446,11 +579,23 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             # Merge checkpoint shared_memory into context for intent classifier
             if checkpoint_shared_memory:
                 conversation_context["shared_memory"].update(checkpoint_shared_memory)
-                logger.info(f"📚 Merged checkpoint shared_memory into context: {list(checkpoint_shared_memory.keys())}")
+                # Log specifically about agent continuity for debugging
+                primary_agent = checkpoint_shared_memory.get("primary_agent_selected")
+                last_agent = checkpoint_shared_memory.get("last_agent")
+                if primary_agent or last_agent:
+                    logger.info(f"📚 Loaded agent continuity from checkpoint: primary_agent={primary_agent}, last_agent={last_agent}")
+                else:
+                    logger.info(f"📚 Merged checkpoint shared_memory (no agent continuity): {list(checkpoint_shared_memory.keys())}")
             
             # Determine which agent to use via intent classification
             primary_agent_name = None
-            if request.agent_type and request.agent_type != "auto":
+            
+            # SHORT-CIRCUIT ROUTING: Check for "define:" prefix for instant dictionary routing
+            if request.query.lower().strip().startswith("define:"):
+                agent_type = "dictionary_agent"
+                primary_agent_name = agent_type
+                logger.info(f"📖 SHORT-CIRCUIT ROUTING: Dictionary agent (query starts with 'define:')")
+            elif request.agent_type and request.agent_type != "auto":
                 # Explicit agent routing provided by backend
                 agent_type = request.agent_type
                 primary_agent_name = agent_type  # Store for next intent classification
@@ -468,6 +613,34 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 logger.info(f"✅ INTENT CLASSIFICATION: → {agent_type} (action: {intent_result.action_intent}, confidence: {intent_result.confidence})")
                 if intent_result.reasoning:
                     logger.info(f"💡 REASONING: {intent_result.reasoning}")
+                
+                # Handle conversation title from intent classification (for new conversations)
+                if intent_result.conversation_title:
+                    logger.info(f"🔤 INTENT CLASSIFICATION generated title: {intent_result.conversation_title}")
+                    
+                    # Send title immediately via stream so frontend can update UI right away
+                    yield orchestrator_pb2.ChatChunk(
+                        type="title",
+                        message=intent_result.conversation_title,
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="intent_classifier"
+                    )
+                    
+                    # Update conversation title asynchronously (non-blocking)
+                    try:
+                        from orchestrator.backend_tool_client import get_backend_tool_client
+                        backend_client = await get_backend_tool_client()
+                        # Run in background - don't await to avoid blocking response
+                        asyncio.create_task(
+                            backend_client.update_conversation_title(
+                                conversation_id=request.conversation_id,
+                                title=intent_result.conversation_title,
+                                user_id=request.user_id
+                            )
+                        )
+                        logger.info(f"🔤 Queued title update: {intent_result.conversation_title}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to queue title update: {e}")
             
             # Parse conversation history for agent
             messages = []
@@ -477,59 +650,35 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 elif msg.role == "assistant":
                     messages.append(AIMessage(content=msg.content))
             
-            # Map specialized agents to available migrated agents (fallback)
-            # TODO: Remove this mapping as more agents get migrated
-            agent_mapping = {
-                # Migrated agents
-                "chat_agent": "chat",
-                "research_agent": "research",
-                "data_formatting_agent": "data_formatting",
-                "help_agent": "help",
-                "weather_agent": "weather",
-                "image_generation_agent": "image_generation",
-                # FactCheckingAgent removed - not actively used
-                "rss_agent": "rss",
-                "org_inbox_agent": "org_inbox",
-                "entertainment_agent": "entertainment",
-                "electronics_agent": "electronics",
-                "character_development_agent": "character_development",
+            # Convert agent name from intent classifier format to routing format
+            # Intent classifier returns names like "research_agent", routing uses "research"
+            def normalize_agent_name(agent_name: str) -> str:
+                """Convert agent name from intent classifier format to routing format"""
+                # Handle special cases first
+                special_cases = {
+                    "combined_proofread_and_analyze": "chat",  # Not implemented, fallback to chat
+                    "pipeline_agent": "data_formatting",  # Pipeline functionality handled by data_formatting
+                    "website_crawler_agent": "site_crawl",  # Different naming convention
+                    "dictionary_agent": "dictionary",  # Short-circuit dictionary agent
+                }
                 
-                # Migrated agents (continued)
-                "content_analysis_agent": "content_analysis",
-                "fiction_editing_agent": "fiction_editing",
-                "outline_editing_agent": "outline_editing",
-                "story_analysis_agent": "story_analysis",
-                "site_crawl_agent": "site_crawl",
-                "rules_editing_agent": "rules_editing",
-                "proofreading_agent": "proofreading",
-                "report_formatting_agent": "report_formatting",
-                "general_project_agent": "general_project",
+                if agent_name in special_cases:
+                    return special_cases[agent_name]
                 
-                # Unmigrated agents - map to closest available agent
-                "proofreading_agent": "chat",
-                "podcast_script_agent": "chat",
-                "substack_agent": "chat",
-                "org_inbox_agent": "chat",
-                "org_project_agent": "chat",
-                "website_crawler_agent": "research",
-                "pipeline_agent": "data_formatting",
-                "image_generation_agent": "chat",
-                # WargamingAgent removed - not fully fleshed out
-                # SysMLAgent removed - not fully fleshed out
-                "rss_agent": "chat",
-                "combined_proofread_and_analyze": "chat"
-            }
+                # Standard conversion: remove "_agent" suffix
+                if agent_name.endswith("_agent"):
+                    return agent_name[:-6]  # Remove "_agent" (6 characters)
+                
+                # Already in short format, return as-is
+                return agent_name
             
-            # Map to available agent if not migrated yet
-            if agent_type in agent_mapping:
-                mapped_agent = agent_mapping[agent_type]
-                if mapped_agent != agent_type:
-                    logger.info(f"🔄 AGENT MAPPING: {agent_type} → {mapped_agent} (not migrated yet)")
-                agent_type = mapped_agent
-            else:
-                # Unknown agent - default to chat
-                logger.warning(f"⚠️ Unknown agent type: {agent_type}, falling back to chat")
-                agent_type = "chat"
+            # Normalize agent name for routing
+            original_agent_type = agent_type
+            agent_type = normalize_agent_name(agent_type)
+            
+            # Log if conversion occurred (for debugging, but no "not migrated" message)
+            if original_agent_type != agent_type:
+                logger.debug(f"🔄 Agent name normalized: {original_agent_type} → {agent_type}")
             
             # Route to appropriate agent
             if agent_type == "chat":
@@ -540,18 +689,28 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                result = await self.chat_agent.process(
+                # Check for cancellation before processing
+                if cancellation_token.is_set():
+                    raise asyncio.CancelledError("Operation cancelled")
+                
+                result = await self._process_agent_with_cancellation(
+                    agent=self.chat_agent,
                     query=request.query,
                     metadata=metadata,
-                    messages=messages
+                    messages=messages,
+                    cancellation_token=cancellation_token
                 )
+                
+                response_text = result.get("response", "No response generated")
                 
                 yield orchestrator_pb2.ChatChunk(
                     type="content",
-                    message=result.get("response", "No response generated"),
+                    message=response_text,
                     timestamp=datetime.now().isoformat(),
                     agent_name="chat_agent"
                 )
+                
+                # Title generation is now handled by intent classifier (parallel, faster)
                 
                 yield orchestrator_pb2.ChatChunk(
                     type="complete",
@@ -568,10 +727,15 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                result = await self.help_agent.process(
+                if cancellation_token.is_set():
+                    raise asyncio.CancelledError("Operation cancelled")
+                
+                result = await self._process_agent_with_cancellation(
+                    agent=self.help_agent,
                     query=request.query,
                     metadata=metadata,
-                    messages=messages
+                    messages=messages,
+                    cancellation_token=cancellation_token
                 )
                 
                 yield orchestrator_pb2.ChatChunk(
@@ -588,6 +752,43 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="system"
                 )
             
+            elif agent_type == "dictionary":
+                yield orchestrator_pb2.ChatChunk(
+                    type="status",
+                    message="Dictionary agent looking up word definition...",
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="orchestrator"
+                )
+                
+                if cancellation_token.is_set():
+                    raise asyncio.CancelledError("Operation cancelled")
+                
+                result = await self._process_agent_with_cancellation(
+                    agent=self.dictionary_agent,
+                    query=request.query,
+                    metadata=metadata,
+                    messages=messages,
+                    cancellation_token=cancellation_token
+                )
+                
+                response_text = result.get("message", "No definition available")
+                
+                yield orchestrator_pb2.ChatChunk(
+                    type="content",
+                    message=response_text,
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="dictionary_agent"
+                )
+                
+                # Title generation is now handled by intent classifier (parallel, faster)
+                
+                yield orchestrator_pb2.ChatChunk(
+                    type="complete",
+                    message=f"Dictionary lookup complete (word found: {result.get('found', False)})",
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="system"
+                )
+            
             elif agent_type == "data_formatting":
                 yield orchestrator_pb2.ChatChunk(
                     type="status",
@@ -596,10 +797,15 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                result = await self.data_formatting_agent.process(
+                if cancellation_token.is_set():
+                    raise asyncio.CancelledError("Operation cancelled")
+                
+                result = await self._process_agent_with_cancellation(
+                    agent=self.data_formatting_agent,
                     query=request.query,
                     metadata=metadata,
-                    messages=messages
+                    messages=messages,
+                    cancellation_token=cancellation_token
                 )
                 
                 yield orchestrator_pb2.ChatChunk(
@@ -626,10 +832,15 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 
                 # Process using BaseAgent pattern (query, metadata, messages)
                 # metadata already contains persona from top of StreamChat
-                result = await self.weather_agent.process(
+                if cancellation_token.is_set():
+                    raise asyncio.CancelledError("Operation cancelled")
+                
+                result = await self._process_agent_with_cancellation(
+                    agent=self.weather_agent,
                     query=request.query,
                     metadata=metadata,
-                    messages=messages
+                    messages=messages,
+                    cancellation_token=cancellation_token
                 )
                 
                 # Extract response from result (matches BaseAgent response format)
@@ -646,6 +857,9 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     timestamp=datetime.now().isoformat(),
                     agent_name="weather_agent"
                 )
+                
+                # Generate title asynchronously if this is the first message
+                # Title generation is now handled by intent classifier (parallel, faster)
                 
                 is_complete = result.get("is_complete", True)
                 status_msg = "Weather check complete" if is_complete else "Weather data incomplete"
@@ -665,18 +879,20 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                # Build state dict for image generation agent
-                # Include metadata with model preferences
-                state = {
-                    "messages": messages + [HumanMessage(content=request.query)],
+                # Build metadata for image generation agent
+                image_metadata = {
                     "user_id": request.user_id,
                     "conversation_id": request.conversation_id,
-                    "metadata": metadata,  # Includes user_image_model
                     "shared_memory": {},
-                    "persona": request.persona if request.HasField("persona") else None
+                    "persona": request.persona if request.HasField("persona") else None,
+                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
                 }
                 
-                result = await self.image_generation_agent.process(state)
+                result = await self.image_generation_agent.process(
+                    query=request.query,
+                    metadata=image_metadata,
+                    messages=messages
+                )
                 
                 # Extract response from result
                 response_messages = result.get("messages", [])
@@ -709,15 +925,18 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                # Build state dict for RSS agent
-                state = {
-                    "messages": messages + [HumanMessage(content=request.query)],
+                # Build metadata for RSS agent
+                rss_metadata = {
                     "user_id": request.user_id,
                     "conversation_id": request.conversation_id,
                     "shared_memory": {}
                 }
                 
-                result = await self.rss_agent.process(state)
+                result = await self.rss_agent.process(
+                    query=request.query,
+                    metadata=rss_metadata,
+                    messages=messages
+                )
                 
                 # Extract response from result
                 response_messages = result.get("messages", [])
@@ -810,10 +1029,15 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
                 }
 
-                result = await self.electronics_agent.process(
+                if cancellation_token.is_set():
+                    raise asyncio.CancelledError("Operation cancelled")
+                
+                result = await self._process_agent_with_cancellation(
+                    agent=self.electronics_agent,
                     query=request.query,
                     metadata=electronics_metadata,
-                    messages=messages
+                    messages=messages,
+                    cancellation_token=cancellation_token
                 )
 
                 # Extract response text - handle various response structures
@@ -834,13 +1058,38 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 # Fallback if we still don't have text
                 if not response_text or response_text.strip() == "":
                     response_text = "Electronics design assistance complete"
-
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="electronics_agent"
-                )
+                
+                # Check for editor operations (editing mode)
+                editor_operations = result.get("editor_operations") or result.get("response", {}).get("editor_operations") if isinstance(result.get("response"), dict) else None
+                manuscript_edit = result.get("manuscript_edit") or result.get("response", {}).get("manuscript_edit") if isinstance(result.get("response"), dict) else None
+                
+                if editor_operations:
+                    # Send editor operations as separate chunk
+                    import json
+                    editor_ops_data = {
+                        "operations": editor_operations,
+                        "manuscript_edit": manuscript_edit
+                    }
+                    yield orchestrator_pb2.ChatChunk(
+                        type="editor_operations",
+                        message=json.dumps(editor_ops_data),
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="electronics_agent"
+                    )
+                    yield orchestrator_pb2.ChatChunk(
+                        type="content",
+                        message=response_text,
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="electronics_agent"
+                    )
+                else:
+                    # Generation mode: send content normally
+                    yield orchestrator_pb2.ChatChunk(
+                        type="content",
+                        message=response_text,
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="electronics_agent"
+                    )
 
                 # Include design type and confidence in complete message
                 design_type = result.get("design_type", "general")
@@ -881,10 +1130,15 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     **{k: v for k, v in metadata.items() if k != "shared_memory"}
                 }
 
-                result = await self.general_project_agent.process(
+                if cancellation_token.is_set():
+                    raise asyncio.CancelledError("Operation cancelled")
+                
+                result = await self._process_agent_with_cancellation(
+                    agent=self.general_project_agent,
                     query=request.query,
                     metadata=general_project_metadata,
-                    messages=messages
+                    messages=messages,
+                    cancellation_token=cancellation_token
                 )
 
                 # Extract response text - handle various response structures
@@ -905,13 +1159,38 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 # Fallback if we still don't have text
                 if not response_text or response_text.strip() == "":
                     response_text = "General project assistance complete"
-
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="general_project_agent"
-                )
+                
+                # Check for editor operations (editing mode)
+                editor_operations = result.get("editor_operations") or result.get("response", {}).get("editor_operations") if isinstance(result.get("response"), dict) else None
+                manuscript_edit = result.get("manuscript_edit") or result.get("response", {}).get("manuscript_edit") if isinstance(result.get("response"), dict) else None
+                
+                if editor_operations:
+                    # Send editor operations as separate chunk
+                    import json
+                    editor_ops_data = {
+                        "operations": editor_operations,
+                        "manuscript_edit": manuscript_edit
+                    }
+                    yield orchestrator_pb2.ChatChunk(
+                        type="editor_operations",
+                        message=json.dumps(editor_ops_data),
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="general_project_agent"
+                    )
+                    yield orchestrator_pb2.ChatChunk(
+                        type="content",
+                        message=response_text,
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="general_project_agent"
+                    )
+                else:
+                    # Generation mode: send content normally
+                    yield orchestrator_pb2.ChatChunk(
+                        type="content",
+                        message=response_text,
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="general_project_agent"
+                    )
 
                 query_type = result.get("query_type", "general") if isinstance(result, dict) else "general"
                 confidence = result.get("confidence", 0.0) if isinstance(result, dict) else 0.0
@@ -933,15 +1212,20 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                # Build state dict for character development agent
-                state = {
-                    "messages": messages,
+                # Build metadata with user_id and shared_memory
+                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
+                
+                character_metadata = {
                     "user_id": request.user_id,
-                    "shared_memory": context.get("shared_memory", {}),
-                    "metadata": metadata
+                    "shared_memory": shared_memory,
+                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
                 }
                 
-                result = await self.character_development_agent.process(state)
+                result = await self.character_development_agent.process(
+                    query=request.query,
+                    metadata=character_metadata,
+                    messages=messages
+                )
                 
                 # Extract response from result
                 if isinstance(result, dict):
@@ -966,7 +1250,22 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     
                     # Include editor operations in metadata if available
                     agent_results = result.get("agent_results", {})
-                    if agent_results.get("editor_operations"):
+                    editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
+                    manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
+                    
+                    if editor_operations:
+                        # Send editor operations as separate chunk
+                        import json
+                        editor_ops_data = {
+                            "operations": editor_operations,
+                            "manuscript_edit": manuscript_edit
+                        }
+                        yield orchestrator_pb2.ChatChunk(
+                            type="editor_operations",
+                            message=json.dumps(editor_ops_data),
+                            timestamp=datetime.now().isoformat(),
+                            agent_name="character_development_agent"
+                        )
                         yield orchestrator_pb2.ChatChunk(
                             type="complete",
                             message="Character edit plan ready",
@@ -1037,15 +1336,20 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                # Build state dict for fiction editing agent
-                state = {
-                    "messages": messages,
+                # Build metadata with user_id and shared_memory
+                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
+                
+                fiction_metadata = {
                     "user_id": request.user_id,
-                    "shared_memory": context.get("shared_memory", {}),
-                    "metadata": metadata
+                    "shared_memory": shared_memory,
+                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
                 }
                 
-                result = await self.fiction_editing_agent.process(state)
+                result = await self.fiction_editing_agent.process(
+                    query=request.query,
+                    metadata=fiction_metadata,
+                    messages=messages
+                )
                 
                 # Extract response from result
                 if isinstance(result, dict):
@@ -1060,9 +1364,14 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                                     agent_name="fiction_editing_agent"
                                 )
                     else:
-                        response_text = result.get("response", {}).get("response", "Fiction editing complete")
-                        if isinstance(response_text, dict):
-                            response_text = response_text.get("response", "Fiction editing complete")
+                        response_data = result.get("response", "Fiction editing complete")
+                        # Handle both string and dict responses
+                        if isinstance(response_data, str):
+                            response_text = response_data
+                        elif isinstance(response_data, dict):
+                            response_text = response_data.get("response", "Fiction editing complete")
+                        else:
+                            response_text = "Fiction editing complete"
                         yield orchestrator_pb2.ChatChunk(
                             type="content",
                             message=response_text,
@@ -1076,6 +1385,18 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
                     
                     if editor_operations:
+                        # Send editor operations as separate chunk
+                        import json
+                        editor_ops_data = {
+                            "operations": editor_operations,
+                            "manuscript_edit": manuscript_edit
+                        }
+                        yield orchestrator_pb2.ChatChunk(
+                            type="editor_operations",
+                            message=json.dumps(editor_ops_data),
+                            timestamp=datetime.now().isoformat(),
+                            agent_name="fiction_editing_agent"
+                        )
                         yield orchestrator_pb2.ChatChunk(
                             type="complete",
                             message="Fiction edit plan ready",
@@ -1111,20 +1432,45 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                # Build state dict for outline editing agent
-                state = {
-                    "messages": messages,
+                # Build metadata with user_id and shared_memory
+                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
+                
+                outline_metadata = {
                     "user_id": request.user_id,
-                    "shared_memory": context.get("shared_memory", {}),
-                    "metadata": metadata
+                    "shared_memory": shared_memory,
+                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
                 }
                 
-                result = await self.outline_editing_agent.process(state)
+                result = await self.outline_editing_agent.process(
+                    query=request.query,
+                    metadata=outline_metadata,
+                    messages=messages
+                )
                 
-                # Extract response from result
+                # Extract response text for title generation (handles both dict and string results)
+                response_text = self._extract_response_text(result)
+                
+                # Extract response from result and yield chunks
+                # Check for editor operations first (regardless of message structure)
+                editor_operations = result.get("editor_operations")
+                manuscript_edit = result.get("manuscript_edit")
+                
+                # Also check agent_results and response dict
+                if not editor_operations:
+                    agent_results = result.get("agent_results", {})
+                    editor_operations = agent_results.get("editor_operations")
+                    manuscript_edit = manuscript_edit or agent_results.get("manuscript_edit")
+                
+                if not editor_operations:
+                    response_obj = result.get("response", {})
+                    if isinstance(response_obj, dict):
+                        editor_operations = response_obj.get("editor_operations")
+                        manuscript_edit = manuscript_edit or response_obj.get("manuscript_edit")
+                
                 if isinstance(result, dict):
                     agent_messages = result.get("messages", [])
                     if agent_messages:
+                        # Stream messages as they come
                         for msg in agent_messages:
                             if hasattr(msg, 'content'):
                                 yield orchestrator_pb2.ChatChunk(
@@ -1133,49 +1479,64 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                                     timestamp=datetime.now().isoformat(),
                                     agent_name="outline_editing_agent"
                                 )
+                        # Update response_text from last message if we have messages
+                        if agent_messages:
+                            last_msg = agent_messages[-1]
+                            if hasattr(last_msg, 'content'):
+                                response_text = last_msg.content
+                            else:
+                                response_text = str(last_msg)
                     else:
-                        response_text = result.get("response", {}).get("response", "Outline editing complete")
-                        if isinstance(response_text, dict):
-                            response_text = response_text.get("response", "Outline editing complete")
+                        # No messages, extract from response field
+                        response_obj = result.get("response", "")
+                        if isinstance(response_obj, dict):
+                            response_text = response_obj.get("response", "Outline editing complete")
+                        elif isinstance(response_obj, str):
+                            response_text = response_obj
+                        else:
+                            response_text = "Outline editing complete"
+                        
+                        # Send content (editor operations sent separately below if present)
                         yield orchestrator_pb2.ChatChunk(
                             type="content",
                             message=response_text,
                             timestamp=datetime.now().isoformat(),
                             agent_name="outline_editing_agent"
                         )
-                    
-                    # Include editor operations in metadata if available
-                    agent_results = result.get("agent_results", {})
-                    editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
-                    manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
-                    
-                    if editor_operations:
-                        yield orchestrator_pb2.ChatChunk(
-                            type="complete",
-                            message="Outline edit plan ready",
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system"
-                        )
-                    else:
-                        yield orchestrator_pb2.ChatChunk(
-                            type="complete",
-                            message="Outline editing complete",
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system"
-                        )
+                
                 else:
+                    # Result is a string or other non-dict type
+                    response_text = str(result)
                     yield orchestrator_pb2.ChatChunk(
                         type="content",
-                        message=str(result),
+                        message=response_text,
                         timestamp=datetime.now().isoformat(),
                         agent_name="outline_editing_agent"
                     )
+                
+                # Send editor operations if present (after content, regardless of message structure)
+                if editor_operations:
+                    import json
+                    editor_ops_data = {
+                        "operations": editor_operations,
+                        "manuscript_edit": manuscript_edit
+                    }
                     yield orchestrator_pb2.ChatChunk(
-                        type="complete",
-                        message="Outline editing complete",
+                        type="editor_operations",
+                        message=json.dumps(editor_ops_data),
                         timestamp=datetime.now().isoformat(),
-                        agent_name="system"
+                        agent_name="outline_editing_agent"
                     )
+                
+                # Generate title asynchronously if this is the first message
+                # Title generation is now handled by intent classifier (parallel, faster)
+                
+                yield orchestrator_pb2.ChatChunk(
+                    type="complete",
+                    message="Outline editing complete",
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="system"
+                )
 
             elif agent_type == "rules_editing":
                 yield orchestrator_pb2.ChatChunk(
@@ -1185,15 +1546,20 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                # Build state dict for rules editing agent
-                state = {
-                    "messages": messages,
+                # Build metadata with user_id and shared_memory
+                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
+                
+                rules_metadata = {
                     "user_id": request.user_id,
-                    "shared_memory": context.get("shared_memory", {}),
-                    "metadata": metadata
+                    "shared_memory": shared_memory,
+                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
                 }
                 
-                result = await self.rules_editing_agent.process(state)
+                result = await self.rules_editing_agent.process(
+                    query=request.query,
+                    metadata=rules_metadata,
+                    messages=messages
+                )
                 
                 # Extract response from result
                 if isinstance(result, dict):
@@ -1208,9 +1574,14 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                                     agent_name="rules_editing_agent"
                                 )
                     else:
-                        response_text = result.get("response", {}).get("response", "Rules editing complete")
-                        if isinstance(response_text, dict):
-                            response_text = response_text.get("response", "Rules editing complete")
+                        response_data = result.get("response", "Rules editing complete")
+                        # Handle both string and dict responses
+                        if isinstance(response_data, str):
+                            response_text = response_data
+                        elif isinstance(response_data, dict):
+                            response_text = response_data.get("response", "Rules editing complete")
+                        else:
+                            response_text = "Rules editing complete"
                         yield orchestrator_pb2.ChatChunk(
                             type="content",
                             message=response_text,
@@ -1224,6 +1595,18 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
                     
                     if editor_operations:
+                        # Send editor operations as separate chunk
+                        import json
+                        editor_ops_data = {
+                            "operations": editor_operations,
+                            "manuscript_edit": manuscript_edit
+                        }
+                        yield orchestrator_pb2.ChatChunk(
+                            type="editor_operations",
+                            message=json.dumps(editor_ops_data),
+                            timestamp=datetime.now().isoformat(),
+                            agent_name="rules_editing_agent"
+                        )
                         yield orchestrator_pb2.ChatChunk(
                             type="complete",
                             message="Rules edit plan ready",
@@ -1259,15 +1642,20 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                # Build state dict for proofreading agent
-                state = {
-                    "messages": messages,
+                # Build metadata with user_id and shared_memory
+                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
+                
+                proofreading_metadata = {
                     "user_id": request.user_id,
-                    "shared_memory": context.get("shared_memory", {}),
-                    "metadata": metadata
+                    "shared_memory": shared_memory,
+                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
                 }
                 
-                result = await self.proofreading_agent.process(state)
+                result = await self.proofreading_agent.process(
+                    query=request.query,
+                    metadata=proofreading_metadata,
+                    messages=messages
+                )
                 
                 # Extract response from result
                 if isinstance(result, dict):
@@ -1282,9 +1670,14 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                                     agent_name="proofreading_agent"
                                 )
                     else:
-                        response_text = result.get("response", {}).get("response", "Proofreading complete")
-                        if isinstance(response_text, dict):
-                            response_text = response_text.get("response", "Proofreading complete")
+                        response_data = result.get("response", "Proofreading complete")
+                        # Handle both string and dict responses
+                        if isinstance(response_data, str):
+                            response_text = response_data
+                        elif isinstance(response_data, dict):
+                            response_text = response_data.get("response", "Proofreading complete")
+                        else:
+                            response_text = "Proofreading complete"
                         yield orchestrator_pb2.ChatChunk(
                             type="content",
                             message=response_text,
@@ -1298,6 +1691,18 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
                     
                     if editor_operations:
+                        # Send editor operations as separate chunk
+                        import json
+                        editor_ops_data = {
+                            "operations": editor_operations,
+                            "manuscript_edit": manuscript_edit
+                        }
+                        yield orchestrator_pb2.ChatChunk(
+                            type="editor_operations",
+                            message=json.dumps(editor_ops_data),
+                            timestamp=datetime.now().isoformat(),
+                            agent_name="proofreading_agent"
+                        )
                         yield orchestrator_pb2.ChatChunk(
                             type="complete",
                             message="Proofreading corrections ready",
@@ -1321,57 +1726,6 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     yield orchestrator_pb2.ChatChunk(
                         type="complete",
                         message="Proofreading complete",
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="system"
-                    )
-
-            elif agent_type == "report_formatting":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Report formatting agent formatting research results...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
-                )
-                
-                # Build state dict for report formatting agent
-                state = {
-                    "query": request.query,
-                    "messages": messages,
-                    "user_id": request.user_id,
-                    "shared_memory": context.get("shared_memory", {}),
-                    "metadata": metadata
-                }
-                
-                result = await self.report_formatting_agent.process(state)
-                
-                # Extract response from result
-                if isinstance(result, dict):
-                    response_text = result.get("response", {}).get("response", "Report formatting complete")
-                    if isinstance(response_text, dict):
-                        response_text = response_text.get("response", "Report formatting complete")
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=response_text,
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="report_formatting_agent"
-                    )
-                    
-                    yield orchestrator_pb2.ChatChunk(
-                        type="complete",
-                        message="Report formatting complete",
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="system"
-                    )
-                else:
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=str(result),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="report_formatting_agent"
-                    )
-                    yield orchestrator_pb2.ChatChunk(
-                        type="complete",
-                        message="Report formatting complete",
                         timestamp=datetime.now().isoformat(),
                         agent_name="system"
                     )
@@ -1454,16 +1808,19 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                # Build state dict for org inbox agent
-                state = {
-                    "messages": messages + [HumanMessage(content=request.query)],
+                # Build metadata for org inbox agent
+                org_inbox_metadata = {
                     "user_id": request.user_id,
                     "conversation_id": request.conversation_id,
                     "shared_memory": {},
                     "persona": {}  # Add persona if available from context
                 }
                 
-                result = await self.org_inbox_agent.process(state)
+                result = await self.org_inbox_agent.process(
+                    query=request.query,
+                    metadata=org_inbox_metadata,
+                    messages=messages
+                )
                 
                 # Extract response from result
                 response_messages = result.get("messages", [])
@@ -1498,29 +1855,58 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                # Build state dict with shared_memory (using centralized extraction)
+                # Build metadata with shared_memory (using centralized extraction)
                 shared_memory = self._extract_shared_memory(request)
                 
-                state = {
-                    "messages": messages + [HumanMessage(content=request.query)],
+                substack_metadata = {
                     "user_id": request.user_id,
                     "conversation_id": request.conversation_id,
                     "shared_memory": shared_memory,
                     "persona": {}
                 }
                 
-                result = await self.substack_agent.process(state)
+                result = await self.substack_agent.process(
+                    query=request.query,
+                    metadata=substack_metadata,
+                    messages=messages
+                )
                 
                 # Extract response
                 response_messages = result.get("messages", [])
                 response_text = response_messages[-1].content if response_messages else result.get("response", "No article generated")
+                agent_results = result.get("agent_results", {})
                 
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="substack_agent"
-                )
+                # Check for editor operations (editing mode)
+                editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
+                manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
+                
+                if editor_operations:
+                    # Send editor operations as separate chunk
+                    import json
+                    editor_ops_data = {
+                        "operations": editor_operations,
+                        "manuscript_edit": manuscript_edit
+                    }
+                    yield orchestrator_pb2.ChatChunk(
+                        type="editor_operations",
+                        message=json.dumps(editor_ops_data),
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="substack_agent"
+                    )
+                    yield orchestrator_pb2.ChatChunk(
+                        type="content",
+                        message=response_text,
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="substack_agent"
+                    )
+                else:
+                    # Generation mode: send content normally
+                    yield orchestrator_pb2.ChatChunk(
+                        type="content",
+                        message=response_text,
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="substack_agent"
+                    )
                 
                 yield orchestrator_pb2.ChatChunk(
                     type="complete",
@@ -1537,29 +1923,58 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                # Build state dict with shared_memory (using centralized extraction)
+                # Build metadata with shared_memory (using centralized extraction)
                 shared_memory = self._extract_shared_memory(request)
                 
-                state = {
-                    "messages": messages + [HumanMessage(content=request.query)],
+                podcast_metadata = {
                     "user_id": request.user_id,
                     "conversation_id": request.conversation_id,
                     "shared_memory": shared_memory,
                     "persona": {}
                 }
                 
-                result = await self.podcast_script_agent.process(state)
+                result = await self.podcast_script_agent.process(
+                    query=request.query,
+                    metadata=podcast_metadata,
+                    messages=messages
+                )
                 
                 # Extract response
                 response_messages = result.get("messages", [])
                 response_text = response_messages[-1].content if response_messages else result.get("response", "No script generated")
+                agent_results = result.get("agent_results", {})
                 
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="podcast_script_agent"
-                )
+                # Check for editor operations (editing mode)
+                editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
+                manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
+                
+                if editor_operations:
+                    # Send editor operations as separate chunk
+                    import json
+                    editor_ops_data = {
+                        "operations": editor_operations,
+                        "manuscript_edit": manuscript_edit
+                    }
+                    yield orchestrator_pb2.ChatChunk(
+                        type="editor_operations",
+                        message=json.dumps(editor_ops_data),
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="podcast_script_agent"
+                    )
+                    yield orchestrator_pb2.ChatChunk(
+                        type="content",
+                        message=response_text,
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="podcast_script_agent"
+                    )
+                else:
+                    # Generation mode: send content normally
+                    yield orchestrator_pb2.ChatChunk(
+                        type="content",
+                        message=response_text,
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="podcast_script_agent"
+                    )
                 
                 yield orchestrator_pb2.ChatChunk(
                     type="complete",
@@ -1590,15 +2005,18 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                             except:
                                 pass
                 
-                state = {
-                    "messages": messages + [HumanMessage(content=request.query)],
+                org_project_metadata = {
                     "user_id": request.user_id,
                     "conversation_id": request.conversation_id,
                     "shared_memory": shared_memory,
                     "persona": {}
                 }
                 
-                result = await self.org_project_agent.process(state)
+                result = await self.org_project_agent.process(
+                    query=request.query,
+                    metadata=org_project_metadata,
+                    messages=messages
+                )
                 
                 # Extract response
                 response_messages = result.get("messages", [])
@@ -1635,10 +2053,37 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="orchestrator"
                 )
                 
-                result = await self.research_agent.research(
-                    query=request.query,
-                    conversation_id=request.conversation_id
+                if cancellation_token.is_set():
+                    raise asyncio.CancelledError("Operation cancelled")
+                
+                # Research agent uses .research() method, wrap with cancellation
+                research_task = asyncio.create_task(
+                    self.research_agent.research(
+                        query=request.query,
+                        conversation_id=request.conversation_id
+                    )
                 )
+                
+                # Wait for either completion or cancellation
+                done, pending = await asyncio.wait(
+                    [research_task, asyncio.create_task(cancellation_token.wait())],
+                    return_when=asyncio.FIRST_COMPLETED
+                )
+                
+                # Cancel pending tasks
+                for task in pending:
+                    task.cancel()
+                
+                # Check if cancellation was requested
+                if cancellation_token.is_set():
+                    research_task.cancel()
+                    try:
+                        await research_task
+                    except asyncio.CancelledError:
+                        pass
+                    raise asyncio.CancelledError("Operation cancelled")
+                
+                result = await research_task
                 
                 current_round = result.get("current_round", "")
                 sources_used = result.get("sources_used", [])
@@ -1666,6 +2111,9 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="research_agent"
                 )
                 
+                # Generate title asynchronously if this is the first message
+                # Title generation is now handled by intent classifier (parallel, faster)
+                
                 completion_msg = f"Multi-round research complete ({current_round})"
                 yield orchestrator_pb2.ChatChunk(
                     type="complete",
@@ -1674,6 +2122,14 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="system"
                 )
             
+        except asyncio.CancelledError:
+            logger.info("🛑 StreamChat cancelled by client")
+            yield orchestrator_pb2.ChatChunk(
+                type="error",
+                message="Operation cancelled by user",
+                timestamp=datetime.now().isoformat(),
+                agent_name="system"
+            )
         except Exception as e:
             logger.error(f"Error in StreamChat: {e}")
             import traceback
@@ -1684,6 +2140,13 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 timestamp=datetime.now().isoformat(),
                 agent_name="system"
             )
+        finally:
+            # Clean up cancellation monitor
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
     
     async def StartTask(
         self,

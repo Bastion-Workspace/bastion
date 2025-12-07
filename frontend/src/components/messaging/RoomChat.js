@@ -17,6 +17,7 @@ import {
   Modal,
   Backdrop,
   Fade,
+  Button,
 } from '@mui/material';
 import {
   Send,
@@ -28,6 +29,7 @@ import {
 import { useMessaging } from '../../contexts/MessagingContext';
 import PresenceIndicator from './PresenceIndicator';
 import messagingService from '../../services/messagingService';
+import AudioPlayer from '../AudioPlayer';
 import TeamInvitationMessage from './TeamInvitationMessage';
 
 const RoomChat = () => {
@@ -347,21 +349,38 @@ const RoomChat = () => {
                   {/* Display attachments */}
                   {messageAttachments[message.message_id]?.map((attachment) => (
                     <Box key={attachment.attachment_id} mt={1}>
-                      <Box
-                        component="img"
-                        src={imageBlobUrls[attachment.attachment_id] || messagingService.getAttachmentUrl(attachment.attachment_id)}
-                        alt={attachment.filename}
-                        onClick={() => setSelectedImage(attachment)}
-                        sx={{
-                          maxWidth: '100%',
-                          maxHeight: '300px',
-                          height: 'auto',
-                          borderRadius: 1,
-                          cursor: 'pointer',
-                          display: 'block',
-                          objectFit: 'contain',
-                        }}
-                      />
+                      {attachment.mime_type?.startsWith('audio/') ? (
+                        <AudioPlayer
+                          src={messagingService.getAttachmentUrl(attachment.attachment_id)}
+                          filename={attachment.filename}
+                        />
+                      ) : attachment.mime_type?.startsWith('image/') ? (
+                        <Box
+                          component="img"
+                          src={imageBlobUrls[attachment.attachment_id] || messagingService.getAttachmentUrl(attachment.attachment_id)}
+                          alt={attachment.filename}
+                          onClick={() => setSelectedImage(attachment)}
+                          sx={{
+                            maxWidth: '100%',
+                            maxHeight: '300px',
+                            height: 'auto',
+                            borderRadius: 1,
+                            cursor: 'pointer',
+                            display: 'block',
+                            objectFit: 'contain',
+                          }}
+                        />
+                      ) : (
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          href={messagingService.getAttachmentUrl(attachment.attachment_id)}
+                          download={attachment.filename || 'attachment'}
+                          startIcon={<Download />}
+                        >
+                          {attachment.filename || 'Download attachment'}
+                        </Button>
+                      )}
                     </Box>
                   ))}
                   <Typography

@@ -45,7 +45,7 @@ class TimezoneRequest(BaseModel):
 
 class PromptSettingsRequest(BaseModel):
     """Request model for updating prompt settings"""
-    ai_name: str = Field("Codex", description="Name for the AI assistant")
+    ai_name: str = Field("Alex", description="Name for the AI assistant")
     political_bias: PoliticalBias = PoliticalBias.NEUTRAL
     persona_style: PersonaStyle = PersonaStyle.PROFESSIONAL
 
@@ -361,7 +361,7 @@ async def get_prompt_options():
             ]
         ],
         "default_settings": {
-            "ai_name": "Codex",
+            "ai_name": "Alex",
             "political_bias": PoliticalBias.NEUTRAL.value,
             "persona_style": PersonaStyle.PROFESSIONAL.value
         }

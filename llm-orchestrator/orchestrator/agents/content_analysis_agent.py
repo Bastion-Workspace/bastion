@@ -462,8 +462,8 @@ class ContentAnalysisAgent(BaseAgent):
                         "task_status": "error"
                     }
                 
-                # Get model name for intelligent comparison
-                llm = self._get_llm(temperature=0.3)
+                # Get model name for intelligent comparison - pass state to access user's model selection
+                llm = self._get_llm(temperature=0.3, state=state)
                 model_name = llm.model_name if hasattr(llm, 'model_name') else "claude-3-5-sonnet-20241022"
                 
                 # Perform intelligent comparison analysis (chooses direct vs summarization)
@@ -526,7 +526,7 @@ class ContentAnalysisAgent(BaseAgent):
                 "4) Set verdict: 'solid' or 'needs_more'.\n"
             )
             
-            llm = self._get_llm(temperature=0.2)
+            llm = self._get_llm(temperature=0.2, state=state)
             messages = [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_prompt)
@@ -611,9 +611,9 @@ class ContentAnalysisAgent(BaseAgent):
             
             logger.info(f"Total content: {total_chars:,} characters (~{total_estimated_tokens:,} tokens)")
             
-            # Get model name from state or use default
+            # Get model name from state or use default - pass state to access user's model selection
             if model_name is None:
-                llm = self._get_llm(temperature=0.3)
+                llm = self._get_llm(temperature=0.3, state=state)
                 model_name = llm.model_name if hasattr(llm, 'model_name') else "claude-3-5-sonnet-20241022"
             
             # Token-aware strategy: If over 400K tokens, use summarization approach
@@ -1373,8 +1373,30 @@ Provide a comprehensive comparative analysis based on the document summaries abo
             metadata = metadata or {}
             user_id = metadata.get("user_id", "system")
             
-            # Add current user query to messages for checkpoint persistence
-            conversation_messages = self._prepare_messages_with_query(messages, query)
+            # Get workflow (lazy initialization with checkpointer)
+            workflow = await self._get_workflow()
+            
+            # Get checkpoint config (handles thread_id from conversation_id/user_id)
+            config = self._get_checkpoint_config(metadata)
+            
+            # Prepare new messages (current query)
+            new_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Load and merge checkpointed messages to preserve conversation history
+            conversation_messages = await self._load_and_merge_checkpoint_messages(
+                workflow, config, new_messages
+            )
+            
+            # Load shared_memory from checkpoint if available
+            checkpoint_state = await workflow.aget_state(config)
+            existing_shared_memory = {}
+            if checkpoint_state and checkpoint_state.values:
+                existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+            
+            # Merge with any shared_memory from metadata
+            shared_memory = metadata.get("shared_memory", {}) or {}
+            shared_memory.update(existing_shared_memory)
+            metadata["shared_memory"] = shared_memory
             
             # Initialize state for LangGraph workflow
             initial_state: ContentAnalysisState = {
@@ -1392,12 +1414,6 @@ Provide a comprehensive comparative analysis based on the document summaries abo
                 "task_status": "",
                 "error": ""
             }
-            
-            # Get workflow (lazy initialization with checkpointer)
-            workflow = await self._get_workflow()
-            
-            # Get checkpoint config (handles thread_id from conversation_id/user_id)
-            config = self._get_checkpoint_config(metadata)
             
             # Run LangGraph workflow with checkpointing
             result_state = await workflow.ainvoke(initial_state, config=config)

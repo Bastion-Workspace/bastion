@@ -37,6 +37,8 @@ const ChatSidebar = () => {
     setSidebarWidth,
     isFullWidth,
     setIsFullWidth,
+    isResizing,
+    setIsResizing,
     currentConversationId,
     selectConversation,
     createNewConversation,
@@ -49,7 +51,6 @@ const ChatSidebar = () => {
   } = useChatSidebar();
 
   const [historyWindowOpen, setHistoryWindowOpen] = useState(false);
-  const [isResizing, setIsResizing] = useState(false);
   const [tempWidth, setTempWidth] = useState(sidebarWidth); // Local state for resize
   const sidebarRef = useRef(null);
   const resizeHandleRef = useRef(null);
@@ -82,7 +83,7 @@ const ChatSidebar = () => {
     {
       enabled: !!currentConversationId,
       refetchOnWindowFocus: false,
-      staleTime: 300000, // 5 minutes
+      staleTime: 0, // Always allow cache updates from streaming to show immediately
     }
   );
 
@@ -169,10 +170,16 @@ const ChatSidebar = () => {
     if (newWidth >= minWidth && newWidth <= maxWidth) {
       console.log('🔄 Resizing to:', newWidth);
       setTempWidth(newWidth);
+      // Update context width in real-time so sidebar follows mouse cursor
+      if (setSidebarWidthRef.current && typeof setSidebarWidthRef.current === 'function') {
+        setSidebarWidthRef.current(newWidth);
+      } else if (typeof setSidebarWidth === 'function') {
+        setSidebarWidth(newWidth);
+      }
     } else {
       console.log('🔄 Width out of bounds - min:', minWidth, 'max:', maxWidth);
     }
-  }, []); // No dependencies needed since we use refs
+  }, [setSidebarWidth]); // Add setSidebarWidth for fallback
 
   const handleMouseUp = useCallback(() => {
     console.log('🔄 Resize ended - final tempWidth:', tempWidthRef.current);
@@ -180,26 +187,15 @@ const ChatSidebar = () => {
     // Stop resizing first to prevent further mouse move events
     setIsResizing(false);
     
-    // Then update the context with the final width
+    // Width is already updated in real-time during drag, but persist to localStorage on mouse up
+    // This ensures we don't write to localStorage excessively during drag
     try {
-      console.log('🔄 Updating context sidebarWidth to:', tempWidthRef.current);
-      
-      // Ensure setSidebarWidthRef contains a valid function before calling
-      if (setSidebarWidthRef.current && typeof setSidebarWidthRef.current === 'function') {
-        setSidebarWidthRef.current(tempWidthRef.current);
-        console.log('✅ Sidebar width updated successfully');
-      } else {
-        console.error('❌ setSidebarWidthRef.current is not a function:', typeof setSidebarWidthRef.current);
-        // Fallback: Try to call setSidebarWidth directly
-        if (typeof setSidebarWidth === 'function') {
-          setSidebarWidth(tempWidthRef.current);
-          console.log('✅ Used fallback setSidebarWidth directly');
-        }
-      }
+      console.log('🔄 Persisting final sidebar width to localStorage:', tempWidthRef.current);
+      localStorage.setItem('chatSidebarWidth', JSON.stringify(tempWidthRef.current));
     } catch (error) {
-      console.error('❌ Error updating sidebar width:', error);
+      console.error('❌ Error persisting sidebar width:', error);
     }
-  }, [setSidebarWidth]); // Add setSidebarWidth as dependency for fallback
+  }, []); // No dependencies needed since width is already updated in real-time
 
   // Safety mechanism: if resize state gets stuck, force cleanup after 5 seconds
   useEffect(() => {

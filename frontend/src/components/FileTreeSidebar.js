@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Box,
   Typography,
@@ -52,7 +52,9 @@ import {
   ChevronLeft,
   ChevronRight,
   Newspaper,
-  FindInPage
+  FindInPage,
+  Block,
+  Audiotrack
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -92,6 +94,7 @@ const FileTreeSidebar = ({
   });
   const [contextMenu, setContextMenu] = useState(null);
   const [contextMenuTarget, setContextMenuTarget] = useState(null);
+  const [vectorizationSubmenu, setVectorizationSubmenu] = useState(null);
   const [createFolderDialog, setCreateFolderDialog] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderParent, setNewFolderParent] = useState(null);
@@ -771,6 +774,59 @@ const FileTreeSidebar = ({
     }
   );
 
+  // Build a flat map for quick folder lookups (used for inheritance indicators)
+  const folderMap = useMemo(() => {
+    const map = {};
+    const walk = (folders) => {
+      if (!folders) return;
+      folders.forEach((folder) => {
+        map[folder.folder_id] = folder;
+        if (folder.children && folder.children.length > 0) {
+          walk(folder.children);
+        }
+      });
+    };
+    if (folderTree?.folders) {
+      walk(folderTree.folders);
+    }
+    return map;
+  }, [folderTree]);
+
+  // Effective exemption for a folder (walk ancestors until explicit setting)
+  const getEffectiveFolderExemption = useCallback((folderId) => {
+    let current = folderMap[folderId];
+    while (current) {
+      const val = current.exempt_from_vectorization;
+      if (val === true || val === false) {
+        return {
+          status: val,
+          sourceFolderId: current.folder_id,
+          sourceExplicit: current.folder_id === folderId
+        };
+      }
+      current = current.parent_folder_id ? folderMap[current.parent_folder_id] : null;
+    }
+    return { status: false, sourceFolderId: null, sourceExplicit: false };
+  }, [folderMap]);
+
+  // Effective exemption for a file (document override first, else folder inheritance)
+  const getEffectiveFileExemption = useCallback((file) => {
+    if (file.exempt_from_vectorization === true) {
+      return { status: true, source: 'document' };
+    }
+    if (file.exempt_from_vectorization === false) {
+      return { status: false, source: 'document' };
+    }
+    if (file.folder_id) {
+      const folderResult = getEffectiveFolderExemption(file.folder_id);
+      return {
+        status: folderResult.status,
+        source: folderResult.sourceExplicit ? 'folder' : 'ancestor'
+      };
+    }
+    return { status: false, source: 'default' };
+  }, [getEffectiveFolderExemption]);
+
   // **ROOSEVELT FIX**: Check for org files ANYWHERE, not just in loaded folders!
   // This makes Org Tools appear immediately if ANY .org files exist
   useEffect(() => {
@@ -1377,6 +1433,7 @@ const FileTreeSidebar = ({
   const handleContextMenuClose = useCallback(() => {
     setContextMenu(null);
     setContextMenuTarget(null);
+    setVectorizationSubmenu(null);
   }, []);
 
   const handleCreateFolder = useCallback(() => {
@@ -1815,6 +1872,35 @@ const FileTreeSidebar = ({
                   <Typography variant="body2" noWrap>
                     {folder.name}
                   </Typography>
+                  {(() => {
+                    const effective = getEffectiveFolderExemption(folder.folder_id);
+                    if (effective.status === true) {
+                      return (
+                        <Tooltip title="Folder is not being vectorized" placement="top">
+                          <Box
+                            sx={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              width: 16,
+                              height: 16,
+                              borderRadius: '50%',
+                              border: theme.palette.mode === 'dark' 
+                                ? '1px solid rgba(255, 255, 255, 0.3)' 
+                                : '1px solid rgba(0, 0, 0, 0.23)',
+                              backgroundColor: 'transparent'
+                            }}
+                          >
+                            <CheckCircle sx={{ 
+                              color: theme.palette.mode === 'dark' ? 'rgba(255, 255, 255, 0.7)' : 'rgba(0, 0, 0, 0.38)', 
+                              fontSize: 14,
+                            }} />
+                          </Box>
+                        </Tooltip>
+                      );
+                    }
+                    return null;
+                  })()}
                   {folder.is_virtual_source && (
                     <Chip
                       size="small"
@@ -1931,7 +2017,9 @@ const FileTreeSidebar = ({
     rssFeeds,
     rssUnreadCounts,
     handleRSSFeedClick,
-    user
+    user,
+    getEffectiveFolderExemption,
+    theme
   ]);
 
   // Render file item
@@ -1948,23 +2036,54 @@ const FileTreeSidebar = ({
         case 'org':
           baseIcon = <Article color="action" />;
           break;
+        case 'mp3':
+        case 'aac':
+        case 'wav':
+        case 'flac':
+        case 'ogg':
+        case 'm4a':
+        case 'wma':
+        case 'opus':
+          baseIcon = <Audiotrack color="action" />;
+          break;
         default:
           baseIcon = <InsertDriveFile color="action" />;
       }
       return baseIcon;
     };
 
-    const getStatusIcon = (status) => {
-      // ROOSEVELT DEBUG: Log the status for debugging
-      if (status) {
-        console.log(`🔍 File status icon for status: "${status}" (type: ${typeof status})`);
-      }
-      
+    const getStatusIcon = (status, isExemptFromVectorization = false) => {
       const getStatusIconWithTooltip = (icon, title) => (
         <Tooltip title={title} placement="top">
           {icon}
         </Tooltip>
       );
+
+      // If exempt from vectorization and file is completed/okay, show white CheckCircle
+      if (isExemptFromVectorization && (status === 'completed' || !status || status === 'pending')) {
+        return getStatusIconWithTooltip(
+          <Box
+            sx={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: 16,
+              height: 16,
+              borderRadius: '50%',
+              border: theme.palette.mode === 'dark' 
+                ? '1px solid rgba(255, 255, 255, 0.3)' 
+                : '1px solid rgba(0, 0, 0, 0.23)',
+              backgroundColor: 'transparent'
+            }}
+          >
+            <CheckCircle sx={{ 
+              color: theme.palette.mode === 'dark' ? 'rgba(255, 255, 255, 0.7)' : 'rgba(0, 0, 0, 0.38)', 
+              fontSize: 14,
+            }} />
+          </Box>,
+          'File is ready but not being vectorized'
+        );
+      }
 
       switch (status) {
         case 'completed':
@@ -2028,14 +2147,17 @@ const FileTreeSidebar = ({
                 <Typography variant="body2" noWrap sx={{ flex: 1 }}>
                   {file.filename}
                 </Typography>
-                {getStatusIcon(file.status || file.processing_status)}
+                {(() => {
+                  const effective = getEffectiveFileExemption(file);
+                  return getStatusIcon(file.status || file.processing_status, effective.status === true);
+                })()}
               </Box>
             }
           />
         </ListItemButton>
       </ListItem>
     );
-  }, [handleContextMenu, onFileSelect]);
+  }, [getEffectiveFileExemption, handleContextMenu, onFileSelect, theme]);
 
   // Render destination item for Move dialog
   const renderDestinationItem = useCallback((folder, level = 0) => {
@@ -2555,6 +2677,158 @@ const FileTreeSidebar = ({
                 
                 <Divider />
                 
+                {/* Vectorization Settings - Submenu */}
+                <MenuItem
+                  onMouseEnter={(e) => {
+                    setVectorizationSubmenu(e.currentTarget);
+                  }}
+                >
+                  <ListItemIcon>
+                    <FindInPage fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText primary="Vectorization" />
+                  <ChevronRight fontSize="small" />
+                </MenuItem>
+                
+                <Menu
+                  anchorEl={vectorizationSubmenu}
+                  open={Boolean(vectorizationSubmenu)}
+                  onClose={() => setVectorizationSubmenu(null)}
+                  anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+                  transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+                  MenuListProps={{ 
+                    onMouseLeave: () => setVectorizationSubmenu(null),
+                    onMouseEnter: () => {
+                      // Keep menu open when mouse enters submenu
+                    }
+                  }}
+                >
+                  {/* Option 1: Don't vectorize (exempt) */}
+                  <MenuItem
+                    onClick={async () => {
+                      try {
+                        await apiService.exemptFolder(contextMenuTarget.folder_id);
+                        alert('Folder set to not vectorize. All files in this folder and subfolders will be skipped.');
+                        setVectorizationSubmenu(null);
+                        handleContextMenuClose();
+                        queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]);
+                        queryClient.invalidateQueries(['folders', 'contents']);
+                        const expandedArray = Array.from(expandedFolders);
+                        for (const folderId of expandedArray) {
+                          try {
+                            const contents = await apiService.getFolderContents(folderId);
+                            setFolderContents(prev => ({ ...prev, [folderId]: contents }));
+                          } catch (err) {
+                            console.error(`Failed to refresh folder contents for ${folderId}:`, err);
+                          }
+                        }
+                        if (onFolderSelect) {
+                          onFolderSelect(selectedFolderId);
+                        }
+                      } catch (error) {
+                        alert(`Failed to update setting: ${error.message}`);
+                      }
+                    }}
+                    selected={contextMenuTarget.exempt_from_vectorization === true}
+                  >
+                    <ListItemIcon>
+                      {contextMenuTarget.exempt_from_vectorization === true ? (
+                        <CheckCircle fontSize="small" color="primary" />
+                      ) : (
+                        <Block fontSize="small" />
+                      )}
+                    </ListItemIcon>
+                    <ListItemText 
+                      primary="Don't vectorize"
+                      secondary="Files won't be indexed"
+                    />
+                  </MenuItem>
+                  
+                  {/* Option 2: Vectorize (override parent) */}
+                  <MenuItem
+                    onClick={async () => {
+                      try {
+                        await apiService.overrideFolderExemption(contextMenuTarget.folder_id);
+                        alert('Folder set to vectorize. Files will be indexed even if parent folder is exempt.');
+                        setVectorizationSubmenu(null);
+                        handleContextMenuClose();
+                        queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]);
+                        queryClient.invalidateQueries(['folders', 'contents']);
+                        const expandedArray = Array.from(expandedFolders);
+                        for (const folderId of expandedArray) {
+                          try {
+                            const contents = await apiService.getFolderContents(folderId);
+                            setFolderContents(prev => ({ ...prev, [folderId]: contents }));
+                          } catch (err) {
+                            console.error(`Failed to refresh folder contents for ${folderId}:`, err);
+                          }
+                        }
+                        if (onFolderSelect) {
+                          onFolderSelect(selectedFolderId);
+                        }
+                      } catch (error) {
+                        alert(`Failed to update setting: ${error.message}`);
+                      }
+                    }}
+                    selected={contextMenuTarget.exempt_from_vectorization === false}
+                  >
+                    <ListItemIcon>
+                      {contextMenuTarget.exempt_from_vectorization === false ? (
+                        <CheckCircle fontSize="small" color="primary" />
+                      ) : (
+                        <FindInPage fontSize="small" />
+                      )}
+                    </ListItemIcon>
+                    <ListItemText 
+                      primary="Vectorize"
+                      secondary="Files will be indexed"
+                    />
+                  </MenuItem>
+                  
+                  {/* Option 3: Use parent setting (inherit) */}
+                  <MenuItem
+                    onClick={async () => {
+                      try {
+                        await apiService.removeFolderExemption(contextMenuTarget.folder_id);
+                        alert('Folder will use parent folder setting.');
+                        setVectorizationSubmenu(null);
+                        handleContextMenuClose();
+                        queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]);
+                        queryClient.invalidateQueries(['folders', 'contents']);
+                        const expandedArray = Array.from(expandedFolders);
+                        for (const folderId of expandedArray) {
+                          try {
+                            const contents = await apiService.getFolderContents(folderId);
+                            setFolderContents(prev => ({ ...prev, [folderId]: contents }));
+                          } catch (err) {
+                            console.error(`Failed to refresh folder contents for ${folderId}:`, err);
+                          }
+                        }
+                        if (onFolderSelect) {
+                          onFolderSelect(selectedFolderId);
+                        }
+                      } catch (error) {
+                        alert(`Failed to update setting: ${error.message}`);
+                      }
+                    }}
+                    selected={contextMenuTarget.exempt_from_vectorization === null || contextMenuTarget.exempt_from_vectorization === undefined}
+                  >
+                    <ListItemIcon>
+                      {(contextMenuTarget.exempt_from_vectorization === null || contextMenuTarget.exempt_from_vectorization === undefined) ? (
+                        <CheckCircle fontSize="small" color="primary" />
+                      ) : (
+                        <Folder fontSize="small" />
+                      )}
+                    </ListItemIcon>
+                    <ListItemText 
+                      primary="Use parent setting"
+                      secondary="Follows parent folder"
+                    />
+                  </MenuItem>
+                </Menu>
+                
+                <Divider />
+                
                 {/* Hide delete option for team root folders */}
                 {!(contextMenuTarget.collection_type === 'team' && !contextMenuTarget.parent_folder_id) && (
                   <MenuItem
@@ -2618,6 +2892,156 @@ const FileTreeSidebar = ({
               </ListItemIcon>
               Move
             </MenuItem>
+            
+            <Divider />
+            
+            {/* Vectorization Settings - Submenu for Documents */}
+            <MenuItem
+              onMouseEnter={(e) => {
+                setVectorizationSubmenu(e.currentTarget);
+              }}
+            >
+              <ListItemIcon>
+                <FindInPage fontSize="small" />
+              </ListItemIcon>
+              <ListItemText primary="Vectorization" />
+              <ChevronRight fontSize="small" />
+            </MenuItem>
+            
+            <Menu
+              anchorEl={vectorizationSubmenu}
+              open={Boolean(vectorizationSubmenu) && contextMenuTarget?.document_id}
+              onClose={() => setVectorizationSubmenu(null)}
+              anchorOrigin={{ vertical: 'top', horizontal: 'right' }}
+              transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+              MenuListProps={{ onMouseLeave: () => setVectorizationSubmenu(null) }}
+            >
+              {/* Option 1: Don't vectorize (exempt) */}
+              <MenuItem
+                onClick={async () => {
+                  try {
+                    await apiService.exemptDocument(contextMenuTarget.document_id);
+                    alert('Document set to not vectorize. This file will not be indexed for search.');
+                    setVectorizationSubmenu(null);
+                    handleContextMenuClose();
+                    const folderId = contextMenuTarget.folder_id || 
+                      Object.keys(folderContents).find(fId => 
+                        folderContents[fId]?.documents?.some(d => d.document_id === contextMenuTarget.document_id)
+                      );
+                    if (folderId) {
+                      queryClient.invalidateQueries(['folders', 'contents', folderId]);
+                      try {
+                        const contents = await apiService.getFolderContents(folderId);
+                        setFolderContents(prev => ({ ...prev, [folderId]: contents }));
+                      } catch (err) {
+                        console.error('Failed to refresh folder contents:', err);
+                      }
+                    } else {
+                      queryClient.invalidateQueries(['folders', 'contents']);
+                    }
+                  } catch (error) {
+                    alert(`Failed to update setting: ${error.message}`);
+                  }
+                }}
+                selected={contextMenuTarget.exempt_from_vectorization === true}
+              >
+                <ListItemIcon>
+                  {contextMenuTarget.exempt_from_vectorization === true ? (
+                    <CheckCircle fontSize="small" color="primary" />
+                  ) : (
+                    <Block fontSize="small" />
+                  )}
+                </ListItemIcon>
+                <ListItemText 
+                  primary="Don't vectorize"
+                  secondary="File won't be indexed"
+                />
+              </MenuItem>
+              
+              {/* Option 2: Vectorize (explicit) */}
+              <MenuItem
+                onClick={async () => {
+                  try {
+                    await apiService.removeDocumentExemption(contextMenuTarget.document_id, false);
+                    alert('Document set to vectorize. This file will be indexed for search.');
+                    setVectorizationSubmenu(null);
+                    handleContextMenuClose();
+                    const folderId = contextMenuTarget.folder_id || 
+                      Object.keys(folderContents).find(fId => 
+                        folderContents[fId]?.documents?.some(d => d.document_id === contextMenuTarget.document_id)
+                      );
+                    if (folderId) {
+                      queryClient.invalidateQueries(['folders', 'contents', folderId]);
+                      try {
+                        const contents = await apiService.getFolderContents(folderId);
+                        setFolderContents(prev => ({ ...prev, [folderId]: contents }));
+                      } catch (err) {
+                        console.error('Failed to refresh folder contents:', err);
+                      }
+                    } else {
+                      queryClient.invalidateQueries(['folders', 'contents']);
+                    }
+                  } catch (error) {
+                    alert(`Failed to update setting: ${error.message}`);
+                  }
+                }}
+                selected={contextMenuTarget.exempt_from_vectorization === false}
+              >
+                <ListItemIcon>
+                  {contextMenuTarget.exempt_from_vectorization === false ? (
+                    <CheckCircle fontSize="small" color="primary" />
+                  ) : (
+                    <FindInPage fontSize="small" />
+                  )}
+                </ListItemIcon>
+                <ListItemText 
+                  primary="Vectorize"
+                  secondary="File will be indexed"
+                />
+              </MenuItem>
+              
+              {/* Option 3: Use folder setting (inherit) */}
+              <MenuItem
+                onClick={async () => {
+                  try {
+                    await apiService.removeDocumentExemption(contextMenuTarget.document_id, true);
+                    alert('Document will use folder setting.');
+                    setVectorizationSubmenu(null);
+                    handleContextMenuClose();
+                    const folderId = contextMenuTarget.folder_id || 
+                      Object.keys(folderContents).find(fId => 
+                        folderContents[fId]?.documents?.some(d => d.document_id === contextMenuTarget.document_id)
+                      );
+                    if (folderId) {
+                      queryClient.invalidateQueries(['folders', 'contents', folderId]);
+                      try {
+                        const contents = await apiService.getFolderContents(folderId);
+                        setFolderContents(prev => ({ ...prev, [folderId]: contents }));
+                      } catch (err) {
+                        console.error('Failed to refresh folder contents:', err);
+                      }
+                    } else {
+                      queryClient.invalidateQueries(['folders', 'contents']);
+                    }
+                  } catch (error) {
+                    alert(`Failed to update setting: ${error.message}`);
+                  }
+                }}
+                selected={contextMenuTarget.exempt_from_vectorization === null || contextMenuTarget.exempt_from_vectorization === undefined}
+              >
+                <ListItemIcon>
+                  {(contextMenuTarget.exempt_from_vectorization === null || contextMenuTarget.exempt_from_vectorization === undefined) ? (
+                    <CheckCircle fontSize="small" color="primary" />
+                  ) : (
+                    <Folder fontSize="small" />
+                  )}
+                </ListItemIcon>
+                <ListItemText 
+                  primary="Use folder setting"
+                  secondary="Follows folder setting"
+                />
+              </MenuItem>
+            </Menu>
             
             <Divider />
             

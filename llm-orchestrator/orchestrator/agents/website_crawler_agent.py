@@ -272,25 +272,47 @@ You MUST respond with valid JSON matching this exact schema:
             
             logger.info(f"Website Crawler Agent processing: {query[:80]}...")
             
-            # Build initial state for LangGraph workflow
-            initial_state: WebsiteCrawlerState = {
-                "query": query,
-                "user_id": user_id,
-                "metadata": state.get("metadata", {}),
-                "messages": state.get("messages", []),
-                "shared_memory": state.get("shared_memory", {}),
-                "url_to_crawl": "",
-                "crawl_result": {},
-                "response": {},
-                "task_status": "",
-                "error": ""
-            }
+            metadata = state.get("metadata", {})
+            shared_memory = state.get("shared_memory", {})
             
             # Get workflow (lazy initialization with checkpointer)
             workflow = await self._get_workflow()
             
             # Get checkpoint config (handles thread_id from conversation_id/user_id)
             config = self._get_checkpoint_config(metadata)
+            
+            # Prepare new messages (current query)
+            messages = state.get("messages", [])
+            new_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Load and merge checkpointed messages to preserve conversation history
+            conversation_messages = await self._load_and_merge_checkpoint_messages(
+                workflow, config, new_messages
+            )
+            
+            # Load shared_memory from checkpoint if available
+            checkpoint_state = await workflow.aget_state(config)
+            existing_shared_memory = {}
+            if checkpoint_state and checkpoint_state.values:
+                existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+            
+            # Merge with any shared_memory from metadata
+            shared_memory_merged = shared_memory.copy()
+            shared_memory_merged.update(existing_shared_memory)
+            
+            # Build initial state for LangGraph workflow
+            initial_state: WebsiteCrawlerState = {
+                "query": query,
+                "user_id": user_id,
+                "metadata": metadata,
+                "messages": conversation_messages,
+                "shared_memory": shared_memory_merged,
+                "url_to_crawl": "",
+                "crawl_result": {},
+                "response": {},
+                "task_status": "",
+                "error": ""
+            }
             
             # Invoke LangGraph workflow with checkpointing
             final_state = await workflow.ainvoke(initial_state, config=config)

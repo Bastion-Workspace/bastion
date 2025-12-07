@@ -330,8 +330,8 @@ class CharacterDevelopmentAgent(BaseAgent):
                     )
                 })
             
-            # Call LLM using BaseAgent's _get_llm method
-            llm = self._get_llm(temperature=0.35)
+            # Call LLM using BaseAgent's _get_llm method - pass state to access user's model selection
+            llm = self._get_llm(temperature=0.35, state=state)
             start_time = datetime.now()
             
             # Convert messages to LangChain format
@@ -584,31 +584,55 @@ class CharacterDevelopmentAgent(BaseAgent):
             "NO PLACEHOLDER TEXT: Leave empty sections blank, do NOT insert '[To be developed]' or 'TBD'.\n"
         )
     
-    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
         """
         Process character development request using LangGraph workflow
         
         Args:
-            state: Dictionary with messages, shared_memory, user_id, etc.
+            query: User query string
+            metadata: Optional metadata dictionary (persona, editor context, etc.)
+            messages: Optional conversation history
             
         Returns:
             Dictionary with character edit response and operations
         """
         try:
-            logger.info("Character Development Agent: Starting character edit...")
+            logger.info(f"Character Development Agent: Starting character edit: {query[:100]}...")
             
-            # Extract user message
-            messages = state.get("messages", [])
-            latest_message = messages[-1] if messages else None
-            user_message = latest_message.content if hasattr(latest_message, 'content') else str(latest_message) if latest_message else ""
+            # Extract user_id and shared_memory from metadata
+            metadata = metadata or {}
+            user_id = metadata.get("user_id", "system")
+            shared_memory = metadata.get("shared_memory", {}) or {}
+            
+            # Prepare new messages (current query)
+            new_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Get workflow to access checkpoint
+            workflow = await self._get_workflow()
+            config = self._get_checkpoint_config(metadata)
+            
+            # Load and merge checkpointed messages to preserve conversation history
+            conversation_messages = await self._load_and_merge_checkpoint_messages(
+                workflow, config, new_messages
+            )
+            
+            # Load shared_memory from checkpoint if available
+            checkpoint_state = await workflow.aget_state(config)
+            existing_shared_memory = {}
+            if checkpoint_state and checkpoint_state.values:
+                existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+            
+            # Merge shared_memory: start with checkpoint, then update with NEW data (so new active_editor overwrites old)
+            shared_memory_merged = existing_shared_memory.copy()
+            shared_memory_merged.update(shared_memory)  # New data (including updated active_editor) takes precedence
             
             # Build initial state for LangGraph workflow
             initial_state: CharacterDevelopmentState = {
-                "query": user_message,
-                "user_id": state.get("user_id", "system"),
-                "metadata": state.get("metadata", {}),
-                "messages": messages,
-                "shared_memory": state.get("shared_memory", {}),
+                "query": query,
+                "user_id": user_id,
+                "metadata": metadata,
+                "messages": conversation_messages,
+                "shared_memory": shared_memory_merged,
                 "active_editor": {},
                 "text": "",
                 "filename": "character.md",
@@ -632,13 +656,7 @@ class CharacterDevelopmentAgent(BaseAgent):
                 "error": ""
             }
             
-            # Get workflow (lazy initialization with checkpointer)
-            workflow = await self._get_workflow()
-            
-            # Get checkpoint config (handles thread_id from conversation_id/user_id)
-            config = self._get_checkpoint_config(metadata)
-            
-            # Invoke LangGraph workflow with checkpointing
+            # Invoke LangGraph workflow with checkpointing (workflow and config already created above)
             final_state = await workflow.ainvoke(initial_state, config=config)
             
             # Return response from final state

@@ -23,8 +23,7 @@ celery_app = Celery(
     include=[
         "services.celery_tasks.orchestrator_tasks",
         "services.celery_tasks.agent_tasks",
-        "services.celery_tasks.rss_tasks",
-        "services.celery_tasks.twitter_tasks"
+        "services.celery_tasks.rss_tasks"
     ]
 )
 
@@ -42,7 +41,6 @@ celery_app.conf.update(
         "services.celery_tasks.orchestrator_tasks.*": {"queue": "orchestrator"},
         "services.celery_tasks.agent_tasks.*": {"queue": "agents"},
         "services.celery_tasks.rss_tasks.*": {"queue": "rss"},
-        "services.celery_tasks.twitter_tasks.*": {"queue": "twitter"},
     },
     
     # Queue configuration
@@ -54,7 +52,6 @@ celery_app.conf.update(
         Queue("research", routing_key="research"),
         Queue("coding", routing_key="coding"),
         Queue("rss", routing_key="rss"),
-        Queue("twitter", routing_key="twitter"),
     ),
     
     # Worker settings
@@ -105,11 +102,6 @@ celery_app.conf.update(
         'purge-old-news-articles': {
             'task': 'services.celery_tasks.rss_tasks.purge_old_news_task',
             'schedule': 86400.0,  # 24 hours in seconds
-        },
-        # Twitter polling - run every 5 minutes
-        'poll-twitter-feeds': {
-            'task': 'services.celery_tasks.twitter_tasks.scheduled_twitter_poll_task',
-            'schedule': 300.0,
         },
     },
     # Beat scheduler settings

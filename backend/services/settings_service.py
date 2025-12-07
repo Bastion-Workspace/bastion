@@ -404,7 +404,7 @@ class SettingsService:
                 clean_key = key.replace('prompt_', '')
                 settings_dict[clean_key] = value
             return UserPromptSettings(
-                ai_name=settings_dict.get('ai_name', 'Codex'),
+                ai_name=settings_dict.get('ai_name', 'Alex'),
                 political_bias=PoliticalBias(settings_dict.get('political_bias', 'neutral')),
                 persona_style=PersonaStyle(settings_dict.get('persona_style', 'professional'))
             )

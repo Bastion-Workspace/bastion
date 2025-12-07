@@ -69,6 +69,9 @@ service ToolService {
   rpc ProposeDocumentEdit(ProposeDocumentEditRequest) returns (ProposeDocumentEditResponse);
   rpc ApplyDocumentEditProposal(ApplyDocumentEditProposalRequest) returns (ApplyDocumentEditProposalResponse);
   rpc ApplyOperationsDirectly(ApplyOperationsDirectlyRequest) returns (ApplyOperationsDirectlyResponse);
+  
+  // Conversation operations
+  rpc UpdateConversationTitle(UpdateConversationTitleRequest) returns (UpdateConversationTitleResponse);
 }
 
 // Document Messages
@@ -771,6 +774,21 @@ message ApplyOperationsDirectlyResponse {
   bool success = 1;
   string document_id = 2;
   int32 applied_count = 3;  // Number of operations applied
+  string message = 4;
+  optional string error = 5;
+}
+
+// Conversation Messages
+message UpdateConversationTitleRequest {
+  string user_id = 1;
+  string conversation_id = 2;
+  string title = 3;
+}
+
+message UpdateConversationTitleResponse {
+  bool success = 1;
+  string conversation_id = 2;
+  string title = 3;
   string message = 4;
   optional string error = 5;
 }

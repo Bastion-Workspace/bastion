@@ -1,5 +1,5 @@
 """
-Codex Knowledge Base - Main FastAPI Application V2 (Optimized)
+Bastion Workspace - Main FastAPI Application V2 (Optimized)
 A sophisticated RAG system with PostgreSQL-backed document storage
 """
 
@@ -388,7 +388,7 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app
 app = FastAPI(
-    title="Codex Knowledge Base V2",
+    title="Bastion Workspace V2",
     description="A sophisticated RAG system with PostgreSQL-backed document storage and knowledge graph integration",
     version=__version__,
     lifespan=lifespan
@@ -498,16 +498,10 @@ logger.info("✅ Resilient embedding API routes registered")
 # Include settings API routes
 app.include_router(settings_router)
 
-# Include template management router
-from api.template_api import router as template_router
-from api.template_execution_api import router as template_execution_router
-app.include_router(template_router)
-app.include_router(template_execution_router)
+# Template management removed - functionality not in use
 logger.info("✅ Settings API routes registered")
 
-# Include Services API routes
-from api.services_api import router as services_router
-app.include_router(services_router)
+# Services API removed - Twitter integration removed
 logger.info("✅ Services API routes registered")
 logger.info("✅ Template management API routes registered")
 logger.info("✅ Template execution API routes registered")
@@ -636,13 +630,6 @@ from api.rss_api import router as rss_router
 app.include_router(rss_router)
 logger.info("✅ RSS API routes registered")
 
-# Include Cyber Catalog API routes
-try:
-    from api.cyber_catalog_api import router as cyber_catalog_router
-    app.include_router(cyber_catalog_router)
-    logger.info("✅ Cyber Catalog API routes registered")
-except Exception as e:
-    logger.warning(f"⚠️ Failed to register Cyber Catalog API routes: {e}")
 
 # Include News API routes
 try:
@@ -700,7 +687,7 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "service": "Codex Knowledge Base V2",
+        "service": "Bastion Workspace V2",
         "version": __version__,
         "storage": "PostgreSQL"
     }
@@ -710,7 +697,7 @@ async def health_check():
 async def root():
     """Root endpoint with service information"""
     return {
-        "message": "Welcome to Codex Knowledge Base V2",
+        "message": "Welcome to Bastion Workspace V2",
         "description": "A sophisticated RAG system with PostgreSQL-backed document storage",
         "docs": "/docs",
         "health": "/health",
@@ -1006,8 +993,10 @@ async def get_conversation_messages(conversation_id: str, skip: int = 0, limit: 
             )
             
             # ConversationService returns dict with "messages" key
+            logger.info(f"🔍 get_conversation_messages result keys: {list(db_messages_result.keys()) if db_messages_result else 'None'}")
             if db_messages_result and "messages" in db_messages_result:
                 db_messages = db_messages_result.get("messages", [])
+                logger.info(f"🔍 get_conversation_messages returned {len(db_messages)} messages")
                 if db_messages:
                     logger.info(f"✅ Retrieved {len(db_messages)} messages from conversation database (primary source)")
                     
@@ -3138,6 +3127,106 @@ async def get_document_pdf(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/documents/{doc_id}/file")
+async def get_document_file(
+    doc_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Serve the original file for a document (audio, images, etc.)"""
+    try:
+        logger.info(f"📄 Serving file for document: {doc_id}")
+        
+        # SECURITY: Check access authorization
+        doc_info = await check_document_access(doc_id, current_user, "read")
+        if not doc_info:
+            raise HTTPException(status_code=404, detail="Document not found")
+        
+        # Get file path using folder service
+        from pathlib import Path
+        from fastapi.responses import FileResponse
+        import os
+        import mimetypes
+        
+        filename = getattr(doc_info, 'filename', None)
+        user_id = getattr(doc_info, 'user_id', None)
+        folder_id = getattr(doc_info, 'folder_id', None)
+        collection_type = getattr(doc_info, 'collection_type', 'user')
+        
+        # SECURITY: Sanitize filename to prevent path traversal
+        if filename:
+            safe_filename = os.path.basename(filename)
+            if not safe_filename or safe_filename in ('.', '..'):
+                logger.error(f"Invalid filename in document metadata: {filename}")
+                raise HTTPException(status_code=500, detail="Invalid file metadata")
+            filename = safe_filename
+        
+        file_path = None
+        
+        if filename:
+            # Try new folder structure first
+            try:
+                file_path_str = await folder_service.get_document_file_path(
+                    filename=filename,
+                    folder_id=folder_id,
+                    user_id=user_id,
+                    collection_type=collection_type
+                )
+                file_path = Path(file_path_str)
+                
+                # SECURITY: Verify resolved path is within uploads directory
+                try:
+                    uploads_base = Path(settings.UPLOAD_DIR).resolve()
+                    file_path_resolved = file_path.resolve()
+                    
+                    if not str(file_path_resolved).startswith(str(uploads_base)):
+                        logger.error(f"Path traversal attempt detected in document: {doc_id} -> {file_path_resolved}")
+                        raise HTTPException(status_code=403, detail="Access denied")
+                except Exception as e:
+                    logger.error(f"Path validation error for document {doc_id}: {e}")
+                    raise HTTPException(status_code=403, detail="Access denied")
+                
+                if not file_path.exists():
+                    logger.warning(f"⚠️ File not found at computed path: {file_path}")
+                    file_path = None
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to compute file path with folder service: {e}")
+        
+        # Fall back to legacy flat structure if not found in new structure
+        if file_path is None or not file_path.exists():
+            upload_dir = Path(settings.UPLOAD_DIR)
+            legacy_paths = [
+                upload_dir / f"{doc_id}_{doc_info.filename}",
+                upload_dir / doc_info.filename
+            ]
+            
+            for legacy_path in legacy_paths:
+                if legacy_path.exists():
+                    file_path = legacy_path
+                    logger.info(f"📄 Found file in legacy location: {file_path}")
+                    break
+        
+        if file_path is None or not file_path.exists():
+            raise HTTPException(status_code=404, detail="File not found on disk")
+        
+        # Determine media type from file extension
+        media_type, _ = mimetypes.guess_type(str(file_path))
+        if not media_type:
+            media_type = "application/octet-stream"
+        
+        logger.info(f"✅ Serving file: {file_path} (type: {media_type})")
+        return FileResponse(
+            path=str(file_path),
+            filename=doc_info.filename,
+            media_type=media_type
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to serve file: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(
     doc_id: str,
@@ -4618,6 +4707,124 @@ async def get_document_content(
         raise HTTPException(status_code=500, detail=f"Failed to get document content: {str(e)}")
 
 
+@app.post("/api/documents/{doc_id}/exempt")
+async def exempt_document_from_vectorization(
+    doc_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Exempt a document from vectorization and knowledge graph processing"""
+    try:
+        success = await document_service.exempt_document_from_vectorization(
+            doc_id, 
+            current_user.user_id
+        )
+        if success:
+            return {"status": "success", "message": "Document exempted from vectorization"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to exempt document")
+    except Exception as e:
+        logger.error(f"❌ Failed to exempt document {doc_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/documents/{doc_id}/exempt")
+async def remove_document_exemption(
+    doc_id: str,
+    inherit: bool = False,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """
+    Remove exemption from document.
+    
+    Args:
+        doc_id: Document ID
+        inherit: If True, set to inherit from folder. If False, set to explicit vectorize.
+    """
+    try:
+        success = await document_service.remove_document_exemption(
+            doc_id,
+            current_user.user_id,
+            inherit=inherit
+        )
+        if success:
+            if inherit:
+                return {"status": "success", "message": "Document now inherits from folder"}
+            else:
+                return {"status": "success", "message": "Document exemption removed and re-processed"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to remove exemption")
+    except Exception as e:
+        logger.error(f"❌ Failed to remove exemption for document {doc_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/folders/{folder_id}/exempt")
+async def exempt_folder_from_vectorization(
+    folder_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Exempt a folder and all descendants from vectorization"""
+    try:
+        from services.service_container import get_service_container
+        container = await get_service_container()
+        folder_service = container.folder_service
+        
+        success = await folder_service.exempt_folder_from_vectorization(
+            folder_id,
+            current_user.user_id
+        )
+        if success:
+            return {"status": "success", "message": "Folder and descendants exempted from vectorization"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to exempt folder")
+    except Exception as e:
+        logger.error(f"❌ Failed to exempt folder {folder_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/folders/{folder_id}/exempt")
+async def remove_folder_exemption(
+    folder_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Remove exemption from a folder (set to inherit from parent), re-process all documents"""
+    try:
+        from services.service_container import get_service_container
+        container = await get_service_container()
+        folder_service = container.folder_service
+        
+        success = await folder_service.remove_folder_exemption(
+            folder_id,
+            current_user.user_id
+        )
+        if success:
+            return {"status": "success", "message": "Folder exemption removed - now inherits from parent"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to remove exemption")
+    except Exception as e:
+        logger.error(f"❌ Failed to remove exemption for folder {folder_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/folders/{folder_id}/exempt/override")
+async def override_folder_exemption(
+    folder_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Set folder to explicitly NOT exempt (override parent exemption)"""
+    try:
+        from services.service_container import get_service_container
+        container = await get_service_container()
+        folder_service = container.folder_service
+        
+        success = await folder_service.override_folder_exemption(
+            folder_id,
+            current_user.user_id
+        )
+        if success:
+            return {"status": "success", "message": "Folder set to override parent exemption - not exempt"}
+        else:
+            raise HTTPException(status_code=500, detail="Failed to set override")
+    except Exception as e:
+        logger.error(f"❌ Failed to set override for folder {folder_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.put("/api/documents/{doc_id}/content")
 async def update_document_content(
     doc_id: str,
@@ -4716,6 +4923,13 @@ async def update_document_content(
         except Exception as e:
             logger.warning(f"⚠️ Failed to update file size metadata: {e}")
 
+        # Check if document is exempt from vectorization BEFORE processing
+        is_exempt = await document_service.document_repository.is_document_exempt(doc_id)
+        if is_exempt:
+            logger.info(f"🚫 Document {doc_id} is exempt from vectorization - skipping embedding and entity extraction")
+            await document_service.document_repository.update_status(doc_id, ProcessingStatus.COMPLETED)
+            return {"status": "success", "message": "Content updated (exempt from vectorization)", "document_id": doc_id}
+        
         # Re-embed the updated content
         try:
             await document_service.document_repository.update_status(doc_id, ProcessingStatus.EMBEDDING)
@@ -4795,8 +5009,9 @@ async def update_document_content(
                 )
                 await document_service.document_repository.update_chunk_count(doc_id, len(chunks))
             
+            # Extract entities (document is not exempt, so proceed)
             # **BULLY!** Extract and store NEW entities using PROPER spaCy NER
-            if document_service.kg_service:
+            elif document_service.kg_service:
                 try:
                     # Use DocumentProcessor's sophisticated entity extraction (spaCy + patterns)
                     entities = await document_service.document_processor._extract_entities(new_content, chunks or [])

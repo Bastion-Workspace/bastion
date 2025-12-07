@@ -8,6 +8,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import messagingService from '../services/messagingService';
 import { useAuth } from './AuthContext';
+import tabNotificationManager from '../utils/tabNotification';
 
 const MessagingContext = createContext();
 
@@ -123,6 +124,27 @@ export const MessagingProvider = ({ children }) => {
       throw error;
     }
   }, [loadRooms]);
+
+  const toggleMute = useCallback(async (roomId, muted) => {
+    try {
+      await messagingService.updateNotificationSettings(roomId, { muted });
+      // Update local state immediately
+      setRooms(prev => prev.map(room =>
+        room.room_id === roomId
+          ? {
+              ...room,
+              notification_settings: {
+                ...(room.notification_settings || {}),
+                muted
+              }
+            }
+          : room
+      ));
+    } catch (error) {
+      console.error('❌ Failed to toggle mute:', error);
+      throw error;
+    }
+  }, []);
 
   // =====================
   // MESSAGE OPERATIONS
@@ -285,12 +307,25 @@ export const MessagingProvider = ({ children }) => {
         }));
       }
       
-      // Update room's last message time
-      setRooms(prev => prev.map(room =>
-        room.room_id === roomId
-          ? { ...room, last_message_at: message.created_at }
-          : room
-      ).sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at)));
+      // Update room's last message time and check for notifications
+      setRooms(prev => {
+        const updated = prev.map(room =>
+          room.room_id === roomId
+            ? { ...room, last_message_at: message.created_at }
+            : room
+        ).sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at));
+        
+        // Flash tab notification if not current room and not muted
+        if (roomId !== currentRoomId) {
+          const room = updated.find(r => r.room_id === roomId);
+          const notificationSettings = room?.notification_settings || {};
+          if (!notificationSettings.muted) {
+            tabNotificationManager.startFlashing('New message');
+          }
+        }
+        
+        return updated;
+      });
     };
     
     const handlePresenceUpdate = (presenceData) => {
@@ -476,11 +511,24 @@ export const MessagingProvider = ({ children }) => {
         const roomId = message.room_id;
         
         // Update room timestamp
-        setRooms(prev => prev.map(room =>
-          room.room_id === roomId
-            ? { ...room, last_message_at: message.created_at }
-            : room
-        ).sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at)));
+        setRooms(prev => {
+          const updated = prev.map(room =>
+            room.room_id === roomId
+              ? { ...room, last_message_at: message.created_at }
+              : room
+          ).sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at));
+          
+          // Flash tab notification if not current room and not muted
+          if (roomId !== currentRoomId) {
+            const room = updated.find(r => r.room_id === roomId);
+            const notificationSettings = room?.notification_settings || {};
+            if (!notificationSettings.muted) {
+              tabNotificationManager.startFlashing('New message');
+            }
+          }
+          
+          return updated;
+        });
         
         // Increment unread count if not current room
         if (roomId !== currentRoomId) {
@@ -534,6 +582,7 @@ export const MessagingProvider = ({ children }) => {
     deleteRoom,
     addParticipantToRoom,
     selectRoom,
+    toggleMute,
     
     // Message operations
     loadMessages,

@@ -1,5 +1,5 @@
 r"""
-Conversation History Models for Codex Knowledge Base
+Conversation History Models for Bastion Workspace
 Handles data models for persistent conversation storage
 """
 

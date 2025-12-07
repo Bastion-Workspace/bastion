@@ -56,7 +56,7 @@ class AgentMode(str, Enum):
 
 class UserPromptSettings(BaseModel):
     """User-specific prompt customization settings"""
-    ai_name: str = Field("Codex", description="Name for the AI assistant")
+    ai_name: str = Field("Alex", description="Name for the AI assistant")
     political_bias: PoliticalBias = PoliticalBias.NEUTRAL
     persona_style: PersonaStyle = PersonaStyle.PROFESSIONAL
 
@@ -648,13 +648,13 @@ RESEARCH PRIVACY GUIDANCE:
         """Validate that AI name is changed when using non-default bias/persona settings"""
         is_default_bias = user_settings.political_bias == PoliticalBias.NEUTRAL
         is_default_persona = user_settings.persona_style == PersonaStyle.PROFESSIONAL
-        is_default_name = user_settings.ai_name == "Codex"
+        is_default_name = user_settings.ai_name == "Alex"
         
         # If using non-default settings but keeping default name, raise error
         if (not is_default_bias or not is_default_persona) and is_default_name:
             raise ValueError(
-                "You must change the AI name from 'Codex' when using non-default bias or persona settings. "
-                "'Codex' is always neutral and professional. Please choose a different name for your customized AI."
+                "You must change the AI name from 'Alex' when using non-default bias or persona settings. "
+                "'Alex' is always neutral and professional. Please choose a different name for your customized AI."
             )
     
     def _get_persona_override_name(self, user_settings: UserPromptSettings) -> str:

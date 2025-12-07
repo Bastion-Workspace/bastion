@@ -8,7 +8,7 @@ import logging
 import re
 import json
 from datetime import datetime
-from typing import Dict, Any, List, Optional, TypedDict
+from typing import Dict, Any, List, Optional, TypedDict, Tuple
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from langgraph.graph import StateGraph, END
@@ -28,6 +28,9 @@ class PodcastScriptState(TypedDict):
     user_message: str
     editor_content: str
     frontmatter: Dict[str, Any]
+    editing_mode: bool  # True if editor has existing content
+    structured_edit: Optional[Dict[str, Any]]  # LLM-generated edit plan
+    editor_operations: List[Dict[str, Any]]  # Resolved operations
     content_block: str
     system_prompt: str
     task_block: str
@@ -60,14 +63,28 @@ class PodcastScriptAgent(BaseAgent):
         workflow.add_node("prepare_context", self._prepare_context_node)
         workflow.add_node("extract_content", self._extract_content_node)
         workflow.add_node("generate_script", self._generate_script_node)
+        workflow.add_node("resolve_operations", self._resolve_operations_node)
+        workflow.add_node("format_response", self._format_response_node)
         
         # Entry point
         workflow.set_entry_point("prepare_context")
         
-        # Linear flow: prepare_context -> extract_content -> generate_script -> END
+        # Conditional routing based on editing mode
         workflow.add_edge("prepare_context", "extract_content")
         workflow.add_edge("extract_content", "generate_script")
-        workflow.add_edge("generate_script", END)
+        
+        # Route based on editing mode
+        workflow.add_conditional_edges(
+            "generate_script",
+            lambda state: "resolve_operations" if state.get("editing_mode") else "format_response",
+            {
+                "resolve_operations": "resolve_operations",
+                "format_response": "format_response"
+            }
+        )
+        
+        workflow.add_edge("resolve_operations", "format_response")
+        workflow.add_edge("format_response", END)
         
         return workflow.compile(checkpointer=checkpointer)
     
@@ -78,11 +95,40 @@ class PodcastScriptAgent(BaseAgent):
             self._grpc_client = await get_backend_tool_client()
         return self._grpc_client
     
-    def _build_system_prompt(self, persona: Optional[Dict[str, Any]] = None) -> str:
+    def _build_system_prompt(self, persona: Optional[Dict[str, Any]] = None, editing_mode: bool = False) -> str:
         """Build podcast script system prompt"""
         base = (
             "You are a professional podcast scriptwriter. "
             "Produce a single-narrator plain-text script suitable for ElevenLabs TTS, with inline bracket cues.\n\n"
+        )
+        
+        # Add editing mode instructions if in editing mode
+        if editing_mode:
+            base += (
+                "=== EDITING MODE - STRUCTURED OPERATIONS ===\n"
+                "The editor contains existing content. You must generate targeted edit operations as JSON:\n\n"
+                "{\n"
+                '  "summary": "Brief description of changes",\n'
+                '  "operations": [\n'
+                "    {\n"
+                '      "op_type": "replace_range",\n'
+                '      "start": 0,\n'
+                '      "end": 50,\n'
+                '      "text": "New script content with [brackets]",\n'
+                '      "original_text": "Exact text from document (20-40 words)",\n'
+                '      "occurrence_index": 0\n'
+                "    }\n"
+                "  ]\n"
+                "}\n\n"
+                "Operation types:\n"
+                "- replace_range: Replace existing text with new text\n"
+                "- delete_range: Remove existing text\n"
+                "- insert_after_heading: Add content after a specific heading\n\n"
+                "CRITICAL: Provide \"original_text\" with EXACT verbatim text from the document for replace/delete operations.\n"
+                "CRITICAL: For insert_after_heading, provide \"anchor_text\" with the exact heading line.\n\n"
+            )
+        
+        base += (
             "=== INLINE CUE LEXICON (ElevenLabs v3 Audio Tags) ===\n"
             "TIMING & RHYTHM CONTROL:\n"
             "- [pause] - Brief pause for effect\n"
@@ -184,10 +230,27 @@ class PodcastScriptAgent(BaseAgent):
             user_message = latest_message.content if hasattr(latest_message, 'content') else ""
             editor_content = active_editor.get("content", "")
             
+            # Detect editing mode: if editor has content (after frontmatter), use editing mode
+            editing_mode = False
+            if editor_content:
+                # Strip frontmatter to check if there's actual content
+                import re
+                frontmatter_match = re.match(r'^---\s*\n[\s\S]*?\n---\s*\n', editor_content)
+                if frontmatter_match:
+                    body_content = editor_content[frontmatter_match.end():].strip()
+                    editing_mode = len(body_content) > 0
+                else:
+                    editing_mode = len(editor_content.strip()) > 0
+            
+            logger.info(f"🎙️ Podcast agent mode: {'EDITING' if editing_mode else 'GENERATION'}")
+            
             return {
                 "user_message": user_message,
                 "editor_content": editor_content,
-                "frontmatter": frontmatter
+                "frontmatter": frontmatter,
+                "editing_mode": editing_mode,
+                "editor_operations": [],
+                "structured_edit": None
             }
             
         except Exception as e:
@@ -232,12 +295,14 @@ class PodcastScriptAgent(BaseAgent):
                 persona_text, background_text, articles, tweets_text
             )
             
-            # Build system prompt
-            system_prompt = self._build_system_prompt(persona)
+            # Build system prompt (check editing mode from state)
+            editing_mode = state.get("editing_mode", False)
+            system_prompt = self._build_system_prompt(persona, editing_mode=editing_mode)
             
-            # Build task instructions
+            # Build task instructions (check editing mode from state)
+            editing_mode = state.get("editing_mode", False)
             task_block = self._build_task_block(
-                user_message, target_length, tone, pacing, include_music, include_sfx
+                user_message, target_length, tone, pacing, include_music, include_sfx, editing_mode=editing_mode
             )
             
             return {
@@ -258,7 +323,13 @@ class PodcastScriptAgent(BaseAgent):
     async def _generate_script_node(self, state: PodcastScriptState) -> Dict[str, Any]:
         """Generate podcast script using LLM"""
         try:
-            logger.info("🎙️ Generating podcast script...")
+            editing_mode = state.get("editing_mode", False)
+            editor_content = state.get("editor_content", "")
+            
+            if editing_mode:
+                logger.info("🎙️ Generating podcast script edits (editing mode)...")
+            else:
+                logger.info("🎙️ Generating podcast script (generation mode)...")
             
             content_block = state.get("content_block", "")
             system_prompt = state.get("system_prompt", "")
@@ -275,7 +346,22 @@ class PodcastScriptAgent(BaseAgent):
             
             if content_block:
                 messages.append(HumanMessage(content=content_block))
-            messages.append(HumanMessage(content=task_block))
+            
+            # In editing mode, include current editor content
+            if editing_mode and editor_content:
+                # Strip frontmatter for editing context
+                import re
+                frontmatter_match = re.match(r'^---\s*\n[\s\S]*?\n---\s*\n', editor_content)
+                if frontmatter_match:
+                    body_content = editor_content[frontmatter_match.end():]
+                else:
+                    body_content = editor_content
+                
+                messages.append(HumanMessage(
+                    content=f"=== CURRENT EDITOR CONTENT ===\n{body_content}\n\n=== END CURRENT CONTENT ===\n\n{task_block}"
+                ))
+            else:
+                messages.append(HumanMessage(content=task_block))
             
             logger.info(f"🎙️ Generating podcast script with {len(messages)} messages")
             
@@ -283,23 +369,31 @@ class PodcastScriptAgent(BaseAgent):
             response = await llm.ainvoke(messages)
             content = response.content if hasattr(response, 'content') else str(response)
             
-            # Parse structured response
-            script_text, metadata = self._parse_response(content)
-            
-            logger.info("✅ Podcast Script Agent: Script generation complete")
-            
-            result = self._create_response(
-                success=True,
-                response=script_text,
-                metadata=metadata
-            )
-            
-            return {
-                "response": result,
-                "script_text": script_text,
-                "metadata_result": metadata,
-                "task_status": "complete"
-            }
+            if editing_mode:
+                # Parse structured edit operations
+                structured_edit = self._parse_editing_response(content)
+                logger.info("✅ Podcast Script Agent: Edit plan generation complete")
+                return {
+                    "structured_edit": structured_edit,
+                    "task_status": "complete"
+                }
+            else:
+                # Parse structured response (generation mode)
+                script_text, metadata = self._parse_response(content)
+                logger.info("✅ Podcast Script Agent: Script generation complete")
+                
+                result = self._create_response(
+                    success=True,
+                    response=script_text,
+                    metadata=metadata
+                )
+                
+                return {
+                    "response": result,
+                    "script_text": script_text,
+                    "metadata_result": metadata,
+                    "task_status": "complete"
+                }
             
         except Exception as e:
             logger.error(f"❌ Script generation failed: {e}")
@@ -309,35 +403,62 @@ class PodcastScriptAgent(BaseAgent):
                 "error": str(e)
             }
     
-    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
         """
         Process podcast script generation request using LangGraph workflow
         
         Args:
-            state: Dictionary with messages, shared_memory, user_id, persona, etc.
+            query: User query string
+            metadata: Optional metadata dictionary (persona, editor context, etc.)
+            messages: Optional conversation history
             
         Returns:
             Dictionary with podcast script response and metadata
         """
         try:
-            logger.info("🎙️ Podcast Script Agent: Starting script generation...")
+            logger.info(f"🎙️ Podcast Script Agent: Starting script generation: {query[:100]}...")
             
-            # Extract user message
-            messages = state.get("messages", [])
-            latest_message = messages[-1] if messages else None
-            user_message = latest_message.content if hasattr(latest_message, 'content') else ""
+            # Extract user_id and shared_memory from metadata
+            metadata = metadata or {}
+            user_id = metadata.get("user_id", "system")
+            shared_memory = metadata.get("shared_memory", {}) or {}
+            
+            # Prepare new messages (current query)
+            new_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Get workflow to access checkpoint
+            workflow = await self._get_workflow()
+            config = self._get_checkpoint_config(metadata)
+            
+            # Load and merge checkpointed messages to preserve conversation history
+            conversation_messages = await self._load_and_merge_checkpoint_messages(
+                workflow, config, new_messages
+            )
+            
+            # Load shared_memory from checkpoint if available
+            checkpoint_state = await workflow.aget_state(config)
+            existing_shared_memory = {}
+            if checkpoint_state and checkpoint_state.values:
+                existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+            
+            # Merge shared_memory: start with checkpoint, then update with NEW data (so new active_editor overwrites old)
+            shared_memory_merged = existing_shared_memory.copy()
+            shared_memory_merged.update(shared_memory)  # New data (including updated active_editor) takes precedence
             
             # Build initial state for LangGraph workflow
             initial_state: PodcastScriptState = {
-                "query": user_message,
-                "user_id": state.get("user_id", "system"),
-                "metadata": state.get("metadata", {}),
-                "messages": messages,
-                "shared_memory": state.get("shared_memory", {}),
-                "persona": state.get("persona"),
+                "query": query,
+                "user_id": user_id,
+                "metadata": metadata,
+                "messages": conversation_messages,
+                "shared_memory": shared_memory_merged,
+                "persona": metadata.get("persona"),
                 "user_message": "",
                 "editor_content": "",
                 "frontmatter": {},
+                "editing_mode": False,
+                "structured_edit": None,
+                "editor_operations": [],
                 "content_block": "",
                 "system_prompt": "",
                 "task_block": "",
@@ -348,18 +469,11 @@ class PodcastScriptAgent(BaseAgent):
                 "error": ""
             }
             
-            # Get workflow (lazy initialization with checkpointer)
-            workflow = await self._get_workflow()
-            
-            # Get checkpoint config (handles thread_id from conversation_id/user_id)
-            metadata = state.get("metadata", {})
-            config = self._get_checkpoint_config(metadata)
-            
             # Invoke LangGraph workflow with checkpointing
             final_state = await workflow.ainvoke(initial_state, config=config)
             
-            # Return response from final state
-            return final_state.get("response", {
+            # Extract response
+            response = final_state.get("response", {
                 "messages": [AIMessage(content="Podcast script generation failed")],
                 "agent_results": {
                     "agent_type": self.agent_type,
@@ -367,6 +481,14 @@ class PodcastScriptAgent(BaseAgent):
                 },
                 "is_complete": False
             })
+            
+            # Add editor operations at top level for compatibility (if in editing mode)
+            if final_state.get("editing_mode") and final_state.get("editor_operations"):
+                response["editor_operations"] = final_state.get("editor_operations", [])
+                if final_state.get("response", {}).get("agent_results", {}).get("manuscript_edit"):
+                    response["manuscript_edit"] = final_state["response"]["agent_results"]["manuscript_edit"]
+            
+            return response
             
         except Exception as e:
             logger.error(f"❌ Podcast Script Agent ERROR: {e}")
@@ -490,10 +612,11 @@ class PodcastScriptAgent(BaseAgent):
         tone: str,
         pacing: str,
         include_music: bool,
-        include_sfx: bool
+        include_sfx: bool,
+        editing_mode: bool = False
     ) -> str:
         """Build task instruction block"""
-        return (
+        base = (
             "=== REQUEST ===\n"
             f"User instruction: {user_message.strip()}\n\n"
             f"Target length: {target_length} words\n"
@@ -501,25 +624,51 @@ class PodcastScriptAgent(BaseAgent):
             f"Pacing: {pacing}\n"
             f"Include music cues: {include_music}\n"
             f"Include SFX cues: {include_sfx}\n\n"
-            "FORMAT GUIDELINES:\n"
-            "- Read user request carefully for format (monologue vs dialogue)\n"
-            "- If 'monologue' or 'commentary' → single narrator WITHOUT speaker labels\n"
-            "- If 'dialogue', 'debate', 'conversation' → multi-speaker WITH labels (HOST:, CALLER:, etc.)\n"
-            "- If unclear, default to MONOLOGUE\n"
-            "- Ground content in provided sources - cite names, quotes, specifics\n"
-            "- Use bracket cues FREQUENTLY: [excited], [mocking], [shouting], [pause], [breathes]\n"
-            "- Include natural stammering: 'F...folks', 'This is—ugh—OUTRAGEOUS'\n"
-            "- MAXIMUM 3,000 characters total (strict limit)\n\n"
-            "RESPOND WITH JSON:\n"
-            "{\n"
-            '  "task_status": "complete",\n'
-            '  "script_text": "Your podcast script here with [bracket cues]",\n'
-            '  "metadata": {"words": 900, "estimated_duration_sec": 180, "tag_counts": {}}\n'
-            "}\n"
         )
+        
+        if editing_mode:
+            base += (
+                "EDITING MODE: Generate targeted edit operations.\n"
+                "Review the current editor content and create operations to modify it.\n"
+                "Provide EXACT original_text from the document for replace/delete operations.\n\n"
+                "RESPOND WITH JSON:\n"
+                "{\n"
+                '  "summary": "Brief description of changes",\n'
+                '  "operations": [\n'
+                "    {\n"
+                '      "op_type": "replace_range",\n'
+                '      "start": 0,\n'
+                '      "end": 50,\n'
+                '      "text": "New script content with [brackets]",\n'
+                '      "original_text": "Exact text from document (20-40 words)",\n'
+                '      "occurrence_index": 0\n'
+                "    }\n"
+                "  ]\n"
+                "}\n"
+            )
+        else:
+            base += (
+                "FORMAT GUIDELINES:\n"
+                "- Read user request carefully for format (monologue vs dialogue)\n"
+                "- If 'monologue' or 'commentary' → single narrator WITHOUT speaker labels\n"
+                "- If 'dialogue', 'debate', 'conversation' → multi-speaker WITH labels (HOST:, CALLER:, etc.)\n"
+                "- If unclear, default to MONOLOGUE\n"
+                "- Ground content in provided sources - cite names, quotes, specifics\n"
+                "- Use bracket cues FREQUENTLY: [excited], [mocking], [shouting], [pause], [breathes]\n"
+                "- Include natural stammering: 'F...folks', 'This is—ugh—OUTRAGEOUS'\n"
+                "- MAXIMUM 3,000 characters total (strict limit)\n\n"
+                "RESPOND WITH JSON:\n"
+                "{\n"
+                '  "task_status": "complete",\n'
+                '  "script_text": "Your podcast script here with [bracket cues]",\n'
+                '  "metadata": {"words": 900, "estimated_duration_sec": 180, "tag_counts": {}}\n'
+                "}\n"
+            )
+        
+        return base
     
     def _parse_response(self, content: str) -> tuple:
-        """Parse LLM JSON response"""
+        """Parse LLM JSON response (generation mode)"""
         try:
             # Strip code fences
             text = content.strip()
@@ -557,6 +706,224 @@ class PodcastScriptAgent(BaseAgent):
                 "words": 0,
                 "estimated_duration_sec": 0,
                 "tag_counts": {}
+            }
+    
+    def _parse_editing_response(self, content: str) -> Dict[str, Any]:
+        """Parse LLM JSON response (editing mode)"""
+        try:
+            # Strip code fences
+            text = content.strip()
+            if '```json' in text:
+                m = re.search(r'```json\s*\n([\s\S]*?)\n```', text)
+                if m:
+                    text = m.group(1).strip()
+            elif '```' in text:
+                text = text.replace('```', '').strip()
+            
+            data = json.loads(text)
+            
+            # Validate structure
+            if not isinstance(data, dict):
+                raise ValueError("Response is not a JSON object")
+            
+            operations = data.get("operations", [])
+            if not isinstance(operations, list):
+                operations = []
+            
+            return {
+                "summary": data.get("summary", "Edit plan ready"),
+                "operations": operations
+            }
+            
+        except Exception as e:
+            logger.warning(f"JSON parse failed for editing response: {e}")
+            return {
+                "summary": "Failed to parse edit plan",
+                "operations": []
+            }
+    
+    def _resolve_operation_simple(
+        self,
+        content: str,
+        op_dict: Dict[str, Any],
+        frontmatter_end: int = 0
+    ) -> Tuple[int, int, str, float]:
+        """Resolve operation to exact positions using progressive search"""
+        
+        op_type = op_dict.get("op_type", "replace_range")
+        original_text = op_dict.get("original_text")
+        anchor_text = op_dict.get("anchor_text")
+        occurrence_index = op_dict.get("occurrence_index", 0)
+        text = op_dict.get("text", "")
+        
+        # Strategy 1: Exact match with original_text
+        if original_text and op_type in ("replace_range", "delete_range"):
+            count = 0
+            search_from = 0
+            while True:
+                pos = content.find(original_text, search_from)
+                if pos == -1:
+                    break
+                if count == occurrence_index:
+                    end_pos = pos + len(original_text)
+                    # Guard frontmatter
+                    pos = max(pos, frontmatter_end)
+                    end_pos = max(end_pos, pos)
+                    return pos, end_pos, text, 1.0
+                count += 1
+                search_from = pos + 1
+        
+        # Strategy 2: Anchor text for insert_after_heading
+        if anchor_text and op_type == "insert_after_heading":
+            pos = content.find(anchor_text)
+            if pos != -1:
+                # Find end of line after anchor
+                line_end = content.find("\n", pos)
+                if line_end == -1:
+                    line_end = len(content)
+                insert_pos = line_end + 1
+                # Guard frontmatter
+                insert_pos = max(insert_pos, frontmatter_end)
+                return insert_pos, insert_pos, text, 0.9
+        
+        # Fallback: use approximate positions
+        start = op_dict.get("start", frontmatter_end)
+        end = op_dict.get("end", start)
+        start = max(start, frontmatter_end)
+        end = max(end, start)
+        return start, end, text, 0.5
+    
+    def _get_frontmatter_end(self, content: str) -> int:
+        """Find frontmatter end position"""
+        import re
+        match = re.match(r'^---\s*\n[\s\S]*?\n---\s*\n', content)
+        return match.end() if match else 0
+    
+    async def _resolve_operations_node(self, state: PodcastScriptState) -> Dict[str, Any]:
+        """Resolve editor operations with progressive search"""
+        try:
+            logger.info("🎙️ Resolving podcast script operations...")
+            
+            editor_content = state.get("editor_content", "")
+            structured_edit = state.get("structured_edit")
+            
+            if not structured_edit or not isinstance(structured_edit.get("operations"), list):
+                return {
+                    "editor_operations": [],
+                    "error": "No operations to resolve",
+                    "task_status": "error"
+                }
+            
+            fm_end_idx = self._get_frontmatter_end(editor_content)
+            editor_operations = []
+            operations = structured_edit.get("operations", [])
+            
+            for op in operations:
+                try:
+                    resolved_start, resolved_end, resolved_text, resolved_confidence = self._resolve_operation_simple(
+                        editor_content,
+                        op,
+                        frontmatter_end=fm_end_idx
+                    )
+                    
+                    logger.info(f"Resolved {op.get('op_type')} [{resolved_start}:{resolved_end}] confidence={resolved_confidence:.2f}")
+                    
+                    # Build operation dict
+                    resolved_op = {
+                        "op_type": op.get("op_type", "replace_range"),
+                        "start": resolved_start,
+                        "end": resolved_end,
+                        "text": resolved_text,
+                        "original_text": op.get("original_text"),
+                        "anchor_text": op.get("anchor_text"),
+                        "occurrence_index": op.get("occurrence_index", 0),
+                        "confidence": resolved_confidence
+                    }
+                    
+                    editor_operations.append(resolved_op)
+                    
+                except Exception as e:
+                    logger.warning(f"Operation resolution failed: {e}")
+                    continue
+            
+            return {
+                "editor_operations": editor_operations
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to resolve operations: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {
+                "editor_operations": [],
+                "error": str(e),
+                "task_status": "error"
+            }
+    
+    async def _format_response_node(self, state: PodcastScriptState) -> Dict[str, Any]:
+        """Format final response with editor operations"""
+        try:
+            editing_mode = state.get("editing_mode", False)
+            editor_operations = state.get("editor_operations", [])
+            structured_edit = state.get("structured_edit", {})
+            script_text = state.get("script_text", "")
+            metadata_result = state.get("metadata_result", {})
+            
+            if editing_mode:
+                # Editing mode: return operations
+                preview = "\n\n".join([
+                    op.get("text", "").strip()
+                    for op in editor_operations
+                    if op.get("text", "").strip()
+                ]).strip()
+                response_text = preview if preview else (structured_edit.get("summary", "Edit plan ready."))
+                
+                result = {
+                    "response": response_text,
+                    "task_status": "complete",
+                    "agent_type": "podcast_script_agent"
+                }
+                
+                # Add editor operations
+                if editor_operations:
+                    result["editor_operations"] = editor_operations
+                    result["manuscript_edit"] = {
+                        **structured_edit,
+                        "operations": editor_operations
+                    }
+                
+                return {
+                    "response": {
+                        "messages": [AIMessage(content=response_text)],
+                        "agent_results": {
+                            "agent_type": "podcast_script_agent",
+                            "is_complete": True,
+                            "editor_operations": editor_operations,
+                            "manuscript_edit": result.get("manuscript_edit")
+                        },
+                        "is_complete": True
+                    },
+                    "task_status": "complete"
+                }
+            else:
+                # Generation mode: return script text
+                result = self._create_response(
+                    success=True,
+                    response=script_text,
+                    metadata=metadata_result
+                )
+                
+                return {
+                    "response": result,
+                    "task_status": "complete"
+                }
+            
+        except Exception as e:
+            logger.error(f"❌ Format response failed: {e}")
+            return {
+                "response": self._create_error_result(f"Response formatting failed: {str(e)}"),
+                "task_status": "error",
+                "error": str(e)
             }
     
     def _create_response(

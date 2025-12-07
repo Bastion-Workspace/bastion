@@ -774,6 +774,155 @@ class FolderService:
     
     # Cache management removed - database is the source of truth
     
+    async def exempt_folder_from_vectorization(self, folder_id: str, user_id: str = None) -> bool:
+        """Exempt folder and all descendants from vectorization, delete existing vectors/entities"""
+        try:
+            logger.info(f"🚫 Exempting folder {folder_id} and all descendants from vectorization")
+            
+            # Mark folder as exempt (TRUE)
+            success = await self.document_repository.update_folder_exemption_status(folder_id, True)
+            if not success:
+                logger.error(f"Failed to update exemption status for folder {folder_id}")
+                return False
+            
+            # Get all descendant folders and documents
+            descendant_folder_ids, descendant_document_ids = await self.document_repository.get_folder_descendants(folder_id)
+            
+            # Force all descendant folders to exempt (TRUE) to ensure hierarchy aligns with parent
+            for desc_folder_id in descendant_folder_ids:
+                await self.document_repository.update_folder_exemption_status(desc_folder_id, True)
+                logger.info(f"🚫 Set descendant folder {desc_folder_id} to exempt (TRUE)")
+            
+            # Force all descendant documents to exempt (TRUE) so no existing override prevents shutdown
+            for desc_doc_id in descendant_document_ids:
+                await self.document_repository.update_document_exemption_status(desc_doc_id, True)
+                logger.info(f"🚫 Set descendant document {desc_doc_id} to exempt (TRUE)")
+            
+            # Get document service for vector/KG deletion
+            from services.service_container import get_service_container
+            container = await get_service_container()
+            document_service = container.document_service
+            
+            # Delete vectors and entities for all documents
+            deleted_count = 0
+            for doc_id in descendant_document_ids:
+                try:
+                    # Get document info for user_id
+                    doc_info = await self.document_repository.get_by_id(doc_id)
+                    doc_user_id = doc_info.user_id if doc_info else user_id
+                    
+                    # Delete vectors
+                    await document_service.embedding_manager.delete_document_chunks(doc_id, doc_user_id)
+                    
+                    # Delete KG entities
+                    if document_service.kg_service:
+                        await document_service.kg_service.delete_document_entities(doc_id)
+                    
+                    deleted_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to delete vectors/entities for document {doc_id}: {e}")
+            
+            logger.info(f"✅ Folder {folder_id} exempted: {len(descendant_folder_ids)} folders, {deleted_count} documents cleaned")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to exempt folder {folder_id}: {e}")
+            return False
+    
+    async def remove_folder_exemption(self, folder_id: str, user_id: str = None) -> bool:
+        """Remove exemption from folder (set to inherit from parent), re-process all documents"""
+        try:
+            logger.info(f"✅ Removing exemption for folder {folder_id} - setting to inherit from parent")
+            
+            # Set folder to inherit (NULL)
+            success = await self.document_repository.update_folder_exemption_status(folder_id, None)
+            if not success:
+                logger.error(f"Failed to remove exemption status for folder {folder_id}")
+                return False
+            
+            # Get all descendant folders and documents
+            descendant_folder_ids, descendant_document_ids = await self.document_repository.get_folder_descendants(folder_id)
+            
+            # Set descendant folders to inherit (NULL) - they'll inherit from new parent state
+            for desc_folder_id in descendant_folder_ids:
+                await self.document_repository.update_folder_exemption_status(desc_folder_id, None)
+            
+            # Set descendant documents to inherit (NULL) - they'll inherit from folder
+            for desc_doc_id in descendant_document_ids:
+                await self.document_repository.update_document_exemption_status(desc_doc_id, None)
+            
+            # Get document service for re-processing
+            from services.service_container import get_service_container
+            container = await get_service_container()
+            document_service = container.document_service
+            
+            # Re-process all documents that are now not exempt
+            processed_count = 0
+            for doc_id in descendant_document_ids:
+                try:
+                    # Check if document is now exempt (after inheritance)
+                    is_exempt = await self.document_repository.is_document_exempt(doc_id)
+                    if not is_exempt:
+                        success = await document_service.remove_document_exemption(doc_id, user_id)
+                        if success:
+                            processed_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to re-process document {doc_id}: {e}")
+            
+            logger.info(f"✅ Folder {folder_id} exemption removed: {len(descendant_folder_ids)} folders, {processed_count} documents re-processed")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to remove exemption for folder {folder_id}: {e}")
+            return False
+    
+    async def override_folder_exemption(self, folder_id: str, user_id: str = None) -> bool:
+        """
+        Set folder to explicitly NOT exempt (override parent exemption).
+        This allows a subfolder to opt out of parent exemption.
+        """
+        try:
+            logger.info(f"✅ Setting folder {folder_id} to explicitly NOT exempt (override parent)")
+            
+            # Mark folder as not exempt (FALSE - explicit override)
+            success = await self.document_repository.update_folder_exemption_status(folder_id, False)
+            if not success:
+                logger.error(f"Failed to set override status for folder {folder_id}")
+                return False
+            
+            # Get all descendant folders and documents
+            descendant_folder_ids, descendant_document_ids = await self.document_repository.get_folder_descendants(folder_id)
+            
+            # Set descendant folders to inherit (NULL) - they'll inherit from this folder's override
+            for desc_folder_id in descendant_folder_ids:
+                await self.document_repository.update_folder_exemption_status(desc_folder_id, None)
+            
+            # Set descendant documents to inherit (NULL) - they'll inherit from folder
+            for desc_doc_id in descendant_document_ids:
+                await self.document_repository.update_document_exemption_status(desc_doc_id, None)
+            
+            # Get document service for re-processing
+            from services.service_container import get_service_container
+            container = await get_service_container()
+            document_service = container.document_service
+            
+            # Re-process all documents that are now not exempt
+            processed_count = 0
+            for doc_id in descendant_document_ids:
+                try:
+                    # Check if document is now not exempt (after override)
+                    is_exempt = await self.document_repository.is_document_exempt(doc_id)
+                    if not is_exempt:
+                        success = await document_service.remove_document_exemption(doc_id, user_id)
+                        if success:
+                            processed_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to re-process document {doc_id}: {e}")
+            
+            logger.info(f"✅ Folder {folder_id} override set: {len(descendant_folder_ids)} folders, {processed_count} documents re-processed")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to set override for folder {folder_id}: {e}")
+            return False
+    
     async def delete_folder(self, folder_id: str, user_id: str = None, recursive: bool = False, current_user_role: str = "user") -> bool:
         """Delete a folder with proper access control"""
         try:

@@ -105,13 +105,34 @@ class DocumentRepository:
                 
             logger.info(f"🔧 DEBUG: Executing INSERT statement for document {doc_info.document_id}")
             
+            # Documents default to NULL (inherit) so they follow folder settings dynamically
+            # Only set explicit exemption if provided in doc_info
+            folder_id = getattr(doc_info, 'folder_id', None)
+            exempt_from_vectorization = getattr(doc_info, 'exempt_from_vectorization', None)  # Default to NULL (inherit)
+
+            # If inheriting and folder is exempt, set explicit TRUE to prevent processing
+            if exempt_from_vectorization is None and folder_id:
+                try:
+                    folder_exempt = await self.is_folder_exempt(folder_id)
+                    if folder_exempt:
+                        exempt_from_vectorization = True
+                        logger.info(f"🚫 Document {doc_info.document_id} inherits exemption from folder {folder_id} → setting TRUE at creation")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to check folder exemption for {folder_id}: {e}")
+            
+            # If user explicitly set exemption, use that; otherwise inherit from folder
+            if exempt_from_vectorization is not None:
+                logger.info(f"📝 Document {doc_info.document_id} created with explicit exemption: {exempt_from_vectorization}")
+            else:
+                logger.info(f"📝 Document {doc_info.document_id} will inherit vectorization setting from folder")
+            
             await execute("""
                 INSERT INTO document_metadata (
                     document_id, filename, title, category, tags, description,
                     author, language, publication_date, doc_type, file_size, file_hash, processing_status,
                     upload_date, quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
-                    collection_type, folder_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+                    collection_type, folder_id, exempt_from_vectorization
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
             """, 
                 doc_info.document_id,
                 doc_info.filename,
@@ -134,7 +155,8 @@ class DocumentRepository:
                 quality_json,
                 user_id,
                 getattr(doc_info, 'collection_type', 'user'),  # Default to 'user' if not specified
-                getattr(doc_info, 'folder_id', None)  # Allow NULL for folder_id
+                folder_id,  # Allow NULL for folder_id
+                exempt_from_vectorization  # Include exemption status
             )
             
             logger.info(f"📝 Created document record: {doc_info.document_id} for user: {getattr(doc_info, 'user_id', None)} with collection_type: {getattr(doc_info, 'collection_type', 'user')}")
@@ -159,13 +181,33 @@ class DocumentRepository:
             from pathlib import Path
             title = Path(doc_info.filename).stem
             
+            # Documents default to NULL (inherit) so they follow folder settings dynamically
+            # Only set explicit exemption if provided in doc_info
+            exempt_from_vectorization = getattr(doc_info, 'exempt_from_vectorization', None)  # Default to NULL (inherit)
+
+            # If inheriting and folder is exempt, set explicit TRUE to prevent processing
+            if exempt_from_vectorization is None and folder_id:
+                try:
+                    folder_exempt = await self.is_folder_exempt(folder_id)
+                    if folder_exempt:
+                        exempt_from_vectorization = True
+                        logger.info(f"🚫 Document {doc_info.document_id} inherits exemption from folder {folder_id} → setting TRUE at creation")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to check folder exemption for {folder_id}: {e}")
+            
+            # If user explicitly set exemption, use that; otherwise inherit from folder
+            if exempt_from_vectorization is not None:
+                logger.info(f"📝 Document {doc_info.document_id} created with explicit exemption: {exempt_from_vectorization}")
+            else:
+                logger.info(f"📝 Document {doc_info.document_id} will inherit vectorization setting from folder")
+            
             await execute(
                 """
                 INSERT INTO document_metadata (
                     document_id, filename, title, doc_type, upload_date, file_size,
                     file_hash, processing_status, quality_score, page_count, chunk_count, entity_count,
-                    user_id, collection_type, folder_id
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                    user_id, collection_type, folder_id, exempt_from_vectorization
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                 ON CONFLICT (document_id) DO NOTHING
                 """,
                 doc_info.document_id,
@@ -182,12 +224,15 @@ class DocumentRepository:
                 getattr(doc_info, 'entity_count', 0),
                 user_id,
                 getattr(doc_info, 'collection_type', 'user'),  # Default to 'user' if not specified
-                folder_id  # Include folder_id in the initial insert for atomic operation
+                folder_id,  # Include folder_id in the initial insert for atomic operation
+                exempt_from_vectorization  # Include exemption status
             )
             
             logger.info(f"📝 Created document record: {doc_info.document_id} for user: {user_id} with collection_type: {getattr(doc_info, 'collection_type', 'user')}")
             if folder_id:
                 logger.info(f"📁 Assigned document {doc_info.document_id} to folder {folder_id} in creation transaction")
+            if exempt_from_vectorization:
+                logger.info(f"🚫 Document {doc_info.document_id} created with vectorization exemption")
             
             return True
             
@@ -943,7 +988,8 @@ class DocumentRepository:
             entity_count=row.get("entity_count", 0),
             quality_metrics=quality_metrics,
             user_id=row.get("user_id", None),
-            folder_id=row.get("folder_id", None)
+            folder_id=row.get("folder_id", None),
+            exempt_from_vectorization=row.get("exempt_from_vectorization", None)
         )
     
     async def execute_query(self, query: str, *params, rls_context: Dict[str, Any] = None) -> List[Dict[str, Any]]:
@@ -1505,7 +1551,7 @@ class DocumentRepository:
             from services.database_manager.database_helpers import fetch_one
             
             row = await fetch_one("""
-                SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
                 FROM document_folders WHERE folder_id = $1
             """, folder_id)
             
@@ -1529,14 +1575,14 @@ class DocumentRepository:
             
             if user_id:
                 rows = await fetch_all("""
-                    SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                    SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
                     FROM document_folders 
                     WHERE user_id = $1 AND collection_type = $2
                     ORDER BY name
                 """, user_id, collection_type)
             else:
                 rows = await fetch_all("""
-                    SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                    SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
                     FROM document_folders 
                     WHERE collection_type = $1
                     ORDER BY name
@@ -1628,7 +1674,7 @@ class DocumentRepository:
                            publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
                            quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                            submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
-                           reviewed_at, review_comment, collection_type, folder_id
+                           reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
                     FROM document_metadata 
                     WHERE folder_id IS NULL
                     ORDER BY filename
@@ -1640,7 +1686,7 @@ class DocumentRepository:
                            publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
                            quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                            submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
-                           reviewed_at, review_comment, collection_type, folder_id
+                           reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
                     FROM document_metadata 
                     WHERE folder_id = $1
                     ORDER BY filename
@@ -1681,7 +1727,7 @@ class DocumentRepository:
                        publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
                        quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                        submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
-                       reviewed_at, review_comment, collection_type, folder_id
+                       reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
                 FROM document_metadata 
                 WHERE folder_id IS NULL AND collection_type = $1
                 ORDER BY filename
@@ -1882,6 +1928,201 @@ class DocumentRepository:
             logger.error(f"❌ Failed to delete folder {folder_id}: {e}")
             return False
     
+    async def update_document_exemption_status(self, document_id: str, exempt_status: bool = None) -> bool:
+        """
+        Update document exemption from vectorization status.
+        
+        Args:
+            document_id: Document ID
+            exempt_status: True=exempt, False=not exempt (override), None=inherit from folder
+        
+        Returns:
+            True if update successful
+        """
+        try:
+            from services.database_manager.database_helpers import execute
+            await execute("""
+                UPDATE document_metadata 
+                SET exempt_from_vectorization = $1, updated_at = CURRENT_TIMESTAMP
+                WHERE document_id = $2
+            """, exempt_status, document_id)
+            status_str = "inherit from folder" if exempt_status is None else ("exempt" if exempt_status else "not exempt (override)")
+            logger.info(f"Updated exemption status for document {document_id}: {status_str}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update exemption status for document {document_id}: {e}")
+            return False
+    
+    async def update_folder_exemption_status(self, folder_id: str, exempt_status: bool = None) -> bool:
+        """
+        Update folder exemption from vectorization status.
+        
+        Args:
+            folder_id: Folder ID
+            exempt_status: True=exempt, False=not exempt (override parent), None=inherit from parent
+        
+        Returns:
+            True if update successful
+        """
+        try:
+            from services.database_manager.database_helpers import execute
+            await execute("""
+                UPDATE document_folders 
+                SET exempt_from_vectorization = $1, updated_at = CURRENT_TIMESTAMP
+                WHERE folder_id = $2
+            """, exempt_status, folder_id)
+            status_str = "inherit from parent" if exempt_status is None else ("exempt" if exempt_status else "not exempt (override)")
+            logger.info(f"Updated exemption status for folder {folder_id}: {status_str}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to update exemption status for folder {folder_id}: {e}")
+            return False
+    
+    async def get_folder_descendants(self, folder_id: str) -> Tuple[List[str], List[str]]:
+        """Get all descendant folder IDs and document IDs for a folder (recursive)"""
+        try:
+            from services.database_manager.database_helpers import fetch_all
+            
+            # Get all descendant folders recursively
+            folder_rows = await fetch_all("""
+                WITH RECURSIVE folder_tree AS (
+                    SELECT folder_id FROM document_folders WHERE folder_id = $1
+                    UNION ALL
+                    SELECT f.folder_id 
+                    FROM document_folders f
+                    INNER JOIN folder_tree ft ON f.parent_folder_id = ft.folder_id
+                )
+                SELECT folder_id FROM folder_tree WHERE folder_id != $1
+            """, folder_id)
+            
+            descendant_folder_ids = [row['folder_id'] for row in folder_rows]
+            
+            # Get all documents in this folder and all descendant folders
+            all_folder_ids = [folder_id] + descendant_folder_ids
+            doc_rows = await fetch_all("""
+                SELECT document_id 
+                FROM document_metadata 
+                WHERE folder_id = ANY($1)
+            """, all_folder_ids)
+            
+            descendant_document_ids = [row['document_id'] for row in doc_rows]
+            
+            return descendant_folder_ids, descendant_document_ids
+        except Exception as e:
+            logger.error(f"Failed to get folder descendants for {folder_id}: {e}")
+            return [], []
+    
+    async def is_folder_exempt(self, folder_id: str) -> bool:
+        """
+        Check if folder is exempt from vectorization.
+        
+        Three-state system:
+        - TRUE: Folder is exempt
+        - FALSE: Folder is NOT exempt (explicit override of parent)
+        - NULL: Inherit from parent folder
+        
+        Returns True if folder or any ancestor is explicitly exempt (TRUE).
+        Returns False if folder is explicitly not exempt (FALSE) or no exemption found.
+        """
+        try:
+            if not folder_id:
+                return False
+            
+            from services.database_manager.database_helpers import fetch_one
+            
+            # Recursively check folder hierarchy
+            # Stop at first explicit exemption (TRUE) or explicit override (FALSE)
+            folder_row = await fetch_one("""
+                WITH RECURSIVE folder_path AS (
+                    -- Start with the target folder
+                    SELECT folder_id, parent_folder_id, exempt_from_vectorization, 0 as depth
+                    FROM document_folders WHERE folder_id = $1
+                    UNION ALL
+                    -- Walk up to parent folders
+                    SELECT f.folder_id, f.parent_folder_id, f.exempt_from_vectorization, fp.depth + 1
+                    FROM document_folders f
+                    INNER JOIN folder_path fp ON f.folder_id = fp.parent_folder_id
+                )
+                SELECT exempt_from_vectorization, depth
+                FROM folder_path 
+                WHERE exempt_from_vectorization IS NOT NULL  -- Stop at first explicit setting (TRUE or FALSE)
+                ORDER BY depth ASC  -- Check from target folder up to root
+                LIMIT 1
+            """, folder_id)
+            
+            if folder_row is None:
+                # No explicit exemption found in hierarchy - not exempt
+                logger.debug(f"✅ Folder {folder_id} has no explicit exemption - not exempt")
+                return False
+            
+            # If we found an explicit setting, use it
+            is_exempt = folder_row['exempt_from_vectorization'] is True
+            if is_exempt:
+                logger.debug(f"🚫 Folder {folder_id} (or ancestor) is exempt from vectorization")
+            else:
+                logger.debug(f"✅ Folder {folder_id} (or ancestor) explicitly overrides exemption - not exempt")
+            
+            return is_exempt
+        except Exception as e:
+            logger.error(f"❌ Failed to check folder exemption status for {folder_id}: {e}")
+            return False
+    
+    async def is_document_exempt(self, document_id: str) -> bool:
+        """
+        Check if document is exempt from vectorization.
+        
+        Three-state system for documents:
+        - TRUE: Document is exempt
+        - FALSE: Document is NOT exempt (explicit override of folder)
+        - NULL: Inherit from folder
+        
+        Returns True if document is explicitly exempt (TRUE) or inherits exemption from folder.
+        Returns False if document is explicitly not exempt (FALSE) or folder is not exempt.
+        """
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            
+            # First check the document itself
+            doc_row = await fetch_one("""
+                SELECT exempt_from_vectorization, folder_id
+                FROM document_metadata 
+                WHERE document_id = $1
+            """, document_id)
+            
+            if not doc_row:
+                logger.warning(f"⚠️ Document {document_id} not found in database for exemption check")
+                return False
+            
+            # Check if document has explicit exemption setting
+            doc_exempt = doc_row['exempt_from_vectorization']
+            
+            if doc_exempt is True:
+                # Document is explicitly exempt
+                logger.info(f"🚫 Document {document_id} is directly exempt from vectorization")
+                return True
+            elif doc_exempt is False:
+                # Document explicitly overrides folder exemption - not exempt
+                logger.info(f"✅ Document {document_id} explicitly overrides folder exemption - not exempt")
+                return False
+            else:
+                # Document inherits from folder (NULL)
+                folder_id = doc_row['folder_id']
+                if not folder_id:
+                    logger.debug(f"📁 Document {document_id} has no folder_id - not exempt")
+                    return False
+                
+                # Use helper method to check folder exemption
+                is_exempt = await self.is_folder_exempt(folder_id)
+                if is_exempt:
+                    logger.info(f"🚫 Document {document_id} inherits exemption from folder {folder_id} (or ancestor)")
+                else:
+                    logger.debug(f"✅ Document {document_id} inherits non-exemption from folder {folder_id}")
+                
+                return is_exempt
+        except Exception as e:
+            logger.error(f"❌ Failed to check exemption status for document {document_id}: {e}")
+            return False
+    
     async def update_document_folder(self, document_id: str, folder_id: str = None, user_id: str = None) -> bool:
         """Update the folder assignment of a document - Roosevelt Architecture"""
         try:
@@ -1907,13 +2148,41 @@ class DocumentRepository:
             
             logger.info(f"🔍 DEBUG: Document {document_id} found for update. User_id: {doc_check['user_id']}, Collection_type: {doc_check['collection_type']}")
             
+            # Check current exemption status and new folder exemption
+            # Documents inherit exemption from their folder, so when moved, update accordingly
+            current_doc = await fetch_one("""
+                SELECT exempt_from_vectorization, folder_id as old_folder_id 
+                FROM document_metadata WHERE document_id = $1
+            """, document_id, rls_context=rls_context)
+            
+            current_exempt = current_doc.get('exempt_from_vectorization', False) if current_doc else False
+            old_folder_id = current_doc.get('old_folder_id') if current_doc else None
+            
+            # Determine new exemption status based on new folder
+            if folder_id:
+                # Check if new folder is exempt
+                folder_exempt = await self.is_folder_exempt(folder_id)
+                exempt_from_vectorization = folder_exempt
+                if folder_exempt:
+                    logger.info(f"🚫 Document {document_id} inheriting exemption from new folder {folder_id}")
+                else:
+                    logger.debug(f"✅ Document {document_id} moved to non-exempt folder {folder_id}")
+            else:
+                # Moving to root - no folder exemption
+                exempt_from_vectorization = False
+                logger.debug(f"✅ Document {document_id} moved to root - removing folder-based exemption")
+            
+            # Note: If a document was directly exempted by user (not via folder), 
+            # the user can re-exempt it after moving. The exemption status is now 
+            # based on the folder, ensuring consistency.
+            
             # Perform the update
             query = """
                 UPDATE document_metadata
-                SET folder_id = $1
+                SET folder_id = $1, exempt_from_vectorization = $3
                 WHERE document_id = $2
             """
-            await execute(query, folder_id, document_id, rls_context=rls_context)
+            await execute(query, folder_id, document_id, exempt_from_vectorization, rls_context=rls_context)
             
             # Verify the update was successful by checking the document again
             verify_check = await fetch_one("""

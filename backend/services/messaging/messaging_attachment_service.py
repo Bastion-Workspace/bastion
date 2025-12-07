@@ -76,10 +76,15 @@ class MessagingAttachmentService:
         file_size = file.file.tell()
         file.file.seek(0)
         
-        if file_size > self.max_size:
+        # Use larger limit for audio files
+        max_size = self.max_size
+        if file.content_type and file.content_type.startswith("audio/"):
+            max_size = settings.AUDIO_ATTACHMENT_MAX_SIZE
+        
+        if file_size > max_size:
             raise HTTPException(
                 status_code=400,
-                detail=f"File too large. Maximum size: {self.max_size / (1024*1024):.1f}MB"
+                detail=f"File too large. Maximum size: {max_size / (1024*1024):.1f}MB"
             )
     
     def _get_image_metadata(self, file_path: Path) -> Dict[str, Any]:
