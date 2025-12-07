@@ -192,9 +192,9 @@ You MUST respond with valid JSON matching this schema:
             if not system_prompt:
                 raise ValueError("System prompt not prepared")
             
-            # Call LLM with low temperature for consistent formatting
+            # Call LLM with low temperature for consistent formatting - pass state to access user's model selection
             start_time = datetime.now()
-            llm = self._get_llm(temperature=0.1)
+            llm = self._get_llm(temperature=0.1, state=state)
             response = await llm.ainvoke(self._build_messages(system_prompt, query))
             processing_time = (datetime.now() - start_time).total_seconds()
             
@@ -257,14 +257,39 @@ You MUST respond with valid JSON matching this schema:
         try:
             logger.info(f"🔢 Data Formatting Agent processing: {query[:100]}...")
             
-            # Add current user query to messages for checkpoint persistence
-            conversation_messages = self._prepare_messages_with_query(messages, query)
+            metadata = metadata or {}
+            user_id = metadata.get("user_id", "system")
+            
+            # Get workflow (lazy initialization with checkpointer)
+            workflow = await self._get_workflow()
+            
+            # Get checkpoint config (handles thread_id from conversation_id/user_id)
+            config = self._get_checkpoint_config(metadata)
+            
+            # Prepare new messages (current query)
+            new_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Load and merge checkpointed messages to preserve conversation history
+            conversation_messages = await self._load_and_merge_checkpoint_messages(
+                workflow, config, new_messages
+            )
+            
+            # Load shared_memory from checkpoint if available
+            checkpoint_state = await workflow.aget_state(config)
+            existing_shared_memory = {}
+            if checkpoint_state and checkpoint_state.values:
+                existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+            
+            # Merge with any shared_memory from metadata
+            shared_memory = metadata.get("shared_memory", {}) or {}
+            shared_memory.update(existing_shared_memory)
+            metadata["shared_memory"] = shared_memory
             
             # Build initial state
             initial_state: DataFormattingState = {
                 "query": query,
-                "user_id": metadata.get("user_id", "system") if metadata else "system",
-                "metadata": metadata or {},
+                "user_id": user_id,
+                "metadata": metadata,
                 "messages": conversation_messages,
                 "conversation_context": "",
                 "system_prompt": "",
@@ -274,11 +299,6 @@ You MUST respond with valid JSON matching this schema:
                 "task_status": "",
                 "error": ""
             }
-            
-            # Invoke LangGraph workflow
-            # Get workflow and checkpoint config
-            workflow = await self._get_workflow()
-            config = self._get_checkpoint_config(metadata)
             
             # Run workflow with checkpointing
             final_state = await workflow.ainvoke(initial_state, config=config)

@@ -463,7 +463,7 @@ class MCPServer:
         return assembled_prompt.content
         
         # Legacy fallback (can be removed after testing)
-        base_prompt = f"""You are Codex, an intelligent knowledge base assistant with access to tools.
+        base_prompt = f"""You are Alex, an intelligent knowledge base assistant with access to tools.
 
 AVAILABLE TOOLS:
 {tools_description}

@@ -43,7 +43,7 @@ const queryClient = new QueryClient({
 const MainContent = () => {
   const location = useLocation();
   const isDocumentsRoute = location.pathname.startsWith('/documents');
-  const { isCollapsed, sidebarWidth, isFullWidth, toggleSidebar } = useChatSidebar();
+  const { isCollapsed, sidebarWidth, isFullWidth, isResizing, toggleSidebar } = useChatSidebar();
   const isMobile = /Mobi|Android/i.test(navigator.userAgent);
   
   // Quick Capture state and hotkey listener
@@ -90,7 +90,7 @@ const MainContent = () => {
       <Box sx={{ 
         flexGrow: 1, 
         overflow: isDocumentsRoute ? 'hidden' : 'auto',
-        transition: 'margin-right 0.3s ease-in-out',
+        transition: isResizing ? 'none' : 'margin-right 0.3s ease-in-out',
         marginRight: isCollapsed ? 0 : (isFullWidth ? '100vw' : `${sidebarWidth}px`),
         minWidth: 0, // Allow content to shrink below its natural size
       }}>
@@ -130,7 +130,7 @@ const MainContent = () => {
           borderColor: 'divider',
           zIndex: 1200,
           boxShadow: 'none',
-          transition: 'width 0.3s ease-in-out',
+          transition: isResizing ? 'none' : 'width 0.3s ease-in-out',
           overflow: 'hidden',
           display: isCollapsed ? 'none' : 'flex',
           flexDirection: 'column',

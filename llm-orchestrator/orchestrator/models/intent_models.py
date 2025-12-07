@@ -32,6 +32,12 @@ class SimpleIntentResult(BaseModel):
     # Optional human-readable reasoning
     reasoning: Optional[str] = Field(default=None, description="Brief explanation of routing decision")
     
+    # Generated title for new conversations
+    conversation_title: Optional[str] = Field(
+        default=None,
+        description="Generated conversation title (only for new conversations)"
+    )
+    
     @property
     def routing_decision(self) -> dict:
         """Legacy compatibility property for existing code"""
@@ -72,21 +78,27 @@ class SimpleIntentResult(BaseModel):
 
 
 class IntentClassificationState(TypedDict):
-    """State for intent classification workflow"""
+    """Enhanced state for intent classification workflow"""
+    # Input
     user_message: str
     conversation_context: Dict[str, Any]
     
-    # Stage 1: Domain detection
-    domain: str
+    # NEW: Prepared context
+    prepared_context: Dict[str, Any]  # Structured context for LLM
+    is_new_conversation: bool
     
-    # Stage 2: Action intent
+    # Existing classification stages
+    domain: str
     action_intent: str
     
-    # Stage 3: Routing
+    # Routing
     target_agent: str
     confidence: float
     reasoning: str
     permission_required: bool
+    
+    # NEW: Title generation (parallel)
+    generated_title: Optional[str]
     
     # Final result
     result: SimpleIntentResult

@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Box,
   TextField,
@@ -27,6 +28,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import TeamInviteDialog from './TeamInviteDialog';
 
 const TeamSettingsTab = ({ teamId }) => {
+  const navigate = useNavigate();
   const { user } = useAuth();
   const {
     currentTeam,
@@ -79,7 +81,9 @@ const TeamSettingsTab = ({ teamId }) => {
   const handleDelete = async () => {
     try {
       await deleteTeam(teamId);
-      // Navigation will be handled by parent component
+      setDeleteDialogOpen(false);
+      // Navigate to teams page after successful deletion
+      navigate('/teams');
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to delete team');
       setDeleteDialogOpen(false);

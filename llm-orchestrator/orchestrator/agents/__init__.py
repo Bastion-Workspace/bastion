@@ -4,6 +4,7 @@ Orchestrator Agents - LangGraph agents using gRPC backend tools
 
 from orchestrator.agents.full_research_agent import FullResearchAgent, get_full_research_agent
 from orchestrator.agents.chat_agent import ChatAgent
+from orchestrator.agents.dictionary_agent import DictionaryAgent
 from orchestrator.agents.data_formatting_agent import DataFormattingAgent
 from orchestrator.agents.help_agent import HelpAgent
 from orchestrator.agents.weather_agent import WeatherAgent, get_weather_agent
@@ -25,13 +26,13 @@ from orchestrator.agents.story_analysis_agent import StoryAnalysisAgent, get_sto
 from orchestrator.agents.site_crawl_agent import SiteCrawlAgent, get_site_crawl_agent
 from orchestrator.agents.rules_editing_agent import RulesEditingAgent, get_rules_editing_agent
 from orchestrator.agents.proofreading_agent import ProofreadingAgent, get_proofreading_agent
-from orchestrator.agents.report_formatting_agent import ReportFormattingAgent, get_report_formatting_agent
 from orchestrator.agents.general_project_agent import GeneralProjectAgent, get_general_project_agent
 
 __all__ = [
     'FullResearchAgent',
     'get_full_research_agent',
     'ChatAgent',
+    'DictionaryAgent',
     'DataFormattingAgent',
     'HelpAgent',
     'WeatherAgent',
@@ -71,8 +72,6 @@ __all__ = [
     'get_rules_editing_agent',
     'ProofreadingAgent',
     'get_proofreading_agent',
-    'ReportFormattingAgent',
-    'get_report_formatting_agent',
     'GeneralProjectAgent',
     'get_general_project_agent'
 ]

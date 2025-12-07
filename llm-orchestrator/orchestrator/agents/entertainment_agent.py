@@ -26,6 +26,7 @@ class EntertainmentState(TypedDict):
     user_id: str
     metadata: Dict[str, Any]
     messages: List[Any]
+    shared_memory: Dict[str, Any]
     query_type: str
     documents: List[Dict[str, Any]]
     response: Dict[str, Any]
@@ -403,6 +404,11 @@ You MUST respond with valid JSON matching this exact schema:
             
             # Prepare context from documents
             if not documents:
+                # Update shared_memory for conversation continuity
+                shared_memory = state.get("shared_memory", {}) or {}
+                shared_memory["primary_agent_selected"] = "entertainment_agent"
+                shared_memory["last_agent"] = "entertainment_agent"
+                
                 no_content_response = {
                     "task_status": "complete",
                     "response": "🎬 **No Entertainment Content Found**\n\nI couldn't find any movies or TV shows in your library that match your query.\n\n**To add entertainment content**:\n1. Create markdown files with movie/TV show information\n2. Tag them with `movie`, `tv_show`, or `tv_episode`\n3. Include relevant details like genres, actors, directors\n4. Upload them to your document library\n\nOnce you've added some entertainment content, I'll be able to provide recommendations and information!",
@@ -412,7 +418,8 @@ You MUST respond with valid JSON matching this exact schema:
                 }
                 return {
                     "response": no_content_response,
-                    "task_status": "complete"
+                    "task_status": "complete",
+                    "shared_memory": shared_memory
                 }
             
             context_parts = []
@@ -456,8 +463,8 @@ You MUST respond with valid JSON matching this exact schema:
             
             logger.info(f"🤖 Calling LLM for entertainment response")
             
-            # Get LLM response
-            llm = self._get_llm(temperature=0.7)
+            # Get LLM response - pass state to access user's model selection
+            llm = self._get_llm(temperature=0.7, state=state)
             response = await llm.ainvoke(messages)
             
             content = response.content if hasattr(response, 'content') else str(response)
@@ -470,18 +477,29 @@ You MUST respond with valid JSON matching this exact schema:
             if "task_status" not in parsed_response:
                 parsed_response["task_status"] = "complete"
             
+            # Update shared_memory for conversation continuity
+            shared_memory = state.get("shared_memory", {}) or {}
+            shared_memory["primary_agent_selected"] = "entertainment_agent"
+            shared_memory["last_agent"] = "entertainment_agent"
+            
             return {
                 "response": parsed_response,
-                "task_status": parsed_response.get("task_status", "complete")
+                "task_status": parsed_response.get("task_status", "complete"),
+                "shared_memory": shared_memory
             }
             
         except Exception as e:
             logger.error(f"❌ Response generation failed: {e}")
+            # Update shared_memory even on error
+            shared_memory = state.get("shared_memory", {}) or {}
+            shared_memory["primary_agent_selected"] = "entertainment_agent"
+            shared_memory["last_agent"] = "entertainment_agent"
             error_response = self._create_error_response(str(e))
             return {
                 "response": error_response,
                 "task_status": "error",
-                "error": str(e)
+                "error": str(e),
+                "shared_memory": shared_memory
             }
     
     async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
@@ -493,24 +511,44 @@ You MUST respond with valid JSON matching this exact schema:
             metadata = metadata or {}
             user_id = metadata.get("user_id", "system")
             
+            # Get workflow (lazy initialization with checkpointer)
+            workflow = await self._get_workflow()
+            
+            # Get checkpoint config (handles thread_id from conversation_id/user_id)
+            config = self._get_checkpoint_config(metadata)
+            
+            # Prepare new messages (current query)
+            new_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Load and merge checkpointed messages to preserve conversation history
+            conversation_messages = await self._load_and_merge_checkpoint_messages(
+                workflow, config, new_messages
+            )
+            
+            # Load shared_memory from checkpoint if available
+            checkpoint_state = await workflow.aget_state(config)
+            existing_shared_memory = {}
+            if checkpoint_state and checkpoint_state.values:
+                existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+            
+            # Merge with any shared_memory from metadata
+            shared_memory = metadata.get("shared_memory", {}) or {}
+            shared_memory.update(existing_shared_memory)
+            metadata["shared_memory"] = shared_memory
+            
             # Initialize state for LangGraph workflow
             initial_state: EntertainmentState = {
                 "query": query,
                 "user_id": user_id,
                 "metadata": metadata,
-                "messages": messages or [],
+                "messages": conversation_messages,
+                "shared_memory": shared_memory,
                 "query_type": "",
                 "documents": [],
                 "response": {},
                 "task_status": "",
                 "error": ""
             }
-            
-            # Get workflow (lazy initialization with checkpointer)
-            workflow = await self._get_workflow()
-            
-            # Get checkpoint config (handles thread_id from conversation_id/user_id)
-            config = self._get_checkpoint_config(metadata)
             
             # Run LangGraph workflow with checkpointing
             result_state = await workflow.ainvoke(initial_state, config=config)

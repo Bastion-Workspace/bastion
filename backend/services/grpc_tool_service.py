@@ -2200,6 +2200,166 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         except Exception as e:
             logger.error(f"ApplyDocumentEditProposal error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Document edit proposal application failed: {str(e)}")
+    
+    # ===== Conversation Operations =====
+    
+    async def UpdateConversationTitle(
+        self,
+        request: tool_service_pb2.UpdateConversationTitleRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.UpdateConversationTitleResponse:
+        """Update conversation title"""
+        try:
+            logger.info(f"UpdateConversationTitle: user={request.user_id}, conversation={request.conversation_id}, title={request.title[:50] if len(request.title) > 50 else request.title}")
+            
+            # Use shared database pool
+            from utils.shared_db_pool import get_shared_db_pool
+            
+            # Get shared database pool
+            pool = await get_shared_db_pool()
+            async with pool.acquire() as conn:
+                # Set user context for RLS policies
+                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", request.user_id)
+                
+                # Verify conversation exists and belongs to user
+                conversation = await conn.fetchrow(
+                    "SELECT conversation_id, user_id FROM conversations WHERE conversation_id = $1",
+                    request.conversation_id
+                )
+                
+                if not conversation:
+                    response = tool_service_pb2.UpdateConversationTitleResponse(
+                        success=False,
+                        conversation_id=request.conversation_id,
+                        message="Conversation not found",
+                        error="Conversation not found"
+                    )
+                    logger.warning(f"UpdateConversationTitle: Conversation {request.conversation_id} not found")
+                    return response
+                
+                if conversation['user_id'] != request.user_id:
+                    response = tool_service_pb2.UpdateConversationTitleResponse(
+                        success=False,
+                        conversation_id=request.conversation_id,
+                        message="Unauthorized",
+                        error="User does not own this conversation"
+                    )
+                    logger.warning(f"UpdateConversationTitle: User {request.user_id} does not own conversation {request.conversation_id}")
+                    return response
+                
+                # Update title in conversations table
+                await conn.execute(
+                    "UPDATE conversations SET title = $1, updated_at = NOW() WHERE conversation_id = $2",
+                    request.title, request.conversation_id
+                )
+                
+                # CRITICAL FIX: Also update checkpoint's channel_values.conversation_title
+                # This ensures the title is available in both the database table and the checkpoint
+                try:
+                    from services.orchestrator_utils import normalize_thread_id
+                    from datetime import datetime
+                    normalized_thread_id = normalize_thread_id(request.user_id, request.conversation_id)
+                    
+                    # Try to find checkpoint with normalized thread_id first
+                    row = await conn.fetchrow(
+                        """
+                        SELECT DISTINCT ON (c.thread_id) 
+                            c.thread_id,
+                            c.checkpoint,
+                            c.checkpoint_id
+                        FROM checkpoints c
+                        WHERE c.thread_id = $1 
+                        AND c.checkpoint -> 'channel_values' ->> 'user_id' = $2
+                        ORDER BY c.thread_id, c.checkpoint_id DESC
+                        LIMIT 1
+                        """,
+                        normalized_thread_id,
+                        request.user_id
+                    )
+                    thread_id_used = normalized_thread_id
+                    
+                    # If not found, try with conversation_id directly
+                    if not row:
+                        row = await conn.fetchrow(
+                            """
+                            SELECT DISTINCT ON (c.thread_id)
+                                c.thread_id,
+                                c.checkpoint,
+                                c.checkpoint_id
+                            FROM checkpoints c
+                            WHERE c.thread_id = $1 
+                              AND c.checkpoint -> 'channel_values' ->> 'user_id' = $2
+                            ORDER BY c.thread_id, c.checkpoint_id DESC
+                            LIMIT 1
+                            """,
+                            request.conversation_id,
+                            request.user_id,
+                        )
+                        if row:
+                            thread_id_used = request.conversation_id
+                    
+                    if row:
+                        checkpoint_data = row["checkpoint"]
+                        if isinstance(checkpoint_data, str):
+                            import json
+                            try:
+                                checkpoint_data = json.loads(checkpoint_data)
+                            except Exception:
+                                checkpoint_data = {}
+                        elif checkpoint_data is None:
+                            checkpoint_data = {}
+                        
+                        channel_values = checkpoint_data.get("channel_values", {})
+                        channel_values["conversation_title"] = request.title
+                        channel_values["conversation_updated_at"] = datetime.now().isoformat()
+                        checkpoint_data["channel_values"] = channel_values
+                        
+                        await conn.execute(
+                            """
+                            UPDATE checkpoints
+                            SET checkpoint = $1
+                            WHERE thread_id = $2
+                              AND checkpoint -> 'channel_values' ->> 'user_id' = $3
+                            """,
+                            checkpoint_data,
+                            thread_id_used,
+                            request.user_id,
+                        )
+                        logger.info(f"UpdateConversationTitle: Updated checkpoint title for conversation {request.conversation_id}")
+                    else:
+                        logger.debug(f"UpdateConversationTitle: No checkpoint found for conversation {request.conversation_id} (this is normal for new conversations)")
+                except Exception as checkpoint_error:
+                    logger.warning(f"UpdateConversationTitle: Failed to update checkpoint title (non-fatal): {checkpoint_error}")
+                
+                logger.info(f"UpdateConversationTitle: Successfully updated title for conversation {request.conversation_id}")
+                
+                # Send WebSocket notification for frontend refresh
+                try:
+                    from utils.websocket_manager import get_websocket_manager
+                    websocket_manager = get_websocket_manager()
+                    if websocket_manager:
+                        await websocket_manager.send_to_session(
+                            session_id=request.user_id,
+                            message={
+                                "type": "conversation_updated",
+                                "data": {"conversation_id": request.conversation_id},
+                            },
+                        )
+                        logger.debug(f"📡 Sent WebSocket notification for title update: {request.conversation_id}")
+                except Exception as ws_error:
+                    logger.debug(f"WebSocket notification failed (non-fatal): {ws_error}")
+                
+                response = tool_service_pb2.UpdateConversationTitleResponse(
+                    success=True,
+                    conversation_id=request.conversation_id,
+                    title=request.title,
+                    message="Conversation title updated successfully"
+                )
+                return response
+                
+        except Exception as e:
+            logger.error(f"UpdateConversationTitle error: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Conversation title update failed: {str(e)}")
 
 
 async def serve_tool_service(port: int = 50052):

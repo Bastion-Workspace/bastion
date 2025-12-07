@@ -1,5 +1,5 @@
 """
-Logging configuration for Codex Knowledge Base
+Logging configuration for Bastion Workspace
 Roosevelt's "Structured Logging" System - Dual format for AI analysis and human debugging
 
 **BULLY!** Efficient logging that serves both AI intelligence and human understanding!

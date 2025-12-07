@@ -367,6 +367,13 @@ class ZipProcessorService:
     async def _process_file_async(self, document_id: str, file_path: Path, doc_type: str, user_id: str = None):
         """Asynchronously process an individual file from ZIP with user isolation support"""
         try:
+            # Check if document is exempt from vectorization BEFORE processing
+            is_exempt = await self.document_repository.is_document_exempt(document_id)
+            if is_exempt:
+                logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping all processing")
+                await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
+                return
+            
             # Process document
             result = await self.document_processor.process_document(str(file_path), doc_type, document_id)
             

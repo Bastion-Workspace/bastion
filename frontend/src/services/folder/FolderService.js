@@ -31,6 +31,18 @@ class FolderService extends ApiServiceBase {
   createDefaultFolders = async () => {
     return this.post('/api/folders/default');
   }
+
+  exemptFolder = async (folderId) => {
+    return this.post(`/api/folders/${folderId}/exempt`);
+  }
+
+  removeFolderExemption = async (folderId) => {
+    return this.delete(`/api/folders/${folderId}/exempt`);
+  }
+
+  overrideFolderExemption = async (folderId) => {
+    return this.post(`/api/folders/${folderId}/exempt/override`);
+  }
 }
 
 export default new FolderService();

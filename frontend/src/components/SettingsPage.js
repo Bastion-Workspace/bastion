@@ -62,10 +62,7 @@ import ClassificationModelSelector from './ClassificationModelSelector';
 import ImageGenerationModelSelector from './ImageGenerationModelSelector';
 import TextCompletionModelSelector from './TextCompletionModelSelector';
 import { useModel } from '../contexts/ModelContext';
-import TemplateManager from './TemplateManager';
-import SettingsServicesTwitter from './SettingsServicesTwitter';
 import OrgModeSettingsTab from './OrgModeSettingsTab';
-import CyberCatalogSettingsTab from './CyberCatalogSettingsTab';
 
 // Model Status Display Component
 const ModelStatusDisplay = () => {
@@ -303,7 +300,8 @@ const SettingsPage = () => {
   const [enabledModels, setEnabledModels] = useState(new Set());
   const [selectedModel, setSelectedModel] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
-  const [providerFilter, setProviderFilter] = useState('all');
+  const [providerFilter, setProviderFilter] = useState('');
+  const [providerSelectFocused, setProviderSelectFocused] = useState(false);
   const [showOnlyEnabled, setShowOnlyEnabled] = useState(false);
   
   // Database cleanup dialog states
@@ -319,7 +317,7 @@ const SettingsPage = () => {
 
   // AI Personality state
   const [promptSettings, setPromptSettings] = useState({
-    ai_name: 'Codex',
+    ai_name: 'Alex',
     political_bias: 'neutral',
     persona_style: 'professional'
   });
@@ -333,7 +331,7 @@ const SettingsPage = () => {
   // Stock persona state
   const [stockPersonaMode, setStockPersonaMode] = useState('custom'); // 'custom' or specific persona
   const [customSettings, setCustomSettings] = useState({
-    ai_name: 'Codex',
+    ai_name: 'Alex',
     political_bias: 'neutral',
     persona_style: 'professional'
   });
@@ -342,7 +340,7 @@ const SettingsPage = () => {
   React.useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     if (urlParams.get('tab') === 'users' && user?.role === 'admin') {
-      setCurrentTab(7); // Shifted due to added Services tab
+      setCurrentTab(6); // Database tab is at 5, User Management is at 6
     }
   }, [user]);
 
@@ -438,7 +436,7 @@ const SettingsPage = () => {
       onSuccess: (data) => {
         if (data) {
           setPromptSettings({
-            ai_name: data.ai_name || 'Codex',
+            ai_name: data.ai_name || 'Alex',
             political_bias: data.political_bias || 'neutral',
             persona_style: data.persona_style || 'professional',
             bias_intensity: data.bias_intensity || 0.5,
@@ -454,14 +452,14 @@ const SettingsPage = () => {
           if (isStockPersona) {
             setStockPersonaMode(data.persona_style);
             setCustomSettings({
-              ai_name: 'Codex',
+              ai_name: 'Alex',
               political_bias: 'neutral',
               persona_style: 'professional'
             });
           } else {
             setStockPersonaMode('custom');
             setCustomSettings({
-              ai_name: data.ai_name || 'Codex',
+              ai_name: data.ai_name || 'Alex',
               political_bias: data.political_bias || 'neutral',
               persona_style: data.persona_style || 'professional'
             });
@@ -576,7 +574,7 @@ const SettingsPage = () => {
       'albert_einstein': 'Albert',
       'nikola_tesla': 'Tesla'
     };
-    return nameMap[persona] || 'Codex';
+    return nameMap[persona] || 'Alex';
   };
 
   const getStockPersonaBias = (persona) => {
@@ -704,8 +702,54 @@ const SettingsPage = () => {
   );
 
   // Filter and group models
-  const { filteredModels, groupedModels, providers } = useMemo(() => {
-    if (!modelsData?.models) return { filteredModels: [], groupedModels: {}, providers: [] };
+  const { filteredModels, groupedModels, displayGroupedModels, providers } = useMemo(() => {
+    if (!modelsData?.models) return { filteredModels: [], groupedModels: {}, displayGroupedModels: {}, providers: [] };
+
+    // Get unique providers - ALWAYS show all providers in dropdown
+    const uniqueProviders = [...new Set(modelsData.models.map(m => m.provider))].sort();
+
+    // When "Show Enabled" is ON, we want to show all providers with enabled models
+    // When "Show Enabled" is OFF, we only show when a provider is selected
+    if (showOnlyEnabled) {
+      // Filter to only enabled models, then group by provider
+      let enabledFiltered = modelsData.models.filter(model => enabledModels.has(model.id));
+      
+      // Apply search filter if present
+      if (searchTerm) {
+        const search = searchTerm.toLowerCase();
+        enabledFiltered = enabledFiltered.filter(model => 
+          model.name.toLowerCase().includes(search) ||
+          model.provider.toLowerCase().includes(search) ||
+          model.id.toLowerCase().includes(search)
+        );
+      }
+      
+      // Group enabled models by provider
+      const enabledGrouped = enabledFiltered.reduce((acc, model) => {
+        if (!acc[model.provider]) {
+          acc[model.provider] = [];
+        }
+        acc[model.provider].push(model);
+        return acc;
+      }, {});
+      
+      return {
+        filteredModels: enabledFiltered,
+        groupedModels: enabledGrouped,
+        displayGroupedModels: enabledGrouped, // Show all providers with enabled models
+        providers: uniqueProviders
+      };
+    }
+
+    // When "Show Enabled" is OFF, only show when provider is selected
+    if (!providerFilter) {
+      return { 
+        filteredModels: [], 
+        groupedModels: {}, 
+        displayGroupedModels: {}, // Don't show any provider cards
+        providers: uniqueProviders 
+      };
+    }
 
     let filtered = modelsData.models;
 
@@ -724,11 +768,6 @@ const SettingsPage = () => {
       filtered = filtered.filter(model => model.provider === providerFilter);
     }
 
-    // Apply enabled filter
-    if (showOnlyEnabled) {
-      filtered = filtered.filter(model => enabledModels.has(model.id));
-    }
-
     // Group by provider
     const grouped = filtered.reduce((acc, model) => {
       if (!acc[model.provider]) {
@@ -738,12 +777,10 @@ const SettingsPage = () => {
       return acc;
     }, {});
 
-    // Get unique providers
-    const uniqueProviders = [...new Set(modelsData.models.map(m => m.provider))].sort();
-
     return { 
       filteredModels: filtered, 
       groupedModels: grouped, 
+      displayGroupedModels: grouped, // Only show selected provider
       providers: uniqueProviders 
     };
   }, [modelsData, searchTerm, providerFilter, showOnlyEnabled, enabledModels]);
@@ -868,13 +905,11 @@ const SettingsPage = () => {
   const tabs = [
     { label: 'User Profile', icon: <Person /> },
     { label: 'AI Personality', icon: <Psychology /> },
-    { label: 'Report Templates', icon: <DescriptionIcon /> },
-    { label: 'System & Models', icon: <Settings /> },
-    { label: 'Services', icon: <Settings /> },
+    { label: 'Models', icon: <Settings /> },
     { label: 'News', icon: <DescriptionIcon /> },
     { label: 'Org-Mode', icon: <ListAlt /> },
-    { label: 'Cyber Catalog', icon: <FolderOpen /> },
     ...(user?.role === 'admin' ? [
+      { label: 'Database', icon: <DeleteSweep /> },
       { label: 'User Management', icon: <Security /> },
       { label: 'Pending Submissions', icon: <Warning /> }
     ] : [])
@@ -886,7 +921,7 @@ const SettingsPage = () => {
         Settings
       </Typography>
       <Typography variant="body1" color="text.secondary" paragraph>
-        Configure your Codex Knowledge Base settings and manage users.
+        Configure your Bastion Workspace settings and manage users.
       </Typography>
 
       {/* Tabs */}
@@ -1024,7 +1059,7 @@ const SettingsPage = () => {
 
                   <Alert severity="info" sx={{ mb: 3 }}>
                     <strong>Customize Your AI:</strong> Configure the personality, political bias, and communication style of your AI assistant. 
-                    Note: You must change the AI name from "Codex" when using non-default bias or persona settings.
+                    Note: You must change the AI name from "Alex" when using non-default bias or persona settings.
                   </Alert>
 
                   {/* Stock Persona Selection */}
@@ -1065,7 +1100,7 @@ const SettingsPage = () => {
                           AI Assistant Name
                         </Typography>
                         <Typography variant="body2" color="text.secondary" paragraph>
-                          Choose a name for your AI assistant. "Codex" is always neutral and professional.
+                          Choose a name for your AI assistant. "Alex" is always neutral and professional.
                         </Typography>
                         
                         <TextField
@@ -1169,16 +1204,6 @@ const SettingsPage = () => {
       )}
 
       {currentTab === 2 && (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-        >
-          <TemplateManager />
-        </motion.div>
-      )}
-
-      {currentTab === 3 && (
         <Grid container spacing={3}>
 
         {/* Current Model Status - Shows what agents are actually using */}
@@ -1361,13 +1386,17 @@ const SettingsPage = () => {
                     
                     <Grid item xs={12} md={3}>
                       <FormControl fullWidth size="small">
-                        <InputLabel>Provider</InputLabel>
+                        <InputLabel shrink>Provider</InputLabel>
                         <Select
                           value={providerFilter}
                           onChange={(e) => setProviderFilter(e.target.value)}
                           label="Provider"
+                          displayEmpty
+                          notched
                         >
-                          <MenuItem value="all">All Providers</MenuItem>
+                          <MenuItem value="">
+                            <em>Select a provider</em>
+                          </MenuItem>
                           {providers.map(provider => (
                             <MenuItem key={provider} value={provider}>
                               {provider}
@@ -1418,59 +1447,76 @@ const SettingsPage = () => {
                   </Box>
                 ) : (
                   <>
-                    {/* Active Model Summary */}
-                    {selectedModel && (
-                      <Paper sx={{ p: 2, mb: 3, backgroundColor: '#e3f2fd' }}>
-                        <Typography variant="subtitle2" gutterBottom>
-                          🎯 Active Model
-                        </Typography>
-                        <Typography variant="body1" sx={{ fontWeight: 'bold' }}>
-                          {modelsData?.models?.find(m => m.id === selectedModel)?.name || selectedModel}
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary">
-                          {modelsData?.models?.find(m => m.id === selectedModel)?.provider} • 
-                          {modelsData?.models?.find(m => m.id === selectedModel)?.context_length?.toLocaleString()} context
-                        </Typography>
-                      </Paper>
-                    )}
-
-                    {/* Models by Provider */}
-                    {Object.entries(groupedModels).map(([provider, models]) => (
-                      <Accordion key={provider} defaultExpanded={models.some(m => enabledModels.has(m.id))}>
-                        <AccordionSummary expandIcon={<ExpandMore />}>
-                          <Box display="flex" alignItems="center" gap={2}>
-                            <Typography variant="h6">{provider}</Typography>
-                            <Chip 
-                              label={`${models.length} models`} 
-                              size="small" 
-                              variant="outlined" 
-                            />
-                            <Chip 
-                              label={`${models.filter(m => enabledModels.has(m.id)).length} enabled`} 
-                              size="small" 
-                              color="primary"
-                            />
-                          </Box>
-                        </AccordionSummary>
-                        <AccordionDetails>
-                          <Box>
-                            {models.map(model => (
-                              <ModelCard key={model.id} model={model} />
-                            ))}
-                          </Box>
-                        </AccordionDetails>
-                      </Accordion>
-                    ))}
-
-                    {filteredModels.length === 0 && (
+                    {Object.keys(displayGroupedModels).length === 0 ? (
                       <Paper sx={{ p: 4, textAlign: 'center' }}>
                         <Typography variant="h6" color="text.secondary" gutterBottom>
-                          No models found
+                          {showOnlyEnabled 
+                            ? 'No enabled models found' 
+                            : 'Select a provider to view models'}
                         </Typography>
                         <Typography variant="body2" color="text.secondary">
-                          Try adjusting your search or filter criteria
+                          {showOnlyEnabled
+                            ? 'Enable some models to see them organized by provider'
+                            : 'Choose a provider from the dropdown above to see available models'}
                         </Typography>
                       </Paper>
+                    ) : (
+                      <>
+                        {/* Active Model Summary */}
+                        {selectedModel && (
+                          <Paper sx={{ p: 2, mb: 3, backgroundColor: '#e3f2fd' }}>
+                            <Typography variant="subtitle2" gutterBottom>
+                              🎯 Active Model
+                            </Typography>
+                            <Typography variant="body1" sx={{ fontWeight: 'bold' }}>
+                              {modelsData?.models?.find(m => m.id === selectedModel)?.name || selectedModel}
+                            </Typography>
+                            <Typography variant="body2" color="text.secondary">
+                              {modelsData?.models?.find(m => m.id === selectedModel)?.provider} • 
+                              {modelsData?.models?.find(m => m.id === selectedModel)?.context_length?.toLocaleString()} context
+                            </Typography>
+                          </Paper>
+                        )}
+
+                        {/* Models by Provider */}
+                        {Object.entries(displayGroupedModels).map(([provider, models]) => (
+                          <Accordion key={provider} defaultExpanded={models.some(m => enabledModels.has(m.id))}>
+                            <AccordionSummary expandIcon={<ExpandMore />}>
+                              <Box display="flex" alignItems="center" gap={2}>
+                                <Typography variant="h6">{provider}</Typography>
+                                <Chip 
+                                  label={`${models.length} models`} 
+                                  size="small" 
+                                  variant="outlined" 
+                                />
+                                <Chip 
+                                  label={`${models.filter(m => enabledModels.has(m.id)).length} enabled`} 
+                                  size="small" 
+                                  color="primary"
+                                />
+                              </Box>
+                            </AccordionSummary>
+                            <AccordionDetails>
+                              <Box>
+                                {models.map(model => (
+                                  <ModelCard key={model.id} model={model} />
+                                ))}
+                              </Box>
+                            </AccordionDetails>
+                          </Accordion>
+                        ))}
+
+                        {filteredModels.length === 0 && (
+                          <Paper sx={{ p: 4, textAlign: 'center' }}>
+                            <Typography variant="h6" color="text.secondary" gutterBottom>
+                              No models found
+                            </Typography>
+                            <Typography variant="body2" color="text.secondary">
+                              Try adjusting your search or filter criteria
+                            </Typography>
+                          </Paper>
+                        )}
+                      </>
                     )}
                   </>
                 )}
@@ -1558,235 +1604,11 @@ const SettingsPage = () => {
           </Grid>
         )}
 
-
-
-        {/* Database Management - Admin Only */}
-        {user?.role === 'admin' && (
-          <Grid item xs={12}>
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.4 }}
-            >
-              <Card sx={{ border: '2px solid #ff9800', borderRadius: 2 }}>
-                <CardContent>
-                  <Box display="flex" alignItems="center" mb={3}>
-                    <DeleteSweep sx={{ mr: 2, color: 'warning.main' }} />
-                    <Typography variant="h6" color="warning.main">
-                      Database Management
-                    </Typography>
-                    <Chip 
-                      label="Admin Only" 
-                      size="small" 
-                      color="warning" 
-                      sx={{ ml: 2 }}
-                    />
-                  </Box>
-
-                  <Alert severity="warning" sx={{ mb: 3 }}>
-                    <strong>Caution:</strong> These operations will permanently delete all data from the respective databases. 
-                    Use only when you want to start completely fresh.
-                  </Alert>
-
-                  <Grid container spacing={3}>
-                    <Grid item xs={12} md={4}>
-                      <Paper sx={{ p: 3, textAlign: 'center', border: '1px solid #e0e0e0' }}>
-                        <Typography variant="h4" sx={{ mb: 1 }}>
-                          📄
-                        </Typography>
-                        <Typography variant="h6" gutterBottom>
-                          Document Database
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                          All documents, notes, and associated files
-                        </Typography>
-                        <Button
-                          variant="outlined"
-                          color="error"
-                          startIcon={<DeleteSweep />}
-                          onClick={() => setDocumentsDialogOpen(true)}
-                          disabled={clearDocumentsMutation.isLoading}
-                          fullWidth
-                        >
-                          {clearDocumentsMutation.isLoading ? 'Clearing...' : 'Delete All Documents'}
-                        </Button>
-                      </Paper>
-                    </Grid>
-
-                    <Grid item xs={12} md={4}>
-                      <Paper sx={{ p: 3, textAlign: 'center', border: '1px solid #e0e0e0' }}>
-                        <Typography variant="h4" sx={{ mb: 1 }}>
-                          🔍
-                        </Typography>
-                        <Typography variant="h6" gutterBottom>
-                          Qdrant Vector Database
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                          Contains all document embeddings and search vectors
-                        </Typography>
-                        <Button
-                          variant="outlined"
-                          color="warning"
-                          startIcon={<DeleteSweep />}
-                          onClick={() => setQdrantDialogOpen(true)}
-                          disabled={clearQdrantMutation.isLoading}
-                          fullWidth
-                        >
-                          {clearQdrantMutation.isLoading ? 'Clearing...' : 'Clear Qdrant Database'}
-                        </Button>
-                      </Paper>
-                    </Grid>
-
-                    <Grid item xs={12} md={4}>
-                      <Paper sx={{ p: 3, textAlign: 'center', border: '1px solid #e0e0e0' }}>
-                        <Typography variant="h4" sx={{ mb: 1 }}>
-                          🕸️
-                        </Typography>
-                        <Typography variant="h6" gutterBottom>
-                          Neo4j Knowledge Graph
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                          Contains extracted entities and their relationships
-                        </Typography>
-                        <Button
-                          variant="outlined"
-                          color="warning"
-                          startIcon={<DeleteSweep />}
-                          onClick={() => setNeo4jDialogOpen(true)}
-                          disabled={clearNeo4jMutation.isLoading}
-                          fullWidth
-                        >
-                          {clearNeo4jMutation.isLoading ? 'Clearing...' : 'Clear Neo4j Database'}
-                        </Button>
-                      </Paper>
-                    </Grid>
-                  </Grid>
-
-                  {/* Success/Error Messages */}
-                  {clearDocumentsMutation.isSuccess && (
-                    <Alert severity="success" sx={{ mt: 2 }}>
-                      Document database cleared successfully! All documents, notes, and associated data have been removed.
-                    </Alert>
-                  )}
-                  
-                  {clearDocumentsMutation.isError && (
-                    <Alert severity="error" sx={{ mt: 2 }}>
-                      Failed to clear document database: {clearDocumentsMutation.error?.response?.data?.detail}
-                    </Alert>
-                  )}
-
-                  {clearQdrantMutation.isSuccess && (
-                    <Alert severity="success" sx={{ mt: 2 }}>
-                      Qdrant database cleared successfully! All embeddings have been removed.
-                    </Alert>
-                  )}
-                  
-                  {clearQdrantMutation.isError && (
-                    <Alert severity="error" sx={{ mt: 2 }}>
-                      Failed to clear Qdrant database: {clearQdrantMutation.error?.response?.data?.detail}
-                    </Alert>
-                  )}
-
-                  {clearNeo4jMutation.isSuccess && (
-                    <Alert severity="success" sx={{ mt: 2 }}>
-                      Neo4j database cleared successfully! All entities and relationships have been removed.
-                    </Alert>
-                  )}
-                  
-                  {clearNeo4jMutation.isError && (
-                    <Alert severity="error" sx={{ mt: 2 }}>
-                      Failed to clear Neo4j database: {clearNeo4jMutation.error?.response?.data?.detail}
-                    </Alert>
-                  )}
-                </CardContent>
-              </Card>
-            </motion.div>
-          </Grid>
-        )}
-
-        {/* Theme Settings */}
-        <Grid item xs={12}>
-          <motion.div
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ delay: 0.5 }}
-          >
-            <Card>
-              <CardContent>
-                <Box display="flex" alignItems="center" justifyContent="space-between" mb={3}>
-                  <Box display="flex" alignItems="center">
-                    <Settings sx={{ mr: 2, color: 'primary.main' }} />
-                    <Typography variant="h6">Appearance Settings</Typography>
-                  </Box>
-                </Box>
-
-                <Grid container spacing={3} alignItems="center">
-                  <Grid item xs={12} md={6}>
-                    <Typography variant="body1" gutterBottom>
-                      <strong>Theme Mode</strong>
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary" paragraph>
-                      Choose between light and dark themes. The theme will be saved and remembered across sessions.
-                    </Typography>
-                    {systemPrefersDark !== null && (
-                      <Typography variant="body2" color="text.secondary">
-                        System preference: {systemPrefersDark ? 'Dark' : 'Light'} mode
-                      </Typography>
-                    )}
-                  </Grid>
-                  
-                  <Grid item xs={12} md={6}>
-                    <Box display="flex" flexDirection="column" alignItems="flex-end" gap={2}>
-                      <Box display="flex" alignItems="center">
-                        <Typography variant="body2" sx={{ mr: 2 }}>
-                          Light Mode
-                        </Typography>
-                        <FormControlLabel
-                          control={
-                            <Switch
-                              checked={darkMode}
-                              onChange={toggleDarkMode}
-                              color="primary"
-                            />
-                          }
-                          label=""
-                        />
-                        <Typography variant="body2" sx={{ ml: 2 }}>
-                          Dark Mode
-                        </Typography>
-                      </Box>
-                      
-                      {!isSystemTheme && (
-                        <Button
-                          variant="outlined"
-                          size="small"
-                          onClick={syncWithSystem}
-                          sx={{ mt: 1 }}
-                        >
-                          Sync with System
-                        </Button>
-                      )}
-                    </Box>
-                  </Grid>
-                </Grid>
-
-                <Alert severity="info" sx={{ mt: 2 }}>
-                  <strong>Tip:</strong> You can also toggle the theme using the button in the navigation bar. 
-                  {systemPrefersDark !== null && (
-                    <span> Your system prefers {systemPrefersDark ? 'dark' : 'light'} mode.</span>
-                  )}
-                </Alert>
-              </CardContent>
-            </Card>
-          </motion.div>
-        </Grid>
-
-
       </Grid>
       )}
 
       {/* News Settings Tab */}
-      {currentTab === 6 && (
+      {currentTab === 3 && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
             <motion.div
@@ -1926,7 +1748,7 @@ const SettingsPage = () => {
       )}
 
       {/* Org-Mode Settings Tab */}
-      {currentTab === 6 && (
+      {currentTab === 4 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -1936,19 +1758,154 @@ const SettingsPage = () => {
         </motion.div>
       )}
 
-      {/* Cyber Catalog Settings Tab */}
-      {currentTab === 7 && (
+      {/* Database Management Tab */}
+      {currentTab === 5 && user?.role === 'admin' && (
+        <Grid container spacing={3}>
+          <Grid item xs={12}>
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-        >
-          <CyberCatalogSettingsTab />
+              transition={{ delay: 0.05 }}
+            >
+              <Card sx={{ border: '2px solid #ff9800', borderRadius: 2 }}>
+                <CardContent>
+                  <Box display="flex" alignItems="center" mb={3}>
+                    <DeleteSweep sx={{ mr: 2, color: 'warning.main' }} />
+                    <Typography variant="h6" color="warning.main">
+                      Database Management
+                    </Typography>
+                    <Chip 
+                      label="Admin Only" 
+                      size="small" 
+                      color="warning" 
+                      sx={{ ml: 2 }}
+                    />
+                  </Box>
+
+                  <Alert severity="warning" sx={{ mb: 3 }}>
+                    <strong>Caution:</strong> These operations will permanently delete all data from the respective databases. 
+                    Use only when you want to start completely fresh.
+                  </Alert>
+
+                  <Grid container spacing={3}>
+                    <Grid item xs={12} md={4}>
+                      <Paper sx={{ p: 3, textAlign: 'center', border: '1px solid #e0e0e0' }}>
+                        <Typography variant="h4" sx={{ mb: 1 }}>
+                          📄
+                        </Typography>
+                        <Typography variant="h6" gutterBottom>
+                          Document Database
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                          All documents, notes, and associated files
+                        </Typography>
+                        <Button
+                          variant="outlined"
+                          color="error"
+                          startIcon={<DeleteSweep />}
+                          onClick={() => setDocumentsDialogOpen(true)}
+                          disabled={clearDocumentsMutation.isLoading}
+                          fullWidth
+                        >
+                          {clearDocumentsMutation.isLoading ? 'Clearing...' : 'Delete All Documents'}
+                        </Button>
+                      </Paper>
+                    </Grid>
+
+                    <Grid item xs={12} md={4}>
+                      <Paper sx={{ p: 3, textAlign: 'center', border: '1px solid #e0e0e0' }}>
+                        <Typography variant="h4" sx={{ mb: 1 }}>
+                          🔍
+                        </Typography>
+                        <Typography variant="h6" gutterBottom>
+                          Qdrant Vector Database
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                          Contains all document embeddings and search vectors
+                        </Typography>
+                        <Button
+                          variant="outlined"
+                          color="warning"
+                          startIcon={<DeleteSweep />}
+                          onClick={() => setQdrantDialogOpen(true)}
+                          disabled={clearQdrantMutation.isLoading}
+                          fullWidth
+                        >
+                          {clearQdrantMutation.isLoading ? 'Clearing...' : 'Clear Qdrant Database'}
+                        </Button>
+                      </Paper>
+                    </Grid>
+
+                    <Grid item xs={12} md={4}>
+                      <Paper sx={{ p: 3, textAlign: 'center', border: '1px solid #e0e0e0' }}>
+                        <Typography variant="h4" sx={{ mb: 1 }}>
+                          🕸️
+                        </Typography>
+                        <Typography variant="h6" gutterBottom>
+                          Neo4j Knowledge Graph
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                          Contains extracted entities and their relationships
+                        </Typography>
+                        <Button
+                          variant="outlined"
+                          color="warning"
+                          startIcon={<DeleteSweep />}
+                          onClick={() => setNeo4jDialogOpen(true)}
+                          disabled={clearNeo4jMutation.isLoading}
+                          fullWidth
+                        >
+                          {clearNeo4jMutation.isLoading ? 'Clearing...' : 'Clear Neo4j Database'}
+                        </Button>
+                      </Paper>
+                    </Grid>
+                  </Grid>
+
+                  {/* Success/Error Messages */}
+                  {clearDocumentsMutation.isSuccess && (
+                    <Alert severity="success" sx={{ mt: 2 }}>
+                      Document database cleared successfully! All documents, notes, and associated data have been removed.
+                    </Alert>
+                  )}
+                  
+                  {clearDocumentsMutation.isError && (
+                    <Alert severity="error" sx={{ mt: 2 }}>
+                      Failed to clear document database: {clearDocumentsMutation.error?.response?.data?.detail}
+                    </Alert>
+                  )}
+
+                  {clearQdrantMutation.isSuccess && (
+                    <Alert severity="success" sx={{ mt: 2 }}>
+                      Qdrant database cleared successfully! All embeddings have been removed.
+                    </Alert>
+                  )}
+                  
+                  {clearQdrantMutation.isError && (
+                    <Alert severity="error" sx={{ mt: 2 }}>
+                      Failed to clear Qdrant database: {clearQdrantMutation.error?.response?.data?.detail}
+                    </Alert>
+                  )}
+
+                  {clearNeo4jMutation.isSuccess && (
+                    <Alert severity="success" sx={{ mt: 2 }}>
+                      Neo4j database cleared successfully! All entities and relationships have been removed.
+                    </Alert>
+                  )}
+                  
+                  {clearNeo4jMutation.isError && (
+                    <Alert severity="error" sx={{ mt: 2 }}>
+                      Failed to clear Neo4j database: {clearNeo4jMutation.error?.response?.data?.detail}
+                    </Alert>
+                  )}
+                </CardContent>
+              </Card>
         </motion.div>
+          </Grid>
+        </Grid>
       )}
 
       {/* User Management Tab */}
-      {currentTab === 8 && user?.role === 'admin' && (
+      {currentTab === 6 && user?.role === 'admin' && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -1959,29 +1916,14 @@ const SettingsPage = () => {
       )}
 
       {/* Pending Submissions Tab */}
-      {currentTab === 9 && user?.role === 'admin' && (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-        >
-          <PendingSubmissions />
-        </motion.div>
-      )}
-
-      {/* Services Tab */}
-      {currentTab === 4 && (
-        <Grid container spacing={3}>
-          <Grid item xs={12}>
+      {currentTab === 7 && user?.role === 'admin' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: 0.05 }}
+          transition={{ duration: 0.3 }}
             >
-              <SettingsServicesTwitter />
+          <PendingSubmissions />
             </motion.div>
-          </Grid>
-        </Grid>
       )}
 
       {/* Confirmation Dialogs */}

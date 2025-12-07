@@ -110,7 +110,9 @@ class TeamPostService:
                 
                 # Vectorize post text content with author metadata for search
                 # This allows Research Agent to know who said what when searching team posts
-                if content and content.strip():
+                # Skip vectorization for very short posts (< 50 chars) as they provide little semantic value
+                content_stripped = content.strip() if content else ""
+                if content_stripped and len(content_stripped) >= 50:
                     try:
                         await self._vectorize_post_content(
                             post_id=post_id,
@@ -122,6 +124,8 @@ class TeamPostService:
                     except Exception as e:
                         # Don't fail post creation if vectorization fails
                         logger.warning(f"Failed to vectorize post {post_id} content: {e}")
+                elif content_stripped:
+                    logger.debug(f"Skipping vectorization for short post {post_id} ({len(content_stripped)} chars)")
                 
                 return post_dict
         

@@ -11,6 +11,7 @@ import { Box, TextField, Button, Tooltip, Drawer, IconButton, Typography, Stack,
 import { Add, Delete } from '@mui/icons-material';
 import { createGhostTextExtension } from './editor/extensions/ghostTextExtension';
 import { createInlineEditSuggestionsExtension } from './editor/extensions/inlineEditSuggestionsExtension';
+import { createLiveEditDiffExtension } from './editor/extensions/liveEditDiffExtension';
 import { editorSuggestionService } from '../services/editor/EditorSuggestionService';
 
 const createMdTheme = (darkMode) => EditorView.baseTheme({
@@ -210,14 +211,29 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
   }, { debounceMs: 350 }) : [], [suggestionsEnabled]);
   const mdTheme = useMemo(() => createMdTheme(darkMode), [darkMode]);
   const inlineEditExt = useMemo(() => createInlineEditSuggestionsExtension(), []);
+  const liveEditDiffExt = useMemo(() => {
+    const ext = createLiveEditDiffExtension();
+    console.log('🔍 MarkdownCMEditor: Created liveEditDiffExt:', ext?.length, 'items');
+    // Test event listener to verify events are firing
+    const testListener = (e) => {
+      console.log('🔍 TEST: MarkdownCMEditor received editorOperationsLive event:', e.detail);
+    };
+    window.addEventListener('editorOperationsLive', testListener);
+    // Clean up after 30 seconds
+    setTimeout(() => {
+      window.removeEventListener('editorOperationsLive', testListener);
+    }, 30000);
+    return ext;
+  }, []);
   const extensions = useMemo(() => [
     history(),
     keymap.of([...defaultKeymap, ...historyKeymap]),
     markdown({ base: markdownLanguage }),
     EditorView.lineWrapping,
     mdTheme,
-    inlineEditExt
-  ], [mdTheme, inlineEditExt]);
+    inlineEditExt,
+    liveEditDiffExt
+  ], [mdTheme, inlineEditExt, liveEditDiffExt]);
 
   const { setEditorState } = useEditor();
   const [fmOpen, setFmOpen] = useState(false);
@@ -320,6 +336,21 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
 
   // Removed floating Accept listener; no longer needed
 
+  // Global test listener for editorOperationsLive (temporary debug)
+  useEffect(() => {
+    const globalTestListener = (e) => {
+      console.log('🔍 GLOBAL TEST: editorOperationsLive event received:', {
+        type: e.type,
+        detail: e.detail,
+        operationsCount: e.detail?.operations?.length
+      });
+    };
+    window.addEventListener('editorOperationsLive', globalTestListener);
+    return () => {
+      window.removeEventListener('editorOperationsLive', globalTestListener);
+    };
+  }, []);
+
   // ROOSEVELT'S EDITOR OPS APPLY: Listen for editor operations and apply to content with optimistic concurrency
   useEffect(() => {
     // Simple undo stack for apply batches
@@ -394,6 +425,47 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
       }
     }
     window.addEventListener('codexApplyEditorOps', applyOperations);
+    
+    // Handle live edit acceptance (single operation from inline diff)
+    function handleLiveEditAccepted(e) {
+      try {
+        const { operationId, operation } = e.detail || {};
+        if (!operation) return;
+        
+        // Apply the single operation
+        const current = (value || '').replace(/\r\n/g, '\n');
+        window.__pushEditorUndo(current);
+        
+        const ops = [operation];
+        applyOperations({ detail: { operations: ops } });
+        
+        // Remove from pending diffs
+        window.dispatchEvent(new CustomEvent('removeLiveDiff', { 
+          detail: { operationId } 
+        }));
+      } catch (err) {
+        console.error('Failed to handle live edit acceptance:', err);
+      }
+    }
+    
+    // Handle live edit rejection (just remove visualization)
+    function handleLiveEditRejected(e) {
+      try {
+        const { operationId } = e.detail || {};
+        if (!operationId) return;
+        
+        // Just remove visualization
+        window.dispatchEvent(new CustomEvent('removeLiveDiff', { 
+          detail: { operationId } 
+        }));
+      } catch (err) {
+        console.error('Failed to handle live edit rejection:', err);
+      }
+    }
+    
+    window.addEventListener('liveEditAccepted', handleLiveEditAccepted);
+    window.addEventListener('liveEditRejected', handleLiveEditRejected);
+    
     // Provide current editor content on request for diff previews
     function provideEditorContent() {
       try {
@@ -402,7 +474,12 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
       } catch {}
     }
     window.addEventListener('codexRequestEditorContent', provideEditorContent);
-    return () => window.removeEventListener('codexApplyEditorOps', applyOperations);
+    
+    return () => {
+      window.removeEventListener('codexApplyEditorOps', applyOperations);
+      window.removeEventListener('liveEditAccepted', handleLiveEditAccepted);
+      window.removeEventListener('liveEditRejected', handleLiveEditRejected);
+    };
   }, [value, onChange]);
 
   const applyFrontmatter = () => {
@@ -518,7 +595,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
         value={value}
         height="100%"
         basicSetup={true}
-        extensions={[...extensions, frontmatterHider, ...(ghostExt || []), inlineEditExt, EditorView.updateListener.of((update) => {
+        extensions={[...extensions, frontmatterHider, ...(ghostExt || []), EditorView.updateListener.of((update) => {
           try {
             if (!update.view) return;
             const sel = update.state.selection.main;
@@ -554,7 +631,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
         })]}
         onChange={(val) => onChange && onChange(val)}
         style={{ height: '60vh' }}
-      />), [value, filename, canonicalPath, extensions, frontmatterHider, ghostExt, setEditorState])}
+      />), [value, filename, canonicalPath, extensions, frontmatterHider, ghostExt, liveEditDiffExt, setEditorState])}
       {/* Removed floating Accept/Dismiss UI */}
       {/* Undo bar */}
       <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 1 }}>

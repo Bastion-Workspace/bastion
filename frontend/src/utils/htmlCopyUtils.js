@@ -202,10 +202,12 @@ export const markdownToHtml = (markdown) => {
 
 /**
  * Copy content as both HTML and plain text for maximum compatibility
+ * Plain text preserves raw markdown syntax for markdown editors
  */
 export const copyAsRichText = async (markdown) => {
   try {
-    const plainText = markdownToPlainText(markdown);
+    // Keep raw markdown for plain text (for markdown editors)
+    const plainText = markdown;
     const htmlContent = markdownToHtml(markdown);
     
     // Use modern Clipboard API with multiple formats

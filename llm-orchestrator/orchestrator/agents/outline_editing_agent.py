@@ -246,13 +246,46 @@ def _resolve_operation_simple(
     if anchor_text and op_type == "insert_after_heading":
         pos = outline.find(anchor_text)
         if pos != -1:
-            # Find end of line/paragraph
-            end_pos = outline.find("\n", pos)
-            if end_pos == -1:
-                end_pos = len(outline)
+            # For chapter headings, find the end of the entire chapter (not just the heading line)
+            # Look for the next chapter heading or end of document
+            if anchor_text.startswith("## Chapter"):
+                # Find end of this chapter by looking for next chapter heading
+                next_chapter_pattern = re.compile(r"\n##\s+Chapter\s+\d+", re.MULTILINE)
+                match = next_chapter_pattern.search(outline, pos + len(anchor_text))
+                if match:
+                    # Insert before the next chapter
+                    end_pos = match.start()
+                else:
+                    # This is the last chapter, insert at end of document
+                    end_pos = len(outline)
             else:
-                end_pos += 1
+                # For non-chapter headings, just find end of line/paragraph
+                end_pos = outline.find("\n", pos)
+                if end_pos == -1:
+                    end_pos = len(outline)
+                else:
+                    end_pos += 1
             return end_pos, end_pos, text, 0.9
+        else:
+            # Anchor text not found - check if it's a heading pattern
+            # If anchor_text looks like a heading (starts with #), create the section
+            heading_match = re.match(r'^(#{1,6})\s+(.+)$', anchor_text.strip())
+            if heading_match:
+                # This is a heading that doesn't exist - insert at end of document
+                # Prepend the heading to the text so the section gets created
+                heading_level = heading_match.group(1)
+                heading_text = heading_match.group(2)
+                section_header = f"\n\n{heading_level} {heading_text}\n\n"
+                # Ensure text starts with section header if it doesn't already
+                if not text.strip().startswith(heading_level):
+                    text = section_header + text
+                else:
+                    # Text already has header, just ensure proper spacing
+                    if not text.startswith("\n"):
+                        text = "\n\n" + text
+                # Insert at end of document (after frontmatter)
+                end_pos = len(outline)
+                return end_pos, end_pos, text, 0.7
     
     # Strategy 3: Left + right context
     if left_context and right_context:
@@ -264,6 +297,9 @@ def _resolve_operation_simple(
     # Fallback: use approximate positions from op_dict
     start = op_dict.get("start", 0)
     end = op_dict.get("end", 0)
+    # Guard frontmatter: ensure operations never occur before frontmatter end
+    start = max(start, frontmatter_end)
+    end = max(end, start)
     return start, end, text, 0.5
 
 
@@ -317,6 +353,8 @@ class OutlineEditingState(TypedDict):
     has_notes: bool
     has_characters: bool
     has_outline_section: bool
+    # NEW: Content routing plan
+    routing_plan: Optional[Dict[str, Any]]  # Structured routing plan from analysis
 
 
 # ============================================
@@ -346,6 +384,7 @@ class OutlineEditingAgent(BaseAgent):
         workflow.add_node("load_references", self._load_references_node)
         workflow.add_node("analyze_mode", self._analyze_mode_node)
         workflow.add_node("analyze_outline_structure", self._analyze_outline_structure_node)
+        workflow.add_node("analyze_and_route_request", self._analyze_and_route_request_node)
         workflow.add_node("generate_edit_plan", self._generate_edit_plan_node)
         workflow.add_node("resolve_operations", self._resolve_operations_node)
         workflow.add_node("format_response", self._format_response_node)
@@ -353,11 +392,12 @@ class OutlineEditingAgent(BaseAgent):
         # Entry point
         workflow.set_entry_point("prepare_context")
         
-        # Flow: prepare_context -> load_references -> analyze_mode -> analyze_outline_structure -> generate_edit_plan -> resolve_operations -> format_response -> END
+        # Flow: prepare_context -> load_references -> analyze_mode -> analyze_outline_structure -> analyze_and_route_request -> generate_edit_plan -> resolve_operations -> format_response -> END
         workflow.add_edge("prepare_context", "load_references")
         workflow.add_edge("load_references", "analyze_mode")
         workflow.add_edge("analyze_mode", "analyze_outline_structure")
-        workflow.add_edge("analyze_outline_structure", "generate_edit_plan")
+        workflow.add_edge("analyze_outline_structure", "analyze_and_route_request")
+        workflow.add_edge("analyze_and_route_request", "generate_edit_plan")
         workflow.add_edge("generate_edit_plan", "resolve_operations")
         workflow.add_edge("resolve_operations", "format_response")
         workflow.add_edge("format_response", END)
@@ -369,123 +409,113 @@ class OutlineEditingAgent(BaseAgent):
         
         # Base prompt (always included)
         base_prompt = (
-            "You are an Outline Development Assistant for type: outline files. Persona disabled."
-            " Preserve frontmatter; operate on Markdown body only.\n\n"
-            "BEST EFFORT DOCTRINE:\n"
-            "ALWAYS provide outline content - never leave the user empty-handed!\n\n"
-            "OPERATIONAL STRATEGY:\n"
-            "1. **ALWAYS create content** based on available information\n"
-            "2. **Make reasonable inferences** from existing context\n"
-            "3. **ONLY skip clarification** when you're highly confident (>0.85)\n"
-            "4. **Ask questions SPARINGLY** - only for truly critical gaps\n\n"
-            "WHEN TO REQUEST CLARIFICATION (ONLY CRITICAL GAPS):\n"
-            "✅ Ask when:\n"
-            "- User request is genuinely ambiguous with multiple valid interpretations\n"
-            "- A critical plot element contradicts established rules/characters\n"
-            "- Creating the wrong content would be worse than asking\n\n"
-            "❌ DO NOT ask when:\n"
-            "- You can make reasonable inferences from context\n"
-            "- Existing chapters/rules/characters provide guidance\n"
-            "- User request is clear enough for basic implementation\n"
-            "- You can create placeholder structure that's useful\n\n"
-            "STRUCTURED OUTPUT OPTIONS:\n\n"
-            "OPTION 1 - OutlineClarificationRequest (RARE - only for critical ambiguity):\n"
-            "{\n"
-            '  "task_status": "incomplete",\n'
-            '  "clarification_needed": true,\n'
-            '  "questions": ["Critical question that blocks progress?"],\n'
-            '  "context": "Why this blocks content creation",\n'
-            '  "missing_elements": ["critical_element"],\n'
-            '  "suggested_direction": "Optional suggestion",\n'
-            '  "section_affected": "Chapter 3",\n'
-            '  "confidence_without_clarification": 0.3\n'
-            "}\n"
-            "⚠️ USE THIS SPARINGLY - Only when creating content would be genuinely harmful!\n\n"
-            "OPTION 2 - ManuscriptEdit (DEFAULT - use >90% of the time):\n"
-            "{\n"
-            '  "type": "ManuscriptEdit",\n'
-            '  "target_filename": string,\n'
-            '  "scope": one of ["paragraph", "chapter", "multi_chapter"],\n'
-            '  "summary": string,\n'
-            '  "chapter_index": integer|null,\n'
-            '  "safety": one of ["low", "medium", "high"],\n'
-            '  "operations": [\n'
-            "    {\n"
-            '      "op_type": one of ["replace_range", "delete_range", "insert_after_heading"],\n'
-            '      "start": integer (approximate),\n'
-            '      "end": integer (approximate),\n'
-            '      "text": string,\n'
-            '      "original_text": string (REQUIRED for replace/delete, optional for insert - EXACT verbatim text from file),\n'
-            '      "anchor_text": string (optional - for inserts, exact line to insert after),\n'
-            '      "left_context": string (optional - text before target),\n'
-            '      "right_context": string (optional - text after target),\n'
-            '      "occurrence_index": integer (optional, default 0 if text appears multiple times)\n'
-            "    }\n"
-            "  ]\n"
-            "}\n\n"
-            "OUTPUT RULES:\n"
-            "- Output MUST be a single JSON object only.\n"
-            "- Do NOT include triple backticks or language tags.\n"
-            "- Do NOT include explanatory text before or after the JSON.\n\n"
-            "STRICT OUTLINE SCAFFOLD:\n"
+            "You are an Outline Development Assistant. Generate outlines based on user requests.\n\n"
+            "🎯 CORE PRINCIPLE: USER'S REQUEST IS PRIMARY\n"
+            "Generate what the user asks for. References (style/rules/characters) are consistency guidelines, not content sources.\n\n"
+            "OUTLINE STRUCTURE:\n"
             "# Overall Synopsis\n"
             "# Notes\n"
             "# Characters\n"
-            "- Protagonists\n"
-            "- Antagonists\n"
-            "- Supporting Characters\n"
+            "  - Protagonists: Name - Role\n"
+            "  - Antagonists: Name - Role\n"
+            "  - Supporting Characters: Name - Role\n"
             "# Outline\n"
             "## Chapter 1\n"
-            "## Chapter 2\n"
-            "... (continue numerically)\n\n"
-            "CHARACTER LIST FORMAT:\n"
-            "- Protagonists\n  - Name - Brief role\n"
-            "- Antagonists\n  - Name - Brief role\n"
-            "- Supporting Characters\n  - Name - Brief role\n\n"
-            "CHAPTER CONTENT RULES:\n"
-            "- Start with a 3-5 sentence summary paragraph.\n"
-            "- Follow with main beats as '-' bullets; each may have up to two '  -' sub-bullets.\n"
-            "- Max 8-10 main beats per chapter.\n"
-            "- Focus on plot events, actions, reveals, conflicts; avoid prose/dialogue.\n"
-            "- Use exact '## Chapter N' headings; never titles.\n\n"
-            "EDIT RULES:\n"
-            "1) Make surgical edits near cursor/selection unless re-organization is requested.\n"
-            "2) Maintain scaffold; if missing, create only requested sections.\n"
-            "3) Enforce universe consistency against directly referenced Rules and Characters; match Style.\n"
-            "4) NO PLACEHOLDER FILLERS: If a requested section has no content yet, create the heading only and leave the body blank. Do NOT insert placeholders like '[To be developed]' or 'TBD'.\n\n"
-            "ANCHOR REQUIREMENTS (CRITICAL):\n"
-            "For EVERY operation, you MUST provide precise anchors:\n\n"
-            "REVISE/DELETE Operations:\n"
-            "- ALWAYS include 'original_text' with EXACT, VERBATIM text from the file\n"
-            "- Minimum 10-20 words, include complete sentences with natural boundaries\n"
-            "- Copy and paste directly - do NOT retype or modify\n"
-            "- ⚠️ NEVER include header lines (###, ##, #) in original_text!\n"
-            "- OR provide both 'left_context' and 'right_context' (exact surrounding text)\n\n"
-            "INSERT Operations (PREFERRED for adding content below headers!):\n"
-            "- **PRIMARY METHOD**: Use op_type='insert_after_heading' with anchor_text='## Chapter N' when adding content below ANY header\n"
-            "- Provide 'anchor_text' with EXACT, COMPLETE header line to insert after (verbatim from file)\n"
-            "- This is the SAFEST method - it NEVER deletes headers, always inserts AFTER them\n"
-            "- Use this for adding chapter summaries, beats, or any content below headers\n"
-            "- ALTERNATIVE: Provide 'original_text' with text to insert after\n"
-            "- FALLBACK: Provide 'left_context' with text before insertion point (minimum 10-20 words)\n\n"
-            "Additional Options:\n"
-            "- 'occurrence_index' if text appears multiple times (0-based, default 0)\n"
-            "- Start/end indices are approximate; anchors take precedence\n\n"
-            "=== DECISION TREE FOR OPERATION TYPE ===\n"
-            "1. Chapter/section is COMPLETELY EMPTY? → insert_after_heading with anchor_text=\"## Chapter N\"\n"
-            "2. Chapter has PLACEHOLDER or existing content to replace? → replace_range (NO headers in original_text!)\n"
-            "3. Deleting SPECIFIC content? → delete_range with original_text (NO headers!)\n\n"
-            "⚠️ CRITICAL: When replacing placeholder content, use 'replace_range' on ONLY the placeholder!\n"
-            "⚠️ NEVER include headers in 'original_text' for replace_range - headers will be deleted!\n"
-            "✅ Correct: {\"op_type\": \"replace_range\", \"original_text\": \"[Placeholder beats]\", \"text\": \"- Beat 1\\n- Beat 2\"}\n"
-            "❌ Wrong: {\"op_type\": \"insert_after_heading\", \"anchor_text\": \"## Chapter 1\", \"text\": \"...\"} when placeholder exists!\n\n"
-            "=== SPACING RULES (CRITICAL - READ CAREFULLY!) ===\n"
-            "YOUR TEXT MUST END IMMEDIATELY AFTER THE LAST CHARACTER!\n\n"
-            '✅ CORRECT: "- Beat 1\\n- Beat 2\\n- Beat 3"  ← Ends after "3" with NO \\n\n'
-            '❌ WRONG: "- Beat 1\\n- Beat 2\\n"  ← Extra \\n after last line creates blank line!\n'
-            '❌ WRONG: "- Beat 1\\n- Beat 2\\n\\n"  ← \\n\\n creates 2 blank lines!\n'
-            '❌ WRONG: "- Beat 1\\n\\n- Beat 2"  ← Double \\n\\n between items creates blank line!\n\n'
-            "IRON-CLAD RULE: After last line = ZERO \\n (nothing!)\n"
+            "[3-5 sentence summary of chapter events]\n"
+            "- Specific plot event or story beat\n"
+            "- Another plot event or story beat\n"
+            "- Continue with bullet points of what happens in the chapter\n"
+            "(Typically 6-12 bullet points per chapter, but adjust based on chapter complexity)\n\n"
+            "**CONTENT ROUTING RULES (CRITICAL)**:\n"
+            "When the user provides information, you MUST route it to the appropriate section:\n\n"
+            "- **# Overall Synopsis** -> Story-wide summary (2-3 sentences about the entire story)\n"
+            "  - Overall plot summary\n"
+            "  - Main story arc description\n"
+            "  - High-level story premise\n\n"
+            "- **# Notes** -> Story-wide rules, themes, and constraints that apply to the ENTIRE story\n"
+            "  - Universe rules and constraints (magic systems, world-building rules, etc.)\n"
+            "  - Themes and motifs that run throughout the story\n"
+            "  - Tone and mood guidelines for the entire work\n"
+            "  - Writing techniques and stylistic approaches\n"
+            "  - Symbols and recurring elements\n"
+            "  - Genre considerations and conventions\n"
+            "  - Any information that applies broadly to ALL chapters, not just one\n\n"
+            "- **# Characters** -> Character information (protagonists, antagonists, supporting)\n"
+            "  - Character names and roles\n"
+            "  - Character relationships\n"
+            "  - Character overviews (detailed profiles go in character reference files)\n\n"
+            "- **## Chapter N** -> Chapter-specific plot events and beats\n"
+            "  - Specific plot events that happen in THIS chapter\n"
+            "  - Character actions within a specific chapter\n"
+            "  - Chapter-specific conflicts and resolutions\n"
+            "  - Scene-by-scene beats for the chapter\n\n"
+            "**ROUTING DECISION LOGIC**:\n"
+            "- If information applies to the ENTIRE story (rules, themes, universe constraints) -> # Notes\n"
+            "- If information is a high-level story summary -> # Overall Synopsis\n"
+            "- If information describes what happens in a SPECIFIC chapter -> ## Chapter N\n"
+            "- If information is about characters (who they are, their roles) -> # Characters\n"
+            "- When in doubt: Story-wide information goes in Notes, chapter-specific events go in Chapters\n\n"
+            "**REVISION CAPABILITIES**:\n"
+            "- You CAN and SHOULD edit existing sections (Notes, Synopsis, Characters, Chapters)\n"
+            "- Use 'replace_range' operations when user wants to change/replace existing content\n"
+            "- Use 'insert_after_heading' to ADD new content to existing sections (preserves all existing content)\n"
+            "- **CRITICAL FOR CHAPTERS**: When user wants to ADD to a chapter (not replace), use 'insert_after_heading'\n"
+            "  - Find the last bullet point in the chapter and insert new bullets after it\n"
+            "  - Or insert after the chapter heading if the chapter only has a summary\n"
+            "  - **NEVER regenerate the entire chapter** when adding - preserve all existing beats\n"
+            "- **GRANULAR CORRECTIONS**: When user corrects a specific word/phrase (e.g., 'boat not canoe')\n"
+            "  - Find the specific bullet point or sentence containing the word/phrase in the CURRENT OUTLINE\n"
+            "  - Use 'replace_range' with original_text = the FULL bullet point/sentence (20+ words for uniqueness)\n"
+            "  - Set content = same text with ONLY the specific word/phrase changed\n"
+            "  - Example: original_text: '- Character escapes in a canoe across the river'\n"
+            "    content: '- Character escapes in a boat across the river'\n"
+            "  - **DO NOT replace the entire chapter** - only replace the specific bullet point\n"
+            "- Always check if a section exists before creating new content - update existing sections when appropriate\n\n"
+            "**ROUTING PLAN USAGE (CRITICAL)**:\n"
+            "- You will receive a routing plan that identifies ALL distinct pieces of information from the user's request\n"
+            "- The routing plan specifies which section each piece belongs to and what operation type to use\n"
+            "- You MUST generate operations for EVERY piece in the routing plan - do not skip any\n"
+            "- Use the routing plan's target_section, anchor_text, and operation_type for each operation\n"
+            "- If the routing plan indicates structural changes (character role changes, etc.), handle them appropriately\n\n"
+            "CHAPTER RULES:\n"
+            "- Every chapter needs a summary paragraph (3-5 sentences) followed by bullet points of plot events\n"
+            "- Use simple bullet points (just '- ') - no need for 'Beat 1:', 'Beat 2:' labels\n"
+            "- Focus on plot events, character actions, and story progression - not prose or dialogue\n"
+            "- Typically 6-12 bullet points per chapter (adjust based on chapter complexity and pacing needs)\n"
+            "- Use '## Chapter N' format (numbers only, no titles)\n"
+            "- NO empty chapters or placeholder text\n\n"
+            "**CHAPTER COUNT RESPECT (CRITICAL)**:\n"
+            "- **ALWAYS respect the exact number of chapters requested by the user**\n"
+            "- If user asks for \"1 chapter\" or \"Chapter 1\", generate ONLY 1 chapter - do NOT continue the story beyond what's requested\n"
+            "- If user asks for \"2 chapters\" and provides material for 2 chapters, generate exactly 2 chapters\n"
+            "- If user asks for \"chapters 3-5\", generate exactly those 3 chapters (3, 4, and 5)\n"
+            "- **DO NOT carry the story forward beyond what's requested** - stop at the exact number of chapters requested\n"
+            "- If user provides material that could span multiple chapters but only asks for 1 chapter, generate only 1 chapter with the most relevant content\n"
+            "- If user provides material for 2 chapters and asks for 2 chapters, generate exactly 2 chapters\n"
+            "- When in doubt, generate the minimum number of chapters that satisfies the request - do not add extra chapters\n\n"
+            "OUTPUT FORMAT - ManuscriptEdit JSON:\n"
+            "{\n"
+            '  "type": "ManuscriptEdit",\n'
+            '  "target_filename": "filename.md",\n'
+            '  "scope": "paragraph|chapter|multi_chapter",\n'
+            '  "summary": "brief description",\n'
+            '  "operations": [\n'
+            "    {\n"
+            '      "op_type": "replace_range|delete_range|insert_after_heading",\n'
+            '      "start": 0,\n'
+            '      "end": 0,\n'
+            '      "text": "content to insert/replace",\n'
+            '      "original_text": "exact text from file (for replace/delete)",\n'
+            '      "anchor_text": "exact header line (for insert_after_heading)"\n'
+            "    }\n"
+            "  ]\n"
+            "}\n\n"
+            "ANCHORING (CRITICAL):\n"
+            "- For replace/delete: Include 'original_text' with EXACT text from file (20+ words)\n"
+            "- For insert after header: Use 'anchor_text' with exact header line (e.g., '## Chapter 1')\n"
+            "- Never include headers in 'original_text' for replace operations\n"
+            "- Text should end immediately after last character (no trailing newlines)\n\n"
+            "Output raw JSON only (no markdown fences, no explanatory text).\n"
         )
         
         # If no state provided, return base prompt
@@ -516,44 +546,14 @@ class OutlineEditingAgent(BaseAgent):
             sections.append("\n\n=== OUTLINE STRUCTURE STATUS ===\n")
             sections.append(structure_guidance)
         
-        # Add reference-specific instructions
-        has_style = available_references.get("style", False)
-        has_rules = available_references.get("rules", False)
-        has_characters = available_references.get("characters", False)
-        
-        if has_style and not has_rules and not has_characters:
+        # Add brief reference guidance if references are available
+        has_any_refs = any(available_references.values())
+        if has_any_refs:
+            ref_types = [k for k, v in available_references.items() if v]
             sections.append(
-                "\n\n=== REFERENCE-SPECIFIC INSTRUCTIONS ===\n"
-                "You have ONLY a style guide available:\n"
-                "- Match narrative voice and writing style from the style guide\n"
-                "- Create original universe rules and character profiles as needed\n"
-                "- Use style guide to inform tone, pacing, and narrative approach\n"
-            )
-        elif has_rules and not has_style and not has_characters:
-            sections.append(
-                "\n\n=== REFERENCE-SPECIFIC INSTRUCTIONS ===\n"
-                "You have ONLY universe rules available:\n"
-                "- Respect all universe constraints and rules strictly\n"
-                "- Develop appropriate narrative style that fits the universe\n"
-                "- Create character profiles that work within the established rules\n"
-            )
-        elif has_style and has_rules and not has_characters:
-            sections.append(
-                "\n\n=== REFERENCE-SPECIFIC INSTRUCTIONS ===\n"
-                "You have style guide and universe rules:\n"
-                "- Maintain consistent universe with both style and rules\n"
-                "- Develop character profiles that fit the established universe\n"
-                "- Ensure narrative voice matches style guide\n"
-            )
-        elif has_style and has_rules and has_characters:
-            sections.append(
-                "\n\n=== REFERENCE-SPECIFIC INSTRUCTIONS ===\n"
-                "You have COMPLETE reference set (style, rules, characters):\n"
-                "- Full consistency validation required across all references\n"
-                "- All plot points must respect universe rules\n"
-                "- All character actions must match established profiles\n"
-                "- Narrative style must align with style guide\n"
-                "- Flag ANY inconsistencies immediately\n"
+                f"\n\n=== REFERENCES AVAILABLE ===\n"
+                f"You have: {', '.join(ref_types)}\n"
+                f"Use these as consistency guidelines within the user's requested story.\n"
             )
         
         return "".join(sections)
@@ -608,7 +608,8 @@ class OutlineEditingAgent(BaseAgent):
                     current_request = latest_message.content if hasattr(latest_message, 'content') else str(latest_message)
                 else:
                     current_request = state.get("query", "")
-            except Exception:
+            except Exception as e:
+                logger.error(f"Failed to extract user request: {e}")
                 current_request = ""
             
             # Get paragraph bounds
@@ -783,53 +784,17 @@ class OutlineEditingAgent(BaseAgent):
             
             if creative_freedom_requested:
                 generation_mode = "freehand"
-                mode_guidance = (
-                    "USER REQUESTED CREATIVE FREEDOM - Prioritize creativity and new ideas.\n"
-                    "References are available for consistency checks but DO NOT constrain your imagination.\n"
-                    "Feel free to suggest bold new directions, character arcs, or plot twists.\n"
-                    "Focus on compelling narrative structure and original storytelling.\n"
-                )
+                mode_guidance = "CREATIVE FREEDOM MODE - Full creative latitude. References available for optional consistency checks."
             elif has_any_refs and ref_count == 3:
                 generation_mode = "fully_referenced"
-                mode_guidance = (
-                    "FULLY REFERENCED MODE - You have complete universe context.\n"
-                    "STRICT CONSISTENCY REQUIRED:\n"
-                    "- ALL plot points must respect universe rules\n"
-                    "- ALL character actions must match established profiles\n"
-                    "- Narrative style must align with style guide\n"
-                    "- Flag ANY inconsistencies rather than proceeding\n"
-                    "- Use references to ensure continuity and coherence\n"
-                )
+                mode_guidance = "FULLY REFERENCED - Complete universe context available. Use as guidelines, user's request is primary."
             elif has_any_refs:
                 generation_mode = "partial_references"
                 refs_available = [k for k, v in available_references.items() if v]
-                mode_guidance = (
-                    f"PARTIAL REFERENCES MODE - Available references: {', '.join(refs_available)}\n"
-                    "Balance creativity with consistency:\n"
-                    "- Follow available references strictly where they exist\n"
-                    "- Use reasonable creativity for missing context\n"
-                    "- Flag conflicts with available references\n"
-                    "- Develop appropriate elements where references are missing\n"
-                )
-                
-                # Add specific guidance based on what's available
-                if has_style and not has_rules and not has_characters:
-                    mode_guidance += "\n- Match narrative voice from style guide\n- Create original universe and characters\n"
-                elif has_rules and not has_style and not has_characters:
-                    mode_guidance += "\n- Respect universe constraints from rules\n- Develop appropriate narrative style\n"
-                elif has_style and has_rules and not has_characters:
-                    mode_guidance += "\n- Consistent universe with style and rules\n- Develop character profiles as needed\n"
+                mode_guidance = f"PARTIAL REFERENCES - Available: {', '.join(refs_available)}. Fill gaps with creativity."
             else:
                 generation_mode = "freehand"
-                mode_guidance = (
-                    "FREEHAND MODE - No references available.\n"
-                    "Full creative freedom to develop original story structure.\n"
-                    "Focus on:\n"
-                    "- Compelling narrative arc and character development\n"
-                    "- Clear plot progression and story beats\n"
-                    "- Engaging conflict and resolution\n"
-                    "- Original and creative storytelling\n"
-                )
+                mode_guidance = "FREEHAND MODE - No references. Full creative freedom based on user's request."
             
             # Build reference summary
             ref_parts = []
@@ -913,17 +878,29 @@ class OutlineEditingAgent(BaseAgent):
                     if chapter_nums != expected:
                         structure_warnings.append(f"Chapter numbering is non-sequential: {chapter_nums}")
             
-            # Generate structure-specific guidance
+            # Generate structure-specific guidance with section availability
+            section_list = []
+            if has_synopsis:
+                section_list.append("Overall Synopsis (can edit)")
+            if has_notes:
+                section_list.append("Notes (can edit)")
+            if has_characters:
+                section_list.append("Characters (can edit)")
+            if has_outline:
+                section_list.append("Outline")
+            if chapter_count > 0:
+                section_list.append(f"{chapter_count} chapter(s) (can edit)")
+            
+            sections_available = ", ".join(section_list) if section_list else "No sections yet"
+            
             if completeness_score < 0.25:
-                structure_guidance = "OUTLINE IS EMPTY OR VERY INCOMPLETE - Focus on establishing core structure first:\n- Create Overall Synopsis\n- Add Notes section\n- Define Characters\n- Set up Outline section with initial chapters"
-            elif completeness_score < 0.5:
-                structure_guidance = "OUTLINE IS INCOMPLETE - Complete missing sections before expanding:\n- Ensure all core sections exist\n- Fill in basic content for each section\n- Then proceed with detailed development"
+                structure_guidance = f"Outline {completeness_score:.0%} complete ({sections_present}/4 sections). Available sections: {sections_available}. Build full structure or edit existing sections."
             elif completeness_score < 0.75:
-                structure_guidance = "OUTLINE IS PARTIALLY COMPLETE - Continue developing existing sections:\n- Expand incomplete sections\n- Add more detail to existing content\n- Ensure all sections have meaningful content"
+                structure_guidance = f"Outline {completeness_score:.0%} complete. Available sections: {sections_available}. Continue developing or edit existing sections."
             elif structure_warnings:
-                structure_guidance = f"OUTLINE STRUCTURE HAS ISSUES - Address these first:\n{'; '.join(structure_warnings)}\nThen proceed with requested edits."
+                structure_guidance = f"Available sections: {sections_available}. Issues: {'; '.join(structure_warnings[:2])}"  # Limit to 2
             else:
-                structure_guidance = "OUTLINE STRUCTURE IS SOLID - Proceed with requested edits and improvements."
+                structure_guidance = f"Structure complete. Available sections: {sections_available}. You can edit any existing section."
             
             logger.info(f"Outline completeness: {completeness_score:.0%} ({sections_present}/4 sections)")
             logger.info(f"Chapter count: {chapter_count}")
@@ -956,6 +933,240 @@ class OutlineEditingAgent(BaseAgent):
                 "has_outline_section": False
             }
     
+    def _build_content_routing_prompt(self, state: OutlineEditingState) -> str:
+        """Build prompt for content analysis and routing"""
+        current_request = state.get("current_request", "")
+        body_only = state.get("body_only", "")
+        has_synopsis = state.get("has_synopsis", False)
+        has_notes = state.get("has_notes", False)
+        has_characters = state.get("has_characters", False)
+        chapter_count = state.get("chapter_count", 0)
+        structure_guidance = state.get("structure_guidance", "")
+        
+        # Build section availability context
+        sections_available = []
+        if has_synopsis:
+            sections_available.append("# Overall Synopsis")
+        if has_notes:
+            sections_available.append("# Notes")
+        if has_characters:
+            sections_available.append("# Characters")
+        if chapter_count > 0:
+            sections_available.append(f"## Chapter 1-{chapter_count}")
+        
+        sections_text = ", ".join(sections_available) if sections_available else "No sections exist yet"
+        
+        prompt = f"""**YOUR TASK**: Analyze the user's request and create a routing plan for ALL content pieces.
+
+**USER REQUEST**:
+{current_request}
+
+**CURRENT OUTLINE STRUCTURE**:
+{structure_guidance}
+Available sections: {sections_text}
+
+**CURRENT OUTLINE CONTENT** (for reference):
+{body_only[:2000] if body_only else "Empty outline"}
+
+**MULTI-PART DETECTION (CRITICAL)**:
+- User may provide multiple types of information in one message
+- Each piece may belong in a different outline section
+- You MUST identify and route ALL pieces - missing any piece is a failure
+- Examples of multi-part requests:
+  * "Add character John as antagonist. Universe rule: time travel is impossible" → 2 pieces (character + rule)
+  * "Chapter 2 needs action scene. Also add theme about redemption to the overall story" → 2 pieces (chapter beat + theme)
+  * "Sarah should become the main protagonist instead of supporting character" → 1 piece (structural change)
+
+**ROUTING RULES**:
+- Character info → # Characters (detect if role change: supporting → protagonist)
+- Universe-wide rules/themes → # Notes
+- Story summary → # Overall Synopsis
+- Chapter-specific events → ## Chapter N
+- When in doubt: story-wide goes to Notes, specific events to Chapters
+
+**STRUCTURAL CHANGE DETECTION (CRITICAL)**:
+- "X becomes the protagonist" → Move X from supporting to protagonists (is_structural_change: true)
+- "This applies to all chapters" → Route to # Notes, not a specific chapter
+- "Move character X from Y to Z" → Update character categorization (is_structural_change: true)
+- "X should be more prominent" → May indicate protagonist reclassification (is_structural_change: true)
+- "X is now the main character" → Move to protagonists (is_structural_change: true)
+
+**ADDITION vs REPLACEMENT vs NEW CHAPTER DETECTION (CRITICAL)**:
+- **CREATING NEW CHAPTER**: User says "create", "add chapter", "chapter N", "outline for chapter N" where N doesn't exist yet
+  - Check CURRENT OUTLINE CONTENT above - if the chapter heading (e.g., "## Chapter 6") does NOT exist, this is a NEW chapter
+  - For NEW chapters: operation_type: "insert_after_heading"
+  - **CRITICAL**: Find the LAST LINE of the LAST existing chapter in CURRENT OUTLINE CONTENT above
+  - Set anchor_text to that LAST LINE (could be a bullet point, summary sentence, or chapter heading)
+  - Include the new chapter heading "## Chapter N" in the content itself
+  - Example: If creating Chapter 6 and last chapter is Chapter 5, find the last line of Chapter 5:
+    * If last line is "- Character reaches the destination", then anchor_text: "- Character reaches the destination"
+    * content: "## Chapter 6\n\n[summary paragraph]\n\n- Beat 1\n- Beat 2\n..."
+  - **DO NOT** set anchor_text to the new chapter heading (it doesn't exist yet!)
+  - **The LLM can figure out the exact insertion point from the context**
+
+- **ADDING to existing chapter**: User says "add", "also", "include", "insert" for a chapter that EXISTS → Use "insert_after_heading" operation
+  - Example: "Add a scene where X happens to Chapter 2" → operation_type: "insert_after_heading", anchor_text: "## Chapter 2"
+  - Example: "Chapter 3 also needs a confrontation" → operation_type: "insert_after_heading", anchor_text: "## Chapter 3"
+  - **PRESERVE ALL EXISTING CONTENT** - only add new bullet points, don't regenerate the chapter
+  
+- **GRANULAR CORRECTIONS (SPECIFIC WORD/PHRASE REPLACEMENT)**: User says "not X", "should be Y not X", "change X to Y" → Use "replace_range" with specific original_text
+  - Example: "It should be a boat in chapter 2, not a canoe" → operation_type: "replace_range"
+    - Find the bullet point in Chapter 2 that mentions "canoe"
+    - Set original_text to the ENTIRE bullet point (or sentence) containing "canoe" with enough context (20+ words)
+    - Set content to the same text but with "canoe" replaced with "boat"
+    - Example original_text: "- Character escapes in a canoe across the river"
+    - Example content: "- Character escapes in a boat across the river"
+  - Example: "Chapter 1 should say 'betrayal' not 'mistake'" → Find text with "mistake", replace with "betrayal"
+  - **CRITICAL**: Include enough context in original_text (the full bullet point or sentence) so the system can find it uniquely
+  - **DO NOT replace the entire chapter** - only replace the specific bullet point or sentence containing the word/phrase
+  
+- **REPLACING larger chapter content**: User says "change", "replace", "instead of", "update" (without specific word) → Use "replace_range" operation
+  - Example: "Change Chapter 1 to focus on X instead of Y" → operation_type: "replace_range"
+  - Only use replace_range when user explicitly wants to change existing content
+
+- **DEFAULT for new content**: If chapter exists and user is adding (not replacing), ALWAYS use "insert_after_heading"
+  - Find the last bullet point in the chapter and insert after it
+  - Or insert after the chapter heading if chapter is empty
+
+**CONFLICT DETECTION**:
+- Check if character already exists in different role (e.g., in Supporting but should be in Protagonists)
+- Check if rule contradicts existing rule
+- Check if content overlaps with existing sections
+- Flag conflicts for replacement operations (operation_type: "replace_range")
+
+**OUTPUT FORMAT**: Return ONLY valid JSON:
+{{
+  "content_pieces": [
+    {{
+      "piece_type": "character_update|rule|synopsis|chapter_beat|structural_change",
+      "target_section": "# Characters|# Notes|# Overall Synopsis|## Chapter N",
+      "operation_type": "replace_range|insert_after_heading|delete_range",
+      "content": "The actual content to insert/update (markdown formatted)",
+      "anchor_text": "Exact heading or text to anchor to (e.g., '## Chapter 2' or '# Characters')",
+      "original_text": "For replace_range operations: the EXACT text from CURRENT OUTLINE to replace (20+ words for uniqueness). For granular corrections, include the full bullet point/sentence containing the word/phrase. Empty string for insert operations.",
+      "reasoning": "Why this routing decision was made",
+      "is_structural_change": false,
+      "conflicts_with": "Description of conflicting content if any, or empty string"
+    }}
+  ],
+  "completeness_check": "Verification that all parts of request are covered - list each piece identified"
+}}
+
+**CRITICAL INSTRUCTIONS**:
+1. Identify EVERY distinct piece of information in the user's request
+2. Route each piece to the appropriate section based on routing rules
+3. **DETECT ADDITION vs REPLACEMENT vs GRANULAR CORRECTION**:
+   - Keywords for ADDITION: "add", "also", "include", "insert", "and", "plus" → Use "insert_after_heading"
+   - Keywords for GRANULAR CORRECTION: "not X", "should be Y not X", "change X to Y", "instead of X" (with specific words) → Use "replace_range"
+     - Find the specific bullet point or sentence containing the word/phrase to replace
+     - Include the FULL bullet point (or sentence) in original_text (20+ words for uniqueness)
+     - Replace only the specific word/phrase in the content
+   - Keywords for REPLACEMENT: "change", "replace", "instead of", "update", "revise" (without specific words) → Use "replace_range"
+   - When in doubt for chapters: If chapter exists and user is adding content, use "insert_after_heading"
+4. Detect structural changes (character role changes, scope changes)
+5. Flag conflicts with existing content
+6. Generate content for each piece (markdown formatted)
+7. **For granular corrections**: 
+   - Read the CURRENT OUTLINE CONTENT above to find the exact text containing the word/phrase
+   - Set original_text to the full bullet point or sentence (not just the word)
+   - Set content to the same text with only the specific word/phrase changed
+   - Example: If user says "boat not canoe" and outline has "- Character escapes in a canoe across the river"
+     - original_text: "- Character escapes in a canoe across the river"
+     - content: "- Character escapes in a boat across the river"
+8. **For NEW chapters** (chapter doesn't exist yet):
+   - Check CURRENT OUTLINE CONTENT to verify the chapter heading doesn't exist
+   - Find the LAST LINE of the LAST existing chapter in CURRENT OUTLINE CONTENT
+   - Set anchor_text to that LAST LINE (the actual last line of text - could be a bullet point, summary sentence, etc.)
+   - Include the new chapter heading "## Chapter N" in the content itself
+   - Example: If last line of Chapter 5 is "- Character reaches the destination", then anchor_text: "- Character reaches the destination", content: "## Chapter 6\n\n[summary]\n\n- Beat 1..."
+   - **The LLM can figure out the exact insertion point from the context - use the actual last line, not a heading**
+9. **For chapter additions** (chapter exists): Set anchor_text to the chapter heading (e.g., "## Chapter 2") and note that content should be inserted after the last existing bullet point
+10. Verify completeness - ensure ALL parts of the request are covered
+
+Return ONLY the JSON object, no markdown, no code blocks."""
+        
+        return prompt
+    
+    async def _analyze_and_route_request_node(self, state: OutlineEditingState) -> Dict[str, Any]:
+        """Analyze user request and create routing plan for all content pieces"""
+        try:
+            logger.info("Analyzing and routing user request...")
+            
+            current_request = state.get("current_request", "")
+            if not current_request:
+                logger.warning("No current request found - skipping routing analysis")
+                return {
+                    "routing_plan": {
+                        "content_pieces": [],
+                        "completeness_check": "No user request provided"
+                    }
+                }
+            
+            # Build routing prompt
+            routing_prompt = self._build_content_routing_prompt(state)
+            
+            # Include conversation history for context (standardized 6-message look-back)
+            messages_list = state.get("messages", [])
+            conversation_history = self._format_conversation_history_for_prompt(messages_list, look_back_limit=6, max_message_length=300)
+            
+            # Call LLM with structured output
+            llm = self._get_llm(temperature=0.2, state=state)
+            
+            messages = [
+                SystemMessage(content="You are an outline content routing expert. Analyze user requests and route content pieces to appropriate outline sections."),
+                HumanMessage(content=conversation_history + routing_prompt)
+            ]
+            
+            # Parse JSON response (structured output requires Pydantic model, so we use JSON parsing)
+            response = await llm.ainvoke(messages)
+            content = response.content if hasattr(response, 'content') else str(response)
+            content = _unwrap_json_response(content)
+            try:
+                routing_plan = json.loads(content)
+            except Exception as parse_error:
+                logger.error(f"Failed to parse routing plan: {parse_error}")
+                return {
+                    "routing_plan": {
+                        "content_pieces": [],
+                        "completeness_check": f"Error parsing routing plan: {str(parse_error)}"
+                    },
+                    "error": str(parse_error)
+                }
+            
+            # Validate routing plan structure
+            if not isinstance(routing_plan, dict):
+                routing_plan = {"content_pieces": [], "completeness_check": "Invalid routing plan format"}
+            if "content_pieces" not in routing_plan:
+                routing_plan["content_pieces"] = []
+            if "completeness_check" not in routing_plan:
+                routing_plan["completeness_check"] = "Completeness check not provided"
+            
+            piece_count = len(routing_plan.get("content_pieces", []))
+            logger.info(f"Routing plan created: {piece_count} content piece(s) identified")
+            
+            if piece_count > 0:
+                for i, piece in enumerate(routing_plan["content_pieces"]):
+                    piece_type = piece.get("piece_type", "unknown")
+                    target_section = piece.get("target_section", "unknown")
+                    is_structural = piece.get("is_structural_change", False)
+                    logger.info(f"  Piece {i+1}: {piece_type} → {target_section} (structural_change: {is_structural})")
+            
+            return {
+                "routing_plan": routing_plan
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to analyze and route request: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {
+                "routing_plan": {
+                    "content_pieces": [],
+                    "completeness_check": f"Error during routing analysis: {str(e)}"
+                },
+                "error": str(e)
+            }
+    
     async def _generate_edit_plan_node(self, state: OutlineEditingState) -> Dict[str, Any]:
         """Generate edit plan using LLM"""
         try:
@@ -980,44 +1191,122 @@ class OutlineEditingAgent(BaseAgent):
             structure_guidance = state.get("structure_guidance", "")
             reference_summary = state.get("reference_summary", "")
             
+            # Get routing plan from analysis node
+            routing_plan = state.get("routing_plan", {})
+            content_pieces = routing_plan.get("content_pieces", [])
+            completeness_check = routing_plan.get("completeness_check", "")
+            
             # Build dynamic system prompt
             system_prompt = self._build_system_prompt(state)
             
-            # Build context message
-            context_parts = [
-                "=== OUTLINE CONTEXT ===\n",
-                f"File: {filename}\n\n",
-                "Current Outline (frontmatter stripped):\n" + body_only + "\n\n"
-            ]
+            # Build context message - lean and focused
+            context_parts = []
             
-            # Add mode and structure context
+            # Include conversation history for context (standardized 6-message look-back)
+            messages = state.get("messages", [])
+            conversation_history = self._format_conversation_history_for_prompt(messages, look_back_limit=6)
+            if conversation_history:
+                context_parts.append(conversation_history)
+            
+            # User request first (brief but clear)
+            if current_request:
+                context_parts.append("=== CURRENT USER REQUEST ===\n")
+                context_parts.append(f"{current_request}\n\n")
+            else:
+                logger.error("current_request is empty - user's request will not be sent to LLM")
+            
+            # Routing plan (CRITICAL - use this to generate operations)
+            if content_pieces:
+                context_parts.append("=== ROUTING PLAN (CRITICAL) ===\n")
+                context_parts.append(f"Completeness check: {completeness_check}\n\n")
+                context_parts.append("You MUST generate operations for ALL content pieces listed below:\n\n")
+                for i, piece in enumerate(content_pieces, 1):
+                    piece_type = piece.get("piece_type", "unknown")
+                    target_section = piece.get("target_section", "unknown")
+                    operation_type = piece.get("operation_type", "replace_range")
+                    anchor_text = piece.get("anchor_text", "")
+                    is_structural = piece.get("is_structural_change", False)
+                    conflicts = piece.get("conflicts_with", "")
+                    reasoning = piece.get("reasoning", "")
+                    
+                    context_parts.append(f"**Content Piece {i}**:\n")
+                    context_parts.append(f"- Type: {piece_type}\n")
+                    context_parts.append(f"- Target Section: {target_section}\n")
+                    context_parts.append(f"- Operation Type: {operation_type}\n")
+                    context_parts.append(f"- Anchor Text: {anchor_text}\n")
+                    original_text = piece.get("original_text", "")
+                    if original_text:
+                        context_parts.append(f"- Original Text (to replace): {original_text[:200]}...\n")
+                    if is_structural:
+                        context_parts.append(f"- ⚠️ STRUCTURAL CHANGE: This is a structural change (e.g., character role change)\n")
+                    if conflicts:
+                        context_parts.append(f"- ⚠️ CONFLICT: {conflicts}\n")
+                    context_parts.append(f"- Reasoning: {reasoning}\n")
+                    context_parts.append(f"- Content to insert/update:\n{piece.get('content', '')}\n\n")
+                context_parts.append("**IMPORTANT**: Generate one operation for EACH content piece above. Do not skip any pieces.\n\n")
+            else:
+                logger.warning("No content pieces in routing plan - proceeding without routing guidance")
+            
+            # Current outline state
+            context_parts.append("=== CURRENT OUTLINE ===\n")
+            context_parts.append(f"File: {filename}\n")
             if mode_guidance:
-                context_parts.append(f"\n=== GENERATION MODE ===\n{mode_guidance}\n")
-            
+                context_parts.append(f"Mode: {mode_guidance}\n")
             if structure_guidance:
-                context_parts.append(f"\n=== OUTLINE STATUS ===\n{structure_guidance}\n")
+                context_parts.append(f"Status: {structure_guidance}\n")
+            context_parts.append("\n" + body_only + "\n\n")
             
-            if reference_summary:
-                context_parts.append(f"\n=== REFERENCE STATUS ===\n{reference_summary}\n")
-            
+            # References (if present, keep concise)
             if rules_body:
-                context_parts.append(f"=== RULES ===\n{rules_body}\n\n")
+                context_parts.append("=== UNIVERSE RULES ===\n")
+                context_parts.append(f"{rules_body}\n\n")
             
             if style_body:
-                context_parts.append(f"=== STYLE GUIDE ===\n{style_body}\n\n")
+                context_parts.append("=== STYLE GUIDE ===\n")
+                context_parts.append(f"{style_body}\n\n")
             
             if characters_bodies:
-                context_parts.append("".join([f"=== CHARACTER DOC ===\n{b}\n\n" for b in characters_bodies]))
+                context_parts.append("=== CHARACTER PROFILES ===\n")
+                context_parts.append("".join([f"{b}\n---\n" for b in characters_bodies]))
+                context_parts.append("\n")
             
             if clarification_context:
                 context_parts.append(clarification_context)
             
-            # Check for revision mode
-            revision_mode = current_request and any(k in current_request.lower() for k in ["revise", "revision", "tweak", "adjust", "polish", "tighten"])
-            if revision_mode:
-                context_parts.append("REVISION MODE: Apply minimal targeted edits; prefer bullet/paragraph-level replace_range ops.\n\n")
-            
-            context_parts.append("Provide a ManuscriptEdit JSON plan strictly within scope (or OutlineClarificationRequest if you need more information).")
+            # Final instruction
+            if content_pieces:
+                context_parts.append(f"Generate ManuscriptEdit JSON with operations for ALL {len(content_pieces)} content piece(s) from the routing plan above.\n")
+                context_parts.append("Use the routing plan's target_section, anchor_text, operation_type, and original_text (if provided) for each operation.\n")
+                context_parts.append("**CRITICAL**: If the routing plan provides original_text, you MUST use that EXACT text in the operation's original_text field.\n")
+                context_parts.append("\n**CRITICAL FOR CHAPTER OPERATIONS**:\n")
+                context_parts.append("**FOR NEW CHAPTERS** (chapter doesn't exist in CURRENT OUTLINE):\n")
+                context_parts.append("- Check CURRENT OUTLINE above - if the chapter heading (e.g., '## Chapter 6') does NOT exist, this is a NEW chapter\n")
+                context_parts.append("- For NEW chapters: Find the LAST LINE of the LAST existing chapter in CURRENT OUTLINE above\n")
+                context_parts.append("- Set anchor_text to that LAST LINE (the actual last line of text - could be a bullet point, summary sentence, etc.)\n")
+                context_parts.append("- **INCLUDE the new chapter heading in the content**: content should start with '## Chapter N' followed by summary and beats\n")
+                context_parts.append("- Example: If last line of Chapter 5 is '- Character reaches the destination', then:\n")
+                context_parts.append("  anchor_text: '- Character reaches the destination'\n")
+                context_parts.append("  content: '## Chapter 6\\n\\n[summary paragraph]\\n\\n- Beat 1\\n- Beat 2...'\n")
+                context_parts.append("- **DO NOT** set anchor_text to the new chapter heading (it doesn't exist yet!)\n")
+                context_parts.append("- **The LLM can figure out the exact insertion point from the context - use the actual last line**\n\n")
+                context_parts.append("**FOR EXISTING CHAPTERS** (chapter exists in CURRENT OUTLINE):\n")
+                context_parts.append("- If operation_type is 'insert_after_heading' for an existing chapter, find the LAST bullet point in that chapter\n")
+                context_parts.append("- Insert new content AFTER the last existing bullet point (preserves all existing content)\n")
+                context_parts.append("- If chapter only has summary paragraph, insert bullets after the summary\n")
+                context_parts.append("- **DO NOT replace the entire chapter** when adding - only insert new content\n")
+                context_parts.append("\n**FOR GRANULAR CORRECTIONS (replace_range with specific word changes)**:\n")
+                context_parts.append("- Read the CURRENT OUTLINE above to find the exact bullet point containing the word/phrase\n")
+                context_parts.append("- Set original_text to the FULL bullet point or sentence (20+ words for uniqueness)\n")
+                context_parts.append("- Set content to the same text with ONLY the specific word/phrase changed\n")
+                context_parts.append("- Example: If routing plan says to change 'canoe' to 'boat' in Chapter 2:\n")
+                context_parts.append("  * Find: '- Character escapes in a canoe across the river'\n")
+                context_parts.append("  * original_text: '- Character escapes in a canoe across the river'\n")
+                context_parts.append("  * content: '- Character escapes in a boat across the river'\n")
+                context_parts.append("- **DO NOT replace the entire chapter** - only replace the specific bullet point\n")
+            else:
+                context_parts.append("Generate ManuscriptEdit JSON for the user's request above.\n")
+            if current_request:
+                context_parts.append(f'User asked for: "{current_request[:100]}..."\n')
             
             messages = [
                 SystemMessage(content=system_prompt),
@@ -1025,23 +1314,16 @@ class OutlineEditingAgent(BaseAgent):
                 HumanMessage(content="".join(context_parts))
             ]
             
-            if current_request:
-                messages.append(HumanMessage(content=(
-                    f"USER REQUEST: {current_request}\n\n"
-                    "CRITICAL ANCHORING INSTRUCTIONS:\n"
-                    "- For REVISE/DELETE: Provide 'original_text' with EXACT, VERBATIM text from file (10-20+ words, complete sentences)\n"
-                    "- For INSERT: Provide 'anchor_text' or 'original_text' with exact line to insert after, OR 'left_context' with text before insertion\n"
-                    "- Copy text directly from the file - do NOT retype or paraphrase\n"
-                    "- Without precise anchors, the operation WILL FAIL"
-                )))
-            
-            # Call LLM
-            llm = self._get_llm(temperature=0.3)
+            # Call LLM - pass state to access user's model selection from metadata
+            llm = self._get_llm(temperature=0.3, state=state)
             start_time = datetime.now()
             response = await llm.ainvoke(messages)
             
             content = response.content if hasattr(response, 'content') else str(response)
             content = _unwrap_json_response(content)
+            
+            # Log the raw LLM response for debugging
+            logger.info(f"LLM generated edit plan (first 500 chars): {content[:500]}")
             
             # Try parsing as clarification request first (RARE)
             clarification_request = None
@@ -1110,11 +1392,18 @@ class OutlineEditingAgent(BaseAgent):
                         if op_type not in ("replace_range", "delete_range", "insert_after_heading"):
                             op_type = "replace_range"
                         
+                        op_text = op.get("text", "")
+                        # Log operation text for debugging
+                        if op_text:
+                            logger.info(f"Operation {len(ops)} text length: {len(op_text)} chars, preview: {op_text[:100]}")
+                        else:
+                            logger.warning(f"Operation {len(ops)} has EMPTY text field!")
+                        
                         ops.append({
                             "op_type": op_type,
                             "start": op.get("start", para_start),
                             "end": op.get("end", para_start),
-                            "text": op.get("text", ""),
+                            "text": op_text,
                             "original_text": op.get("original_text"),
                             "anchor_text": op.get("anchor_text"),
                             "left_context": op.get("left_context"),
@@ -1331,31 +1620,49 @@ class OutlineEditingAgent(BaseAgent):
                 "task_status": "error"
             }
     
-    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
         """Process outline editing query using LangGraph workflow"""
         try:
-            # Extract query from state
-            messages = state.get("messages", [])
-            query = ""
-            if messages:
-                latest_message = messages[-1]
-                query = latest_message.content if hasattr(latest_message, 'content') else str(latest_message)
-            else:
-                query = state.get("query", "")
+            # Ensure query is a string
+            if not isinstance(query, str):
+                query = str(query) if query else ""
             
-            logger.info(f"Outline editing agent processing: {query[:100]}...")
+            logger.info(f"Outline editing agent processing: {query[:100] if query else 'empty'}...")
             
-            shared_memory = state.get("shared_memory", {}) or {}
-            metadata = state.get("metadata", {}) or {}
-            user_id = state.get("user_id", metadata.get("user_id", "system"))
+            # Extract user_id and shared_memory from metadata
+            metadata = metadata or {}
+            user_id = metadata.get("user_id", "system")
+            shared_memory = metadata.get("shared_memory", {}) or {}
+            
+            # Prepare new messages (current query)
+            new_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Get workflow to access checkpoint
+            workflow = await self._get_workflow()
+            config = self._get_checkpoint_config(metadata)
+            
+            # Load and merge checkpointed messages to preserve conversation history
+            conversation_messages = await self._load_and_merge_checkpoint_messages(
+                workflow, config, new_messages
+            )
+            
+            # Load shared_memory from checkpoint if available
+            checkpoint_state = await workflow.aget_state(config)
+            existing_shared_memory = {}
+            if checkpoint_state and checkpoint_state.values:
+                existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+            
+            # Merge shared_memory: start with checkpoint, then update with NEW data (so new active_editor overwrites old)
+            shared_memory_merged = existing_shared_memory.copy()
+            shared_memory_merged.update(shared_memory)  # New data (including updated active_editor) takes precedence
             
             # Initialize state for LangGraph workflow
             initial_state: OutlineEditingState = {
                 "query": query,
                 "user_id": user_id,
                 "metadata": metadata,
-                "messages": messages,
-                "shared_memory": shared_memory,
+                "messages": conversation_messages,
+                "shared_memory": shared_memory_merged,
                 "active_editor": {},
                 "outline": "",
                 "filename": "outline.md",
@@ -1394,16 +1701,12 @@ class OutlineEditingAgent(BaseAgent):
                 "has_synopsis": False,
                 "has_notes": False,
                 "has_characters": False,
-                "has_outline_section": False
+                "has_outline_section": False,
+                # NEW: Content routing plan
+                "routing_plan": None
             }
             
-            # Get workflow (lazy initialization with checkpointer)
-            workflow = await self._get_workflow()
-            
-            # Get checkpoint config (handles thread_id from conversation_id/user_id)
-            config = self._get_checkpoint_config(metadata)
-            
-            # Run LangGraph workflow with checkpointing
+            # Run LangGraph workflow with checkpointing (workflow and config already created above)
             result_state = await workflow.ainvoke(initial_state, config=config)
             
             # Extract final response

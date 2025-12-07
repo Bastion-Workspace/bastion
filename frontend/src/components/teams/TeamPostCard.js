@@ -25,6 +25,9 @@ import {
 import { useTeam } from '../../contexts/TeamContext';
 import { useAuth } from '../../contexts/AuthContext';
 import { formatDistanceToNow } from 'date-fns';
+import AudioPlayer from '../AudioPlayer';
+import EmbeddedContent from './EmbeddedContent';
+import { parseContentForEmbeds } from '../../utils/embedUtils';
 
 const TeamPostCard = ({ post, teamId }) => {
   const { user } = useAuth();
@@ -171,9 +174,98 @@ const TeamPostCard = ({ post, teamId }) => {
           )}
         </Box>
         
-        <Typography variant="body1" sx={{ mb: 2, whiteSpace: 'pre-wrap' }}>
-          {post.content}
-        </Typography>
+        <Box sx={{ mb: 2 }}>
+          {(() => {
+            const segments = parseContentForEmbeds(post.content || '');
+            return segments.map((segment, index) => {
+              if (segment.type === 'embed') {
+                return (
+                  <EmbeddedContent
+                    key={`embed-${index}`}
+                    embedType={segment.embedType}
+                    embedData={segment.embedData}
+                  />
+                );
+              } else {
+                // Render text with clickable URLs and line breaks preserved
+                const renderTextWithLinks = (text) => {
+                  // URL regex pattern
+                  const urlRegex = /(https?:\/\/[^\s]+)/g;
+                  const parts = [];
+                  let lastIndex = 0;
+                  let match;
+                  
+                  while ((match = urlRegex.exec(text)) !== null) {
+                    // Add text before URL
+                    if (match.index > lastIndex) {
+                      parts.push({ type: 'text', content: text.substring(lastIndex, match.index) });
+                    }
+                    // Add URL as link
+                    parts.push({ type: 'link', content: match[0], url: match[0] });
+                    lastIndex = match.index + match[0].length;
+                  }
+                  
+                  // Add remaining text
+                  if (lastIndex < text.length) {
+                    parts.push({ type: 'text', content: text.substring(lastIndex) });
+                  }
+                  
+                  // If no URLs found, return text as-is
+                  if (parts.length === 0) {
+                    parts.push({ type: 'text', content: text });
+                  }
+                  
+                  return parts;
+                };
+                
+                const textLines = segment.content.split('\n');
+                return (
+                  <Typography
+                    key={`text-${index}`}
+                    variant="body1"
+                    component="div"
+                    sx={{ whiteSpace: 'pre-wrap', mb: segment.content.trim() ? 1 : 0 }}
+                  >
+                    {textLines.map((line, lineIndex) => {
+                      const parts = renderTextWithLinks(line);
+                      return (
+                        <React.Fragment key={lineIndex}>
+                          {parts.map((part, partIndex) => {
+                            if (part.type === 'link') {
+                              return (
+                                <a
+                                  key={partIndex}
+                                  href={part.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{
+                                    color: '#1976d2',
+                                    textDecoration: 'none',
+                                    borderBottom: '1px solid #1976d2'
+                                  }}
+                                  onMouseEnter={(e) => {
+                                    e.target.style.textDecoration = 'underline';
+                                  }}
+                                  onMouseLeave={(e) => {
+                                    e.target.style.textDecoration = 'none';
+                                  }}
+                                >
+                                  {part.content}
+                                </a>
+                              );
+                            }
+                            return <React.Fragment key={partIndex}>{part.content}</React.Fragment>;
+                          })}
+                          {lineIndex < textLines.length - 1 && <br />}
+                        </React.Fragment>
+                      );
+                    })}
+                  </Typography>
+                );
+              }
+            });
+          })()}
+        </Box>
         
         {post.attachments && post.attachments.length > 0 && (
           <Box sx={{ mb: 2 }}>
@@ -203,7 +295,12 @@ const TeamPostCard = ({ post, teamId }) => {
               
               return (
                 <Box key={index} sx={{ mb: 1 }}>
-                  {att.mime_type?.startsWith('image/') ? (
+                  {att.mime_type?.startsWith('audio/') ? (
+                    <AudioPlayer
+                      src={fileUrl}
+                      filename={att.filename || 'Audio attachment'}
+                    />
+                  ) : att.mime_type?.startsWith('image/') ? (
                     imageBlobUrls[att.file_path] ? (
                       <img
                         src={imageBlobUrls[att.file_path]}

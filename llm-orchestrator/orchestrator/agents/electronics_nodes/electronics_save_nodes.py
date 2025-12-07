@@ -173,13 +173,39 @@ class ElectronicsSaveNodes:
                 logger.info(f"🔌 Creating new reference file: {suggested_filename} ({file_summary})")
                 
                 try:
-                    # Determine folder from active_editor's canonical_path
-                    project_folder = None
-                    if active_editor and active_editor.get("canonical_path"):
-                        import os
+                    # Determine folder from active_editor
+                    # PRIORITY 1: Use folder_id if available (most reliable)
+                    folder_id = None
+                    folder_path = None
+                    
+                    if active_editor:
+                        folder_id = active_editor.get("folder_id")
+                        if folder_id:
+                            logger.info(f"🔌 Using folder_id from active_editor: {folder_id}")
+                    
+                    # PRIORITY 2: Extract relative folder_path from canonical_path
+                    if not folder_id and active_editor and active_editor.get("canonical_path"):
+                        from pathlib import Path
                         canonical_path = active_editor.get("canonical_path")
-                        project_folder = os.path.dirname(canonical_path)
-                        logger.info(f"🔌 Using project folder from active_editor: {project_folder}")
+                        try:
+                            # Parse canonical_path to get folder hierarchy
+                            # Format: /app/uploads/Users/{username}/Projects/NGen Oscillators/project_plan.md
+                            path_parts = Path(canonical_path).parts
+                            
+                            # Find "Users" to start folder path
+                            if "Users" in path_parts:
+                                users_idx = path_parts.index("Users")
+                                if users_idx + 2 < len(path_parts) - 1:  # username + at least one folder + filename
+                                    # Get folder parts (skip username and filename)
+                                    folder_parts = path_parts[users_idx + 2:-1]
+                                    if folder_parts:
+                                        folder_path = "/".join(folder_parts)
+                                        logger.info(f"🔌 Extracted folder_path from canonical_path: {folder_path}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to extract folder_path from canonical_path: {e}")
+                    
+                    if not folder_id and not folder_path:
+                        logger.warning("⚠️ Could not determine folder_id or folder_path - file will be created in My Documents root")
                     
                     # Create the new file with initial frontmatter
                     from orchestrator.tools.file_creation_tools import create_user_file_tool
@@ -197,7 +223,8 @@ summary: {file_summary}
                         filename=suggested_filename,
                         content=initial_content,
                         user_id=user_id,
-                        folder_path=project_folder
+                        folder_id=folder_id,
+                        folder_path=folder_path
                     )
                     
                     logger.info(f"✅ Created new reference file: {suggested_filename} (doc_id: {new_doc_id})")
@@ -231,19 +258,44 @@ summary: {file_summary}
                     import traceback
                     logger.error(traceback.format_exc())
             
-            # **PHASE 2: GROUP EDITS BY DOCUMENT**
-            edits_by_doc: Dict[str, List[Dict[str, Any]]] = {}
+            # **PHASE 2: SPLIT EDITS - PLAN VS REFERENCED FILES**
+            editing_mode = state.get("editing_mode", False)
+            plan_edits = []
+            referenced_edits = []
             
             for item in routing_items:
                 target_file = item.get("target_file", "")
                 if not target_file:
                     continue
                 
+                # Check if this edit targets the project plan (active editor)
+                is_plan_edit = (
+                    target_file == "project_plan" or
+                    target_file == active_editor.get("filename", "") or
+                    target_file == active_editor.get("canonical_path", "")
+                )
+                
                 # Clean up old component references from new content
                 if item.get("action") == "replace" and item.get("content"):
                     item["content"] = self._remove_old_component_references_from_content(
                         item["content"], state.get("query", "")
                     )
+                
+                if is_plan_edit and editing_mode:
+                    # Store for inline editing (skip frontmatter updates - apply directly)
+                    if item.get("section", "").lower() != "frontmatter":
+                        plan_edits.append(item)
+                else:
+                    # Apply directly (referenced files or generation mode)
+                    referenced_edits.append(item)
+            
+            # **PHASE 2B: GROUP REFERENCED EDITS BY DOCUMENT**
+            edits_by_doc: Dict[str, List[Dict[str, Any]]] = {}
+            
+            for item in referenced_edits:
+                target_file = item.get("target_file", "")
+                if not target_file:
+                    continue
                 
                 # Resolve document_id
                 doc_id = await self._resolve_document_id(
@@ -309,6 +361,56 @@ summary: {file_summary}
             
             logger.info(f"✅ Batch editor processed {len(batch_results)} document(s) with {sum(r.get('operations_succeeded', 0) for r in batch_results)} total operations")
             logger.info(f"✅ Saved content to {len(saved_files)} files: {', '.join(saved_files)}")
+            
+            # **PHASE 3B: HANDLE PLAN EDITS FOR INLINE EDITING**
+            # If we have plan edits in editing mode, store them for operation resolution
+            # Otherwise, apply plan edits directly (generation mode or frontmatter-only)
+            if plan_edits and editing_mode:
+                logger.info(f"📝 Storing {len(plan_edits)} plan edits for inline editing")
+                # Store in state for operation resolution node
+                return {
+                    "plan_edits": plan_edits,
+                    "saved_files": saved_files,
+                    "cleanup_operations": cleanup_operations
+                }
+            elif plan_edits:
+                # Generation mode: apply plan edits directly
+                logger.info(f"📝 Applying {len(plan_edits)} plan edits directly (generation mode)")
+                if project_plan_doc_id:
+                    from orchestrator.utils.document_batch_editor import DocumentEditBatch
+                    plan_batch = DocumentEditBatch(project_plan_doc_id, user_id, "electronics_agent")
+                    if await plan_batch.initialize():
+                        for edit in plan_edits:
+                            section = edit.get("section", "")
+                            content = edit.get("content", "")
+                            action = edit.get("action", "append")
+                            
+                            if section.lower() == "frontmatter":
+                                # Handle frontmatter updates
+                                import yaml
+                                try:
+                                    frontmatter_updates = yaml.safe_load(content)
+                                    if isinstance(frontmatter_updates, dict):
+                                        scalar_fields = {}
+                                        list_fields = {}
+                                        for key, value in frontmatter_updates.items():
+                                            if isinstance(value, list):
+                                                list_fields[key] = value
+                                            else:
+                                                scalar_fields[key] = value
+                                        plan_batch.add_frontmatter_update(scalar_fields, list_fields)
+                                except Exception as e:
+                                    logger.warning(f"Failed to parse frontmatter: {e}")
+                            elif action == "remove":
+                                plan_batch.add_section_delete(section)
+                            elif action == "replace":
+                                plan_batch.add_section_replace(section, content)
+                            else:  # append
+                                plan_batch.add_section_append(section, content)
+                        
+                        result = await plan_batch.apply()
+                        if result.get("success"):
+                            saved_files.append(f"project_plan ({result.get('operations_succeeded', 0)} operations)")
             
             # **PHASE 4: RELOAD REFERENCED CONTEXT** (Critical for subsequent operations)
             # After creating files and updating frontmatter, reload referenced_context so:

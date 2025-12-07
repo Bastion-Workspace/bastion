@@ -480,35 +480,30 @@ class GRPCContextGatherer:
         grpc_request: orchestrator_pb2.ChatRequest,
         state: Optional[Dict[str, Any]]
     ) -> None:
-        """Add primary_agent_selected and last_agent from shared_memory for conversation continuity"""
+        """
+        DEPRECATED: This method is no longer needed.
+        
+        The llm-orchestrator loads primary_agent_selected directly from LangGraph 
+        checkpoint in StreamChat handler, so backend doesn't need to pass it.
+        
+        Keeping this method for backward compatibility but it's a no-op.
+        """
         try:
             if not state:
-                logger.warning(f"⚠️ CONTEXT: No state provided to _add_primary_agent_selected")
+                # Expected case - orchestrator loads checkpoint directly
+                logger.debug(f"📋 CONTEXT: No state from backend (expected - orchestrator loads checkpoint)")
                 return
             
+            # If state is provided (shouldn't happen anymore), still handle it
             shared_memory = state.get("shared_memory", {}) or {}
             primary_agent = shared_memory.get("primary_agent_selected")
             last_agent = shared_memory.get("last_agent")
-            last_response = shared_memory.get("last_response")
             
-            logger.info(f"📋 CONTEXT: Checking shared_memory for continuity - primary_agent={primary_agent}, last_agent={last_agent}, last_response_length={len(last_response) if last_response else 0}")
-            
-            if primary_agent:
-                # Add to metadata dict (proto metadata field)
-                grpc_request.metadata["primary_agent_selected"] = primary_agent
-                logger.info(f"✅ CONTEXT: Added primary_agent_selected ({primary_agent}) to gRPC metadata for intent classifier continuity")
-            else:
-                logger.warning(f"⚠️ CONTEXT: No primary_agent_selected in shared_memory (keys: {list(shared_memory.keys())})")
-            
-            if last_agent:
-                # Add last_agent to metadata for intent classifier continuity
-                grpc_request.metadata["last_agent"] = last_agent
-                logger.info(f"✅ CONTEXT: Added last_agent ({last_agent}) to gRPC metadata for intent classifier continuity")
+            if primary_agent or last_agent:
+                logger.debug(f"📋 CONTEXT: Backend provided agent continuity (primary={primary_agent}, last={last_agent}) - orchestrator will override from checkpoint")
             
         except Exception as e:
-            logger.warning(f"⚠️ CONTEXT: Failed to add agent continuity fields: {e}")
-            import traceback
-            logger.debug(f"Traceback: {traceback.format_exc()}")
+            logger.debug(f"Context gatherer agent continuity check: {e}")
     
     def _log_context_summary(self, grpc_request: orchestrator_pb2.ChatRequest) -> None:
         """Log summary of what context was included"""

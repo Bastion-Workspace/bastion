@@ -48,6 +48,7 @@ const MessagingDrawer = () => {
     deleteRoom,
     isMessagingFullScreen,
     toggleFullScreen,
+    toggleMute,
   } = useMessaging();
 
   const [showCreateRoom, setShowCreateRoom] = useState(false);
@@ -110,6 +111,17 @@ const MessagingDrawer = () => {
 
   const handleAddParticipant = () => {
     setShowAddParticipantModal(true);
+  };
+
+  const handleToggleMute = async () => {
+    if (selectedRoom) {
+      const currentMuted = selectedRoom.notification_settings?.muted || false;
+      try {
+        await toggleMute(selectedRoom.room_id, !currentMuted);
+      } catch (error) {
+        alert('Failed to update notification settings. Please try again.');
+      }
+    }
   };
 
   // Room list component (reusable for both drawer and full-screen modes)
@@ -362,6 +374,8 @@ const MessagingDrawer = () => {
         onRename={handleRename}
         onDelete={handleDelete}
         onAddParticipant={handleAddParticipant}
+        onToggleMute={handleToggleMute}
+        isMuted={selectedRoom?.notification_settings?.muted || false}
       />
 
       {/* Rename Room Modal */}

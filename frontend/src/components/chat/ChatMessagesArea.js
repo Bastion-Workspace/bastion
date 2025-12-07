@@ -27,7 +27,7 @@ import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { materialLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import { markdownToPlainText, renderCitations } from '../../utils/chatUtils';
+import { markdownToPlainText, renderCitations, smartCopy } from '../../utils/chatUtils';
 import { useCapabilities } from '../../contexts/CapabilitiesContext';
 import EditorOpsPreviewModal from './EditorOpsPreviewModal';
 
@@ -103,8 +103,8 @@ const ChatMessagesArea = () => {
     }
   );
 
-  // Get AI name from settings, fallback to "Codex"
-  const aiName = promptSettings?.ai_name || 'Codex';
+  // Get AI name from settings, fallback to "Alex"
+  const aiName = promptSettings?.ai_name || 'Alex';
 
   // ROOSEVELT'S INTELLIGENT AUTO-SCROLL: Only scroll when user is near bottom or new message arrives
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
@@ -260,8 +260,12 @@ const ChatMessagesArea = () => {
           if (content.length > 50000) {
             await navigator.clipboard.writeText(content);
           } else {
-            const plain = markdownToPlainText(content);
-            await navigator.clipboard.writeText(plain);
+            // Use smartCopy to preserve markdown formatting as rich text (HTML)
+            const success = await smartCopy(content);
+            if (!success) {
+              // Fallback to plain text if rich text copy fails
+              await navigator.clipboard.writeText(content);
+            }
           }
         } catch (copyErr) {
           console.error('Failed to copy message:', copyErr);

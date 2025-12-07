@@ -57,7 +57,7 @@ class ChatAgent(BaseAgent):
     
     def _build_chat_prompt(self, persona: Optional[Dict[str, Any]] = None) -> str:
         """Build system prompt for chat agent"""
-        ai_name = persona.get("ai_name", "Codex") if persona else "Codex"
+        ai_name = persona.get("ai_name", "Alex") if persona else "Alex"
         persona_style = persona.get("persona_style", "professional") if persona else "professional"
         
         # Build style instruction based on persona_style
@@ -170,9 +170,9 @@ You have access to conversation history for context. Use this to understand foll
                     "response": {}
                 }
             
-            # Call LLM
+            # Call LLM - pass state to access user's model selection from metadata
             start_time = datetime.now()
-            llm = self._get_llm(temperature=0.7)
+            llm = self._get_llm(temperature=0.7, state=state)
             response = await llm.ainvoke(llm_messages)
             processing_time = (datetime.now() - start_time).total_seconds()
             

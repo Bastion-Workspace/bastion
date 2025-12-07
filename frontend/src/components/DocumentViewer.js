@@ -37,6 +37,7 @@ import OrgRefileDialog from './OrgRefileDialog';
 import OrgArchiveDialog from './OrgArchiveDialog';
 import OrgTagDialog from './OrgTagDialog';
 import PDFDocumentViewer from './PDFDocumentViewer';
+import AudioPlayer from './AudioPlayer';
 import { useEditor } from '../contexts/EditorContext';
 import { parseFrontmatter } from '../utils/frontmatterUtils';
 
@@ -80,14 +81,81 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   const [editedTitle, setEditedTitle] = useState('');
   const [editedFilename, setEditedFilename] = useState('');
   const [updatingMetadata, setUpdatingMetadata] = useState(false);
+  const [externalUpdateNotification, setExternalUpdateNotification] = useState(null);
+
+  // Helper functions for unsaved content persistence
+  const getUnsavedContentKey = (docId) => `unsaved_content_${docId}`;
+  
+  const getUnsavedContent = (docId) => {
+    try {
+      const key = getUnsavedContentKey(docId);
+      const saved = localStorage.getItem(key);
+      return saved ? saved : null;
+    } catch (e) {
+      console.error('Failed to get unsaved content:', e);
+      return null;
+    }
+  };
+  
+  const saveUnsavedContent = (docId, content) => {
+    try {
+      const key = getUnsavedContentKey(docId);
+      if (content !== null && content !== undefined) {
+        localStorage.setItem(key, content);
+      }
+    } catch (e) {
+      console.error('Failed to save unsaved content:', e);
+    }
+  };
+  
+  const clearUnsavedContent = (docId) => {
+    try {
+      const key = getUnsavedContentKey(docId);
+      localStorage.removeItem(key);
+    } catch (e) {
+      console.error('Failed to clear unsaved content:', e);
+    }
+  };
 
   // Fetch document content (can be called multiple times for refresh)
-  const fetchDocument = React.useCallback(async () => {
+  const fetchDocument = React.useCallback(async (forceRefresh = false, preserveEditMode = false) => {
     try {
       setLoading(true);
       setError(null);
       
-      // Fetch document content from API
+      // Check for unsaved content first (unless forcing refresh)
+      if (!forceRefresh) {
+        const unsavedContent = getUnsavedContent(documentId);
+        if (unsavedContent !== null) {
+          // We have unsaved content, but we still need document metadata
+          // Fetch metadata only, then use unsaved content
+          const response = await apiService.getDocumentContent(documentId);
+          const docData = {
+            ...response.metadata,
+            content: unsavedContent, // Use unsaved content instead of fetched
+            chunk_count: response.chunk_count,
+            total_length: response.total_length
+          };
+          setDocument(docData);
+          setEditContent(unsavedContent);
+          
+          // Auto-enter edit mode if applicable (or preserve if already editing)
+          const fname = (docData.filename || '').toLowerCase();
+          const isUserOwned = !!docData.user_id || docData.collection_type === 'user';
+          if (preserveEditMode && isEditing) {
+            // Preserve current edit mode
+            setIsEditing(true);
+          } else if (isUserOwned && (fname.endsWith('.md') || fname.endsWith('.org'))) {
+            setIsEditing(true);
+            setShowPreview(false);
+          }
+          
+          setLoading(false);
+          return;
+        }
+      }
+      
+      // No unsaved content or forcing refresh - fetch from API
       const response = await apiService.getDocumentContent(documentId);
       
       const docData = {
@@ -97,24 +165,39 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
         total_length: response.total_length
       };
       setDocument(docData);
-      // Always update editContent - CodeMirror will handle the update intelligently
       setEditContent(response.content || '');
       
-      // Auto-enter edit mode for user-created MD/ORG documents
+      // Clear any stale unsaved content when we fetch fresh content
+      if (forceRefresh) {
+        clearUnsavedContent(documentId);
+      }
+      
+      // Auto-enter edit mode for user-created MD/ORG documents (or preserve if already editing)
       const fname = (docData.filename || '').toLowerCase();
       const isUserOwned = !!docData.user_id || docData.collection_type === 'user';
-      console.log('🎯 ROOSEVELT EDIT MODE DEBUG:', {
-        filename: docData.filename,
-        fname,
-        user_id: docData.user_id,
-        collection_type: docData.collection_type,
-        isUserOwned,
-        shouldEdit: isUserOwned && (fname.endsWith('.md') || fname.endsWith('.org'))
-      });
-      if (isUserOwned && (fname.endsWith('.md') || fname.endsWith('.org'))) {
-        console.log('🎯 ROOSEVELT: ENTERING EDIT MODE!');
-        setIsEditing(true);
-        setShowPreview(false);
+      
+      if (preserveEditMode && isEditing) {
+        // Preserve current edit mode when force refreshing (don't change isEditing state)
+        console.log('🔄 Preserving edit mode during force refresh');
+        // isEditing state will remain unchanged
+      } else {
+        // Normal auto-enter logic
+        console.log('🎯 ROOSEVELT EDIT MODE DEBUG:', {
+          filename: docData.filename,
+          fname,
+          user_id: docData.user_id,
+          collection_type: docData.collection_type,
+          isUserOwned,
+          shouldEdit: isUserOwned && (fname.endsWith('.md') || fname.endsWith('.org'))
+        });
+        if (isUserOwned && (fname.endsWith('.md') || fname.endsWith('.org'))) {
+          console.log('🎯 ROOSEVELT: ENTERING EDIT MODE!');
+          setIsEditing(true);
+          setShowPreview(false);
+        } else if (!preserveEditMode) {
+          // If not a user-owned editable file and not preserving, exit edit mode
+          setIsEditing(false);
+        }
       }
       
     } catch (err) {
@@ -123,14 +206,34 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
     } finally {
       setLoading(false);
     }
-  }, [documentId]);
+  }, [documentId, isEditing]);
 
   // Initial document load
   useEffect(() => {
     if (documentId) {
-      fetchDocument();
+      fetchDocument(false);
     }
   }, [documentId, fetchDocument]);
+
+  // Save unsaved content whenever editContent changes (debounced)
+  useEffect(() => {
+    if (!documentId || !isEditing || !editContent) return;
+    
+    // Only save if content differs from saved document content
+    const savedContent = document?.content || '';
+    if (editContent === savedContent) {
+      // Content matches saved version, clear unsaved content
+      clearUnsavedContent(documentId);
+      return;
+    }
+    
+    // Debounce saving unsaved content
+    const timeoutId = setTimeout(() => {
+      saveUnsavedContent(documentId, editContent);
+    }, 500);
+    
+    return () => clearTimeout(timeoutId);
+  }, [documentId, isEditing, editContent, document?.content]);
 
   // WebSocket listener for real-time document updates
   useEffect(() => {
@@ -161,16 +264,37 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
             console.log('🔄 Document updated, refreshing content:', update);
             
             // Always refresh when status is 'completed' (agent finished updating)
-            // This ensures users see agent changes in real-time
-            // CodeMirror will handle the update intelligently without losing cursor position
+            // This ensures users see agent changes in real-time, even if they have unsaved content
             if (update.status === 'completed') {
-              console.log('🔄 Auto-refreshing document content (status: completed)...');
-              fetchDocument();
+              console.log('🔄 Auto-refreshing document content (status: completed - agent finished work)...');
+              
+              // Check if user has unsaved changes
+              const hasUnsaved = getUnsavedContent(documentId) !== null;
+              if (hasUnsaved) {
+                console.log('⚠️ Document has unsaved changes, but refreshing due to agent completion');
+                // Show notification that file was updated externally
+                setExternalUpdateNotification({
+                  message: 'File was updated by agent. Your unsaved changes were overwritten.',
+                  timestamp: Date.now()
+                });
+                // Clear notification after 5 seconds
+                setTimeout(() => setExternalUpdateNotification(null), 5000);
+              }
+              
+              // Clear unsaved content since agent update takes precedence
+              clearUnsavedContent(documentId);
+              
+              // Force refresh to get latest content from server, preserving edit mode if user was editing
+              fetchDocument(true, true); // preserveEditMode = true
+            } else if (update.status === 'processing') {
+              // Document is being processed - don't refresh yet, wait for 'completed'
+              console.log('⏳ Document is being processed, waiting for completion...');
             } else if (!isEditing) {
-              // If not editing, always refresh
-              console.log('🔄 Auto-refreshing document content (not editing)...');
-              fetchDocument();
+              // If not editing and status changed, refresh
+              console.log('🔄 Auto-refreshing document content (not editing, status changed)...');
+              fetchDocument(true);
             } else {
+              // User is editing and status is not completed - don't interrupt them
               console.log('⏸️ User is editing and status is not completed, skipping auto-refresh');
             }
           }
@@ -804,10 +928,54 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
     );
   }
 
+  // Audio files get audio player treatment
+  const audioExtensions = ['.mp3', '.aac', '.wav', '.flac', '.ogg', '.m4a', '.wma', '.opus'];
+  const isAudioFile = audioExtensions.some(ext => fnameLower.endsWith(ext));
+  
+  if (isAudioFile && document) {
+    const audioUrl = `/api/documents/${documentId}/file`;
+    return (
+      <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider' }}>
+          <Typography variant="h6">{document.filename || document.title || 'Audio File'}</Typography>
+          {document.title && document.title !== document.filename && (
+            <Typography variant="body2" color="text.secondary">{document.title}</Typography>
+          )}
+        </Box>
+        <Box sx={{ flex: 1, p: 3, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <Box sx={{ width: '100%', maxWidth: '800px' }}>
+            <AudioPlayer
+              src={audioUrl}
+              filename={document.filename}
+            />
+          </Box>
+        </Box>
+      </Box>
+    );
+  }
+
   return (
     <Box sx={{ height: '100%', overflow: 'hidden' }}>
       {/* Single scroll area inside the viewer */}
       <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {/* External Update Notification */}
+        {externalUpdateNotification && (
+          <Alert 
+            severity="info" 
+            onClose={() => setExternalUpdateNotification(null)}
+            sx={{ 
+              mx: 2, 
+              mt: 1, 
+              mb: 0,
+              '& .MuiAlert-message': {
+                fontSize: '0.875rem'
+              }
+            }}
+          >
+            {externalUpdateNotification.message}
+          </Alert>
+        )}
+        
         {/* Compact Header */}
         <Box sx={{ px: 2, py: 1, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
           <Box sx={{ minWidth: 0, overflow: 'hidden', flex: 1 }}>
@@ -985,10 +1153,13 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                         await apiService.updateDocumentContent(document.document_id, editContent);
                         setDocument((prev) => prev ? { ...prev, content: editContent } : prev);
                         
+                        // Clear unsaved content after successful save
+                        clearUnsavedContent(documentId);
+                        
                         // If recurring task was handled, refresh to get updated content
                         if (recurringHandled) {
                           setTimeout(() => {
-                            fetchDocument();
+                            fetchDocument(true); // Force refresh to get updated content
                           }, 500);
                         }
                         

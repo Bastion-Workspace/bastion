@@ -73,6 +73,18 @@ class MessagingService {
     }
   }
 
+  async updateNotificationSettings(roomId, settings) {
+    try {
+      const response = await apiService.put(`/api/messaging/rooms/${roomId}/notifications`, {
+        settings
+      });
+      return response;
+    } catch (error) {
+      console.error('❌ Failed to update notification settings:', error);
+      throw error;
+    }
+  }
+
   async addParticipant(roomId, userId, shareHistory = false) {
     try {
       const response = await apiService.post(`/api/messaging/rooms/${roomId}/participants`, {

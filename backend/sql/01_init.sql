@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS document_metadata (
     is_zip_container BOOLEAN DEFAULT FALSE,
     original_zip_path VARCHAR(500),
     folder_id VARCHAR(255), -- ID of folder containing this document (NULL for root documents)
+    exempt_from_vectorization BOOLEAN DEFAULT FALSE, -- If true, document is exempt from vectorization and knowledge graph processing
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -114,6 +115,7 @@ CREATE INDEX IF NOT EXISTS idx_parent_document ON document_metadata(parent_docum
 CREATE INDEX IF NOT EXISTS idx_zip_container ON document_metadata(is_zip_container);
 CREATE INDEX IF NOT EXISTS idx_zip_hierarchy ON document_metadata(parent_document_id, is_zip_container);
 CREATE INDEX IF NOT EXISTS idx_document_metadata_folder_id ON document_metadata(folder_id);
+CREATE INDEX IF NOT EXISTS idx_document_metadata_exempt ON document_metadata(exempt_from_vectorization);
 
 -- Add foreign key constraint for ZIP hierarchy
 ALTER TABLE document_metadata 
@@ -409,6 +411,7 @@ CREATE TABLE IF NOT EXISTS document_folders (
     category VARCHAR(100), -- Folder category (inherited by documents uploaded to this folder)
     tags TEXT[] DEFAULT '{}', -- Folder tags (automatically applied to documents uploaded here)
     inherit_tags BOOLEAN DEFAULT TRUE, -- Whether documents uploaded to this folder should inherit its tags
+    exempt_from_vectorization BOOLEAN DEFAULT FALSE, -- If true, folder and all descendants are exempt from vectorization and knowledge graph processing
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     -- Ensure user_id is provided for user folders, but can be NULL for global/team folders
@@ -430,6 +433,7 @@ CREATE INDEX IF NOT EXISTS idx_document_folders_collection_type ON document_fold
 CREATE INDEX IF NOT EXISTS idx_document_folders_category ON document_folders(category);
 CREATE INDEX IF NOT EXISTS idx_document_folders_tags ON document_folders USING GIN(tags);
 CREATE INDEX IF NOT EXISTS idx_document_folders_user_collection ON document_folders(user_id, collection_type);
+CREATE INDEX IF NOT EXISTS idx_document_folders_exempt ON document_folders(exempt_from_vectorization);
 
 -- ROOSEVELT'S TRUST-BUSTING CONSTRAINTS: Prevent duplicate folders!
 -- Use partial unique indexes to handle NULL parent_folder_id AND NULL user_id properly

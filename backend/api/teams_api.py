@@ -678,6 +678,17 @@ async def upload_post_attachment(
         content = await file.read()
         file_size = len(content)
         
+        # Check file size - use larger limit for audio files
+        max_size = 10 * 1024 * 1024  # 10MB default
+        if file.content_type and file.content_type.startswith("audio/"):
+            max_size = settings.AUDIO_ATTACHMENT_MAX_SIZE
+        
+        if file_size > max_size:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File too large. Maximum size: {max_size / (1024*1024):.1f}MB"
+            )
+        
         # Sanitize filename
         import re
         sanitized_filename = re.sub(r'[^a-zA-Z0-9._-]', '_', file.filename)

@@ -64,12 +64,7 @@ async def list_conversation_checkpoints(conversation_id: str, current_user: Auth
 @router.get("/api/conversations", response_model=ConversationListResponse)
 async def list_conversations(skip: int = 0, limit: int = 50, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     try:
-        logger.info(f"💬 Listing conversations from LangGraph checkpoints (skip={skip}, limit={limit})")
-        from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
-        checkpointer = await get_postgres_checkpointer()
-        if not checkpointer.is_initialized:
-            logger.error("❌ LangGraph checkpointer not initialized")
-            raise HTTPException(status_code=500, detail="LangGraph checkpointer not initialized")
+        logger.info(f"💬 Listing conversations from database (skip={skip}, limit={limit})")
         conversations = []
         try:
             import asyncpg
@@ -79,84 +74,85 @@ async def list_conversations(skip: int = 0, limit: int = 50, current_user: Authe
             try:
                 rows = await conn.fetch(
                     """
-                        WITH latest_checkpoints AS (
-                            SELECT DISTINCT ON (c.thread_id) 
-                                c.thread_id,
-                                c.checkpoint,
-                                c.checkpoint_id
-                            FROM checkpoints c
-                            WHERE c.checkpoint -> 'channel_values' ->> 'user_id' = $1
-                            ORDER BY c.thread_id, c.checkpoint_id DESC
-                        )
                         SELECT 
-                            lc.thread_id,
+                            conv.conversation_id,
+                            conv.title,
+                            conv.description,
+                            conv.is_pinned,
+                            conv.is_archived,
+                            conv.tags,
+                            conv.created_at,
+                            conv.updated_at,
+                            conv.last_message_at,
+                            conv.manual_order,
+                            conv.order_locked,
+                            -- Use actual message count from conversation_messages table
                             COALESCE(
-                                (lc.checkpoint -> 'channel_values' ->> 'conversation_title'),
-                                'New Conversation'
-                            ) as title,
-                            (lc.checkpoint -> 'channel_values' ->> 'conversation_created_at') as created_at,
-                            (lc.checkpoint -> 'channel_values' ->> 'conversation_updated_at') as updated_at,
-                            (lc.checkpoint -> 'channel_values' ->> 'is_pinned')::boolean as is_pinned,
-                            (lc.checkpoint -> 'channel_values' ->> 'is_archived')::boolean as is_archived,
-                            (lc.checkpoint -> 'channel_values' -> 'conversation_tags') as tags,
-                            (lc.checkpoint -> 'channel_values' ->> 'conversation_description') as description,
-                            COALESCE(
-                                (CASE 
-                                    WHEN lc.checkpoint ? 'channel_data' AND lc.checkpoint -> 'channel_data' ? 'messages' 
-                                    THEN jsonb_array_length(lc.checkpoint -> 'channel_data' -> 'messages')
-                                    WHEN lc.checkpoint -> 'channel_versions' ? 'messages' 
-                                    THEN 2
-                                    ELSE 0
-                                END),
+                                (SELECT COUNT(*) FROM conversation_messages cm 
+                                 WHERE cm.conversation_id = conv.conversation_id 
+                                 AND (cm.is_deleted IS NULL OR cm.is_deleted = FALSE)),
+                                conv.message_count,
                                 0
-                            ) as message_count,
-                            COALESCE(
-                                (lc.checkpoint -> 'channel_values' ->> 'conversation_updated_at')::timestamp,
-                                (lc.checkpoint -> 'channel_values' ->> 'conversation_created_at')::timestamp,
-                                NOW()
-                            ) as sort_timestamp
-                        FROM latest_checkpoints lc
-                        WHERE (
-                            (lc.checkpoint -> 'channel_values' ->> 'conversation_title') IS NOT NULL
-                            OR (lc.checkpoint -> 'channel_values' ->> 'latest_response') IS NOT NULL
-                            OR (lc.checkpoint -> 'channel_values' ->> 'user_id') IS NOT NULL
-                        )
-                        ORDER BY sort_timestamp DESC
+                            ) as message_count
+                        FROM conversations conv
+                        WHERE conv.user_id = $1
+                        ORDER BY conv.updated_at DESC NULLS LAST, conv.created_at DESC
                         LIMIT $2 OFFSET $3
-                """, current_user.user_id, limit, skip)
+                    """, current_user.user_id, limit, skip)
                 from models.conversation_models import ConversationSummary
                 for row in rows:
-                    if row['thread_id']:
+                    if row['conversation_id']:
+                        # Tags are stored as TEXT[] in PostgreSQL, asyncpg returns as list
+                        tags_list = list(row['tags']) if row['tags'] else []
+                        
                         conversation = ConversationSummary(
-                            conversation_id=row['thread_id'],
+                            conversation_id=row['conversation_id'],
                             user_id=current_user.user_id,
                             title=row['title'] or "Untitled Conversation",
                             description=row['description'],
                             is_pinned=row['is_pinned'] or False,
                             is_archived=row['is_archived'] or False,
-                            tags=row['tags'] if row['tags'] else [],
+                            tags=tags_list,
                             metadata_json={},
                             message_count=row['message_count'] or 0,
-                            last_message_at=row['updated_at'],
-                            manual_order=None,
-                            order_locked=False,
-                            created_at=row['created_at'] or datetime.now().isoformat(),
-                            updated_at=row['updated_at'] or datetime.now().isoformat()
+                            last_message_at=row['last_message_at'].isoformat() if row['last_message_at'] else row['updated_at'].isoformat() if row['updated_at'] else None,
+                            manual_order=row['manual_order'],
+                            order_locked=row['order_locked'] or False,
+                            created_at=row['created_at'].isoformat() if row['created_at'] else datetime.now().isoformat(),
+                            updated_at=row['updated_at'].isoformat() if row['updated_at'] else datetime.now().isoformat()
                         )
                         conversations.append(conversation)
             finally:
                 await conn.close()
         except Exception as e:
-            logger.warning(f"⚠️ Failed to query LangGraph checkpoints for conversation list: {e}")
+            logger.error(f"❌ Failed to query conversations from database: {e}")
             conversations = []
+        
+        # Get total count for pagination
+        total_count = len(conversations)
+        try:
+            import asyncpg
+            from config import settings
+            connection_string = f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+            conn = await asyncpg.connect(connection_string)
+            try:
+                total_count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM conversations WHERE user_id = $1",
+                    current_user.user_id
+                )
+            finally:
+                await conn.close()
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to get total conversation count: {e}")
+        
         from models.conversation_models import ConversationListResponse as ConvList
         result = ConvList(
             conversations=conversations,
-            total_count=len(conversations),
-            has_more=len(conversations) == limit,
+            total_count=total_count,
+            has_more=(skip + len(conversations)) < total_count,
             folders=[]
         )
-        logger.info(f"✅ Retrieved {len(result.conversations)} conversations from LangGraph checkpoints")
+        logger.info(f"✅ Retrieved {len(result.conversations)} conversations from database (total: {total_count})")
         return result
     except Exception as e:
         logger.error(f"❌ Failed to list conversations: {str(e)}")
@@ -232,6 +228,35 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
                         "messages": []
                     }
                     logger.info(f"✅ Found conversation in LangGraph checkpoint: {conversation_id}")
+                    
+                    # CRITICAL FIX: Always check database for title, even when checkpoint exists
+                    # Database is source of truth for conversation metadata
+                    try:
+                        from services.conversation_service import ConversationService
+                        conversation_service = ConversationService()
+                        conversation_service.set_current_user(current_user.user_id)
+                        db_conversation = await conversation_service.lifecycle_manager.get_conversation_lifecycle(conversation_id)
+                        if db_conversation:
+                            db_title = db_conversation.get("title")
+                            # Prefer database title if it exists and is not default
+                            if db_title and db_title != "New Conversation" and db_title != "Untitled Conversation":
+                                conversation_dict["title"] = db_title
+                                logger.info(f"✅ Using database title for conversation {conversation_id}: {db_title}")
+                            # Also update other metadata from database if checkpoint values are defaults
+                            if db_conversation.get("is_pinned") is not None:
+                                conversation_dict["is_pinned"] = db_conversation.get("is_pinned", False)
+                            if db_conversation.get("is_archived") is not None:
+                                conversation_dict["is_archived"] = db_conversation.get("is_archived", False)
+                            if db_conversation.get("tags"):
+                                conversation_dict["tags"] = db_conversation.get("tags", [])
+                            if db_conversation.get("description"):
+                                conversation_dict["description"] = db_conversation.get("description")
+                            if db_conversation.get("manual_order") is not None:
+                                conversation_dict["manual_order"] = db_conversation.get("manual_order")
+                            if db_conversation.get("order_locked") is not None:
+                                conversation_dict["order_locked"] = db_conversation.get("order_locked", False)
+                    except Exception as db_title_error:
+                        logger.warning(f"⚠️ Failed to fetch database title for conversation {conversation_id}: {db_title_error}")
                 else:
                     logger.info(f"💬 Conversation {conversation_id} not found in LangGraph checkpoints")
             finally:

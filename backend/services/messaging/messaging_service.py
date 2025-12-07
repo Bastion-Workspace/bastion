@@ -204,6 +204,14 @@ class MessagingService:
                     """, room_dict['room_id'], user_id)
                     room_dict['unread_count'] = unread_count
                     
+                    # Get notification settings for this user
+                    notification_settings = await conn.fetchval("""
+                        SELECT notification_settings
+                        FROM room_participants
+                        WHERE room_id = $1 AND user_id = $2
+                    """, room_dict['room_id'], user_id)
+                    room_dict['notification_settings'] = notification_settings or {}
+                    
                     rooms.append(room_dict)
                 
                 return rooms
@@ -255,6 +263,49 @@ class MessagingService:
         
         except Exception as e:
             logger.error(f"❌ Failed to update room name: {e}")
+            return False
+    
+    async def update_notification_settings(
+        self,
+        room_id: str,
+        user_id: str,
+        settings: Dict[str, Any]
+    ) -> bool:
+        """
+        Update notification settings for a user in a room
+        
+        Args:
+            room_id: Room UUID
+            user_id: User ID
+            settings: Dictionary of notification settings (e.g., {"muted": True})
+        
+        Returns:
+            True if successful
+        """
+        await self._ensure_initialized()
+        
+        try:
+            async with self.db_pool.acquire() as conn:
+                # Set user context for RLS
+                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                
+                # Update notification settings
+                import json
+                result = await conn.execute("""
+                    UPDATE room_participants
+                    SET notification_settings = $1
+                    WHERE room_id = $2 AND user_id = $3
+                """, json.dumps(settings), room_id, user_id)
+                
+                if result == "UPDATE 1":
+                    logger.info(f"✅ Updated notification settings for room {room_id}, user {user_id}")
+                    return True
+                else:
+                    logger.warning(f"⚠️ Failed to update notification settings - not a participant")
+                    return False
+        
+        except Exception as e:
+            logger.error(f"❌ Failed to update notification settings: {e}")
             return False
     
     async def delete_room(

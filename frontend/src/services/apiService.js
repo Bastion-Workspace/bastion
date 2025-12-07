@@ -68,6 +68,8 @@ class ApiService {
   updateDocumentContent = (documentId, content) => this.documents.updateDocumentContent(documentId, content);
   createDocument = (documentData) => this.documents.createDocument(documentData);
   createDocumentFromContent = (args) => this.documents.createDocumentFromContent(args);
+  exemptDocument = (documentId) => this.documents.exemptDocument(documentId);
+  removeDocumentExemption = (documentId) => this.documents.removeDocumentExemption(documentId);
 
   // ===== CHAT METHODS =====
   queryKnowledgeBase = (query, sessionId, maxResults, conversationId) => 
@@ -145,6 +147,9 @@ class ApiService {
   updateFolder = (folderId, folderData) => this.folders.updateFolder(folderId, folderData);
   deleteFolder = (folderId, recursive) => this.folders.deleteFolder(folderId, recursive);
   moveFolder = (folderId, newParentId) => this.folders.moveFolder(folderId, newParentId);
+  exemptFolder = (folderId) => this.folders.exemptFolder(folderId);
+  removeFolderExemption = (folderId) => this.folders.removeFolderExemption(folderId);
+  overrideFolderExemption = (folderId) => this.folders.overrideFolderExemption(folderId);
   createDefaultFolders = () => this.folders.createDefaultFolders();
 
   // ===== PROJECT METHODS =====

@@ -1,5 +1,5 @@
 """
-Conversation History Service for Codex Knowledge Base
+Conversation History Service for Bastion Workspace
 Handles persistent conversation storage with multi-user support
 """
 
@@ -15,7 +15,7 @@ import asyncpg
 from config import settings
 from models.conversation_models import *
 from repositories.document_repository import DocumentRepository
-from services.title_generation_service import TitleGenerationService
+# Title generation moved to LLM orchestrator - no longer needed in backend
 from utils.citation_utils import citations_to_json, citations_from_json
 
 logger = logging.getLogger(__name__)
@@ -122,6 +122,83 @@ class ConversationLifecycleManager:
             })
             return conversation_dict
     
+    async def _ensure_conversation_exists_in_connection(self, conn, conversation_id: str, user_id: str, 
+                                                        initial_message: str = None) -> bool:
+        """
+        Safely ensure conversation exists in database without overwriting existing data.
+        Uses provided connection to avoid race conditions.
+        
+        This method is idempotent - it only creates if conversation doesn't exist.
+        If conversation exists, it verifies ownership and returns True.
+        If conversation doesn't exist, it creates it with safe defaults.
+        
+        Returns:
+            True if conversation exists (created or already existed), False on error
+        """
+        # Check if conversation exists
+        conversation = await conn.fetchrow(
+            "SELECT * FROM conversations WHERE conversation_id = $1",
+            conversation_id
+        )
+        
+        if conversation:
+            # Conversation exists - verify ownership
+            if conversation['user_id'] != user_id:
+                logger.warning(f"⚠️ Conversation {conversation_id} exists but owned by different user (expected {user_id}, found {conversation['user_id']})")
+                return False
+            logger.debug(f"✅ Conversation {conversation_id} already exists")
+            return True
+        
+        # Conversation doesn't exist - create it safely
+        logger.info(f"📝 Auto-creating conversation {conversation_id} for user {user_id}")
+        created_at = datetime.now(timezone.utc)
+        
+        # Initialize conversation metadata with safe defaults
+        conversation_metadata = {
+            "lifecycle": {
+                "created_at": created_at.isoformat(),
+                "initial_mode": "chat",
+                "current_mode": "chat",
+                "mode_transitions": [],
+                "total_messages": 0,
+                "total_user_messages": 0,
+                "total_assistant_messages": 0,
+                "last_activity": created_at.isoformat(),
+                "status": "active"
+            },
+            "execution_stats": {
+                "research_plans_generated": 0,
+                "research_plans_executed": 0,
+                "web_searches_performed": 0,
+                "documents_ingested": 0,
+                "total_processing_time": 0
+            },
+            "user_context": {
+                "user_id": user_id,
+                "session_id": None,
+                "preferred_model": None
+            }
+        }
+        
+        # Generate default title
+        default_title = "New Conversation"
+        if initial_message:
+            default_title = initial_message[:50] + ("..." if len(initial_message) > 50 else "")
+        
+        try:
+            # Use INSERT ... ON CONFLICT DO NOTHING to prevent race conditions
+            await conn.execute("""
+                INSERT INTO conversations (conversation_id, user_id, title, created_at, updated_at, metadata_json, message_sequence)
+                VALUES ($1, $2, $3, $4, $5, $6, 0)
+                ON CONFLICT (conversation_id) DO NOTHING
+            """, conversation_id, user_id, default_title, created_at, created_at, json.dumps(conversation_metadata))
+            
+            logger.info(f"✅ Auto-created conversation {conversation_id} in database")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to auto-create conversation {conversation_id}: {e}")
+            return False
+    
     async def add_message(self, conversation_id: str, user_id: str, role: str, 
                          content: str, message_type: str = "text", 
                          metadata: Dict[str, Any] = None, 
@@ -132,13 +209,20 @@ class ConversationLifecycleManager:
             # Set user context for RLS policies
             await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
             
-            # Get current conversation
+            # Ensure conversation exists (safe auto-creation if needed) - using same connection
+            conversation_exists = await self._ensure_conversation_exists_in_connection(
+                conn, conversation_id, user_id, initial_message=content if role == "user" else None
+            )
+            if not conversation_exists:
+                raise ValueError(f"Conversation {conversation_id} could not be created or accessed")
+            
+            # Get current conversation (should exist now, in same transaction)
             conversation = await conn.fetchrow(
                 "SELECT * FROM conversations WHERE conversation_id = $1",
                 conversation_id
             )
             if not conversation:
-                raise ValueError(f"Conversation {conversation_id} not found")
+                raise ValueError(f"Conversation {conversation_id} not found after ensure")
             
             # Parse existing metadata
             conv_metadata = json.loads(conversation['metadata_json'] or "{}")
@@ -195,43 +279,43 @@ class ConversationLifecycleManager:
                 conversation_id
             )
             
-            # Generate title from first user message if not set
-            if not conversation['title'] or conversation['title'] == "New Conversation":
-                if role == "user":
-                    # Check if this is the first user message (no previous user messages)
-                    user_message_count = await conn.fetchval("""
-                        SELECT COUNT(*) FROM conversation_messages 
-                        WHERE conversation_id = $1 AND message_type = 'user'
-                    """, conversation_id)
-                    
-                    # Only generate LLM title for the very first user message
-                    if user_message_count == 0:
-                        try:
-                            # Use LLM title generation service for first message
-                            from services.title_generation_service import TitleGenerationService
-                            title_service = TitleGenerationService()
-                            title = await title_service.generate_title(content)
-                            
-                            await conn.execute(
-                                "UPDATE conversations SET title = $1 WHERE conversation_id = $2",
-                                title, conversation_id
-                            )
-                            logger.info(f"✅ Generated LLM title for conversation {conversation_id}: {title}")
-                        except Exception as title_error:
-                            logger.warning(f"⚠️ Failed to generate LLM title, using fallback: {title_error}")
-                            # Fallback to simple title
+            # Title generation is now handled by the orchestrator for better context
+            # Only generate fallback title here for non-orchestrator flows
+            # Check if this is from orchestrator (metadata flag or orchestrator_system flag)
+            is_orchestrator_flow = (
+                metadata and (
+                    metadata.get("orchestrator_system") or 
+                    metadata.get("orchestrator_handles_title") or
+                    metadata.get("skip_title_generation")
+                )
+            )
+            
+            # Generate simple fallback title only for non-orchestrator flows
+            if not is_orchestrator_flow:
+                if not conversation['title'] or conversation['title'] == "New Conversation":
+                    if role == "user":
+                        # Check if this is the first user message (no previous user messages)
+                        user_message_count = await conn.fetchval("""
+                            SELECT COUNT(*) FROM conversation_messages 
+                            WHERE conversation_id = $1 AND message_type = 'user'
+                        """, conversation_id)
+                        
+                        # Only generate fallback title for the very first user message
+                        if user_message_count == 0:
+                            # Simple fallback title (orchestrator will generate better one)
                             title = content[:100] + ("..." if len(content) > 100 else "")
                             await conn.execute(
                                 "UPDATE conversations SET title = $1 WHERE conversation_id = $2",
                                 title, conversation_id
                             )
-                    else:
-                        # Not the first message, just update with simple title if still "New Conversation"
-                        title = content[:100] + ("..." if len(content) > 100 else "")
-                        await conn.execute(
-                            "UPDATE conversations SET title = $1 WHERE conversation_id = $2",
-                            title, conversation_id
-                        )
+                            logger.debug(f"Generated fallback title for conversation {conversation_id}: {title}")
+                        else:
+                            # Not the first message, just update with simple title if still "New Conversation"
+                            title = content[:100] + ("..." if len(content) > 100 else "")
+                            await conn.execute(
+                                "UPDATE conversations SET title = $1 WHERE conversation_id = $2",
+                                title, conversation_id
+                            )
             
             # Add the message
             message_id = str(uuid.uuid4())
@@ -397,7 +481,7 @@ class ConversationService:
     
     def __init__(self):
         self.lifecycle_manager = ConversationLifecycleManager()
-        self.title_service = TitleGenerationService()
+        # Title generation moved to LLM orchestrator - no longer needed here
         logger.info("🗨️ Initializing Conversation Service...")
         
         # Note: Database connection is handled by the lifecycle manager
@@ -422,17 +506,16 @@ class ConversationService:
                 metadata=metadata
             )
             
-            # Generate title if initial message provided
-            if initial_message:
-                try:
-                    title = await self.title_service.generate_title(initial_message)
-                    await self.lifecycle_manager.update_conversation_metadata(
-                        conversation["conversation_id"],
-                        {"title": title}
-                    )
-                    conversation["title"] = title
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to generate title: {e}")
+            # Title generation is handled by LLM orchestrator after first agent response
+            # Use simple fallback title for new conversations (will be replaced by orchestrator)
+            if initial_message and (not conversation.get("title") or conversation.get("title") == "New Conversation"):
+                fallback_title = initial_message[:100] + ("..." if len(initial_message) > 100 else "")
+                await self.lifecycle_manager.update_conversation_metadata(
+                    conversation["conversation_id"],
+                    {"title": fallback_title}
+                )
+                conversation["title"] = fallback_title
+                logger.debug(f"Set fallback title for new conversation: {fallback_title}")
             
             return conversation
         except Exception as e:
@@ -502,8 +585,38 @@ class ConversationService:
             async with pool.acquire() as conn:
                 # Set user context for RLS policies
                 await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
-                logger.debug(f"🔍 Set user context for conversation messages: {user_id}")
+                logger.info(f"🔍 Set user context for conversation messages: {user_id}")
                 
+                # Verify RLS context was set
+                rls_context = await conn.fetchval("SELECT current_setting('app.current_user_id', true)")
+                logger.info(f"🔍 Verified RLS context: {rls_context}")
+                
+                # First check if conversation exists
+                conversation_exists = await conn.fetchval(
+                    "SELECT COUNT(*) FROM conversations WHERE conversation_id = $1",
+                    conversation_id
+                )
+                logger.info(f"🔍 Conversation {conversation_id} exists check: {conversation_exists} rows")
+                
+                # Check message count before query (without JOIN to avoid RLS on conversations table)
+                message_count_before = await conn.fetchval(
+                    "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = $1",
+                    conversation_id
+                )
+                logger.info(f"🔍 Message count for conversation {conversation_id}: {message_count_before} messages")
+                
+                # Try query without JOIN first to see if RLS is blocking
+                messages_direct = await conn.fetch(
+                    """
+                    SELECT * FROM conversation_messages
+                    WHERE conversation_id = $1
+                    ORDER BY sequence_number ASC
+                    LIMIT $2 OFFSET $3
+                    """, conversation_id, limit, skip
+                )
+                logger.info(f"🔍 Direct query (no JOIN) returned {len(messages_direct)} messages")
+                
+                # Now try with JOIN
                 messages = await conn.fetch(
                     """
                     SELECT cm.*, c.metadata_json as conversation_metadata
@@ -515,7 +628,13 @@ class ConversationService:
                     """, conversation_id, limit, skip
                 )
                 
-                logger.debug(f"🔍 Retrieved {len(messages)} messages from database")
+                logger.info(f"🔍 JOIN query returned {len(messages)} messages from database for conversation {conversation_id}")
+                if len(messages) == 0 and message_count_before > 0:
+                    logger.warning(f"⚠️ Query returned 0 messages but message_count shows {message_count_before} - possible RLS issue")
+                if len(messages_direct) > 0 and len(messages) == 0:
+                    logger.warning(f"⚠️ Direct query found {len(messages_direct)} messages but JOIN query found 0 - RLS blocking on conversations table")
+                    # Use direct query results if JOIN fails
+                    messages = messages_direct
                 
                 message_list = []
                 for row in messages:

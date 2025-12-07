@@ -37,6 +37,14 @@ class DocumentType(str, Enum):
     MOV = "mov"
     WEBM = "webm"
     IMAGE = "image"  # For JPG, PNG, GIF, etc. - stored but not vectorized
+    MP3 = "mp3"
+    AAC = "aac"
+    WAV = "wav"
+    FLAC = "flac"
+    OGG = "ogg"
+    M4A = "m4a"
+    WMA = "wma"
+    OPUS = "opus"
 
 
 class DocumentCategory(str, Enum):
@@ -228,6 +236,7 @@ class DocumentInfo(BaseModel):
     reviewed_at: Optional[datetime] = Field(None, description="Review timestamp")
     review_comment: Optional[str] = Field(None, description="Admin review comment")
     collection_type: str = Field(default="user", description="Collection type: 'user' or 'global'")
+    exempt_from_vectorization: Optional[bool] = Field(default=None, description="Three-state exemption: TRUE=exempt, FALSE=not exempt (override), NULL=inherit from folder")
 
 
 class DocumentFolder(BaseModel):
@@ -247,6 +256,7 @@ class DocumentFolder(BaseModel):
     subfolder_count: Optional[int] = Field(0, description="Number of subfolders")
     children: Optional[List['DocumentFolder']] = Field(default_factory=list, description="Child folders")
     is_virtual_source: Optional[bool] = Field(False, description="Whether this is a virtual source (RSS Feeds, Web Sources)")
+    exempt_from_vectorization: Optional[bool] = Field(default=None, description="Three-state exemption: TRUE=exempt, FALSE=not exempt (override parent), NULL=inherit from parent folder")
 
 
 class FolderMetadataUpdateRequest(BaseModel):

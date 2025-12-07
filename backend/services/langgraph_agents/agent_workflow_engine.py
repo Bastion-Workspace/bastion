@@ -32,13 +32,14 @@ class AgentWorkflowEngine:
     
     def _initialize_agent_registry(self):
         """Initialize registry of available agents"""
+        # NOTE: Agent chaining is deprecated - all agents have been migrated to llm-orchestrator
+        # This registry is kept for backward compatibility with agent_chaining_api
+        # but the referenced agents no longer exist in the backend
         self.agent_registry = {
-            # ChatAgent removed - migrated to llm-orchestrator gRPC service
-            "research": {"class": "ResearchAgent", "module": "services.langgraph_agents.research_agent"},
-            # CodingAgent removed - not fully fleshed out
-            "direct": {"class": "DirectAgent", "module": "services.langgraph_agents.direct_agent"}
+            # All agents migrated to llm-orchestrator gRPC service
+            # ResearchAgent and DirectAgent removed - use llm-orchestrator instead
         }
-        logger.info(f"🏭 Initialized agent registry with {len(self.agent_registry)} agents")
+        logger.warning(f"⚠️ Agent registry is empty - all agents migrated to llm-orchestrator. Agent chaining API may not function properly.")
     
     async def execute_workflow(
         self,

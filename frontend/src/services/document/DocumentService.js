@@ -62,6 +62,15 @@ class DocumentService extends ApiServiceBase {
     return this.post(`/api/user/documents/${documentId}/reprocess`);
   }
 
+  exemptDocument = async (documentId) => {
+    return this.post(`/api/documents/${documentId}/exempt`);
+  }
+
+  removeDocumentExemption = async (documentId, inherit = false) => {
+    const queryParam = inherit ? '?inherit=true' : '';
+    return this.delete(`/api/documents/${documentId}/exempt${queryParam}`);
+  }
+
   updateDocument = async (documentId, updates) => {
     return this.put(`/api/documents/${documentId}`, updates);
   }

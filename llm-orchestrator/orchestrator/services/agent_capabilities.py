@@ -112,19 +112,13 @@ AGENT_CAPABILITIES = {
         'keywords': ['proofread', 'check grammar', 'fix typos', 'style corrections', 'grammar check', 'spell check'],
         'context_boost': 20
     },
-    'report_formatting_agent': {
-        'domains': ['general', 'research'],
-        'actions': ['generation', 'modification'],
-        'editor_types': [],
-        'keywords': ['format report', 'create report', 'structure report', 'format research', 'report template'],
-        'context_boost': 0
-    },
     'general_project_agent': {
         'domains': ['general', 'management'],
         'actions': ['observation', 'generation', 'modification', 'analysis', 'management'],
         'editor_types': ['project'],
         'keywords': ['project plan', 'scope', 'timeline', 'requirements', 'tasks', 'project', 'planning', 'design', 'specification'],
-        'context_boost': 15  # Moderate boost when project editor is active
+        'context_boost': 15,  # Moderate boost when project editor is active
+        'requires_editor': True  # Only route when project editor is active (unless explicit keywords)
     },
     'help_agent': {
         'domains': ['general', 'help', 'documentation'],
@@ -208,8 +202,7 @@ def detect_domain(
                 'proofreading_agent': 'fiction',
                 'weather_agent': 'weather',
                 'research_agent': 'general',
-                'site_crawl_agent': 'general',
-                'report_formatting_agent': 'general'
+                'site_crawl_agent': 'general'
             }
             domain = agent_domain_map.get(last_agent)
             if domain:
@@ -317,7 +310,21 @@ def route_within_domain(
                 return 'research_agent'
         elif action_intent == 'analysis':
             return 'content_analysis_agent'
+        elif action_intent == 'observation':
+            # Conversational statements, greetings, checking status → chat_agent
+            return 'chat_agent'
+        elif action_intent == 'generation':
+            # For generation without editor context, default to chat_agent
+            # general_project_agent should only be selected via capability matching when editor is active
+            return 'chat_agent'
+        elif action_intent == 'modification':
+            # Modification without specific editor context → chat_agent
+            return 'chat_agent'
+        elif action_intent == 'management':
+            # Management operations → check for specific keywords or default to chat_agent
+            return 'chat_agent'
         else:
+            # Default fallback
             return 'chat_agent'
     
     # Fallback
@@ -343,6 +350,17 @@ def score_agent_capabilities(
     capabilities = AGENT_CAPABILITIES[agent]
     score = 0.0
     
+    # Check if agent requires editor but none is provided
+    requires_editor = capabilities.get('requires_editor', False)
+    if requires_editor and not editor_context:
+        # Check if query has explicit keywords - if so, allow routing
+        query_lower = query.lower()
+        keyword_matches = sum(1 for kw in capabilities['keywords'] if kw in query_lower)
+        if keyword_matches == 0:
+            # No editor and no keywords - don't route to this agent
+            logger.debug(f"  Agent {agent} requires editor but none provided and no keywords matched")
+            return 0.0
+    
     # Domain match
     if domain in capabilities['domains']:
         score += 10.0
@@ -353,18 +371,27 @@ def score_agent_capabilities(
         if editor_type in capabilities['editor_types']:
             score += capabilities['context_boost']
     
-    # Action intent match
-    if action_intent in capabilities['actions']:
-        score += 5.0
-    
-    # Keyword match
+    # Keyword match (check before action intent to use in action intent logic)
     query_lower = query.lower()
     keyword_matches = sum(1 for kw in capabilities['keywords'] if kw in query_lower)
     score += keyword_matches * 2.0
     
+    # Action intent match (CRITICAL - must match for routing)
+    if action_intent in capabilities['actions']:
+        score += 5.0
+    else:
+        # Agent doesn't support this action intent - heavily penalize
+        # Only allow if it's a very strong keyword match or editor context match
+        if keyword_matches == 0 and not editor_context:
+            logger.debug(f"  Agent {agent} doesn't support action '{action_intent}' and no keywords/editor match - excluding")
+            return 0.0  # Exclude entirely if no supporting context
+        # Allow with heavy penalty if there's editor/keyword context
+        score -= 10.0
+        logger.debug(f"  -10.0 penalty: {agent} doesn't support action '{action_intent}'")
+    
     # Special boost for research_agent on information lookup queries
-    # This helps override domain-based routing for "how-to" queries
-    if agent == 'research_agent' and is_information_lookup_query(query):
+    # BUT only if action intent is 'query' (research doesn't handle 'observation')
+    if agent == 'research_agent' and action_intent == 'query' and is_information_lookup_query(query):
         score += 15.0  # Strong boost to override electronics domain routing
         logger.debug(f"  +15.0 information lookup boost for research_agent")
     
@@ -394,6 +421,13 @@ def find_best_agent_match(
     
     scores = {}
     for agent in AGENT_CAPABILITIES.keys():
+        # Skip internal-only agents from direct routing (they should be called by other agents)
+        capabilities = AGENT_CAPABILITIES.get(agent, {})
+        if capabilities.get('internal_only', False):
+            # Only allow if explicitly requested via keywords or if there's research data in shared_memory
+            # For now, exclude from direct routing entirely
+            continue
+        
         score = score_agent_capabilities(
             agent=agent,
             domain=domain,
@@ -420,21 +454,26 @@ def find_best_agent_match(
     
     # INTELLIGENT AGENT SWITCHING: Only switch if new agent scores significantly higher
     # This prevents unnecessary switches for marginal cases while allowing clear topic changes
-    MIN_SCORE_DIFFERENCE_FOR_SWITCH = 3.0  # Minimum score difference to switch agents
+    # Higher threshold when switching FROM chat_agent (since it handles general conversation)
+    MIN_SCORE_DIFFERENCE_FOR_SWITCH = 3.0  # Default minimum score difference
+    MIN_SCORE_DIFFERENCE_FROM_CHAT = 8.0  # Higher threshold when switching from chat_agent
     
     if last_agent and last_agent != best_agent:
         last_agent_score = scores.get(last_agent, 0.0)
         score_difference = best_score - last_agent_score
         
-        if score_difference < MIN_SCORE_DIFFERENCE_FOR_SWITCH:
+        # Use higher threshold when switching from chat_agent (handles general conversation)
+        threshold = MIN_SCORE_DIFFERENCE_FROM_CHAT if last_agent == 'chat_agent' else MIN_SCORE_DIFFERENCE_FOR_SWITCH
+        
+        if score_difference < threshold:
             # Score difference is too small - maintain continuity
-            logger.info(f"🔄 CONTINUITY: Keeping {last_agent} (score difference {score_difference:.1f} < {MIN_SCORE_DIFFERENCE_FOR_SWITCH} threshold)")
+            logger.info(f"🔄 CONTINUITY: Keeping {last_agent} (score difference {score_difference:.1f} < {threshold} threshold)")
             logger.info(f"   → {last_agent}: {last_agent_score:.1f} vs {best_agent}: {best_score:.1f}")
             best_agent = last_agent
             best_score = last_agent_score
         else:
             # Score difference is significant - switch agents
-            logger.info(f"🔄 TOPIC CHANGE: Switching to {best_agent} (score difference {score_difference:.1f} >= {MIN_SCORE_DIFFERENCE_FOR_SWITCH} threshold)")
+            logger.info(f"🔄 TOPIC CHANGE: Switching to {best_agent} (score difference {score_difference:.1f} >= {threshold} threshold)")
             logger.info(f"   → {last_agent}: {last_agent_score:.1f} vs {best_agent}: {best_score:.1f}")
     elif last_agent and last_agent == best_agent:
         logger.info(f"✅ CONTINUITY: Routed to {best_agent} (matches primary_agent, conversation continuity maintained)")

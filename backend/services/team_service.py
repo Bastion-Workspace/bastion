@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional
 import asyncpg
 
 from utils.shared_db_pool import get_shared_db_pool
-# TeamRole enum imported for type hints only
+from models.team_models import TeamRole
 
 logger = logging.getLogger(__name__)
 
@@ -391,6 +391,7 @@ class TeamService:
     async def delete_team(self, team_id: str, user_id: str) -> bool:
         """
         Delete team (admin only, cascades to members, posts, etc.)
+        Also deletes team folder from database and disk.
         
         Args:
             team_id: Team ID
@@ -410,6 +411,49 @@ class TeamService:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
                 await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                
+                # Find and delete team folder(s) before deleting team
+                try:
+                    from services.folder_service import FolderService
+                    from pathlib import Path
+                    import shutil
+                    from config import settings
+                    
+                    folder_service = FolderService()
+                    await folder_service.initialize()
+                    
+                    # Get all folders for this team
+                    team_folders = await folder_service.document_repository.get_folders_by_teams([team_id])
+                    
+                    # Delete all team folders from database (cascade will handle documents)
+                    # We delete directly from repository to bypass the team root folder restriction
+                    for folder_data in team_folders:
+                        folder_id = folder_data.get('folder_id')
+                        if folder_id:
+                            try:
+                                # Delete from database (cascade will handle subfolders and documents)
+                                await folder_service.document_repository.delete_folder(folder_id)
+                                logger.info(f"Deleted team folder {folder_id} from database")
+                            except Exception as e:
+                                logger.warning(f"Failed to delete team folder {folder_id} from database: {e}")
+                    
+                    # Delete entire team directory from disk (Teams/{team_id})
+                    # This will delete all team files including documents, posts, etc.
+                    team_base_path = folder_service.get_team_base_path(team_id)
+                    team_dir = team_base_path.parent  # Go up one level to get Teams/{team_id}
+                    
+                    if team_dir.exists():
+                        try:
+                            shutil.rmtree(team_dir)
+                            logger.info(f"Deleted team directory from disk: {team_dir}")
+                        except Exception as e:
+                            logger.warning(f"Failed to delete team directory {team_dir} from disk: {e}")
+                    else:
+                        logger.info(f"Team directory not found on disk: {team_dir}")
+                        
+                except Exception as e:
+                    logger.warning(f"Failed to delete team folder(s) for team {team_id}: {e}")
+                    # Continue with team deletion even if folder deletion fails
                 
                 # Delete team (cascades to members, posts, etc.)
                 result = await conn.execute("""
@@ -490,7 +534,7 @@ class TeamService:
                     except Exception as e:
                         logger.warning(f"Failed to add member to team room: {e}")
                 
-                logger.info(f"Added member {user_id} to team {team_id} with role {role.value}")
+                logger.info(f"Added member {user_id} to team {team_id} with role {role}")
                 return True
         
         except (PermissionError, ValueError):
@@ -603,7 +647,7 @@ class TeamService:
                 """, new_role, team_id, user_id)
                 
                 if result == "UPDATE 1":
-                    logger.info(f"Updated member {user_id} role to {new_role.value} in team {team_id}")
+                    logger.info(f"Updated member {user_id} role to {new_role} in team {team_id}")
                     return True
                 else:
                     return False

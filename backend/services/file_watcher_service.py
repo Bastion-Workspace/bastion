@@ -435,6 +435,9 @@ class DocumentFileHandler(FileSystemEventHandler):
                 # Still process chunks for metadata, but don't embed
                 if chunks:
                     logger.info(f"✅ Re-processed {len(chunks)} chunks (no embedding) for org document {document_id}")
+            # Check if document is exempt from vectorization
+            elif await self.document_service.document_repository.is_document_exempt(document_id):
+                logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping embedding and KG extraction")
             elif chunks:
                 # **ROOSEVELT'S COMPLETE CLEANUP!** Delete old vectors AND knowledge graph entities
                 await self.document_service.embedding_manager.delete_document_chunks(document_id, user_id)
@@ -996,6 +999,15 @@ class DocumentFileHandler(FileSystemEventHandler):
                 '.gif': 'image',
                 '.bmp': 'image',
                 '.webp': 'image',
+                # Audio files - stored but NOT vectorized
+                '.mp3': 'mp3',
+                '.aac': 'aac',
+                '.wav': 'wav',
+                '.flac': 'flac',
+                '.ogg': 'ogg',
+                '.m4a': 'm4a',
+                '.wma': 'wma',
+                '.opus': 'opus',
             }
             doc_type = doc_type_map.get(file_ext, 'txt')  # Default to txt
             

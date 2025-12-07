@@ -200,39 +200,55 @@ class ImageGenerationAgent(BaseAgent):
                 "error": str(e)
             }
     
-    async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
+    async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
         """
         Process image generation request using LangGraph workflow
         
         Args:
-            state: Dictionary with messages, shared_memory, user_id, persona, etc.
+            query: User query string
+            metadata: Optional metadata dictionary (persona, editor context, etc.)
+            messages: Optional conversation history
             
         Returns:
             Dictionary with image generation response and metadata
         """
         try:
-            logger.info("🎨 Image Generation Agent: Starting image generation...")
+            logger.info(f"🎨 Image Generation Agent: Starting image generation: {query[:100]}...")
             
-            # Extract user message
-            messages = state.get("messages", []) or []
-            user_prompt = ""
-            for msg in reversed(messages):
-                content = getattr(msg, "content", None)
-                role = getattr(msg, "type", None)
-                if content and (role == "human" or role is None):
-                    user_prompt = str(content)
-                    break
-                if isinstance(msg, dict) and msg.get("role") == "user":
-                    user_prompt = str(msg.get("content") or "")
-                    break
+            # Extract user_id and shared_memory from metadata
+            metadata = metadata or {}
+            user_id = metadata.get("user_id", "system")
+            shared_memory = metadata.get("shared_memory", {}) or {}
+            
+            # Prepare new messages (current query)
+            new_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Get workflow to access checkpoint
+            workflow = await self._get_workflow()
+            config = self._get_checkpoint_config(metadata)
+            
+            # Load and merge checkpointed messages to preserve conversation history
+            conversation_messages = await self._load_and_merge_checkpoint_messages(
+                workflow, config, new_messages
+            )
+            
+            # Load shared_memory from checkpoint if available
+            checkpoint_state = await workflow.aget_state(config)
+            existing_shared_memory = {}
+            if checkpoint_state and checkpoint_state.values:
+                existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+            
+            # Merge with any shared_memory from incoming metadata
+            shared_memory_merged = shared_memory.copy()
+            shared_memory_merged.update(existing_shared_memory)
             
             # Build initial state for LangGraph workflow
             initial_state: ImageGenerationState = {
-                "query": user_prompt,
-                "user_id": state.get("user_id", "system"),
-                "metadata": state.get("metadata", {}),
-                "messages": messages,
-                "shared_memory": state.get("shared_memory", {}),
+                "query": query,
+                "user_id": user_id,
+                "metadata": metadata,
+                "messages": conversation_messages,
+                "shared_memory": shared_memory_merged,
                 "persona": state.get("persona"),
                 "prompt": "",
                 "generation_params": {},
@@ -240,12 +256,6 @@ class ImageGenerationAgent(BaseAgent):
                 "task_status": "",
                 "error": ""
             }
-            
-            # Get workflow (lazy initialization with checkpointer)
-            workflow = await self._get_workflow()
-            
-            # Get checkpoint config (handles thread_id from conversation_id/user_id)
-            config = self._get_checkpoint_config(metadata)
             
             # Invoke LangGraph workflow with checkpointing
             final_state = await workflow.ainvoke(initial_state, config=config)

@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Fix: Chat message copy now preserves markdown formatting as rich text (HTML) while keeping raw markdown syntax for plain text editors
+- Feature: Added Dictionary Agent with short-circuit routing for "define:" queries (instant lexicographic lookups)
+- Fix: Resolved conversation ID mismatch causing 403 errors when accessing conversations from checkpoint list
 - Feature: Added universal DocumentEditBatch system for atomic multi-edit operations
 - Feature: Added intelligent reference file creation to general and electronics agents (>1500 char threshold)
 - Refactor: Migrated electronics_agent to use batch editing for atomic, efficient document updates

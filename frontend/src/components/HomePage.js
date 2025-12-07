@@ -44,7 +44,7 @@ const HomePage = () => {
         {/* Hero Section */}
         <Box textAlign="center" mb={6}>
           <Typography variant="h3" component="h1" gutterBottom>
-            Welcome to Codex
+            Welcome to Bastion Workspace
           </Typography>
         </Box>
 
