@@ -5,6 +5,7 @@ FileManager Service - Centralized file management for all agents and tools
 import logging
 import hashlib
 import re
+import shutil
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 import asyncio
@@ -298,21 +299,92 @@ class FileManagerService:
         logger.info(f"📁 Moving file: {request.document_id} to folder {request.new_folder_id}")
         
         try:
+            from pathlib import Path
+            from config import settings
+            
             # Get current document info
             current_doc = await self.document_service.document_repository.get_by_id(request.document_id)
             if not current_doc:
                 raise ValueError(f"Document not found: {request.document_id}")
             
             old_folder_id = current_doc.folder_id
+            filename = current_doc.filename
+            user_id = current_doc.user_id
+            collection_type = current_doc.collection_type if hasattr(current_doc, 'collection_type') else ("global" if not user_id else "user")
             
-            # Update document folder
-            updated_doc = DocumentInfo(
-                **current_doc.dict(),
-                folder_id=request.new_folder_id,
-                updated_at=datetime.now()
+            # Find the current file on disk
+            old_file_path = None
+            
+            # Try new folder structure first
+            try:
+                if old_folder_id:
+                    old_file_path_str = await self.folder_service.get_document_file_path(
+                        filename=filename,
+                        folder_id=old_folder_id,
+                        user_id=user_id,
+                        collection_type=collection_type
+                    )
+                    old_file_path = Path(old_file_path_str)
+                    
+                    if not old_file_path.exists():
+                        # Try with document_id prefix (legacy style)
+                        filename_with_id = f"{request.document_id}_{filename}"
+                        old_file_path_str = await self.folder_service.get_document_file_path(
+                            filename=filename_with_id,
+                            folder_id=old_folder_id,
+                            user_id=user_id,
+                            collection_type=collection_type
+                        )
+                        old_file_path = Path(old_file_path_str)
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to find file in new structure: {e}")
+            
+            # Fall back to legacy flat structure if not found
+            if not old_file_path or not old_file_path.exists():
+                upload_dir = Path(settings.UPLOAD_DIR)
+                legacy_paths = [
+                    upload_dir / f"{request.document_id}_{filename}",
+                    upload_dir / filename
+                ]
+                
+                for legacy_path in legacy_paths:
+                    if legacy_path.exists():
+                        old_file_path = legacy_path
+                        logger.info(f"📄 Found file in legacy location: {old_file_path}")
+                        break
+            
+            # Get new folder's physical path
+            new_folder_path = await self.folder_service.get_folder_physical_path(request.new_folder_id)
+            if not new_folder_path:
+                raise ValueError(f"Failed to get physical path for folder: {request.new_folder_id}")
+            
+            # Ensure new folder directory exists
+            await self.folder_service._create_physical_directory(new_folder_path)
+            
+            # Move file on disk if it exists
+            if old_file_path and old_file_path.exists():
+                new_file_path = new_folder_path / filename
+                
+                # Handle case where file already exists at destination
+                if new_file_path.exists() and new_file_path != old_file_path:
+                    logger.warning(f"⚠️ File already exists at destination: {new_file_path}")
+                    # Generate unique filename
+                    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+                    name_parts = new_file_path.stem, new_file_path.suffix
+                    new_file_path = new_folder_path / f"{name_parts[0]}_{timestamp}{name_parts[1]}"
+                    logger.info(f"📝 Using unique filename: {new_file_path.name}")
+                
+                # Move the file
+                shutil.move(str(old_file_path), str(new_file_path))
+                logger.info(f"📦 Moved file on disk: {old_file_path} -> {new_file_path}")
+            else:
+                logger.warning(f"⚠️ File not found on disk: {old_file_path} (database will be updated anyway)")
+            
+            # Update document folder in database
+            success = await self.document_service.document_repository.update(
+                request.document_id,
+                folder_id=request.new_folder_id
             )
-            
-            success = await self.document_service.document_repository.update(updated_doc)
             if not success:
                 raise ValueError(f"Failed to update document: {request.document_id}")
             

@@ -192,6 +192,12 @@ class DocumentService:
             if not doc_type:
                 doc_type = self._detect_document_type(file.filename)
             
+            # Automatically exempt .json files from vectorization
+            exempt_from_vectorization = None
+            if file.filename and file.filename.lower().endswith('.json'):
+                exempt_from_vectorization = True
+                logger.info(f"🚫 JSON file detected ({file.filename}) - automatically exempting from vectorization")
+            
             # Create document record with file hash and user ownership
             # collection_type already set above
             doc_info = DocumentInfo(
@@ -204,7 +210,8 @@ class DocumentService:
                 status=ProcessingStatus.PROCESSING,
                 user_id=user_id,  # Track document ownership
                 collection_type=collection_type,  # Set correct collection type
-                team_id=team_id  # Track team ownership if applicable
+                team_id=team_id,  # Track team ownership if applicable
+                exempt_from_vectorization=exempt_from_vectorization
             )
             
             # ROOSEVELT FIX: Save to database and assign folder in a single transaction
@@ -1769,6 +1776,12 @@ class DocumentService:
                 logger.warning(f"Invalid category '{category_value}', using 'other'")
                 category = DocumentCategory.OTHER
             
+            # Automatically exempt .json files from vectorization
+            exempt_from_vectorization = None
+            if filename and filename.lower().endswith('.json'):
+                exempt_from_vectorization = True
+                logger.info(f"🚫 JSON file detected ({filename}) - automatically exempting from vectorization")
+            
             # Create document info with proper fields
             document_info = DocumentInfo(
                 document_id=doc_id,
@@ -1785,7 +1798,8 @@ class DocumentService:
                 status=ProcessingStatus.PROCESSING,
                 user_id=user_id,
                 collection_type=collection_type,
-                folder_id=folder_id
+                folder_id=folder_id,
+                exempt_from_vectorization=exempt_from_vectorization
             )
             
             # Store original file to disk so content endpoint can load it
@@ -1818,8 +1832,8 @@ class DocumentService:
             else:
                 logger.info(f"📝 File already written by caller: {file_path}")
             
-            # Store in database
-            await self.document_repository.create(document_info)
+            # Store in database - use create_with_folder to inherit exemption from parent folder
+            await self.document_repository.create_with_folder(document_info, folder_id)
             
             # Update status to embedding
             await self.document_repository.update_status(doc_id, ProcessingStatus.EMBEDDING)

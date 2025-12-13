@@ -18,6 +18,9 @@ export const EditorProvider = ({ children }) => {
     cursorOffset: -1,
     selectionStart: -1,
     selectionEnd: -1,
+    canonicalPath: null,
+    documentId: null,
+    folderId: null,
   });
 
   // **ROOSEVELT'S NAVIGATION CLEANUP**: Clear editor state when leaving documents page
@@ -37,6 +40,9 @@ export const EditorProvider = ({ children }) => {
         cursorOffset: -1,
         selectionStart: -1,
         selectionEnd: -1,
+        canonicalPath: null,
+        documentId: null,
+        folderId: null,
       });
     }
   }, [location.pathname, editorState.isEditable]);

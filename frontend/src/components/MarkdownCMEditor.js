@@ -1,4 +1,4 @@
-import React, { useMemo, useEffect, useState } from 'react';
+import React, { useMemo, useEffect, useState, useRef } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { EditorView, keymap, Decoration, ViewPlugin } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
@@ -173,8 +173,16 @@ function buildFrontmatter(data) {
   return `---\n${lines.join('\n')}\n---\n`;
 }
 
-export default function MarkdownCMEditor({ value, onChange, filename, canonicalPath }) {
+export default function MarkdownCMEditor({ value, onChange, filename, canonicalPath, initialScrollPosition = 0, onScrollChange }) {
   const { darkMode } = useTheme();
+  
+  // Refs for scroll position preservation
+  const editorViewRef = useRef(null);
+  const savedScrollPosRef = useRef(null);
+  const shouldRestoreScrollRef = useRef(false);
+  const scrollCallbackTimeoutRef = useRef(null);
+  const hasRestoredInitialScrollRef = useRef(false);
+  
   const [suggestionsEnabled, setSuggestionsEnabled] = useState(() => {
     try {
       const saved = localStorage.getItem('editorPredictiveSuggestionsEnabled');
@@ -239,12 +247,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
   const [fmOpen, setFmOpen] = useState(false);
   const { data: initialData, lists: initialLists, raw: initialRaw, order: initialOrder, body: initialBody } = useMemo(() => {
     const parsed = parseFrontmatter((value || '').replace(/\r\n/g, '\n'));
-    console.log('🎯 ROOSEVELT FRONTMATTER DEBUG:');
-    console.log('  📄 Value (first 100 chars):', value?.slice(0, 100) + (value?.length > 100 ? '...' : ''));
-    console.log('  📋 Parsed object:', parsed);
-    console.log('  🏷️ Data keys:', Object.keys(parsed.data || {}));
-    console.log('  🏷️ Data values:', parsed.data);
-    console.log('  ✅ Has data:', Object.keys(parsed.data || {}).length > 0);
+    // Debug logging removed for performance - fires on every keystroke
     return parsed;
   }, [value]);
   const baseTitle = useMemo(() => (filename ? String(filename).replace(/\.[^.]+$/, '') : ''), [filename]);
@@ -254,10 +257,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
     if (!entries.find(e => e.key === 'title') && baseTitle) {
       entries.unshift({ key: 'title', value: baseTitle });
     }
-    console.log('🎯 ROOSEVELT FRONTMATTER ENTRIES INIT:');
-    console.log('  🏷️ Initial data:', initialData);
-    console.log('  📝 Entries array:', entries);
-    console.log('  📄 Base title:', baseTitle);
+    // Debug logging removed for performance
     return entries;
   });
   const [fmListEntries, setFmListEntries] = useState(() => {
@@ -275,12 +275,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
     if (!entries.find(e => e.key === 'title') && baseTitle) {
       entries.unshift({ key: 'title', value: baseTitle });
     }
-    console.log('🎯 ROOSEVELT FRONTMATTER ENTRIES UPDATE:');
-    console.log('  🏷️ Initial data:', initialData);
-    console.log('  📝 Entries array:', entries);
-    console.log('  📄 Base title:', baseTitle);
-    console.log('  📋 Initial lists:', initialLists);
-    console.log('  📄 Initial raw:', initialRaw);
+    // Debug logging removed for performance - fires on every change
     setFmEntries(entries);
     const obj = {};
     Object.entries(initialLists || {}).forEach(([k, arr]) => { obj[k] = (arr || []).join('\n'); });
@@ -289,6 +284,72 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
     setFmOrder(initialOrder || []);
   }, [initialData, initialLists, initialRaw, initialOrder, baseTitle]);
 
+  // Restore scroll position after value changes (from diff accept/reject)
+  useEffect(() => {
+    if (shouldRestoreScrollRef.current && savedScrollPosRef.current !== null && editorViewRef.current) {
+      // Use requestAnimationFrame to ensure DOM has updated
+      requestAnimationFrame(() => {
+        if (editorViewRef.current && savedScrollPosRef.current !== null) {
+          const scrollDOM = editorViewRef.current.scrollDOM;
+          if (scrollDOM) {
+            scrollDOM.scrollTop = savedScrollPosRef.current;
+            console.log('📜 Restored scroll position:', savedScrollPosRef.current);
+            shouldRestoreScrollRef.current = false;
+            savedScrollPosRef.current = null;
+          }
+        }
+      });
+    }
+  }, [value]);
+  
+  // Restore initial scroll position on mount (for tab switching and page reload)
+  useEffect(() => {
+    if (!hasRestoredInitialScrollRef.current && editorViewRef.current && initialScrollPosition > 0) {
+      requestAnimationFrame(() => {
+        if (editorViewRef.current) {
+          const scrollDOM = editorViewRef.current.scrollDOM;
+          if (scrollDOM) {
+            scrollDOM.scrollTop = initialScrollPosition;
+            console.log('📜 Restored initial scroll position:', initialScrollPosition);
+            hasRestoredInitialScrollRef.current = true;
+          }
+        }
+      });
+    }
+  }, [initialScrollPosition]);
+  
+  // Track scroll changes and notify parent (debounced)
+  useEffect(() => {
+    if (!editorViewRef.current || !onScrollChange) return;
+    
+    const scrollDOM = editorViewRef.current.scrollDOM;
+    if (!scrollDOM) return;
+    
+    const handleScroll = () => {
+      // Clear any pending callback
+      if (scrollCallbackTimeoutRef.current) {
+        clearTimeout(scrollCallbackTimeoutRef.current);
+      }
+      
+      // Debounce scroll position updates (300ms)
+      scrollCallbackTimeoutRef.current = setTimeout(() => {
+        if (scrollDOM && onScrollChange) {
+          const scrollTop = scrollDOM.scrollTop;
+          onScrollChange(scrollTop);
+        }
+      }, 300);
+    };
+    
+    scrollDOM.addEventListener('scroll', handleScroll, { passive: true });
+    
+    return () => {
+      scrollDOM.removeEventListener('scroll', handleScroll);
+      if (scrollCallbackTimeoutRef.current) {
+        clearTimeout(scrollCallbackTimeoutRef.current);
+      }
+    };
+  }, [onScrollChange]);
+  
   // Show frontmatter in the editor (no hiding)
   const frontmatterHider = useMemo(() => {
     return ViewPlugin.fromClass(class {
@@ -301,15 +362,14 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
     }, { decorations: v => v.decorations });
   }, []);
 
-  // Publish active editor state to context on mount/update (debounced localStorage write for ChatSidebar consumption)
+  // Set editor state ONCE on mount to tell ChatSidebar that editor is open
+  // ChatSidebar only checks isEditable flag, doesn't need content updates during typing
   useEffect(() => {
     const fullText = (value || '').replace(/\r\n/g, '\n');
     const { data, lists } = parseFrontmatter(fullText);
-    
-    // **ROOSEVELT'S FRONTMATTER MERGE**: Merge data and lists so array fields (files, components, etc.) are included!
     const mergedFrontmatter = { ...data, ...lists };
     
-    // **ROOSEVELT'S CANONICAL PATH**: Backend provides the canonical path - we just pass it through!
+    // Set context state ONCE to indicate editor is open
     const payload = {
       isEditable: true,
       filename: filename || 'untitled.md',
@@ -317,22 +377,37 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
       content: fullText,
       contentLength: fullText.length,
       frontmatter: mergedFrontmatter,
-      // Cursor info populated by onUpdate plugin below; default unknowns here
       cursorOffset: -1,
       selectionStart: -1,
       selectionEnd: -1,
-      canonicalPath: canonicalPath || null, // **ROOSEVELT: Backend-provided canonical path!**
+      canonicalPath: canonicalPath || null,
     };
+    
     setEditorState(payload);
-    // Debounced localStorage update to make active_editor available to ChatSidebarContext
-    const handle = setTimeout(() => {
-      try {
-        localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
-      } catch {}
-    }, 400);
-    return () => clearTimeout(handle);
+    
+    // Also write to localStorage for chat to read on mount
+    try {
+      localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
+    } catch {}
+    
+    // Cleanup on unmount - clear editor state
+    return () => {
+      setEditorState({
+        isEditable: false,
+        filename: null,
+        language: null,
+        content: null,
+        contentLength: 0,
+        frontmatter: null,
+        cursorOffset: -1,
+        selectionStart: -1,
+        selectionEnd: -1,
+        canonicalPath: null,
+      });
+    };
+    // Only run on mount/unmount and when file changes, NOT on every keystroke
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [value, filename, canonicalPath]);
+  }, [filename, canonicalPath]);
 
   // Removed floating Accept listener; no longer needed
 
@@ -402,8 +477,8 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
           const before = nextText.slice(0, start);
           const mid = nextText.slice(start, end);
           const after = nextText.slice(end);
-          // pre_hash check if present
-          if (op.pre_hash && op.pre_hash.length > 0) {
+          // pre_hash check if present (skip for insert operations where start == end)
+          if (op.pre_hash && op.pre_hash.length > 0 && start !== end) {
             const ph = sliceHash(mid);
             if (ph !== op.pre_hash) {
               console.warn('⚠️ Pre-hash mismatch, skipping operation to avoid conflict:', { start, end });
@@ -412,13 +487,52 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
           }
           if (op.op_type === 'delete_range') {
             nextText = before + after;
+          } else if (op.op_type === 'insert_after_heading' || op.op_type === 'insert_after') {
+            // Insert operation: start === end, insert text at that position
+            const text = typeof op.text === 'string' ? op.text : '';
+            nextText = before + text + after;
           } else { // replace_range default
             const text = typeof op.text === 'string' ? op.text : '';
             nextText = before + text + after;
           }
         }
         if (nextText !== current) {
-          onChange && onChange(nextText);
+          console.log('✅ Applying operations: text changed', { 
+            originalLength: current.length, 
+            newLength: nextText.length,
+            operationsCount: operations.length,
+            diff: nextText.length - current.length
+          });
+          
+          // Save scroll position before applying changes
+          if (editorViewRef.current) {
+            const scrollDOM = editorViewRef.current.scrollDOM;
+            if (scrollDOM) {
+              savedScrollPosRef.current = scrollDOM.scrollTop;
+              shouldRestoreScrollRef.current = true;
+              console.log('💾 Saved scroll position:', savedScrollPosRef.current);
+            }
+          }
+          
+          if (onChange) {
+            onChange(nextText);
+            console.log('✅ onChange called with new text');
+          } else {
+            console.warn('⚠️ onChange callback is not defined');
+          }
+        } else {
+          console.warn('⚠️ Operations did not change text', { 
+            operationsCount: operations.length,
+            operations: operations.map(op => ({ 
+              op_type: op.op_type, 
+              start: op.start, 
+              end: op.end,
+              textLength: op.text?.length,
+              textPreview: op.text?.substring(0, 30)
+            })),
+            currentLength: current.length,
+            nextTextLength: nextText.length
+          });
         }
       } catch (err) {
         console.error('❌ Failed to apply editor operations:', err);
@@ -430,13 +544,37 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
     function handleLiveEditAccepted(e) {
       try {
         const { operationId, operation } = e.detail || {};
-        if (!operation) return;
+        if (!operation) {
+          console.warn('⚠️ No operation in liveEditAccepted event');
+          return;
+        }
+        
+        console.log('✅ Accepting live edit:', { 
+          operationId, 
+          operation: { 
+            op_type: operation.op_type,
+            start: operation.start,
+            end: operation.end,
+            textLength: operation.text?.length,
+            textPreview: operation.text?.substring(0, 50) + '...' 
+          } 
+        });
         
         // Apply the single operation
         const current = (value || '').replace(/\r\n/g, '\n');
         window.__pushEditorUndo(current);
         
-        const ops = [operation];
+        // Ensure operation has all required fields
+        const normalizedOp = {
+          op_type: operation.op_type || 'replace_range',
+          start: Number(operation.start || 0),
+          end: Number(operation.end !== undefined ? operation.end : operation.start || 0),
+          text: operation.text || ''
+        };
+        
+        console.log('✅ Normalized operation for apply:', normalizedOp);
+        
+        const ops = [normalizedOp];
         applyOperations({ detail: { operations: ops } });
         
         // Remove from pending diffs
@@ -444,7 +582,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
           detail: { operationId } 
         }));
       } catch (err) {
-        console.error('Failed to handle live edit acceptance:', err);
+        console.error('❌ Failed to handle live edit acceptance:', err);
       }
     }
     
@@ -454,10 +592,36 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
         const { operationId } = e.detail || {};
         if (!operationId) return;
         
-        // Just remove visualization
+        // Save scroll position before removing decoration (DOM changes can cause scroll jump)
+        let savedScrollPos = null;
+        if (editorViewRef.current) {
+          const scrollDOM = editorViewRef.current.scrollDOM;
+          if (scrollDOM) {
+            savedScrollPos = scrollDOM.scrollTop;
+            console.log('💾 Saved scroll position for reject:', savedScrollPos);
+          }
+        }
+        
+        // Remove visualization
         window.dispatchEvent(new CustomEvent('removeLiveDiff', { 
           detail: { operationId } 
         }));
+        
+        // Restore scroll position after decoration removal
+        // Use double RAF to ensure decoration removal has completed
+        if (savedScrollPos !== null && editorViewRef.current) {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              if (editorViewRef.current) {
+                const scrollDOM = editorViewRef.current.scrollDOM;
+                if (scrollDOM) {
+                  scrollDOM.scrollTop = savedScrollPos;
+                  console.log('📜 Restored scroll position after reject:', savedScrollPos);
+                }
+              }
+            });
+          });
+        }
       } catch (err) {
         console.error('Failed to handle live edit rejection:', err);
       }
@@ -594,21 +758,36 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
         <CodeMirror
         value={value}
         height="100%"
-        basicSetup={true}
+        basicSetup={false}
         extensions={[...extensions, frontmatterHider, ...(ghostExt || []), EditorView.updateListener.of((update) => {
           try {
             if (!update.view) return;
+            
+            // Capture editor view reference for scroll position management
+            if (!editorViewRef.current) {
+              editorViewRef.current = update.view;
+            }
+            
             const sel = update.state.selection.main;
             const cursorOffset = sel.head;
             const selectionStart = sel.from;
             const selectionEnd = sel.to;
             const docText = update.state.doc.toString();
-            const { data, lists } = parseFrontmatter(docText);
             
-            // **ROOSEVELT'S FRONTMATTER MERGE**: Merge data and lists so array fields (files, components, etc.) are included!
-            const mergedFrontmatter = { ...data, ...lists };
+            // **PERFORMANCE FIX**: Only parse frontmatter when document changes, not on cursor moves
+            const needsContentUpdate = update.docChanged;
             
-            // **ROOSEVELT: Use backend-provided canonical path**
+            let mergedFrontmatter = {};
+            if (needsContentUpdate) {
+              const { data, lists } = parseFrontmatter(docText);
+              mergedFrontmatter = { ...data, ...lists };
+              // Cache for reuse during cursor-only updates
+              window.__last_editor_frontmatter = mergedFrontmatter;
+            } else {
+              // Reuse cached frontmatter for cursor-only updates
+              mergedFrontmatter = window.__last_editor_frontmatter || {};
+            }
+            
             const payload = {
               isEditable: true,
               filename: filename || 'untitled.md',
@@ -619,10 +798,15 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
               cursorOffset,
               selectionStart,
               selectionEnd,
-              canonicalPath: canonicalPath || null, // **ROOSEVELT: Backend-provided canonical path!**
+              canonicalPath: canonicalPath || null,
             };
-            setEditorState(payload);
-            // throttle writes
+            
+            // **PERFORMANCE FIX**: Don't update React context during typing!
+            // ChatSidebar only checks if editor is open (already set on mount via useEffect)
+            // When sending messages, chat reads from localStorage, not React context
+            // So we ONLY write to localStorage, not to React state
+            
+            // Throttle localStorage writes for chat to read when sending messages
             if (!window.__editor_ctx_write_ts || Date.now() - window.__editor_ctx_write_ts > 500) {
               window.__editor_ctx_write_ts = Date.now();
               localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));

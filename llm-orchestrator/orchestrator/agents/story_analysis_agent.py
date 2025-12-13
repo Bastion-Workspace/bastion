@@ -186,8 +186,10 @@ class StoryAnalysisAgent(BaseAgent):
             llm = self._get_llm(temperature=0.3, state=state)
             
             # Generate analysis
+            datetime_context = self._get_datetime_context()
             messages = [
                 SystemMessage(content=system_prompt),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=user_prompt)
             ]
             

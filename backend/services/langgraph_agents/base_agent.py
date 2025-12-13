@@ -1,6 +1,10 @@
 """
 Base Agent Class - Roosevelt's "LangGraph Gold Standard" Implementation
 Common functionality for all LangGraph agents with best practices
+
+**DEPRECATED**: Backend agents are deprecated. All new agent development should use
+llm-orchestrator agents (orchestrator/agents/). Backend agents are maintained for
+legacy compatibility only. The llm-orchestrator service is the active agent system.
 """
 
 import json
@@ -47,6 +51,10 @@ class AgentError:
 class BaseAgent:
     """
     Base class for all LangGraph agents following Roosevelt's best practices
+    
+    **DEPRECATED**: Backend agents are deprecated. All new agent development
+    should use llm-orchestrator agents (orchestrator/agents/). Backend agents
+    are maintained for legacy compatibility only.
     
     Key principles:
     - Additive state updates (never mutate input state)
@@ -226,6 +234,47 @@ class BaseAgent:
         except Exception as e:
             logger.error(f"❌ Failed to get agent tools for {self.agent_type}: {e}")
             return []
+    
+    async def _get_agent_tools_dynamic(
+        self,
+        query: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get tools dynamically based on current query
+        
+        NEW METHOD: Replaces _get_agent_tools_async for dynamic loading
+        Uses Kiro-style query analysis to load only relevant tools
+        
+        Args:
+            query: Current user query
+            metadata: Optional metadata with conversation context
+            
+        Returns:
+            List of tool objects (core + conditional based on query)
+        """
+        try:
+            await self._initialize_tools()
+            from services.langgraph_tools.centralized_tool_registry import get_tool_registry
+            
+            registry = await get_tool_registry()
+            
+            # Use dynamic tool selection
+            agent_tools = await registry.get_tools_for_agent_dynamic(
+                agent_type=self.agent_type_enum,
+                query=query,
+                metadata=metadata
+            )
+            
+            tool_names = [tool["function"]["name"] for tool in agent_tools]
+            logger.info(f"🎯 {self.agent_type} dynamic tools: {tool_names}")
+            
+            return agent_tools
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to get dynamic tools for {self.agent_type}: {e}")
+            # Fallback to static loading
+            return await self._get_agent_tools_async()
     
     def _create_agent_result(
         self,
@@ -1061,12 +1110,37 @@ Be concise and focus on preventing topic contamination while preserving relevant
             chat_service = await self._get_chat_service()
             model_name = await self._get_model_name()
             
-            # Get tools using modern async method
+            # Get tools using dynamic loading (Kiro-style) based on query
             try:
-                tools = await self._get_agent_tools_async()
+                # Extract query from state for dynamic tool loading
+                query = self._extract_current_user_query(state)
+                
+                # Build metadata for dynamic tool loading
+                metadata = {
+                    "user_id": state.get("user_id"),
+                    "conversation_id": state.get("conversation_id"),
+                    "conversation_context": {
+                        "previous_tools_used": tools_used  # Pass tools used so far for context
+                    }
+                }
+                
+                # Use dynamic tool loading for research agent (and others when enabled)
+                # This reduces token usage by loading only relevant tools
+                if self.agent_type == "research_agent":
+                    tools = await self._get_agent_tools_dynamic(query, metadata)
+                    logger.info(f"🎯 Dynamic tool loading: {len(tools)} tools loaded for research agent")
+                else:
+                    # Other agents can use static loading for now (can be enabled later)
+                    tools = await self._get_agent_tools_async()
             except Exception as e:
                 logger.error(f"❌ Failed to get tools: {e}")
-                tools = []
+                # Fallback to static loading on error
+                try:
+                    tools = await self._get_agent_tools_async()
+                    logger.info(f"⚠️ Fallback to static tool loading: {len(tools)} tools")
+                except Exception as fallback_error:
+                    logger.error(f"❌ Fallback tool loading also failed: {fallback_error}")
+                    tools = []
             
             # Reasoning automatically added by OpenRouterClient wrapper
             response = await chat_service.openai_client.chat.completions.create(

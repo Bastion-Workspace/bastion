@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { Box, Dialog, DialogTitle, DialogContent, DialogActions, Button, Checkbox, FormControlLabel, Typography, Divider, Alert } from '@mui/material';
 
 function computeSimpleHash(text) {
@@ -34,6 +34,8 @@ export default function EditorOpsPreviewModal({ open, onClose, operations, manus
   const [currentText, setCurrentText] = useState('');
   const [selected, setSelected] = useState({});
   const [error, setError] = useState(null);
+  const contentRef = useRef(null);
+  const scrollPositionRef = useRef(0);
 
   useEffect(() => {
     if (!open) return;
@@ -68,13 +70,41 @@ export default function EditorOpsPreviewModal({ open, onClose, operations, manus
   const rows = useMemo(() => {
     const list = Array.isArray(operations) ? operations : [];
     return list.map((op, idx) => {
-      const original = getOriginalSlice(currentText, op.start, op.end);
+      // For replace_range operations, prefer original_text if available (more reliable)
+      // Fallback to slicing currentText if original_text not available
+      let original = '';
+      if (op.op_type === 'replace_range' && op.original_text) {
+        original = op.original_text;
+      } else if (op.op_type === 'delete_range' && op.original_text) {
+        original = op.original_text;
+      } else {
+        // For insert operations (insert_after_heading, insert_after) or when original_text not available, use slice
+        original = getOriginalSlice(currentText, op.start, op.end);
+      }
       const preOk = op.pre_hash ? computeSimpleHash(original) === op.pre_hash : true;
       return { idx, op, original, preOk };
     });
   }, [operations, currentText]);
 
-  const handleToggle = (idx) => setSelected(prev => ({ ...prev, [idx]: !prev[idx] }));
+  const handleToggle = (idx) => {
+    // Preserve scroll position before state update
+    if (contentRef.current) {
+      scrollPositionRef.current = contentRef.current.scrollTop;
+    }
+    setSelected(prev => ({ ...prev, [idx]: !prev[idx] }));
+  };
+
+  // Restore scroll position after re-render
+  useEffect(() => {
+    if (contentRef.current && scrollPositionRef.current > 0) {
+      // Use requestAnimationFrame to ensure DOM has updated
+      requestAnimationFrame(() => {
+        if (contentRef.current) {
+          contentRef.current.scrollTop = scrollPositionRef.current;
+        }
+      });
+    }
+  }, [selected]);
 
   const selectedOps = useMemo(() => {
     const list = [];
@@ -97,7 +127,7 @@ export default function EditorOpsPreviewModal({ open, onClose, operations, manus
   return (
     <Dialog open={open} onClose={onClose} maxWidth="lg" fullWidth>
       <DialogTitle>Review Proposed Edits</DialogTitle>
-      <DialogContent dividers>
+      <DialogContent dividers ref={contentRef}>
         {error && <Alert severity="error" sx={{ mb: 1 }}>{String(error)}</Alert>}
         {(rows || []).map(({ idx, op, original, preOk }) => (
           <Box key={idx} sx={{ mb: 2 }}>

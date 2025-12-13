@@ -81,7 +81,8 @@ class ToolDefinition:
         description: str,
         access_level: ToolAccessLevel,
         parameters: Dict[str, Any],
-        timeout_seconds: int = 30
+        timeout_seconds: int = 30,
+        categories: List[Any] = None
     ):
         self.name = name
         self.function = function
@@ -89,6 +90,7 @@ class ToolDefinition:
         self.access_level = access_level
         self.parameters = parameters
         self.timeout_seconds = timeout_seconds
+        self.categories = categories or []
 
 
 class CentralizedToolRegistry:
@@ -1237,6 +1239,216 @@ class CentralizedToolRegistry:
             logger.error(f"❌ Failed to create StructuredTool for {tool_def.name}: {e}")
             return None
     
+    def _get_core_tools_for_agent(self, agent_type: AgentType) -> List[Dict[str, Any]]:
+        """
+        Get core tools that are always loaded for an agent
+        
+        Args:
+            agent_type: Agent type
+            
+        Returns:
+            List of tool objects (core tools only)
+        """
+        from services.langgraph_tools.tool_categories import get_core_tools_for_agent
+        
+        agent_type_str = agent_type.value
+        core_tool_names = get_core_tools_for_agent(agent_type_str)
+        
+        # Get tool objects for core tools
+        core_tools = []
+        permissions = self._agent_permissions.get(agent_type, {})
+        
+        for tool_name in core_tool_names:
+            if tool_name in permissions and tool_name in self._tools:
+                tool_def = self._tools[tool_name]
+                schema_parameters = self._convert_to_json_schema(tool_def.parameters)
+                
+                tool_obj = {
+                    "type": "function",
+                    "function": {
+                        "name": tool_def.name,
+                        "description": tool_def.description,
+                        "parameters": schema_parameters
+                    }
+                }
+                core_tools.append(tool_obj)
+        
+        return core_tools
+    
+    def _get_tools_by_category(
+        self,
+        agent_type: AgentType,
+        category: Any
+    ) -> List[Dict[str, Any]]:
+        """
+        Get tools for a specific category that the agent has permission for
+        
+        Args:
+            agent_type: Agent type
+            category: ToolCategory enum value
+            
+        Returns:
+            List of tool objects matching the category
+        """
+        from services.langgraph_tools.dynamic_tool_analyzer import DynamicToolAnalyzer
+        
+        analyzer = DynamicToolAnalyzer()
+        tool_category_map = analyzer._map_tools_to_categories([])
+        
+        # Map category to tool names
+        category_to_tools = {
+            "search_local": ["search_local", "search_conversation_cache"],
+            "search_web": ["search_web", "search_and_crawl", "crawl_web_content"],
+            "document_ops": ["get_document"],
+            "analysis": ["analyze_documents"],
+            "math": ["calculate"],
+            "weather": ["get_weather"],
+            "aws_pricing": ["get_aws_service_pricing", "compare_aws_regions", "estimate_aws_costs", "estimate_aws_workload"],
+            "org_files": ["search_org_files", "list_org_todos", "search_org_by_tag"],
+            "messaging": ["send_room_message", "get_user_rooms"],
+            "file_creation": ["create_file", "create_folder"],
+            "expansion": ["expand_query"],
+            "image_generation": ["generate_image"],
+            "website_crawl": ["crawl_website"],
+        }
+        
+        category_str = category.value if hasattr(category, 'value') else str(category)
+        tool_names = category_to_tools.get(category_str, [])
+        
+        # Get tool objects for these tools
+        tools = []
+        permissions = self._agent_permissions.get(agent_type, {})
+        
+        for tool_name in tool_names:
+            if tool_name in permissions and tool_name in self._tools:
+                tool_def = self._tools[tool_name]
+                schema_parameters = self._convert_to_json_schema(tool_def.parameters)
+                
+                tool_obj = {
+                    "type": "function",
+                    "function": {
+                        "name": tool_def.name,
+                        "description": tool_def.description,
+                        "parameters": schema_parameters
+                    }
+                }
+                tools.append(tool_obj)
+        
+        return tools
+    
+    async def get_tools_for_agent_dynamic(
+        self,
+        agent_type: AgentType,
+        query: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get tools dynamically based on query analysis
+        
+        Strategy:
+        1. Always include "core" tools for agent (e.g., search_local for research)
+        2. Analyze query for additional needs
+        3. Load conditional tools based on analysis
+        4. Return minimal focused tool set
+        
+        Args:
+            agent_type: Agent type
+            query: User query string
+            metadata: Optional metadata with conversation context
+            
+        Returns:
+            List of tool objects (core + conditional based on query)
+        """
+        if not self._initialized:
+            logger.warning("⚠️ Tool registry not initialized, falling back to static loading")
+            return self.get_tool_objects_for_agent(agent_type)
+        
+        # Check if dynamic loading is enabled
+        import os
+        enable_dynamic = os.getenv("ENABLE_DYNAMIC_TOOL_LOADING", "true").lower() == "true"
+        
+        if not enable_dynamic:
+            logger.debug("Dynamic tool loading disabled, using static loading")
+            return self.get_tool_objects_for_agent(agent_type)
+        
+        try:
+            # Get core tools (always loaded)
+            core_tools = self._get_core_tools_for_agent(agent_type)
+            
+            # Analyze query for additional needs
+            from services.langgraph_tools.dynamic_tool_analyzer import get_dynamic_tool_analyzer
+            
+            analyzer = get_dynamic_tool_analyzer()
+            conversation_context = metadata.get("conversation_context", {}) if metadata else {}
+            analysis = await analyzer.analyze_tool_needs(query, agent_type, conversation_context)
+            
+            # Build final tool list
+            tools = core_tools.copy()
+            
+            # Add conditional tools based on analysis
+            for category in analysis["conditional_categories"]:
+                category_tools = self._get_tools_by_category(agent_type, category)
+                # Avoid duplicates
+                existing_names = {t["function"]["name"] for t in tools}
+                for tool in category_tools:
+                    if tool["function"]["name"] not in existing_names:
+                        tools.append(tool)
+                        existing_names.add(tool["function"]["name"])
+            
+            logger.info(
+                f"🎯 Dynamic loading: {len(tools)} tools for {agent_type.value} "
+                f"(core: {len(core_tools)}, conditional: {len(tools) - len(core_tools)})"
+            )
+            logger.debug(f"🎯 Categories detected: {[c.value for c in analysis['conditional_categories']]}")
+            
+            return tools
+            
+        except Exception as e:
+            logger.error(f"❌ Dynamic tool loading failed: {e}, falling back to static")
+            return self.get_tool_objects_for_agent(agent_type)
+    
+    async def load_additional_tools(
+        self,
+        agent_type: AgentType,
+        categories: List[Any],
+        existing_tool_names: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Load additional tools by category (progressive loading)
+        
+        Used when agent realizes mid-workflow it needs more tools.
+        
+        Args:
+            agent_type: Agent type
+            categories: List of ToolCategory values to load
+            existing_tool_names: Optional list of tool names already loaded (to avoid duplicates)
+            
+        Returns:
+            List of additional tool objects
+        """
+        if not self._initialized:
+            logger.warning("⚠️ Tool registry not initialized")
+            return []
+        
+        existing_names = set(existing_tool_names or [])
+        additional_tools = []
+        
+        for category in categories:
+            category_tools = self._get_tools_by_category(agent_type, category)
+            for tool in category_tools:
+                tool_name = tool["function"]["name"]
+                if tool_name not in existing_names:
+                    additional_tools.append(tool)
+                    existing_names.add(tool_name)
+        
+        if additional_tools:
+            logger.info(
+                f"🎯 Progressive loading: Added {len(additional_tools)} tools "
+                f"for categories {[c.value if hasattr(c, 'value') else str(c) for c in categories]}"
+            )
+        
+        return additional_tools
+    
     def get_tool_node_for_agent(self, agent_type: AgentType) -> Optional[Any]:
         """
         Get LangGraph ToolNode for an agent (LangGraph best practice)
@@ -1325,6 +1537,26 @@ async def get_tool_objects_for_agent(agent_type: AgentType) -> List[Dict[str, An
     """Get tool objects for an agent (LangGraph format)"""
     registry = await get_tool_registry()
     return registry.get_tool_objects_for_agent(agent_type)
+
+
+async def get_tools_for_agent_dynamic(
+    agent_type: AgentType,
+    query: str,
+    metadata: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Get tools dynamically based on query analysis (Kiro-style dynamic loading)
+    
+    Args:
+        agent_type: Agent type
+        query: User query string
+        metadata: Optional metadata with conversation context
+        
+    Returns:
+        List of tool objects (core + conditional based on query)
+    """
+    registry = await get_tool_registry()
+    return await registry.get_tools_for_agent_dynamic(agent_type, query, metadata)
 
 
 async def get_structured_tools_for_agent(agent_type: AgentType) -> List[Any]:

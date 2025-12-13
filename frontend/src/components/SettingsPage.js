@@ -49,7 +49,8 @@ import {
   Person,
   Description as DescriptionIcon,
   ListAlt,
-  FolderOpen
+  FolderOpen,
+  MusicNote
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
@@ -63,6 +64,7 @@ import ImageGenerationModelSelector from './ImageGenerationModelSelector';
 import TextCompletionModelSelector from './TextCompletionModelSelector';
 import { useModel } from '../contexts/ModelContext';
 import OrgModeSettingsTab from './OrgModeSettingsTab';
+import MediaSettingsTab from './music/MediaSettingsTab';
 
 // Model Status Display Component
 const ModelStatusDisplay = () => {
@@ -313,6 +315,8 @@ const SettingsPage = () => {
   // User profile state
   const [userTimezone, setUserTimezone] = useState('UTC');
   const [timezoneLoading, setTimezoneLoading] = useState(false);
+  const [userZipCode, setUserZipCode] = useState('');
+  const [userTimeFormat, setUserTimeFormat] = useState('24h');
 
 
   // AI Personality state
@@ -340,7 +344,7 @@ const SettingsPage = () => {
   React.useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     if (urlParams.get('tab') === 'users' && user?.role === 'admin') {
-      setCurrentTab(6); // Database tab is at 5, User Management is at 6
+      setCurrentTab(7); // Database tab is at 6, User Management is at 7
     }
   }, [user]);
 
@@ -404,6 +408,38 @@ const SettingsPage = () => {
       },
       onError: (error) => {
         console.error('Failed to fetch user timezone:', error);
+      }
+    }
+  );
+
+  // Fetch user zip code
+  const { data: zipCodeData, refetch: refetchZipCode } = useQuery(
+    'userZipCode',
+    () => apiService.settings.getUserZipCode(),
+    {
+      onSuccess: (data) => {
+        if (data?.zip_code) {
+          setUserZipCode(data.zip_code);
+        }
+      },
+      onError: (error) => {
+        console.error('Failed to fetch user zip code:', error);
+      }
+    }
+  );
+
+  // Fetch user time format
+  const { data: timeFormatData, refetch: refetchTimeFormat } = useQuery(
+    'userTimeFormat',
+    () => apiService.settings.getUserTimeFormat(),
+    {
+      onSuccess: (data) => {
+        if (data?.time_format) {
+          setUserTimeFormat(data.time_format);
+        }
+      },
+      onError: (error) => {
+        console.error('Failed to fetch user time format:', error);
       }
     }
   );
@@ -502,6 +538,50 @@ const SettingsPage = () => {
         setSnackbar({
           open: true,
           message: `Failed to update timezone: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  // Zip code update mutation
+  const zipCodeMutation = useMutation(
+    (zipCode) => apiService.settings.setUserZipCode({ zip_code: zipCode }),
+    {
+      onSuccess: (data) => {
+        setSnackbar({
+          open: true,
+          message: `Zip code updated to ${data.zip_code}`,
+          severity: 'success'
+        });
+        refetchZipCode();
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to update zip code: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  // Time format update mutation
+  const timeFormatMutation = useMutation(
+    (timeFormat) => apiService.settings.setUserTimeFormat({ time_format: timeFormat }),
+    {
+      onSuccess: (data) => {
+        setSnackbar({
+          open: true,
+          message: `Time format updated to ${data.time_format === '12h' ? '12-hour (AM/PM)' : '24-hour (Military)'}`,
+          severity: 'success'
+        });
+        refetchTimeFormat();
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to update time format: ${error.response?.data?.detail || error.message}`,
           severity: 'error'
         });
       }
@@ -908,6 +988,7 @@ const SettingsPage = () => {
     { label: 'Models', icon: <Settings /> },
     { label: 'News', icon: <DescriptionIcon /> },
     { label: 'Org-Mode', icon: <ListAlt /> },
+    { label: 'Media', icon: <MusicNote /> },
     ...(user?.role === 'admin' ? [
       { label: 'Database', icon: <DeleteSweep /> },
       { label: 'User Management', icon: <Security /> },
@@ -1014,6 +1095,81 @@ const SettingsPage = () => {
                       startIcon={timezoneMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
                     >
                       {timezoneMutation.isLoading ? 'Updating...' : 'Update Timezone'}
+                    </Button>
+                  </Box>
+
+                  {/* Zip Code Setting */}
+                  <Box mb={3}>
+                    <Typography variant="h6" gutterBottom>
+                      Zip Code
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" paragraph>
+                      Enter your zip code to display local weather conditions in the status bar.
+                    </Typography>
+                    
+                    <TextField
+                      fullWidth
+                      label="Zip Code"
+                      value={userZipCode}
+                      onChange={(e) => {
+                        const value = e.target.value.replace(/\D/g, '').slice(0, 5);
+                        setUserZipCode(value);
+                      }}
+                      inputProps={{ maxLength: 5 }}
+                      sx={{ mb: 2 }}
+                      helperText="5-digit US zip code"
+                      disabled={zipCodeMutation.isLoading}
+                    />
+
+                    <Button
+                      variant="contained"
+                      onClick={() => {
+                        if (userZipCode.length === 5) {
+                          zipCodeMutation.mutate(userZipCode);
+                        } else {
+                          setSnackbar({
+                            open: true,
+                            message: 'Zip code must be 5 digits',
+                            severity: 'error'
+                          });
+                        }
+                      }}
+                      disabled={zipCodeMutation.isLoading || userZipCode.length !== 5}
+                      startIcon={zipCodeMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
+                    >
+                      {zipCodeMutation.isLoading ? 'Updating...' : 'Update Zip Code'}
+                    </Button>
+                  </Box>
+
+                  {/* Time Format Setting */}
+                  <Box mb={3}>
+                    <Typography variant="h6" gutterBottom>
+                      Time Format
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" paragraph>
+                      Choose how time is displayed in the status bar: 12-hour format (AM/PM) or 24-hour format (Military).
+                    </Typography>
+                    
+                    <FormControl fullWidth sx={{ mb: 2 }}>
+                      <InputLabel>Time Format</InputLabel>
+                      <Select
+                        value={userTimeFormat}
+                        onChange={(e) => setUserTimeFormat(e.target.value)}
+                        label="Time Format"
+                        disabled={timeFormatMutation.isLoading}
+                      >
+                        <MenuItem value="12h">12-hour (AM/PM)</MenuItem>
+                        <MenuItem value="24h">24-hour (Military)</MenuItem>
+                      </Select>
+                    </FormControl>
+
+                    <Button
+                      variant="contained"
+                      onClick={() => timeFormatMutation.mutate(userTimeFormat)}
+                      disabled={timeFormatMutation.isLoading}
+                      startIcon={timeFormatMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
+                    >
+                      {timeFormatMutation.isLoading ? 'Updating...' : 'Update Time Format'}
                     </Button>
                   </Box>
 
@@ -1758,8 +1914,19 @@ const SettingsPage = () => {
         </motion.div>
       )}
 
+      {/* Media Settings Tab */}
+      {currentTab === 5 && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+        >
+          <MediaSettingsTab />
+        </motion.div>
+      )}
+
       {/* Database Management Tab */}
-      {currentTab === 5 && user?.role === 'admin' && (
+      {currentTab === 6 && user?.role === 'admin' && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
         <motion.div
@@ -1905,7 +2072,7 @@ const SettingsPage = () => {
       )}
 
       {/* User Management Tab */}
-      {currentTab === 6 && user?.role === 'admin' && (
+      {currentTab === 7 && user?.role === 'admin' && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -1916,7 +2083,7 @@ const SettingsPage = () => {
       )}
 
       {/* Pending Submissions Tab */}
-      {currentTab === 7 && user?.role === 'admin' && (
+      {currentTab === 8 && user?.role === 'admin' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}

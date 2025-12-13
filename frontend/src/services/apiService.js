@@ -12,6 +12,7 @@ import templateService from './template/TemplateService';
 import integrationService from './integration/IntegrationService';
 import audioService from './audio/AudioService';
 import orgService from './org/OrgService';
+import musicService from './music/MediaService';
 
 class ApiService {
   constructor() {
@@ -27,6 +28,7 @@ class ApiService {
     this.integrations = integrationService;
     this.audio = audioService;
     this.org = orgService;
+    this.music = musicService;
   }
 
   // ===== CORE HTTP METHODS =====

@@ -10,7 +10,7 @@ class TabNotificationManager {
     this.isFlashing = false;
     this.flashCount = 0;
     this.flashMessage = 'New message';
-    this.maxFlashCount = 20; // Stop flashing after 20 cycles
+    this.maxFlashCount = 90; // Stop flashing after 90 cycles (90 seconds)
     this.flashDelay = 1000; // Flash every 1 second
     
     // Listen for visibility changes

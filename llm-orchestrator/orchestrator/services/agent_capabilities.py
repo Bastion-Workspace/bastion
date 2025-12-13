@@ -20,41 +20,47 @@ AGENT_CAPABILITIES = {
         'keywords': ['electronics', 'circuit', 'arduino', 'esp32', 'raspberry pi', 'microcontroller', 
                      'sensor', 'resistor', 'voltage', 'pcb', 'schematic', 'firmware', 'embedded'],
         'context_boost': 20  # Strong preference when editor matches
+        # Note: Can handle queries without editor, but route_within_domain enforces editor for editing actions
     },
     'fiction_editing_agent': {
         'domains': ['fiction', 'writing', 'story', 'manuscript'],
         'actions': ['observation', 'generation', 'modification'],
         'editor_types': ['fiction'],
         'keywords': ['chapter', 'scene', 'dialogue', 'character', 'plot', 'manuscript', 'story', 'prose'],
-        'context_boost': 20
+        'context_boost': 20,
+        'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
     },
     'story_analysis_agent': {
         'domains': ['fiction', 'writing', 'story'],
         'actions': ['analysis'],
         'editor_types': ['fiction'],
         'keywords': ['analyze', 'critique', 'review', 'pacing', 'structure', 'themes'],
-        'context_boost': 15
+        'context_boost': 15,
+        'requires_explicit_keywords': True  # Must have explicit analysis keywords to route here
     },
     'outline_editing_agent': {
         'domains': ['fiction', 'writing', 'outline'],
         'actions': ['observation', 'generation', 'modification'],
         'editor_types': ['outline'],
         'keywords': ['outline', 'structure', 'act', 'plot points'],
-        'context_boost': 20
+        'context_boost': 20,
+        'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
     },
     'character_development_agent': {
         'domains': ['fiction', 'writing', 'character'],
         'actions': ['observation', 'generation', 'modification'],
         'editor_types': ['character'],
         'keywords': ['character', 'protagonist', 'antagonist', 'backstory', 'motivation'],
-        'context_boost': 20
+        'context_boost': 20,
+        'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
     },
     'rules_editing_agent': {
         'domains': ['fiction', 'writing', 'worldbuilding'],
         'actions': ['observation', 'generation', 'modification'],
         'editor_types': ['rules'],
         'keywords': ['rules', 'worldbuilding', 'canon', 'magic system', 'lore'],
-        'context_boost': 20
+        'context_boost': 20,
+        'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
     },
     'weather_agent': {
         'domains': ['weather', 'forecast', 'climate'],
@@ -110,7 +116,8 @@ AGENT_CAPABILITIES = {
         'actions': ['modification'],
         'editor_types': ['fiction'],
         'keywords': ['proofread', 'check grammar', 'fix typos', 'style corrections', 'grammar check', 'spell check'],
-        'context_boost': 20
+        'context_boost': 20,
+        'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
     },
     'general_project_agent': {
         'domains': ['general', 'management'],
@@ -131,6 +138,13 @@ AGENT_CAPABILITIES = {
             'help', 'documentation', 'tutorial', 'user guide', 'feature guide'
         ],
         'context_boost': 0
+    },
+    'reference_agent': {
+        'domains': ['general', 'reference', 'journal', 'log'],
+        'actions': ['query', 'analysis', 'observation'],
+        'editor_types': ['reference'],
+        'keywords': ['journal', 'log', 'record', 'tracking', 'diary', 'food log', 'weight log', 'mood log'],
+        'context_boost': 20  # Strong preference when editor type matches
     }
 }
 
@@ -167,7 +181,8 @@ def detect_domain(
                 'podcast': 'content',
                 'substack': 'content',
                 'blog': 'content',
-                'project': 'general'
+                'project': 'general',
+                'reference': 'general'
             }
             domain = editor_domain_map.get(editor_type)
             if domain:
@@ -202,7 +217,8 @@ def detect_domain(
                 'proofreading_agent': 'fiction',
                 'weather_agent': 'weather',
                 'research_agent': 'general',
-                'site_crawl_agent': 'general'
+                'site_crawl_agent': 'general',
+                'reference_agent': 'general'
             }
             domain = agent_domain_map.get(last_agent)
             if domain:
@@ -267,7 +283,16 @@ def route_within_domain(
             logger.info(f"🔍 INFORMATION LOOKUP: Electronics domain query detected as information lookup → research_agent")
             return 'research_agent'
         
-        # Technical understanding, design, analysis, project management → electronics_agent
+        # For editing operations (generation, modification), require active editor
+        if action_intent in ['generation', 'modification']:
+            if editor_type == 'electronics':
+                return 'electronics_agent'
+            else:
+                # No electronics editor active - route to chat_agent for general discussion
+                logger.info(f"🎯 ELECTRONICS DOMAIN: Editing action but no active editor - routing to chat_agent")
+                return 'chat_agent'
+        
+        # For query/analysis actions, electronics_agent can handle without editor
         return 'electronics_agent'
     
     elif domain == 'fiction':
@@ -280,14 +305,23 @@ def route_within_domain(
             return 'character_development_agent'
         elif editor_type == 'rules':
             return 'rules_editing_agent'
-        else:
+        elif editor_type == 'fiction':
+            # Only route to fiction_editing_agent if fiction editor is active
             return 'fiction_editing_agent'
+        else:
+            # No editor active - route to chat_agent for general fiction discussion
+            logger.info(f"🎯 FICTION DOMAIN: No active editor - routing to chat_agent instead of fiction_editing_agent")
+            return 'chat_agent'
     
     elif domain == 'weather':
         return 'weather_agent'
     
     elif domain == 'general':
         # General domain routing
+        # Check if reference editor is active - prefer reference_agent
+        if editor_type == 'reference':
+            return 'reference_agent'
+        
         # Check if project editor is active - prefer general_project_agent
         if editor_type == 'project':
             return 'general_project_agent'
@@ -352,7 +386,27 @@ def score_agent_capabilities(
     
     # Check if agent requires editor but none is provided
     requires_editor = capabilities.get('requires_editor', False)
+    has_editor_types = bool(capabilities.get('editor_types', []))
+    editing_actions = ['generation', 'modification']
+    
+    # Editing agents (agents with editor_types) require an editor for editing actions
+    # Even if requires_editor is not explicitly set, if agent has editor_types and action is editing, require editor
+    if has_editor_types and action_intent in editing_actions:
+        if not editor_context:
+            # Editing agent with editing action but no editor - block routing
+            logger.debug(f"  Agent {agent} is an editing agent with editing action '{action_intent}' but no active editor - blocking")
+            return 0.0
+    
+    # Explicit requires_editor flag check
     if requires_editor and not editor_context:
+        # Editing agents (agents with editor_types) should ALWAYS require an editor
+        # No keyword bypass allowed - they need an active document to edit
+        if has_editor_types:
+            # Strict requirement: editing agents must have active editor
+            logger.debug(f"  Agent {agent} is an editing agent and requires active editor - no keyword bypass allowed")
+            return 0.0
+        
+        # For non-editing agents with requires_editor, allow keyword bypass
         # Check if query has explicit keywords - if so, allow routing
         query_lower = query.lower()
         keyword_matches = sum(1 for kw in capabilities['keywords'] if kw in query_lower)
@@ -379,6 +433,17 @@ def score_agent_capabilities(
     # Action intent match (CRITICAL - must match for routing)
     if action_intent in capabilities['actions']:
         score += 5.0
+        
+        # Special handling for story_analysis_agent: requires explicit analysis keywords
+        # This prevents basic questions from routing to analysis agent
+        if agent == 'story_analysis_agent':
+            # Must have explicit analysis keywords (analyze, critique, review, etc.)
+            explicit_analysis_keywords = ['analyze', 'critique', 'review', 'assess', 'evaluate', 'examine', 'study']
+            has_explicit_keyword = any(kw in query_lower for kw in explicit_analysis_keywords)
+            if not has_explicit_keyword:
+                # No explicit analysis keyword - heavily penalize (prefer fiction_editing_agent for questions)
+                score -= 15.0
+                logger.debug(f"  -15.0 penalty: {agent} requires explicit analysis keywords (analyze/critique/review)")
     else:
         # Agent doesn't support this action intent - heavily penalize
         # Only allow if it's a very strong keyword match or editor context match
@@ -391,9 +456,16 @@ def score_agent_capabilities(
     
     # Special boost for research_agent on information lookup queries
     # BUT only if action intent is 'query' (research doesn't handle 'observation')
-    if agent == 'research_agent' and action_intent == 'query' and is_information_lookup_query(query):
+    # AND only if NOT asking about current document (document questions should go to editor agents)
+    is_document_question = any(word in query.lower() for word in ['this', 'the document', 'the file', 'current', 'here', 'in this'])
+    if agent == 'research_agent' and action_intent == 'query' and is_information_lookup_query(query) and not is_document_question:
         score += 15.0  # Strong boost to override electronics domain routing
         logger.debug(f"  +15.0 information lookup boost for research_agent")
+    
+    # Special boost for editor-matched agents when question is about current document
+    if editor_context and is_document_question and editor_type in capabilities['editor_types']:
+        score += 10.0  # Strong boost for document-specific questions
+        logger.debug(f"  +10.0 document question boost for {agent} (editor matches)")
     
     # Conversation continuity (reduced boost to avoid overriding semantic intent)
     if last_agent == agent:

@@ -96,6 +96,16 @@ message ActiveEditor {
   EditorFrontmatter frontmatter = 6;  // Parsed YAML frontmatter
   string editor_preference = 7;  // "prefer" | "ignore"
   string canonical_path = 8;  // Full filesystem path for resolving relative references
+  
+  // Editor cursor and selection state
+  optional int32 cursor_offset = 9;  // Character offset of cursor position (-1 if unknown)
+  optional int32 selection_start = 10;  // Start of selected text (-1 if no selection)
+  optional int32 selection_end = 11;  // End of selected text (-1 if no selection)
+  
+  // Document metadata for file operations
+  optional string document_id = 12;  // Document ID in database (if known)
+  optional string folder_id = 13;  // Folder ID for creating companion files in same folder
+  optional string file_path = 14;  // Relative file path (alternative to canonical_path)
 }
 
 // Editor frontmatter (YAML metadata from markdown files)

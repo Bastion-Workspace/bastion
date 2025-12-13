@@ -24,6 +24,8 @@ class ChatState(TypedDict):
     system_prompt: str
     conversation_history: List[Dict[str, str]]
     llm_messages: List[Any]
+    needs_calculations: bool
+    calculation_result: Optional[Dict[str, Any]]
     response: Dict[str, Any]
     task_status: str
     error: str
@@ -43,17 +45,38 @@ class ChatAgent(BaseAgent):
         
         # Add nodes
         workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("detect_calculations", self._detect_calculations_node)
+        workflow.add_node("perform_calculations", self._perform_calculations_node)
         workflow.add_node("generate_response", self._generate_response_node)
         
         # Entry point
         workflow.set_entry_point("prepare_context")
         
-        # Linear flow: prepare context -> generate response -> END
-        workflow.add_edge("prepare_context", "generate_response")
+        # Flow: prepare context -> detect calculations -> (conditional) -> generate response
+        workflow.add_edge("prepare_context", "detect_calculations")
+        
+        # Route based on whether calculations are needed
+        workflow.add_conditional_edges(
+            "detect_calculations",
+            self._route_from_calculation_detection,
+            {
+                "calculate": "perform_calculations",
+                "respond": "generate_response"
+            }
+        )
+        
+        # After calculations, go to response generation
+        workflow.add_edge("perform_calculations", "generate_response")
         workflow.add_edge("generate_response", END)
         
         # Compile with checkpointer for state persistence
         return workflow.compile(checkpointer=checkpointer)
+    
+    def _route_from_calculation_detection(self, state: ChatState) -> str:
+        """Route based on whether calculations are needed"""
+        if state.get("needs_calculations", False):
+            return "calculate"
+        return "respond"
     
     def _build_chat_prompt(self, persona: Optional[Dict[str, Any]] = None) -> str:
         """Build system prompt for chat agent"""
@@ -88,6 +111,7 @@ WHAT YOU HANDLE:
 - Hypothetical scenarios and "what if" questions
 - Follow-up questions and clarifications
 - Technical discussions using your training knowledge
+- Mathematical calculations (the system will automatically calculate for you)
 
 PROJECT GUIDANCE:
 - If user asks about electronics/circuits/components without an electronics project open:
@@ -157,6 +181,164 @@ You have access to conversation history for context. Use this to understand foll
                 "task_status": "error"
             }
     
+    async def _detect_calculations_node(self, state: ChatState) -> Dict[str, Any]:
+        """Detect if query requires mathematical calculations"""
+        try:
+            query = state.get("query", "")
+            query_lower = query.lower().strip()
+            
+            # Simple detection: look for math patterns
+            # Arithmetic expressions: "84+92", "100 - 50", "5 * 3", "10 / 2"
+            # Calculation keywords: "calculate", "compute", "what is X + Y", "how much is"
+            # Math symbols: +, -, *, /, =, ^
+            
+            has_math_symbols = any(symbol in query for symbol in ['+', '-', '*', '/', '=', '^', '×', '÷'])
+            has_calculation_keywords = any(kw in query_lower for kw in [
+                "calculate", "compute", "what is", "how much is", "what's", "equals",
+                "plus", "minus", "times", "divided by", "multiply", "add", "subtract"
+            ])
+            
+            # Check for simple arithmetic patterns (e.g., "84+92", "100 - 50")
+            import re
+            arithmetic_pattern = re.search(r'\d+\s*[+\-*/×÷]\s*\d+', query)
+            
+            needs_calculations = has_math_symbols or has_calculation_keywords or bool(arithmetic_pattern)
+            
+            logger.info(f"💬 Calculation detection: {needs_calculations} (symbols: {has_math_symbols}, keywords: {has_calculation_keywords}, pattern: {bool(arithmetic_pattern)})")
+            
+            return {
+                "needs_calculations": needs_calculations
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Calculation detection failed: {e}")
+            return {
+                "needs_calculations": False
+            }
+    
+    async def _perform_calculations_node(self, state: ChatState) -> Dict[str, Any]:
+        """Perform calculations using math tool"""
+        try:
+            query = state.get("query", "")
+            
+            # Extract mathematical expression from query
+            import re
+            
+            # Try to find arithmetic expression
+            arithmetic_match = re.search(r'(\d+(?:\.\d+)?)\s*([+\-*/×÷])\s*(\d+(?:\.\d+)?)', query)
+            
+            if arithmetic_match:
+                # Simple arithmetic found
+                num1 = float(arithmetic_match.group(1))
+                operator = arithmetic_match.group(2)
+                num2 = float(arithmetic_match.group(3))
+                
+                # Map operators
+                operator_map = {
+                    '+': '+',
+                    '-': '-',
+                    '*': '*',
+                    '/': '/',
+                    '×': '*',
+                    '÷': '/'
+                }
+                
+                op_symbol = operator_map.get(operator, operator)
+                expression = f"{num1} {op_symbol} {num2}"
+                
+                logger.info(f"💬 Performing calculation: {expression}")
+                
+                from orchestrator.tools.math_tools import calculate_expression_tool
+                result = await calculate_expression_tool(expression)
+                
+                if result.get("success"):
+                    calculation_result = result.get("result")
+                    logger.info(f"✅ Calculation result: {calculation_result}")
+                    
+                    return {
+                        "calculation_result": {
+                            "expression": expression,
+                            "result": calculation_result,
+                            "steps": result.get("steps", [])
+                        },
+                        "needs_calculations": False
+                    }
+                else:
+                    logger.warning(f"⚠️ Calculation failed: {result.get('error')}")
+                    return {
+                        "calculation_result": None,
+                        "needs_calculations": False
+                    }
+            else:
+                # Try to extract expression using LLM
+                fast_model = self._get_fast_model(state)
+                llm = self._get_llm(temperature=0.1, model=fast_model, state=state)
+                
+                prompt = f"""Extract the mathematical expression or calculation from this query:
+
+**QUERY**: {query}
+
+**TASK**: Extract a mathematical expression that can be evaluated.
+
+**EXAMPLES**:
+- "What is 84+92?" → "84+92"
+- "Calculate 100 times 5" → "100*5"
+- "How much is 50 divided by 2?" → "50/2"
+- "What's 10 minus 3?" → "10-3"
+
+Return ONLY the mathematical expression as a string, or "null" if no clear expression can be extracted.
+
+Return ONLY valid JSON:
+{{
+  "expression": "84+92" or null
+}}"""
+                
+                try:
+                    schema = {
+                        "type": "object",
+                        "properties": {
+                            "expression": {"type": ["string", "null"]}
+                        },
+                        "required": ["expression"]
+                    }
+                    structured_llm = llm.with_structured_output(schema)
+                    result = await structured_llm.ainvoke([{"role": "user", "content": prompt}])
+                    result_dict = result if isinstance(result, dict) else result.dict() if hasattr(result, 'dict') else result.model_dump()
+                    expression = result_dict.get("expression")
+                except Exception:
+                    response = await llm.ainvoke([{"role": "user", "content": prompt}])
+                    content = response.content if hasattr(response, 'content') else str(response)
+                    result_dict = self._parse_json_response(content) or {}
+                    expression = result_dict.get("expression")
+                
+                if expression:
+                    from orchestrator.tools.math_tools import calculate_expression_tool
+                    calc_result = await calculate_expression_tool(expression)
+                    
+                    if calc_result.get("success"):
+                        return {
+                            "calculation_result": {
+                                "expression": expression,
+                                "result": calc_result.get("result"),
+                                "steps": calc_result.get("steps", [])
+                            },
+                            "needs_calculations": False
+                        }
+            
+            # No calculation could be extracted
+            return {
+                "calculation_result": None,
+                "needs_calculations": False
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Calculation failed: {e}")
+            return {
+                "calculation_result": None,
+                "needs_calculations": False,
+                "error": str(e)
+            }
+    
     async def _generate_response_node(self, state: ChatState) -> Dict[str, Any]:
         """Generate response: call LLM and parse structured output"""
         try:
@@ -176,12 +358,30 @@ You have access to conversation history for context. Use this to understand foll
             response = await llm.ainvoke(llm_messages)
             processing_time = (datetime.now() - start_time).total_seconds()
             
+            # Check if we have calculation results to include
+            calculation_result = state.get("calculation_result")
+            calc_value = None
+            calc_expression = None
+            
+            if calculation_result:
+                calc_value = calculation_result.get("result")
+                calc_expression = calculation_result.get("expression", "")
+                logger.info(f"💬 Including calculation result in response: {calc_expression} = {calc_value}")
+            
+            # Call LLM
+            response = await llm.ainvoke(llm_messages)
+            
             # Parse structured response
             response_content = response.content if hasattr(response, 'content') else str(response)
             structured_response = self._parse_json_response(response_content)
             
             # Extract message
             final_message = structured_response.get("message", response_content)
+            
+            # If calculation was performed, prepend the result
+            if calculation_result and calc_value is not None:
+                # Prepend calculation result for clarity
+                final_message = f"{calc_expression} = {calc_value}\n\n{final_message}"
             
             # Add assistant response to messages for checkpoint persistence
             state = self._add_assistant_response_to_messages(state, final_message)
@@ -260,6 +460,8 @@ You have access to conversation history for context. Use this to understand foll
                 "system_prompt": "",
                 "conversation_history": [],
                 "llm_messages": [],
+                "needs_calculations": False,
+                "calculation_result": None,
                 "response": {},
                 "task_status": "",
                 "error": "",

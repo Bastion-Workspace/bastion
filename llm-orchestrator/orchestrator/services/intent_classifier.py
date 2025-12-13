@@ -416,7 +416,7 @@ class IntentClassifier:
 			from orchestrator.services.title_generation_service import get_title_generation_service
 			title_service = get_title_generation_service()
 			
-			# Generate title using fast model
+			# Generate title using fast model (classification model)
 			title = await title_service.generate_title(user_message)
 			
 			logger.info(f"🔤 TITLE GENERATED: {title}")
@@ -426,11 +426,9 @@ class IntentClassifier:
 			
 		except Exception as e:
 			logger.error(f"❌ Title generation failed: {e}")
-			# Fallback: use first few words of user message
-			words = state["user_message"].strip().split()[:5]
-			fallback_title = " ".join(words) + ("..." if len(words) == 5 else "")
-			if len(fallback_title) > 50:
-				fallback_title = fallback_title[:47] + "..."
+			# Fallback: use first 3 words of user message
+			words = state["user_message"].strip().split()[:3]
+			fallback_title = " ".join(words)
 			state["generated_title"] = fallback_title.capitalize()
 			return state
 	
@@ -922,13 +920,18 @@ class IntentClassifier:
    - Examples: "Edit...", "Revise...", "Change...", "Improve...", "Update...", "Fix..."
    - Intent: Alter existing content
 
-4. **analysis** - User wants CRITIQUE/FEEDBACK/ASSESSMENT/COMPARISON/SUMMARIZATION
-   - Examples: "Analyze...", "Critique...", "Review...", "Compare...", "Summarize...", "Find differences..."
+4. **analysis** - User wants EXPLICIT CRITIQUE/FEEDBACK/ASSESSMENT/COMPARISON/SUMMARIZATION with analysis verbs
+   - Examples: "Analyze...", "Critique...", "Review...", "Compare...", "Summarize...", "Find differences...", "Assess...", "Evaluate..."
    - Intent: Get feedback, assessment, or summary
+   - **CRITICAL**: Must have EXPLICIT analysis verbs (analyze, critique, review, assess, evaluate, examine)
+   - **NOT analysis**: Simple questions about content ("Why is this...?", "How about...?", "Does this follow...?") → **observation**
+   - Questions about style, content, or structure without explicit analysis verbs → **observation** (NOT analysis)
 
-5. **query** - User seeks EXTERNAL INFORMATION or FACTS (NOT document analysis)
+5. **query** - User seeks EXTERNAL INFORMATION or FACTS (NOT document analysis, NOT questions about current document)
    - Examples: "Tell me about...", "What is...", "Explain...", "Research...", "Find information about..."
    - Intent: Get information about general topics (NOT specific documents)
+   - **CRITICAL**: Questions about the CURRENT document (using "this", "the", referring to visible content) → **observation** (NOT query)
+   - Examples of document questions → observation: "Where is this coming from?", "What style is this?", "Why is this here?"
 
 6. **management** - User wants to ORGANIZE/CONFIGURE/MANAGE system/tasks/project files
    - Examples: "Add TODO...", "Save...", "Update project files...", "Mark as done...", "Crawl website..."
@@ -939,11 +942,18 @@ class IntentClassifier:
 - **Conversational statements** about plans/actions without explicit creation verbs → **observation** (NOT generation, NOT query)
   - Examples: "I'm going to...", "I plan to...", "Eat nothing but beans on Tuesday" → **observation**
 - **Explicit creation requests** with verbs like "Write", "Create", "Draft", "Generate" → **generation**
-- Document-specific queries (mentions specific files/documents) → **analysis** (NOT query)
+- **Questions about CURRENT document** (using "this", "the", referring to visible/active content) → **observation** (NOT query, NOT analysis)
+  - Examples: "Where is this coming from?", "What style is this?", "Why is this here?", "Where is this abbreviate narrative style coming from?", "How about Chapter 2?", "Does this follow our style guide?" → **observation**
+  - These are asking about existing content in the active document, not seeking external information
+  - These are conversational questions, not explicit analysis requests
+- **Explicit analysis requests** (with analysis verbs) → **analysis**
+  - Examples: "Analyze Chapter 2", "Critique the pacing", "Review the structure", "Assess the themes" → **analysis**
+  - Must have explicit analysis verbs (analyze, critique, review, assess, evaluate, examine)
+- Document-specific queries without explicit analysis verbs (mentions specific files/documents) → **observation** (NOT analysis)
 - "How is X looking?" or "How is X going?" → **observation** (checking status)
 - "Save what we discussed" → **management** (project file operation)
 - Comparison/contrast queries → **analysis** (NOT query)
-- Seeking information about topics (not documents) → **query**
+- Seeking information about topics (not documents, not current content) → **query**
 
 **OUTPUT FORMAT** (JSON ONLY):
 {{
@@ -1108,7 +1118,7 @@ The '{primary_agent}' agent previously responded with:
 			data_formatting_note = " (NOT AWS pipelines!)"
 			data_formatting_avoid = "\n  - AVOID: AWS pipeline creation (use pipeline_agent)"
 		
-		return f"""You are Roosevelt's Simple Intent Classifier - quick and decisive routing!
+		return f"""You are a Simple Intent Classifier - quick and decisive routing!
 
 **MISSION**: Classify user intent (WHAT they want) and action intent (HOW they want to interact), then route to the right agent.
 
@@ -1601,8 +1611,8 @@ You MUST respond with a single JSON object matching this schema:
 				# **CRITICAL**: Pipeline agent is ONLY accessible from pipelines page
 				# If NOT on pipelines page (no active_pipeline_id), BLOCK pipeline agent
 				if not active_pipeline_id and current_agent == 'pipeline_agent':
-					logger.info(f"🛑 ROOSEVELT: Blocking pipeline_agent - not on pipelines page (no active_pipeline_id)")
-					logger.info(f"🔄 ROOSEVELT: Redirecting pipeline_agent → research_agent (general query handling)")
+					logger.info(f"🛑 Blocking pipeline_agent - not on pipelines page (no active_pipeline_id)")
+					logger.info(f"🔄 Redirecting pipeline_agent → research_agent (general query handling)")
 					data['target_agent'] = 'research_agent'  # Redirect to research agent for general queries
 					current_agent = 'research_agent'
 				

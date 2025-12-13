@@ -209,6 +209,17 @@ async def stream_from_grpc_orchestrator(
                     except json.JSONDecodeError as e:
                         logger.warning(f"Failed to parse editor_operations JSON: {e}")
                 
+                elif chunk.type == "title":
+                    # Forward title chunks immediately so frontend can update UI right away
+                    title_updated = True
+                    yield format_sse_message({
+                        'type': 'title',
+                        'message': chunk.message,
+                        'timestamp': chunk.timestamp,
+                        'agent': chunk.agent_name
+                    })
+                    logger.info(f"🔤 Forwarded title chunk to frontend: {chunk.message}")
+                
                 # Flush immediately
                 await asyncio.sleep(0)
             

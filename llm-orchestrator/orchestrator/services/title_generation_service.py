@@ -92,17 +92,17 @@ class TitleGenerationService:
 
 Rules:
 - Generate a title that captures the main topic or intent of the conversation
-- Keep it under 50 characters
+- Maximum 3 words only - this is critical for UI display
 - Make it descriptive but concise
 - Don't include quotes or special formatting
 - Focus on the key subject or question being asked
 - If both user message and assistant response are provided, use both for context
 
 Examples:
-- User: "How do I set up a Docker container for my React app?" → "Docker React App Setup"
+- User: "How do I set up a Docker container for my React app?" → "Docker React Setup"
 - User: "Explain quantum computing concepts" → "Quantum Computing Concepts"
 - User: "Can you help me debug this Python error?" → "Python Error Debugging"
-- User: "What are the best practices for database design?" → "Database Design Best Practices"
+- User: "What are the best practices for database design?" → "Database Design Practices"
 
 Return only the title, nothing else."""
             
@@ -125,8 +125,11 @@ Return only the title, nothing else."""
                 title = response.choices[0].message.content.strip()
                 # Clean up the title
                 title = title.replace('"', '').replace("'", "").strip()
-                if len(title) > 60:
-                    title = title[:57] + "..."
+                
+                # Enforce 3-word maximum
+                words = title.split()
+                if len(words) > 3:
+                    title = " ".join(words[:3])
                 
                 logger.info(f"✅ Generated title: {title}")
                 return title
@@ -143,16 +146,12 @@ Return only the title, nothing else."""
     
     def _generate_fallback_title(self, user_message: str) -> str:
         """Generate a fallback title when LLM generation fails"""
-        # Extract first few words from the message
+        # Extract first 3 words from the message
         words = user_message.strip().split()
-        if len(words) <= 5:
+        if len(words) <= 3:
             title = " ".join(words)
         else:
-            title = " ".join(words[:5]) + "..."
-        
-        # Limit length and clean up
-        if len(title) > 50:
-            title = title[:47] + "..."
+            title = " ".join(words[:3])
         
         return title.capitalize()
 

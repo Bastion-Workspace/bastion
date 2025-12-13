@@ -6,6 +6,24 @@ This directory contains comprehensive documentation for our gRPC-based microserv
 
 ---
 
+## 🆕 Complete Services Reference
+
+**📄 [SERVICES.md](./SERVICES.md)** - **START HERE for complete container overview**
+
+Comprehensive documentation of **ALL** services and containers in the Bastion platform:
+- Infrastructure services (PostgreSQL, Redis)
+- Core application services (Backend, Frontend)
+- Background workers (Celery)
+- gRPC microservices (LLM Orchestrator, Vector Service, Data Service)
+- Supporting services (WebDAV, SearXNG)
+- Port reference, dependencies, health checks, and more
+
+**Use when:** You need to understand what each container does, how they connect, or where to find specific functionality.
+
+---
+
+---
+
 ## Documentation Structure
 
 ### 1. **Quick Start** - Get up and running fast

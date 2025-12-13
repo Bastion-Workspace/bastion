@@ -122,28 +122,136 @@ Steps:
 **FRONTMATTER TYPES FOR AGENT OPERATIONS**
 Set the `type` field in your document's YAML frontmatter to enable specialized agent assistance:
 
-**Creative Writing Types:**
-- `type: fiction` - Enables Fiction Editing Agent for prose creation/editing
-- `type: outline` - Enables Outline Editing Agent for story structure
-- `type: character` - Enables Character Development Agent for character profiles
-- `type: rules` - Enables Rules Editing Agent for world-building rules
-- `type: style` - Style guide for proofreading and consistency
+**Frontmatter Format:**
+Frontmatter is YAML metadata at the top of your markdown document, enclosed by `---` delimiters:
 
-**Content Creation Types:**
-- `type: substack` or `type: blog` - Enables Substack Agent for article/tweet generation
-- `type: podcast` - Enables Podcast Script Agent for TTS-ready scripts
-
-**Technical Types:**
-- `type: electronics` - Enables Electronics Agent for circuit design and embedded programming
-- `type: project` - Enables General Project Agent for project planning, design, and documentation (HVAC, landscaping, home improvement, etc.)
-- `type: sysml` - Enables SysML Agent for system diagrams and UML
-
-**Example frontmatter:**
 ```yaml
 ---
 type: fiction
 title: My Story
 author: Your Name
+tags: [fantasy, adventure]
+status: draft
+---
+```
+
+**Common Frontmatter Fields:**
+- `type` (required) - Determines which agent handles the document
+- `title` - Document title
+- `author` - Author name
+- `tags` - Array of tags for organization
+- `status` - Document status (draft, published, etc.)
+- Custom fields - Any additional metadata you need
+
+**Creative Writing Types:**
+- `type: fiction` - Enables **Fiction Editing Agent** for prose creation/editing
+  - Creates and edits fiction prose, chapters, scenes, dialogue
+  - Works with active fiction editor
+  - Example: "Write chapter 3", "Edit this scene to add tension"
+  
+- `type: outline` - Enables **Outline Editing Agent** for story structure
+  - Creates and refines story outlines
+  - Expands structure and organization
+  - Example: "Create a three-act outline", "Expand this outline"
+  
+- `type: character` - Enables **Character Development Agent** for character profiles
+  - Creates character profiles, backstory, motivations
+  - Defines character arcs
+  - Example: "Create a character profile", "Develop my protagonist"
+  
+- `type: rules` - Enables **Rules Editing Agent** for world-building rules
+  - Defines world-building rules, magic systems, technology
+  - Establishes canon and consistency
+  - Uses structured format with sections: Background, Universe Constraints, Systems, Social Structures, Geography, Religion, Timeline, Series Synopsis
+  - Example: "Define magic system rules", "Create world-building rules"
+  
+- `type: style` - Style guide for proofreading and consistency
+  - Used by **Proofreading Agent** for grammar/spelling/style corrections
+  - Aligns corrections to your style guide
+  - Example: "Proofread this", "Check grammar"
+
+**Content Creation Types:**
+- `type: substack` or `type: blog` - Enables **Substack Agent** for article/tweet generation
+  - Generates long-form articles OR tweet-sized posts
+  - Has built-in research capabilities
+  - Example: "Write article about X", "Create post", "Generate tweet"
+  
+- `type: podcast` - Enables **Podcast Script Agent** for TTS-ready scripts
+  - Generates podcast scripts with audio cues
+  - Optimized for text-to-speech
+  - Example: "Create podcast episode", "Generate script"
+
+**Technical Types:**
+- `type: electronics` - Enables **Electronics Agent** for circuit design and embedded programming
+  - Circuit design and schematic guidance
+  - Embedded programming (Arduino, ESP32, Raspberry Pi, STM32)
+  - Component selection and specifications
+  - Electronics calculations (resistor values, voltage dividers, power dissipation, timing)
+  - Troubleshooting circuit issues
+  - Project management: Creates project plans, organizes project files and folders
+  - Automatically updates project files based on your input
+  - Example: "Design a circuit for [purpose]", "Arduino code for [sensor]", "Calculate resistor value"
+  - Note: Maintains a project plan as the source of truth and organizes detailed specs in referenced files
+  
+- `type: project` - Enables **General Project Agent** for project planning, design, and documentation
+  - Handles HVAC, landscaping, gardening, home improvement, and more
+  - Project planning and requirements gathering
+  - Scope definition and timeline planning
+  - Design assistance and approach recommendations
+  - Tradeoff analysis and decision documentation
+  - Project file organization and maintenance
+  - Automatically updates project files based on your input
+  - Example: "Plan an HVAC system for my home", "Create a project plan for [project]"
+  - Note: Maintains a project plan as the source of truth and organizes detailed specifications in referenced files
+  
+- `type: sysml` - Enables **SysML Agent** for system diagrams and UML
+  - System modeling and diagram generation
+  - UML diagram creation
+  - Example: "Create a system diagram", "Generate UML for [system]"
+
+**Reference Types:**
+- `type: reference` - Enables **Reference Agent** for personal reference documents
+  - Analyzes journals, logs, records, tracking documents
+  - Read-only analysis and pattern detection
+  - Provides insights and answers questions about reference data
+  - Example: "What patterns do you see in my food log?", "Analyze my journal entries"
+
+**How Editor-Based Agents Work:**
+1. When you open a document with a `type` in frontmatter, that type determines which agent handles your requests
+2. The agent uses the document as project context automatically
+3. Editor agents can read referenced files (via frontmatter `components`, `characters`, `rules`, etc.)
+4. Agents maintain project structure and update files based on your input
+5. Some agents (electronics, project) create and organize multiple project files automatically
+
+**Example Frontmatter for Different Types:**
+
+Fiction:
+```yaml
+---
+type: fiction
+title: The Adventure Begins
+author: Your Name
+status: draft
+---
+```
+
+Electronics Project:
+```yaml
+---
+type: electronics
+title: Smart Home Controller
+components:
+  - ./sensor_specs.md
+  - ./power_supply.md
+---
+```
+
+Project Planning:
+```yaml
+---
+type: project
+title: Home Renovation
+status: planning
 ---
 ```
 
@@ -316,6 +424,61 @@ What it does:
 When to use: "Plan a [project type]", "Create a project plan for [project]", "Help me design [system]", "What are the requirements for [project]", "Update project files"
 Example: "Plan an HVAC system for my home" → Comprehensive project plan with requirements, design approach, timeline, and organized project files
 Note: Works best when you have a document open with `type: project` in frontmatter. Handles a wide variety of projects including HVAC, landscaping, gardening, home improvement, and more. The agent maintains a project plan as the source of truth and organizes detailed specifications in referenced files.
+
+**REFERENCE AGENT**
+What it does:
+- Analyzes personal reference documents (journals, logs, records, tracking documents)
+- Pattern detection and trend analysis
+- Answers questions about reference data
+- Provides insights from historical entries
+- Read-only analysis (no editing capabilities)
+When to use: "What patterns do you see in my food log?", "Analyze my journal entries", "What trends are in my weight log?"
+Example: "Show me patterns in my mood log" → Detailed pattern analysis with insights
+Note: Requires a document open with `type: reference` in frontmatter. Works with journals, food logs, weight logs, mood logs, and other personal tracking documents.
+
+═══════════════════════════════════════════════════════════════
+EDITOR-BASED AGENTS SUMMARY
+═══════════════════════════════════════════════════════════════
+
+**Editor-based agents** are specialized agents that activate when you have a document open with a matching `type` in the frontmatter. They use your document as project context and can read referenced files.
+
+**Creative Writing Editor Agents:**
+- **Fiction Editing Agent** (`type: fiction`) - Prose creation/editing, chapters, scenes, dialogue
+- **Outline Editing Agent** (`type: outline`) - Story structure, plot organization, narrative flow
+- **Character Development Agent** (`type: character`) - Character profiles, backstory, motivations, arcs
+- **Rules Editing Agent** (`type: rules`) - World-building rules, magic systems, canon consistency
+- **Proofreading Agent** (uses `type: style` for style guide) - Grammar, spelling, style corrections
+
+**Content Creation Editor Agents:**
+- **Substack Agent** (`type: substack` or `type: blog`) - Article/tweet generation with built-in research
+- **Podcast Script Agent** (`type: podcast`) - TTS-ready podcast scripts with audio cues
+
+**Technical Editor Agents:**
+- **Electronics Agent** (`type: electronics`) - Circuit design, embedded programming, project management
+- **General Project Agent** (`type: project`) - Project planning, design, documentation (HVAC, landscaping, etc.)
+- **SysML Agent** (`type: sysml`) - System diagrams and UML modeling
+
+**Reference Editor Agents:**
+- **Reference Agent** (`type: reference`) - Analysis of journals, logs, records, pattern detection
+
+**How Editor Agents Work:**
+1. Open a document with `type: [agent_type]` in frontmatter
+2. The matching agent automatically handles your requests
+3. Agent uses the document as project context
+4. Can read referenced files (via frontmatter `components`, `characters`, `rules`, etc.)
+5. Some agents (electronics, project) automatically organize multiple project files
+
+**Frontmatter Structure:**
+```yaml
+---
+type: [agent_type]  # Required: determines which agent activates
+title: Document Title
+author: Your Name
+tags: [tag1, tag2]
+status: draft
+components: [./file1.md, ./file2.md]  # Referenced files (agent-specific)
+---
+```
 
 ═══════════════════════════════════════════════════════════════
 FEATURE DISCOVERY - WHAT YOU CAN DO

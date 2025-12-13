@@ -13,6 +13,7 @@ import { ModelProvider } from './contexts/ModelContext';
 import { ChatSidebarProvider, useChatSidebar } from './contexts/ChatSidebarContext';
 import { MessagingProvider } from './contexts/MessagingContext';
 import { TeamProvider } from './contexts/TeamContext';
+import { MusicProvider } from './contexts/MediaContext';
 import ModelConfigurationNotification from './components/ModelConfigurationNotification';
 import Navigation from './components/Navigation';
 import ChatSidebar from './components/ChatSidebar';
@@ -26,6 +27,8 @@ import SettingsPage from './components/SettingsPage';
 import TeamsPage from './components/teams/TeamsPage';
 import TeamDetailPage from './components/teams/TeamDetailPage';
 import OrgQuickCapture from './components/OrgQuickCapture';
+import StatusBar from './components/StatusBar';
+import MediaPage from './components/MediaPage';
 
 import PDFTextLayerEditor from './components/PDFTextLayerEditor';
 
@@ -43,6 +46,7 @@ const queryClient = new QueryClient({
 const MainContent = () => {
   const location = useLocation();
   const isDocumentsRoute = location.pathname.startsWith('/documents');
+  const isMediaRoute = location.pathname.startsWith('/media') || location.pathname.startsWith('/music');
   const { isCollapsed, sidebarWidth, isFullWidth, isResizing, toggleSidebar } = useChatSidebar();
   const isMobile = /Mobi|Android/i.test(navigator.userAgent);
   
@@ -82,23 +86,39 @@ const MainContent = () => {
   return (
     <Box sx={{ 
       display: 'flex', 
-      height: { xs: 'calc(var(--appvh, 100vh) - 64px)', md: 'calc(100dvh - 64px)' },
+      height: { xs: 'calc(var(--appvh, 100vh) - 64px - 32px)', md: 'calc(100dvh - 64px - 32px)' },
       position: 'relative',
       paddingBottom: 'env(safe-area-inset-bottom)'
     }}>
       {/* Main Content Area - Responsive to chat sidebar */}
       <Box sx={{ 
         flexGrow: 1, 
-        overflow: isDocumentsRoute ? 'hidden' : 'auto',
+        overflow: 'hidden',
         transition: isResizing ? 'none' : 'margin-right 0.3s ease-in-out',
         marginRight: isCollapsed ? 0 : (isFullWidth ? '100vw' : `${sidebarWidth}px`),
         minWidth: 0, // Allow content to shrink below its natural size
+        display: 'flex',
+        flexDirection: 'column',
       }}>
-        <Container maxWidth={isDocumentsRoute ? false : 'xl'} disableGutters={isDocumentsRoute} sx={{ mt: isDocumentsRoute ? 0 : 4, mb: isDocumentsRoute ? 0 : 4, px: isDocumentsRoute ? 0 : undefined }}>
+        <Container 
+          maxWidth={isDocumentsRoute || isMediaRoute ? false : 'xl'} 
+          disableGutters={isDocumentsRoute || isMediaRoute} 
+          sx={{ 
+            mt: isDocumentsRoute || isMediaRoute ? 0 : 4, 
+            mb: isDocumentsRoute || isMediaRoute ? 0 : 4, 
+            px: isDocumentsRoute || isMediaRoute ? 0 : undefined,
+            flex: 1,
+            overflow: isDocumentsRoute || isMediaRoute ? 'hidden' : 'auto',
+            display: 'flex',
+            flexDirection: 'column',
+            minHeight: 0,
+          }}
+        >
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5 }}
+            style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, width: '100%' }}
           >
             <Routes>
               <Route path="/" element={<Navigate to="/documents" replace />} />
@@ -111,6 +131,8 @@ const MainContent = () => {
               <Route path="/teams/:teamId" element={<TeamDetailPage />} />
               <Route path="/pdf-text-editor/:documentId" element={<PDFTextLayerEditor />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/media" element={<MediaPage />} />
+              <Route path="/music" element={<MediaPage />} />
             </Routes>
           </motion.div>
         </Container>
@@ -123,7 +145,7 @@ const MainContent = () => {
           position: 'fixed',
           right: 0,
           top: '66px',
-          height: { xs: 'calc(var(--appvh, 100vh) - 66px)', md: 'calc(100dvh - 66px)' },
+          height: { xs: 'calc(var(--appvh, 100vh) - 66px - 32px)', md: 'calc(100dvh - 66px - 32px)' },
           width: isCollapsed ? 0 : (isFullWidth ? '100vw' : `${sidebarWidth}px`),
           backgroundColor: 'background.paper',
           borderLeft: '1px solid',
@@ -204,6 +226,7 @@ function App() {
         <ChatSidebarProvider>
           <MessagingProvider>
           <TeamProvider>
+          <MusicProvider>
           <EditorProvider>
           <div className="App">
             <Routes>
@@ -215,6 +238,7 @@ function App() {
                 <ProtectedRoute>
                   <Navigation />
                   <MainContent />
+                  <StatusBar />
                   <MessagingDrawer />
                   <ModelConfigurationNotification />
                 </ProtectedRoute>
@@ -222,6 +246,7 @@ function App() {
             </Routes>
           </div>
           </EditorProvider>
+          </MusicProvider>
           </TeamProvider>
           </MessagingProvider>
         </ChatSidebarProvider>

@@ -677,6 +677,16 @@ from api.projects_api import router as projects_router
 app.include_router(projects_router)
 logger.info("✅ Projects API routes registered")
 
+# Include Status Bar API routes
+from api.status_bar_api import router as status_bar_router
+app.include_router(status_bar_router)
+logger.info("✅ Status Bar API routes registered")
+
+# Include Music API routes
+from api.music_api import router as music_router
+app.include_router(music_router)
+logger.info("✅ Music API routes registered")
+
 # Include HITL Orchestrator API routes
 # HITL orchestrator API removed - using official orchestrator
 logger.info("✅ Legacy HITL Orchestrator API removed")

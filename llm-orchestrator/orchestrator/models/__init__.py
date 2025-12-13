@@ -6,6 +6,7 @@ Provides Pydantic models for structured data:
 - Agent responses
 - Routing decisions
 - Research assessments and gap analysis
+- Editor operations for fiction and outline editing
 """
 
 from orchestrator.models.intent_models import SimpleIntentResult
@@ -28,6 +29,10 @@ from orchestrator.models.electronics_models import (
     IncrementalUpdateAnalysis,
     ComponentCompatibilityAnalysis
 )
+from orchestrator.models.editor_models import (
+    EditorOperation,
+    ManuscriptEdit
+)
 
 __all__ = [
     'SimpleIntentResult',
@@ -45,6 +50,8 @@ __all__ = [
     'ContentConflictAnalysis',
     'ResponseQualityAnalysis',
     'IncrementalUpdateAnalysis',
-    'ComponentCompatibilityAnalysis'
+    'ComponentCompatibilityAnalysis',
+    'EditorOperation',
+    'ManuscriptEdit'
 ]
 

@@ -186,7 +186,10 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
       this.pendingUpdate = false; // Track if decoration update is queued
       this.updateTimeout = null; // Track pending timeout
       
-      console.log('🔍 Live diff extension plugin initialized for view:', view);
+      // Only log in development mode
+      if (process.env.NODE_ENV === 'development') {
+        console.log('🔍 Live diff extension plugin initialized for view:', view);
+      }
       
       // Listen for live diff events
       this.handleLiveDiffEvent = this.handleLiveDiffEvent.bind(this);
@@ -220,15 +223,20 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
   
   handleLiveDiffEvent(event) {
     try {
-      console.log('🔍 Live diff extension handleLiveDiffEvent called:', event.type, event.detail);
+      // Only log in development mode
+      if (process.env.NODE_ENV === 'development') {
+        console.log('🔍 Live diff extension handleLiveDiffEvent called:', event.type, event.detail);
+      }
       if (event.type === 'editorOperationsLive') {
         const { operations, messageId } = event.detail || {};
-        console.log('🔍 Live diff extension received editorOperationsLive:', { 
-          operationsCount: operations?.length, 
-          messageId,
-          firstOp: operations?.[0],
-          allOps: operations
-        });
+        if (process.env.NODE_ENV === 'development') {
+          console.log('🔍 Live diff extension received editorOperationsLive:', { 
+            operationsCount: operations?.length, 
+            messageId,
+            firstOp: operations?.[0],
+            allOps: operations
+          });
+        }
         if (Array.isArray(operations) && operations.length > 0) {
           console.log('🔍 Calling addOperations with', operations.length, 'operations');
           this.addOperations(operations, messageId);
@@ -249,14 +257,35 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
   }
   
   update(update) {
-    // OPTION 1: Validation disabled for live edits
-    // Operations remain visible until explicitly accepted or rejected
-    // This prevents operations from disappearing when document changes
-    // 
-    // NOTE: If user manually edits the document, decorations may point to wrong positions.
-    // In practice, users typically don't edit while live suggestions are pending.
+    // Handle document changes - remove operations with invalid positions
+    if (update.docChanged && this.operations.size > 0) {
+      const docLength = update.state.doc.length;
+      const toRemove = [];
+      
+      this.operations.forEach((op, id) => {
+        const from = op.from !== undefined ? op.from : (op.start !== undefined ? op.start : 0);
+        const to = op.to !== undefined ? op.to : (op.end !== undefined ? op.end : from);
+        
+        // Remove operations that are now out of range
+        if (from < 0 || to < from || from > docLength || to > docLength) {
+          toRemove.push(id);
+        }
+      });
+      
+      // Remove invalid operations
+      toRemove.forEach(id => {
+        console.warn('Removing operation with invalid positions:', id);
+        this.operations.delete(id);
+      });
+      
+      // Update decorations if any operations were removed
+      if (toRemove.length > 0) {
+        this.scheduleDecorationUpdate();
+      }
+    }
+    
     try {
-      // No validation - trust operations remain valid until user acts on them
+      // Operations remain visible until explicitly accepted or rejected
       // This prevents the issue where accepting one edit removes others
     } catch (e) {
       console.error('❌ Error in live diff plugin update:', e);
@@ -296,18 +325,21 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
     const docText = this.view.state.doc.toString();
     const frontmatterEnd = this._getFrontmatterEnd(docText);
     
-    console.log('🔍 Live diff extension adding operations:', { 
-      total: operations.length, 
-      toAdd: toAdd.length,
-      frontmatterEnd,
-      operations: toAdd.map(op => ({ 
-        start: op.start, 
-        end: op.end, 
-        op_type: op.op_type,
-        hasText: !!op.text,
-        textPreview: op.text?.substring(0, 50)
-      }))
-    });
+    // Only log in development mode to reduce console noise
+    if (process.env.NODE_ENV === 'development') {
+      console.log('🔍 Live diff extension adding operations:', { 
+        total: operations.length, 
+        toAdd: toAdd.length,
+        frontmatterEnd,
+        operations: toAdd.map(op => ({ 
+          start: op.start, 
+          end: op.end, 
+          op_type: op.op_type,
+          hasText: !!op.text,
+          textPreview: op.text?.substring(0, 50)
+        }))
+      });
+    }
     
     toAdd.forEach((op, idx) => {
       const operationId = `${messageId || 'op'}-${idx}-${Date.now()}`;
@@ -325,7 +357,7 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
           opType 
         });
         // For insertions, move to after frontmatter
-        if (start === end || opType === 'insert_after_heading') {
+        if (start === end || opType === 'insert_after_heading' || opType === 'insert_after') {
           start = frontmatterEnd;
           end = frontmatterEnd;
         } else {
@@ -335,7 +367,10 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
         }
       }
       
-      console.log('🔍 Processing operation:', { operationId, start, end, opType, proposedLength: proposed.length });
+      // Only log in development mode
+      if (process.env.NODE_ENV === 'development') {
+        console.log('🔍 Processing operation:', { operationId, start, end, opType, proposedLength: proposed.length });
+      }
       
       // Validate range
       if (start < 0 || end < start || end > this.view.state.doc.length) {
@@ -407,14 +442,27 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
       
       this.operations.forEach((op, id) => {
         try {
+          // Validate operation positions against current document
+          const docLength = this.view.state.doc.length;
+          const from = Math.max(0, Math.min(docLength, op.from !== undefined ? op.from : (op.start !== undefined ? op.start : 0)));
+          const to = Math.max(from, Math.min(docLength, op.to !== undefined ? op.to : (op.end !== undefined ? op.end : from)));
+          
+          // Skip if positions are invalid
+          if (from < 0 || to < from || from > docLength || to > docLength) {
+            console.warn('Skipping invalid operation:', id, { from, to, docLength });
+            return;
+          }
+          
           if (op.opType === 'replace_range') {
-            // Mark original text with deletion styling
-            decos.push(
-              Decoration.mark({
-                class: 'cm-edit-diff-replacement',
-                attributes: { 'data-operation-id': id }
-              }).range(op.from, op.to)
-            );
+            // Only create mark decoration if from !== to (mark decorations can't be empty)
+            if (from !== to) {
+              decos.push(
+                Decoration.mark({
+                  class: 'cm-edit-diff-replacement',
+                  attributes: { 'data-operation-id': id }
+                }).range(from, to)
+              );
+            }
             
             // Add proposed text as widget after the range
             if (op.proposed && op.proposed.length > 0) {
@@ -422,7 +470,7 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
                 Decoration.widget({
                   widget: new DiffAdditionWidget(op.proposed, id),
                   side: 1
-                }).range(op.to)
+                }).range(to)
               );
             }
             
@@ -435,16 +483,18 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
                   () => this.rejectOperation(id)
                 ),
                 side: 1
-              }).range(op.to)
+              }).range(to)
             );
           } else if (op.opType === 'delete_range') {
-            // Mark range with deletion styling
-            decos.push(
-              Decoration.mark({
-                class: 'cm-edit-diff-deletion',
-                attributes: { 'data-operation-id': id }
-              }).range(op.from, op.to)
-            );
+            // Only create mark decoration if from !== to
+            if (from !== to) {
+              decos.push(
+                Decoration.mark({
+                  class: 'cm-edit-diff-deletion',
+                  attributes: { 'data-operation-id': id }
+                }).range(from, to)
+              );
+            }
             
             // Add accept/reject buttons
             decos.push(
@@ -455,16 +505,16 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
                   () => this.rejectOperation(id)
                 ),
                 side: 1
-              }).range(op.to)
+              }).range(to)
             );
-          } else if (op.opType === 'insert_after_heading') {
+          } else if (op.opType === 'insert_after_heading' || op.opType === 'insert_after') {
             // For insert operations, show proposed text at the insertion point
             if (op.proposed && op.proposed.length > 0) {
               decos.push(
                 Decoration.widget({
                   widget: new DiffAdditionWidget(op.proposed, id),
                   side: 1
-                }).range(op.from)
+                }).range(from)
               );
               
               // Add accept/reject buttons
@@ -476,7 +526,7 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
                     () => this.rejectOperation(id)
                   ),
                   side: 1
-                }).range(op.from)
+                }).range(from)
               );
             }
           }
@@ -516,7 +566,7 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
     
     // Build operation object for applyOperations handler
     let operationObj;
-    if (op.opType === 'insert_after_heading') {
+    if (op.opType === 'insert_after_heading' || op.opType === 'insert_after') {
       // Normalize text to ensure proper newlines
       let normalizedText = op.proposed || '';
       const insertPos = op.from;
@@ -620,16 +670,25 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
     // Remove overlapping operations (directly delete to avoid multiple updates)
     toRemove.forEach(id => this.operations.delete(id));
     
-    // Emit event for external handling (MarkdownCMEditor will apply the change)
-    window.dispatchEvent(new CustomEvent('liveEditAccepted', {
-      detail: {
-        operationId: operationId,
-        operation: operationObj
-      }
-    }));
-    
-    // Schedule a single decoration update to reflect all changes
+    // CRITICAL: Update decorations IMMEDIATELY before applying the change
+    // This removes the accepted operation from decorations to prevent invalid positions
     this.scheduleDecorationUpdate();
+    
+    // Emit event for external handling (MarkdownCMEditor will apply the change)
+    // Use setTimeout to ensure decorations are updated first
+    setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('liveEditAccepted', {
+        detail: {
+          operationId: operationId,
+          operation: operationObj
+        }
+      }));
+      
+      // After document change, adjust remaining operations and update again
+      setTimeout(() => {
+        this.scheduleDecorationUpdate();
+      }, 0);
+    }, 0);
   }
   
   rejectOperation(operationId) {

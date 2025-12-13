@@ -3,6 +3,7 @@ Settings API - Handles all settings-related endpoints
 """
 
 import logging
+import re
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel, Field
@@ -41,6 +42,14 @@ class IntentClassificationModelRequest(BaseModel):
 
 class TimezoneRequest(BaseModel):
     timezone: str
+
+
+class ZipCodeRequest(BaseModel):
+    zip_code: str
+
+
+class TimeFormatRequest(BaseModel):
+    time_format: str
 
 
 class PromptSettingsRequest(BaseModel):
@@ -263,7 +272,115 @@ async def set_user_timezone(
         
     except Exception as e:
         logger.error(f"❌ Failed to set timezone for user {current_user.username}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/user/zip-code")
+async def get_user_zip_code(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get current user's zip code preference"""
+    try:
+        logger.info(f"📍 Getting zip code for user: {current_user.username}")
+        zip_code = await settings_service.get_user_zip_code(current_user.user_id)
+        return {
+            "success": True,
+            "zip_code": zip_code,
+            "user_id": current_user.user_id
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to get zip code for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/user/zip-code")
+async def set_user_zip_code(
+    request: ZipCodeRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Set current user's zip code preference"""
+    try:
+        # Validate zip code format (5 digits for US)
+        if not request.zip_code or not re.match(r'^\d{5}$', request.zip_code):
+            raise HTTPException(status_code=400, detail="Zip code must be 5 digits")
+        
+        logger.info(f"📍 Setting zip code for user {current_user.username} to: {request.zip_code}")
+        success = await settings_service.set_user_zip_code(current_user.user_id, request.zip_code)
+        
+        if success:
+            logger.info(f"✅ Zip code updated successfully for user {current_user.username}")
+            return {
+                "success": True,
+                "message": f"Zip code updated to {request.zip_code}",
+                "zip_code": request.zip_code,
+                "user_id": current_user.user_id
+            }
+        else:
+            logger.error(f"❌ Failed to update zip code for user {current_user.username}")
+            return {
+                "success": False,
+                "message": "Failed to update zip code"
+            }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to set zip code for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/user/time-format")
+async def get_user_time_format(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get current user's time format preference"""
+    try:
+        logger.info(f"🕐 Getting time format for user: {current_user.username}")
+        time_format = await settings_service.get_user_time_format(current_user.user_id)
+        return {
+            "success": True,
+            "time_format": time_format,
+            "user_id": current_user.user_id
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to get time format for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/user/time-format")
+async def set_user_time_format(
+    request: TimeFormatRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Set current user's time format preference"""
+    try:
+        # Validate time format
+        if request.time_format not in ["12h", "24h"]:
+            raise HTTPException(status_code=400, detail="Time format must be '12h' or '24h'")
+        
+        logger.info(f"🕐 Setting time format for user {current_user.username} to: {request.time_format}")
+        success = await settings_service.set_user_time_format(current_user.user_id, request.time_format)
+        
+        if success:
+            logger.info(f"✅ Time format updated successfully for user {current_user.username}")
+            return {
+                "success": True,
+                "message": f"Time format updated to {request.time_format}",
+                "time_format": request.time_format,
+                "user_id": current_user.user_id
+            }
+        else:
+            logger.error(f"❌ Failed to update time format for user {current_user.username}")
+            return {
+                "success": False,
+                "message": "Failed to update time format"
+            }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to set time format for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/prompt", response_model=PromptSettingsResponse)

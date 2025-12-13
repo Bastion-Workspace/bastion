@@ -23,6 +23,7 @@ from orchestrator.tools import (
     expand_query_tool,
     search_conversation_cache_tool
 )
+from orchestrator.tools.dynamic_tool_analyzer import analyze_tool_needs_for_research
 from orchestrator.backend_tool_client import get_backend_tool_client
 from orchestrator.utils.formatting_detection import detect_formatting_need
 from orchestrator.models import ResearchAssessmentResult, ResearchGapAnalysis, QuickAnswerAssessment, QueryTypeDetection
@@ -417,8 +418,10 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
 }}"""
             
             llm = self._get_llm(temperature=0.3, state=state)
+            datetime_context = self._get_datetime_context()
             response = await llm.ainvoke([
                 SystemMessage(content="You are a query evaluator. Always respond with valid JSON matching the exact schema provided."),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=evaluation_prompt)
             ])
             
@@ -508,8 +511,17 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
             query = state["query"]
             logger.info(f"Checking cache for: {query}")
             
+            # Track tool usage
+            shared_memory = state.get("shared_memory", {})
+            previous_tools = shared_memory.get("previous_tools_used", [])
+            if "search_conversation_cache_tool" not in previous_tools:
+                previous_tools.append("search_conversation_cache_tool")
+                shared_memory["previous_tools_used"] = previous_tools
+                state["shared_memory"] = shared_memory
+            
             # Search cache
             cache_result = await search_conversation_cache_tool(query=query, freshness_hours=24)
+            logger.info("🎯 Tool used: search_conversation_cache_tool (cache check)")
             
             if cache_result["cache_hit"] and cache_result["entries"]:
                 # Found cached research
@@ -547,8 +559,17 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
             query = state["query"]
             logger.info(f"Expanding query: {query}")
             
+            # Track tool usage
+            shared_memory = state.get("shared_memory", {})
+            previous_tools = shared_memory.get("previous_tools_used", [])
+            if "expand_query_tool" not in previous_tools:
+                previous_tools.append("expand_query_tool")
+                shared_memory["previous_tools_used"] = previous_tools
+                state["shared_memory"] = shared_memory
+            
             # Expand query
             expansion_result = await expand_query_tool(query=query, num_variations=3)
+            logger.info("🎯 Tool used: expand_query_tool (query expansion)")
             
             expanded_queries = expansion_result.get("expanded_queries", [query])
             key_entities = expansion_result.get("key_entities", [])
@@ -574,8 +595,18 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
         try:
             query = state["query"]
             expanded_queries = state.get("expanded_queries", [query])
+            shared_memory = state.get("shared_memory", {})
+            
+            # Check dynamic tool analysis to see if web search is needed
+            tool_analysis = shared_memory.get("tool_analysis", {})
+            conditional_tools = tool_analysis.get("conditional_tools", [])
+            needs_web = any("web" in tool.lower() or "crawl" in tool.lower() for tool in conditional_tools)
             
             logger.info(f"Round 1: Parallel search - local + web with {len(expanded_queries)} queries")
+            if needs_web:
+                logger.info("🎯 Web search tools detected in dynamic analysis - including web search")
+            else:
+                logger.info("🎯 Core tools only - web search may be added if local insufficient")
             
             # Run local and web search in parallel
             import asyncio
@@ -585,9 +616,18 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
                 """Local search task"""
                 try:
                     all_results = []
+                    # Track tool usage
+                    shared_memory = state.get("shared_memory", {})
+                    previous_tools = shared_memory.get("previous_tools_used", [])
+                    if "search_documents_tool" not in previous_tools:
+                        previous_tools.append("search_documents_tool")
+                        shared_memory["previous_tools_used"] = previous_tools
+                        state["shared_memory"] = shared_memory
+                    
                     for q in expanded_queries[:3]:  # Limit to top 3
                         result = await search_documents_tool(query=q, limit=10)
                         all_results.append(result)
+                    logger.info("🎯 Tool used: search_documents_tool (local search)")
                     combined_results = "\n\n".join(all_results)
                     return {
                         "search_results": combined_results,
@@ -601,7 +641,16 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
             async def web_search_task():
                 """Web search task"""
                 try:
+                    # Track tool usage for dynamic loading context
+                    shared_memory = state.get("shared_memory", {})
+                    previous_tools = shared_memory.get("previous_tools_used", [])
+                    if "search_and_crawl_tool" not in previous_tools:
+                        previous_tools.append("search_and_crawl_tool")
+                        shared_memory["previous_tools_used"] = previous_tools
+                        state["shared_memory"] = shared_memory
+                    
                     web_result = await search_and_crawl_tool(query=query, max_results=10)
+                    logger.info("🎯 Tool used: search_and_crawl_tool (web search)")
                     return {
                         "content": web_result,
                         "query_used": query
@@ -700,8 +749,10 @@ Example:
 }}"""
             
             llm = self._get_llm(temperature=0.7, state=state)
+            datetime_context = self._get_datetime_context()
             response = await llm.ainvoke([
                 SystemMessage(content="You are a research quality assessor. Always respond with valid JSON."),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=assessment_prompt)
             ])
             
@@ -823,8 +874,10 @@ Example:
 }}"""
             
             llm = self._get_llm(temperature=0.7, state=state)
+            datetime_context = self._get_datetime_context()
             response = await llm.ainvoke([
                 SystemMessage(content="You are a research gap analyst. Always respond with valid JSON."),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=gap_prompt)
             ])
             
@@ -909,11 +962,20 @@ Example:
             
             logger.info(f"Round 2: Gap filling for {len(identified_gaps)} gaps")
             
+            # Track tool usage
+            shared_memory = state.get("shared_memory", {})
+            previous_tools = shared_memory.get("previous_tools_used", [])
+            if "search_documents_tool" not in previous_tools:
+                previous_tools.append("search_documents_tool")
+                shared_memory["previous_tools_used"] = previous_tools
+                state["shared_memory"] = shared_memory
+            
             # Search for gaps
             gap_results = []
             for gap in identified_gaps[:3]:
                 result = await search_documents_tool(query=gap, limit=5)
                 gap_results.append(result)
+            logger.info("🎯 Tool used: search_documents_tool (round 2 gap filling)")
             
             combined_gap_results = "\n\n".join(gap_results)
             
@@ -945,8 +1007,17 @@ Example:
             
             logger.info(f"Web Round 1: {query}")
             
+            # Track tool usage
+            shared_memory = state.get("shared_memory", {})
+            previous_tools = shared_memory.get("previous_tools_used", [])
+            if "search_and_crawl_tool" not in previous_tools:
+                previous_tools.append("search_and_crawl_tool")
+                shared_memory["previous_tools_used"] = previous_tools
+                state["shared_memory"] = shared_memory
+            
             # Use search_and_crawl for comprehensive web research
             web_result = await search_and_crawl_tool(query=query, max_results=10)
+            logger.info("🎯 Tool used: search_and_crawl_tool (web round 1)")
             
             return {
                 "web_round1_results": {
@@ -1007,8 +1078,10 @@ STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact sc
 }}"""
             
             llm = self._get_llm(temperature=0.7, state=state)
+            datetime_context = self._get_datetime_context()
             response = await llm.ainvoke([
                 SystemMessage(content="You are a research quality assessor. Always respond with valid JSON."),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=assessment_prompt)
             ])
             
@@ -1097,8 +1170,10 @@ STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact sc
 }}"""
             
             llm = self._get_llm(temperature=0.7, state=state)
+            datetime_context = self._get_datetime_context()
             response = await llm.ainvoke([
                 SystemMessage(content="You are a research gap analyst. Always respond with valid JSON."),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=gap_prompt)
             ])
             
@@ -1174,8 +1249,17 @@ STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact sc
             
             logger.info(f"Web Round 2 search: {search_query}")
             
+            # Track tool usage
+            shared_memory = state.get("shared_memory", {})
+            previous_tools = shared_memory.get("previous_tools_used", [])
+            if "search_and_crawl_tool" not in previous_tools:
+                previous_tools.append("search_and_crawl_tool")
+                shared_memory["previous_tools_used"] = previous_tools
+                state["shared_memory"] = shared_memory
+            
             # Use search_and_crawl for targeted web research
             web_result = await search_and_crawl_tool(query=search_query, max_results=10)
+            logger.info("🎯 Tool used: search_and_crawl_tool (web round 2)")
             
             return {
                 "web_round2_results": {
@@ -1261,8 +1345,10 @@ Example for "How should I structure a research paper?":
 }}"""
             
             llm = self._get_llm(temperature=0.3, state=state)
+            datetime_context = self._get_datetime_context()
             response = await llm.ainvoke([
                 SystemMessage(content="You are a query type classifier. Always respond with valid JSON matching the exact schema provided."),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=detection_prompt)
             ])
             
@@ -1470,8 +1556,10 @@ Provide a well-organized, thorough response that:
 Your comprehensive response:"""
             
             synthesis_llm = self._get_llm(temperature=0.3, state=state)
+            datetime_context = self._get_datetime_context()
             response = await synthesis_llm.ainvoke([
                 SystemMessage(content="You are an expert research synthesizer."),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=synthesis_prompt)
             ])
             
@@ -1690,6 +1778,25 @@ Your comprehensive response:"""
         try:
             logger.info(f"Starting sophisticated research for: {query}")
             
+            # Analyze tool needs for dynamic loading (Kiro-style)
+            conversation_context = {
+                "previous_tools_used": shared_memory.get("previous_tools_used", []) if shared_memory else []
+            }
+            tool_analysis = analyze_tool_needs_for_research(query, conversation_context)
+            
+            logger.info(
+                f"🎯 Dynamic tool analysis: {tool_analysis['tool_count']} tools needed "
+                f"(core: {tool_analysis['core_count']}, conditional: {tool_analysis['conditional_count']})"
+            )
+            logger.info(f"🎯 Categories: {', '.join(tool_analysis['categories'])}")
+            logger.info(f"🎯 Reasoning: {tool_analysis['reasoning']}")
+            
+            # Store tool analysis in shared_memory for tracking
+            if shared_memory is None:
+                shared_memory = {}
+            shared_memory["tool_analysis"] = tool_analysis
+            shared_memory["dynamic_tools_loaded"] = tool_analysis["all_tools"]
+            
             # Initialize state
             initial_state = {
                 "query": query,
@@ -1740,6 +1847,19 @@ Your comprehensive response:"""
             
             # Run workflow with checkpointing
             result = await workflow.ainvoke(initial_state, config=config)
+            
+            # Log final dynamic tool usage summary
+            final_shared_memory = result.get("shared_memory", {})
+            tool_analysis = final_shared_memory.get("tool_analysis", {})
+            previous_tools = final_shared_memory.get("previous_tools_used", [])
+            
+            if tool_analysis:
+                logger.info(
+                    f"🎯 Dynamic tool usage summary: "
+                    f"{len(previous_tools)} tools used out of {tool_analysis.get('tool_count', 0)} available "
+                    f"(core: {tool_analysis.get('core_count', 0)}, conditional: {tool_analysis.get('conditional_count', 0)})"
+                )
+                logger.info(f"🎯 Tools actually used: {', '.join(previous_tools) if previous_tools else 'none'}")
             
             logger.info("Research workflow complete")
             

@@ -1146,7 +1146,7 @@ export const ChatSidebarProvider = ({ children }) => {
         if (hasValidEditorState) {
           // All validation passed - editor is actually open and editable
           const fmType = (editorCtx.frontmatter && editorCtx.frontmatter.type || '').toLowerCase().trim();
-          const allowedTypes = ['fiction','non-fiction','nonfiction','article','rules','outline','character','style','sysml','podcast','substack','blog','electronics','project'];
+          const allowedTypes = ['fiction','non-fiction','nonfiction','article','rules','outline','character','style','sysml','podcast','substack','blog','electronics','project','reference'];
           
           if (allowedTypes.includes(fmType)) {
             activeEditorPayload = {
@@ -1160,6 +1160,8 @@ export const ChatSidebarProvider = ({ children }) => {
               selection_start: typeof editorCtx.selectionStart === 'number' ? editorCtx.selectionStart : -1,
               selection_end: typeof editorCtx.selectionEnd === 'number' ? editorCtx.selectionEnd : -1,
               canonical_path: editorCtx.canonicalPath || null,
+              document_id: editorCtx.documentId || null,
+              folder_id: editorCtx.folderId || null,
             };
             console.log('✅ Editor tab is open and editable - sending active_editor:', editorCtx.filename);
           } else {
@@ -1364,15 +1366,26 @@ export const ChatSidebarProvider = ({ children }) => {
                     console.log('🔍 ChatSidebarContext emitting editorOperationsLive:', {
                       operationsCount: ops.length,
                       messageId: streamingMessage.id,
-                      firstOp: ops[0]
+                      firstOp: ops[0],
+                      allOps: ops.map(op => ({
+                        start: op.start,
+                        end: op.end,
+                        op_type: op.op_type,
+                        hasText: !!op.text,
+                        textLength: op.text?.length
+                      }))
                     });
-                    window.dispatchEvent(new CustomEvent('editorOperationsLive', {
+                    const event = new CustomEvent('editorOperationsLive', {
                       detail: { 
                         operations: ops,
                         manuscriptEdit: mEdit,
                         messageId: streamingMessage.id
                       }
-                    }));
+                    });
+                    window.dispatchEvent(event);
+                    console.log('✅ ChatSidebarContext: editorOperationsLive event dispatched');
+                  } else {
+                    console.warn('⚠️ ChatSidebarContext: No operations to emit (ops.length = 0)');
                   }
                 } else if (data.type === 'citations') {
                   // **ROOSEVELT'S CITATION CAVALRY**: Capture citations from research agent!

@@ -442,8 +442,10 @@ class OrgProjectAgent(BaseAgent):
         
         # Use centralized LLM mechanism
         llm = self._get_llm(temperature=0.2, state=state)
+        datetime_context = self._get_datetime_context()
         llm_messages = [
             SystemMessage(content=system_prompt),
+            SystemMessage(content=datetime_context),
             SystemMessage(content=schema_instructions),
             HumanMessage(content=f"USER MESSAGE: {user_message}")
         ]

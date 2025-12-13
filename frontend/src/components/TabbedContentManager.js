@@ -62,6 +62,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
         const newTab = {
             id: generateTabId(),
             ...tabData,
+            scrollPosition: 0, // Track scroll position for each tab
             createdAt: Date.now()
         };
 
@@ -77,6 +78,15 @@ const TabbedContentManager = forwardRef((props, ref) => {
         });
         
         setActiveTabId(newTab.id);
+    };
+    
+    // Update scroll position for a specific tab
+    const updateTabScrollPosition = (tabId, scrollPosition) => {
+        setTabs(prevTabs => prevTabs.map(tab => 
+            tab.id === tabId 
+                ? { ...tab, scrollPosition }
+                : tab
+        ));
     };
 
     const closeTab = (tabId) => {
@@ -256,6 +266,8 @@ const TabbedContentManager = forwardRef((props, ref) => {
                         onClose={() => closeTab(tab.id)}
                         scrollToLine={tab.scrollToLine}
                         scrollToHeading={tab.scrollToHeading}
+                        initialScrollPosition={tab.scrollPosition || 0}
+                        onScrollChange={(scrollPos) => updateTabScrollPosition(tab.id, scrollPos)}
                     />
                 );
             case 'note':

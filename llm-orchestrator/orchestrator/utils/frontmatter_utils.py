@@ -13,6 +13,25 @@ from typing import Dict, Any, Optional, List, Union, Tuple
 logger = logging.getLogger(__name__)
 
 
+def strip_frontmatter_block(text: str) -> str:
+    """Strip YAML frontmatter from text."""
+    try:
+        return re.sub(r'^---\s*\n[\s\S]*?\n---\s*\n', '', text, flags=re.MULTILINE)
+    except Exception:
+        return text
+
+
+def frontmatter_end_index(text: str) -> int:
+    """Return the end index of a leading YAML frontmatter block if present, else 0."""
+    try:
+        m = re.match(r'^(---\s*\n[\s\S]*?\n---\s*\n)', text, flags=re.MULTILINE)
+        if m:
+            return m.end()
+        return 0
+    except Exception:
+        return 0
+
+
 async def update_frontmatter_field(
     content: str,
     field_updates: Dict[str, Any],

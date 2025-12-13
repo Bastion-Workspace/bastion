@@ -263,7 +263,7 @@ const MessagingDrawer = () => {
             position: 'fixed',
             right: 0,
             top: '66px',
-            height: { xs: 'calc(var(--appvh, 100vh) - 66px)', md: 'calc(100dvh - 66px)' },
+            height: { xs: 'calc(var(--appvh, 100vh) - 66px - 32px)', md: 'calc(100dvh - 66px - 32px)' },
             width: '100vw',
             backgroundColor: 'background.paper',
             borderLeft: '1px solid',

@@ -33,7 +33,8 @@ from orchestrator.agents import (
     get_site_crawl_agent,
     get_rules_editing_agent,
     get_proofreading_agent,
-    get_general_project_agent
+    get_general_project_agent,
+    get_reference_agent
 )
 from orchestrator.services import get_intent_classifier
 from langchain_core.messages import HumanMessage, AIMessage
@@ -74,12 +75,13 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         self.rules_editing_agent = None
         self.proofreading_agent = None
         self.general_project_agent = None
+        self.reference_agent = None
         logger.info("Initializing OrchestratorGRPCService...")
     
     def _ensure_agents_loaded(self):
         """Lazy load agents"""
         agents_loaded = 0
-        total_agents = 25  # Total number of agents to load
+        total_agents = 26  # Total number of agents to load
         
         if self.research_agent is None:
             self.research_agent = get_full_research_agent()
@@ -176,6 +178,10 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             self.general_project_agent = get_general_project_agent()
             agents_loaded += 1
         
+        if self.reference_agent is None:
+            self.reference_agent = get_reference_agent()
+            agents_loaded += 1
+        
         if agents_loaded > 0:
             logger.info(f"✅ Loaded {agents_loaded}/{total_agents} agents")
     
@@ -259,13 +265,35 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             else:
                 logger.warning(f"⚠️ Active editor has no canonical_path - relative references may fail!")
 
+            # Extract cursor and selection state
+            # Backend always sets these fields (even to -1 if not available)
+            cursor_offset = request.active_editor.cursor_offset if request.active_editor.cursor_offset >= 0 else -1
+            selection_start = request.active_editor.selection_start if request.active_editor.selection_start >= 0 else -1
+            selection_end = request.active_editor.selection_end if request.active_editor.selection_end >= 0 else -1
+            
+            # Extract document metadata
+            document_id = request.active_editor.document_id if request.active_editor.document_id else None
+            folder_id = request.active_editor.folder_id if request.active_editor.folder_id else None
+            file_path = request.active_editor.file_path if request.active_editor.file_path else request.active_editor.filename
+            
+            # Log cursor state for debugging
+            if cursor_offset >= 0:
+                logger.info(f"✅ CONTEXT: Cursor detected at offset {cursor_offset}")
+            if selection_start >= 0 and selection_end > selection_start:
+                logger.info(f"✅ CONTEXT: Selection detected from {selection_start} to {selection_end}")
+            
             shared_memory["active_editor"] = {
                 "is_editable": request.active_editor.is_editable,
                 "filename": request.active_editor.filename,
-                "file_path": request.active_editor.filename,  # Proto doesn't have file_path, use filename
+                "file_path": file_path,
                 "canonical_path": canonical_path,  # Full filesystem path for resolving relative references
                 "language": request.active_editor.language,
                 "content": request.active_editor.content,
+                "cursor_offset": cursor_offset,
+                "selection_start": selection_start,
+                "selection_end": selection_end,
+                "document_id": document_id,
+                "folder_id": folder_id,
                 "frontmatter": {
                     "type": request.active_editor.frontmatter.type,
                     "title": request.active_editor.frontmatter.title,
@@ -339,6 +367,11 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             logger.info(f"📋 CONTEXT: Extracted last_agent from metadata: {request.metadata['last_agent']}")
         else:
             logger.debug(f"📋 CONTEXT: No last_agent in metadata")
+        
+        # Extract user_chat_model from metadata (for title generation and agent model selection)
+        if request.metadata and "user_chat_model" in request.metadata:
+            context["shared_memory"]["user_chat_model"] = request.metadata["user_chat_model"]
+            logger.debug(f"📋 CONTEXT: Extracted user_chat_model from metadata: {request.metadata['user_chat_model']}")
         
         # Use centralized shared_memory extraction
         context["shared_memory"] = self._extract_shared_memory(request, context["shared_memory"])
@@ -533,6 +566,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             
             # Parse metadata into dictionary
             metadata = dict(request.metadata) if request.metadata else {}
+            logger.info(f"🔍 RECEIVED METADATA: user_chat_model = {metadata.get('user_chat_model')}")
 
             # Check for model configuration warning
             model_warning = metadata.get("models_not_configured_warning")
@@ -590,8 +624,32 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             # Determine which agent to use via intent classification
             primary_agent_name = None
             
+            # SHORT-CIRCUIT ROUTING: Check for "/help" prefix for instant help routing
+            query_lower = request.query.lower().strip()
+            if query_lower.startswith("/help"):
+                agent_type = "help_agent"
+                primary_agent_name = agent_type
+                # Strip "/help" prefix from query (with optional space after)
+                # Handle both "/help" and "/help " (with space)
+                cleaned_query = request.query[5:].strip()  # Remove "/help" (5 chars)
+                # If no query after "/help", use empty string (help agent will show general help)
+                if not cleaned_query:
+                    cleaned_query = ""
+                # Update request.query for agent processing
+                request.query = cleaned_query
+                logger.info(f"❓ SHORT-CIRCUIT ROUTING: Help agent (query starts with '/help', cleaned: '{cleaned_query[:50]}...' if cleaned_query else 'empty')")
+                # Set primary_agent_selected in shared_memory for conversation continuity
+                if "shared_memory" not in metadata:
+                    metadata["shared_memory"] = {}
+                metadata["shared_memory"]["primary_agent_selected"] = agent_type
+                if "shared_memory" not in conversation_context:
+                    conversation_context["shared_memory"] = {}
+                conversation_context["shared_memory"]["primary_agent_selected"] = agent_type
+                if checkpoint_shared_memory:
+                    checkpoint_shared_memory["primary_agent_selected"] = agent_type
+                logger.info(f"📋 SET primary_agent_selected: {agent_type} (for conversation continuity)")
             # SHORT-CIRCUIT ROUTING: Check for "define:" prefix for instant dictionary routing
-            if request.query.lower().strip().startswith("define:"):
+            elif query_lower.startswith("define:"):
                 agent_type = "dictionary_agent"
                 primary_agent_name = agent_type
                 logger.info(f"📖 SHORT-CIRCUIT ROUTING: Dictionary agent (query starts with 'define:')")
@@ -613,6 +671,20 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 logger.info(f"✅ INTENT CLASSIFICATION: → {agent_type} (action: {intent_result.action_intent}, confidence: {intent_result.confidence})")
                 if intent_result.reasoning:
                     logger.info(f"💡 REASONING: {intent_result.reasoning}")
+                
+                # CRITICAL: Set primary_agent_selected in shared_memory for conversation continuity
+                # This ensures future queries in the same conversation route to the same agent
+                # Initialize shared_memory in metadata if not present
+                if "shared_memory" not in metadata:
+                    metadata["shared_memory"] = {}
+                # Set primary_agent_selected in metadata shared_memory
+                metadata["shared_memory"]["primary_agent_selected"] = agent_type
+                # Also update conversation_context for consistency (used by intent classifier)
+                conversation_context["shared_memory"]["primary_agent_selected"] = agent_type
+                # Also update checkpoint_shared_memory so it's available for next turn
+                if checkpoint_shared_memory:
+                    checkpoint_shared_memory["primary_agent_selected"] = agent_type
+                logger.info(f"📋 SET primary_agent_selected: {agent_type} (for conversation continuity)")
                 
                 # Handle conversation title from intent classification (for new conversations)
                 if intent_result.conversation_title:
@@ -686,7 +758,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Chat agent processing your message...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="chat_agent"
                 )
                 
                 # Check for cancellation before processing
@@ -724,7 +796,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Help agent loading documentation...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="help_agent"
                 )
                 
                 if cancellation_token.is_set():
@@ -757,7 +829,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Dictionary agent looking up word definition...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="dictionary_agent"
                 )
                 
                 if cancellation_token.is_set():
@@ -794,7 +866,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Data formatting agent organizing your data...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="data_formatting_agent"
                 )
                 
                 if cancellation_token.is_set():
@@ -827,7 +899,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Weather agent checking meteorological conditions...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="weather_agent"
                 )
                 
                 # Process using BaseAgent pattern (query, metadata, messages)
@@ -876,7 +948,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Image generation agent creating your images...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="image_generation_agent"
                 )
                 
                 # Build metadata for image generation agent
@@ -922,7 +994,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="RSS agent managing feeds...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="rss_agent"
                 )
                 
                 # Build metadata for RSS agent
@@ -968,7 +1040,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="🎬 Entertainment agent searching movies and TV shows...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="entertainment_agent"
                 )
                 
                 # Build metadata with user_id
@@ -1009,7 +1081,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="🔌 Electronics agent designing circuits and generating code...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="electronics_agent"
                 )
 
                 # Build metadata with user_id and shared_memory (using centralized extraction)
@@ -1111,7 +1183,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="General project agent planning and managing your project...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="general_project_agent"
                 )
 
                 # Build metadata with user_id and shared_memory
@@ -1204,12 +1276,86 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="system"
                 )
 
+            elif agent_type == "reference":
+                yield orchestrator_pb2.ChatChunk(
+                    type="status",
+                    message="📚 Reference agent analyzing your document...",
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="reference_agent"
+                )
+
+                # Build metadata with user_id and shared_memory
+                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
+                
+                logger.info(f"Reference agent state: shared_memory keys={list(shared_memory.keys())}")
+                if "active_editor" in shared_memory:
+                    ae = shared_memory["active_editor"]
+                    logger.info(f"Active editor in state: filename={ae.get('filename')}, type={ae.get('frontmatter', {}).get('type')}, content_length={len(ae.get('content', ''))}")
+                else:
+                    logger.info(f"No active editor in shared_memory")
+                
+                reference_metadata = {
+                    "user_id": request.user_id,
+                    "shared_memory": shared_memory,
+                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
+                }
+
+                if cancellation_token.is_set():
+                    raise asyncio.CancelledError("Operation cancelled")
+                
+                result = await self._process_agent_with_cancellation(
+                    agent=self.reference_agent,
+                    query=request.query,
+                    metadata=reference_metadata,
+                    messages=messages,
+                    cancellation_token=cancellation_token
+                )
+
+                # Extract response text - handle various response structures
+                response_text = None
+                if isinstance(result, dict):
+                    response_text = result.get("response")
+                    # If response is still a dict, try to extract text from it
+                    if isinstance(response_text, dict):
+                        response_text = response_text.get("response") or str(response_text)
+                    # Ensure we have a string
+                    if not isinstance(response_text, str):
+                        response_text = str(response_text) if response_text else None
+                elif isinstance(result, str):
+                    response_text = result
+                else:
+                    response_text = str(result)
+                
+                # Fallback if we still don't have text
+                if not response_text or response_text.strip() == "":
+                    response_text = "Reference analysis complete"
+                
+                yield orchestrator_pb2.ChatChunk(
+                    type="content",
+                    message=response_text,
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="reference_agent"
+                )
+
+                complexity_level = result.get("complexity_level", "simple_qa") if isinstance(result, dict) else "simple_qa"
+                confidence = result.get("confidence", 0.0) if isinstance(result, dict) else 0.0
+                research_used = result.get("research_used", False) if isinstance(result, dict) else False
+
+                status_msg = f"Reference analysis complete: {complexity_level} (confidence: {confidence:.2f}, research: {research_used})"
+
+                yield orchestrator_pb2.ChatChunk(
+                    type="complete",
+                    message=status_msg,
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="system"
+                )
+
             elif agent_type == "character_development":
                 yield orchestrator_pb2.ChatChunk(
                     type="status",
                     message="Character development agent processing character edits...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="character_development_agent"
                 )
                 
                 # Build metadata with user_id and shared_memory
@@ -1298,7 +1444,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Content analysis agent analyzing documents...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="content_analysis_agent"
                 )
                 
                 result = await self.content_analysis_agent.process(
@@ -1333,11 +1479,16 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Fiction editing agent processing manuscript edits...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="fiction_editing_agent"
                 )
                 
                 # Build metadata with user_id and shared_memory
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
+                # Ensure primary_agent_selected is included from metadata
+                base_shared_memory = metadata.get("shared_memory", {})
+                shared_memory = self._extract_shared_memory(request, base_shared_memory)
+                # Ensure primary_agent_selected is preserved (set by intent classification)
+                if "primary_agent_selected" in base_shared_memory:
+                    shared_memory["primary_agent_selected"] = base_shared_memory["primary_agent_selected"]
                 
                 fiction_metadata = {
                     "user_id": request.user_id,
@@ -1353,37 +1504,64 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 
                 # Extract response from result
                 if isinstance(result, dict):
+                    # Include editor operations in metadata if available
+                    agent_results = result.get("agent_results", {})
+                    editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
+                    manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
+                    
+                    # Debug logging for editor operations
+                    logger.info(f"🔍 Fiction editing agent result structure: has_editor_ops={bool(result.get('editor_operations'))}, agent_results_ops={bool(agent_results.get('editor_operations'))}, final_ops={bool(editor_operations)}, ops_count={len(editor_operations) if editor_operations else 0}")
+                    
+                    # Always send content chunk first (for chat sidebar)
                     agent_messages = result.get("messages", [])
+                    response_text = None
+                    
                     if agent_messages:
                         for msg in agent_messages:
                             if hasattr(msg, 'content'):
+                                response_text = msg.content
                                 yield orchestrator_pb2.ChatChunk(
                                     type="content",
-                                    message=msg.content,
+                                    message=response_text,
                                     timestamp=datetime.now().isoformat(),
                                     agent_name="fiction_editing_agent"
                                 )
                     else:
-                        response_data = result.get("response", "Fiction editing complete")
+                        # Extract response text from result
+                        response_data = result.get("response", {})
                         # Handle both string and dict responses
                         if isinstance(response_data, str):
                             response_text = response_data
                         elif isinstance(response_data, dict):
-                            response_text = response_data.get("response", "Fiction editing complete")
+                            response_text = response_data.get("response", "")
+                            # Fallback: if response key is empty, use summary from manuscript_edit
+                            if not response_text and manuscript_edit:
+                                response_text = manuscript_edit.get("summary", "")
+                        else:
+                            response_text = ""
+                        
+                        # Fallback: if still no response text, use summary from manuscript_edit
+                        if not response_text and manuscript_edit:
+                            response_text = manuscript_edit.get("summary", "")
+                        
+                        # Final fallback: generic message
+                        if not response_text:
+                            op_count = len(editor_operations) if editor_operations else 0
+                            if op_count > 0:
+                                response_text = f"Generated {op_count} edit(s) to the manuscript."
                         else:
                             response_text = "Fiction editing complete"
+                        
+                        # Always send content chunk (even if editor_operations exist)
                         yield orchestrator_pb2.ChatChunk(
                             type="content",
                             message=response_text,
                             timestamp=datetime.now().isoformat(),
                             agent_name="fiction_editing_agent"
                         )
+                        logger.info(f"✅ Sent content chunk to frontend (response_text length: {len(response_text)})")
                     
-                    # Include editor operations in metadata if available
-                    agent_results = result.get("agent_results", {})
-                    editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
-                    manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
-                    
+                    # Then send editor operations if available
                     if editor_operations:
                         # Send editor operations as separate chunk
                         import json
@@ -1391,22 +1569,22 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                             "operations": editor_operations,
                             "manuscript_edit": manuscript_edit
                         }
+                        logger.info(f"✅ Sending {len(editor_operations)} editor_operations to frontend (first op: {editor_operations[0] if editor_operations else None})")
+                        logger.info(f"🔍 Editor operations data structure: operations_count={len(editor_operations)}, has_manuscript_edit={bool(manuscript_edit)}")
+                        logger.info(f"🔍 First operation details: op_type={editor_operations[0].get('op_type') if editor_operations else 'none'}, start={editor_operations[0].get('start') if editor_operations else 'none'}, end={editor_operations[0].get('end') if editor_operations else 'none'}, has_text={bool(editor_operations[0].get('text')) if editor_operations else False}")
                         yield orchestrator_pb2.ChatChunk(
                             type="editor_operations",
                             message=json.dumps(editor_ops_data),
                             timestamp=datetime.now().isoformat(),
                             agent_name="fiction_editing_agent"
                         )
+                        logger.info(f"✅ Sent editor_operations chunk to frontend (type='editor_operations', message_length={len(json.dumps(editor_ops_data))})")
+                    else:
+                        logger.warning(f"⚠️ No editor_operations to send (result keys: {list(result.keys()) if isinstance(result, dict) else 'not a dict'})")
+                    
                         yield orchestrator_pb2.ChatChunk(
                             type="complete",
                             message="Fiction edit plan ready",
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system"
-                        )
-                    else:
-                        yield orchestrator_pb2.ChatChunk(
-                            type="complete",
-                            message="Fiction editing complete",
                             timestamp=datetime.now().isoformat(),
                             agent_name="system"
                         )
@@ -1429,7 +1607,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Outline editing agent processing outline edits...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="outline_editing_agent"
                 )
                 
                 # Build metadata with user_id and shared_memory
@@ -1440,6 +1618,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     "shared_memory": shared_memory,
                     **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
                 }
+                logger.info(f"🔍 OUTLINE METADATA: user_chat_model = {outline_metadata.get('user_chat_model')}, shared_memory keys = {list(shared_memory.keys())}")
                 
                 result = await self.outline_editing_agent.process(
                     query=request.query,
@@ -1543,7 +1722,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Rules editing agent processing rules edits...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="rules_editing_agent"
                 )
                 
                 # Build metadata with user_id and shared_memory
@@ -1639,7 +1818,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Proofreading agent analyzing manuscript...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="proofreading_agent"
                 )
                 
                 # Build metadata with user_id and shared_memory
@@ -1735,7 +1914,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Story analysis agent analyzing manuscript...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="story_analysis_agent"
                 )
                 
                 result = await self.story_analysis_agent.process(
@@ -1770,7 +1949,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Site crawl agent crawling website...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="site_crawl_agent"
                 )
                 
                 result = await self.site_crawl_agent.process(
@@ -1805,7 +1984,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Org inbox agent managing inbox...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="org_inbox_agent"
                 )
                 
                 # Build metadata for org inbox agent
@@ -1852,7 +2031,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Substack agent generating article...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="substack_agent"
                 )
                 
                 # Build metadata with shared_memory (using centralized extraction)
@@ -1920,7 +2099,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Podcast script agent generating script...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="podcast_script_agent"
                 )
                 
                 # Build metadata with shared_memory (using centralized extraction)
@@ -1988,7 +2167,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Org project agent capturing project...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="org_project_agent"
                 )
                 
                 # Build state dict with shared_memory for pending state
@@ -2050,7 +2229,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     type="status",
                     message="Starting sophisticated multi-round research...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="orchestrator"
+                    agent_name="research_agent"
                 )
                 
                 if cancellation_token.is_set():

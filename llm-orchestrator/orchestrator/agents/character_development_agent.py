@@ -12,11 +12,12 @@ import json
 import logging
 import re
 from datetime import datetime
-from typing import Dict, Any, List, Optional, TypedDict
+from typing import Dict, Any, List, Optional, TypedDict, Tuple
 from langchain_core.messages import AIMessage
 
 from langgraph.graph import StateGraph, END
 from orchestrator.agents.base_agent import BaseAgent
+from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,17 @@ def _strip_frontmatter_block(text: str) -> str:
         return re.sub(r'^---\s*\n[\s\S]*?\n---\s*\n', '', text, flags=re.MULTILINE)
     except Exception:
         return text
+
+
+def _frontmatter_end_index(text: str) -> int:
+    """Find the index where frontmatter ends (after closing ---)."""
+    try:
+        match = re.search(r'^---\s*\n[\s\S]*?\n---\s*\n', text, re.MULTILINE)
+        if match:
+            return match.end()
+        return 0
+    except Exception:
+        return 0
 
 
 def _unwrap_json_response(content: str) -> str:
@@ -90,6 +102,9 @@ def paragraph_bounds(text: str, cursor_offset: int) -> tuple:
     right = text.find("\n\n", cursor)
     end = right if right != -1 else len(text)
     return start, end
+
+
+# Removed: _resolve_operation_simple - now using centralized resolver from orchestrator.utils.editor_operation_resolver
 
 
 class CharacterDevelopmentState(TypedDict):
@@ -145,16 +160,18 @@ class CharacterDevelopmentAgent(BaseAgent):
         workflow.add_node("prepare_context", self._prepare_context_node)
         workflow.add_node("load_references", self._load_references_node)
         workflow.add_node("generate_edit_plan", self._generate_edit_plan_node)
-        workflow.add_node("process_operations", self._process_operations_node)
+        workflow.add_node("resolve_operations", self._resolve_operations_node)
+        workflow.add_node("format_response", self._format_response_node)
         
         # Entry point
         workflow.set_entry_point("prepare_context")
         
-        # Linear flow: prepare_context -> load_references -> generate_edit_plan -> process_operations -> END
+        # Linear flow: prepare_context -> load_references -> generate_edit_plan -> resolve_operations -> format_response -> END
         workflow.add_edge("prepare_context", "load_references")
         workflow.add_edge("load_references", "generate_edit_plan")
-        workflow.add_edge("generate_edit_plan", "process_operations")
-        workflow.add_edge("process_operations", END)
+        workflow.add_edge("generate_edit_plan", "resolve_operations")
+        workflow.add_edge("resolve_operations", "format_response")
+        workflow.add_edge("format_response", END)
         
         return workflow.compile(checkpointer=checkpointer)
     
@@ -311,9 +328,10 @@ class CharacterDevelopmentAgent(BaseAgent):
             
             context_parts.append("Provide a ManuscriptEdit JSON plan strictly within scope.")
             
+            datetime_context = self._get_datetime_context()
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "system", "content": f"Current Date/Time: {datetime.now().isoformat()}"},
+                {"role": "system", "content": datetime_context},
                 {"role": "user", "content": "".join(context_parts)}
             ]
             
@@ -391,103 +409,132 @@ class CharacterDevelopmentAgent(BaseAgent):
                 "task_status": "error"
             }
     
-    async def _process_operations_node(self, state: CharacterDevelopmentState) -> Dict[str, Any]:
-        """Process and resolve editor operations"""
+    async def _resolve_operations_node(self, state: CharacterDevelopmentState) -> Dict[str, Any]:
+        """Resolve editor operations with progressive search"""
         try:
-            logger.info("Processing editor operations...")
+            logger.info("Resolving editor operations...")
             
             text = state.get("text", "")
-            filename = state.get("filename", "character.md")
             structured_edit = state.get("structured_edit")
-            para_start = state.get("para_start", 0)
-            para_end = state.get("para_end", 0)
             selection_start = state.get("selection_start", -1)
             selection_end = state.get("selection_end", -1)
-            current_request = state.get("current_request", "")
+            para_start = state.get("para_start", 0)
+            para_end = state.get("para_end", 0)
             
-            if not structured_edit or not structured_edit.get("operations"):
+            if not structured_edit or not isinstance(structured_edit.get("operations"), list):
+                return {
+                    "editor_operations": [],
+                    "error": "No operations to resolve",
+                    "task_status": "error"
+                }
+            
+            fm_end_idx = _frontmatter_end_index(text)
+            selection = {"start": selection_start, "end": selection_end} if selection_start >= 0 and selection_end >= 0 else None
+            
+            editor_operations = []
+            operations = structured_edit.get("operations", [])
+            
+            for op in operations:
+                # Resolve operation
+                try:
+                    # Use centralized resolver
+                    cursor_pos = state.get("cursor_offset", -1)
+                    cursor_pos = cursor_pos if cursor_pos >= 0 else None
+                    resolved_start, resolved_end, resolved_text, resolved_confidence = resolve_editor_operation(
+                        content=text,
+                        op_dict=op,
+                        selection=selection,
+                        frontmatter_end=fm_end_idx,
+                        cursor_offset=cursor_pos
+                    )
+                    
+                    logger.info(f"Resolved {op.get('op_type')} [{resolved_start}:{resolved_end}] confidence={resolved_confidence:.2f}")
+                    
+                    # Clean text (remove frontmatter if accidentally included)
+                    if isinstance(resolved_text, str):
+                        resolved_text = _strip_frontmatter_block(resolved_text)
+                    
+                    # Calculate pre_hash
+                    pre_slice = text[resolved_start:resolved_end]
+                    pre_hash = _slice_hash(pre_slice)
+                    
+                    # Build operation dict
+                    resolved_op = {
+                        "op_type": op.get("op_type", "replace_range"),
+                        "start": resolved_start,
+                        "end": resolved_end,
+                        "text": resolved_text,
+                        "pre_hash": pre_hash,
+                        "original_text": op.get("original_text"),
+                        "anchor_text": op.get("anchor_text"),
+                        "left_context": op.get("left_context"),
+                        "right_context": op.get("right_context"),
+                        "occurrence_index": op.get("occurrence_index", 0),
+                        "confidence": resolved_confidence
+                    }
+                    
+                    editor_operations.append(resolved_op)
+                    
+                except Exception as e:
+                    logger.warning(f"Operation resolution failed: {e}, using fallback")
+                    # Fallback positioning
+                    fallback_start = max(para_start, fm_end_idx)
+                    fallback_end = max(para_end, fallback_start)
+                    
+                    pre_slice = text[fallback_start:fallback_end]
+                    resolved_op = {
+                        "op_type": op.get("op_type", "replace_range"),
+                        "start": fallback_start,
+                        "end": fallback_end,
+                        "text": op.get("text", ""),
+                        "pre_hash": _slice_hash(pre_slice),
+                        "confidence": 0.3
+                    }
+                    editor_operations.append(resolved_op)
+            
+            return {
+                "editor_operations": editor_operations
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to resolve operations: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {
+                "editor_operations": [],
+                "error": str(e),
+                "task_status": "error"
+            }
+    
+    async def _format_response_node(self, state: CharacterDevelopmentState) -> Dict[str, Any]:
+        """Format final response with editor operations"""
+        try:
+            logger.info("Formatting response...")
+            
+            structured_edit = state.get("structured_edit", {})
+            editor_operations = state.get("editor_operations", [])
+            task_status = state.get("task_status", "complete")
+            
+            if task_status == "error":
+                error_msg = state.get("error", "Unknown error")
                 return {
                     "response": {
-                        "messages": [AIMessage(content="No operations to process.")],
-                        "agent_results": {
-                            "agent_type": self.agent_type,
-                            "is_complete": True
-                        },
-                        "is_complete": True
+                        "response": f"Character development failed: {error_msg}",
+                        "task_status": "error",
+                        "agent_type": "character_development_agent"
                     },
-                    "task_status": "complete"
+                    "task_status": "error"
                 }
             
-            # Process operations
-            # For now, we'll do basic processing without the full resolver
-            # In production, this would call the backend resolver via gRPC
-            editor_operations = []
+            # Build prose preview
+            generated_preview = "\n\n".join([
+                op.get("text", "").strip()
+                for op in editor_operations
+                if op.get("text", "").strip()
+            ]).strip()
+            response_text = generated_preview if generated_preview else (structured_edit.get("summary", "Edit plan ready."))
             
-            revision_mode = any(k in (current_request or "").lower() for k in ["revise", "revision", "tweak", "adjust", "polish", "tighten", "edit only"])
-            
-            # Calculate frontmatter end
-            try:
-                body_only_text = _strip_frontmatter_block(text)
-                fm_end_idx = len(text) - len(body_only_text)
-            except Exception:
-                fm_end_idx = 0
-            
-            for op in structured_edit.get("operations", []):
-                if not isinstance(op, dict):
-                    continue
-                
-                start_ix = int(op.get("start", para_start))
-                end_ix = int(op.get("end", para_end))
-                op_type = op.get("op_type", "replace_range")
-                
-                if op_type not in ("replace_range", "delete_range", "insert_after_heading"):
-                    op_type = "replace_range"
-                
-                # Basic processing - in production would use full resolver
-                start = max(0, min(len(text), start_ix))
-                end = max(0, min(len(text), end_ix))
-                
-                # Protect frontmatter
-                if start < fm_end_idx:
-                    if op_type == "delete_range":
-                        continue
-                    if end <= fm_end_idx:
-                        start = fm_end_idx
-                        end = fm_end_idx
-                    else:
-                        start = fm_end_idx
-                
-                # Clamp for revision mode
-                if revision_mode and op_type != "delete_range":
-                    if selection_start >= 0 and selection_end > selection_start:
-                        start = max(selection_start, start)
-                        end = min(selection_end, end)
-                
-                # Clean text
-                op_text = op.get("text", "")
-                if isinstance(op_text, str):
-                    op_text = _strip_frontmatter_block(op_text)
-                
-                # Build operation
-                processed_op = {
-                    "op_type": op_type,
-                    "start": start,
-                    "end": end,
-                    "text": op_text,
-                    "original_text": op.get("original_text"),
-                    "anchor_text": op.get("anchor_text"),
-                    "left_context": op.get("left_context"),
-                    "right_context": op.get("right_context"),
-                    "occurrence_index": op.get("occurrence_index", 0),
-                    "pre_hash": _slice_hash(text[start:end]) if start < end else ""
-                }
-                
-                editor_operations.append(processed_op)
-            
-            # Build response
-            preview = "\n\n".join([op.get("text", "").strip() for op in editor_operations if op.get("text", "").strip()])
-            response_text = preview if preview else (structured_edit.get("summary") or "Edit plan ready.")
-            
+            # Build response with editor operations
             result = {
                 "messages": [AIMessage(content=response_text)],
                 "agent_results": {
@@ -496,7 +543,11 @@ class CharacterDevelopmentAgent(BaseAgent):
                     "content_preview": response_text[:2000],
                     "editor_operations": editor_operations,
                     "manuscript_edit": {
-                        **structured_edit,
+                        "target_filename": structured_edit.get("target_filename"),
+                        "scope": structured_edit.get("scope"),
+                        "summary": structured_edit.get("summary"),
+                        "chapter_index": structured_edit.get("chapter_index"),
+                        "safety": structured_edit.get("safety"),
                         "operations": editor_operations
                     }
                 },
@@ -506,22 +557,21 @@ class CharacterDevelopmentAgent(BaseAgent):
             return {
                 "response": result,
                 "editor_operations": editor_operations,
-                "task_status": "complete"
+                "task_status": task_status
             }
             
         except Exception as e:
-            logger.error(f"Failed to process operations: {e}")
+            logger.error(f"Failed to format response: {e}")
             return {
                 "response": {
-                    "messages": [AIMessage(content=f"Character agent encountered an error: {str(e)}")],
+                    "messages": [AIMessage(content=f"Character development failed: {str(e)}")],
                     "agent_results": {
                         "agent_type": self.agent_type,
                         "is_complete": False
                     },
                     "is_complete": False
                 },
-                "task_status": "error",
-                "error": str(e)
+                "task_status": "error"
             }
     
     def _build_system_prompt(self) -> str:
@@ -539,7 +589,7 @@ class CharacterDevelopmentAgent(BaseAgent):
             "  \"safety\": one of [\"low\", \"medium\", \"high\"],\n"
             "  \"operations\": [\n"
             "    {\n"
-            "      \"op_type\": one of [\"replace_range\", \"delete_range\", \"insert_after_heading\"],\n"
+            "      \"op_type\": one of [\"replace_range\", \"delete_range\", \"insert_after_heading\", \"insert_after\"],\n"
             "      \"start\": integer (approximate),\n"
             "      \"end\": integer (approximate),\n"
             "      \"text\": string,\n"
@@ -576,7 +626,8 @@ class CharacterDevelopmentAgent(BaseAgent):
             "- OR provide both 'left_context' and 'right_context' (exact surrounding text)\n\n"
             "INSERT Operations (PREFERRED for adding content below headers!):\n"
             "- **PRIMARY METHOD**: Use op_type='insert_after_heading' with anchor_text='### Header' when adding content below ANY header\n"
-            "- Provide 'anchor_text' with EXACT, COMPLETE header line to insert after (verbatim from file)\n"
+            "- Use op_type='insert_after' with anchor_text when continuing text mid-paragraph or mid-sentence\n"
+            "- Provide 'anchor_text' with EXACT, COMPLETE header line or text anchor to insert after (verbatim from file)\n"
             "- This is the SAFEST method - it NEVER deletes headers, always inserts AFTER them\n"
             "- Use this even when the section has placeholder text - the resolver will position correctly\n"
             "- ALTERNATIVE: Provide 'original_text' with text to insert after\n"
@@ -659,8 +710,8 @@ class CharacterDevelopmentAgent(BaseAgent):
             # Invoke LangGraph workflow with checkpointing (workflow and config already created above)
             final_state = await workflow.ainvoke(initial_state, config=config)
             
-            # Return response from final state
-            return final_state.get("response", {
+            # Extract response from final state
+            response = final_state.get("response", {
                 "messages": [AIMessage(content="Character development failed")],
                 "agent_results": {
                     "agent_type": self.agent_type,
@@ -668,6 +719,34 @@ class CharacterDevelopmentAgent(BaseAgent):
                 },
                 "is_complete": False
             })
+            
+            # Extract editor_operations from state (stored at state level by _process_operations_node)
+            editor_operations = final_state.get("editor_operations", [])
+            task_status = final_state.get("task_status", "complete")
+            
+            # Build result dict matching Fiction editing agent pattern
+            # Response structure from _process_operations_node: { "messages": [...], "agent_results": {...}, "is_complete": True }
+            result = {
+                "messages": response.get("messages", []),
+                "agent_results": response.get("agent_results", {}),
+                "is_complete": response.get("is_complete", True)
+            }
+            
+            # Add editor_operations at top level for compatibility with gRPC service
+            if editor_operations:
+                result["editor_operations"] = editor_operations
+                # Also ensure they're in agent_results (they should already be there from _process_operations_node)
+                if "agent_results" not in result:
+                    result["agent_results"] = {}
+                result["agent_results"]["editor_operations"] = editor_operations
+                # Include manuscript_edit if available
+                manuscript_edit = response.get("agent_results", {}).get("manuscript_edit")
+                if manuscript_edit:
+                    result["manuscript_edit"] = manuscript_edit
+                    result["agent_results"]["manuscript_edit"] = manuscript_edit
+            
+            logger.info(f"Character development agent completed: {task_status}, operations: {len(editor_operations)}")
+            return result
             
         except Exception as e:
             logger.error(f"Character Development Agent ERROR: {e}")

@@ -919,6 +919,18 @@ async def apply_document_edit_proposal(
         has_frontmatter = bool(frontmatter)
         
         if edit_type == "operations":
+            # Import resolver for re-resolution after each operation
+            from utils.editor_operations_resolver import resolve_operation
+            
+            # Helper to calculate frontmatter end index
+            def get_frontmatter_end(content: str) -> int:
+                """Calculate the end index of frontmatter in content."""
+                import re
+                m = re.match(r'^(---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n)', content)
+                if m:
+                    return m.end()
+                return 0
+            
             # Apply selected operations
             operations = proposal["operations"]
             if selected_operation_indices is None:
@@ -932,35 +944,148 @@ async def apply_document_edit_proposal(
             selected_ops = sorted(selected_ops, key=lambda op: op.get("start", 0), reverse=True)
             
             new_content = current_content
-            for op in selected_ops:
-                op_type = op.get("op_type", "replace_range")
-                start = op.get("start", 0)
-                end = op.get("end", start)
-                text = op.get("text", "")
-                
-                if op_type == "delete_range":
-                    new_content = new_content[:start] + new_content[end:]
-                elif op_type == "replace_range":
-                    new_content = new_content[:start] + text + new_content[end:]
-                elif op_type == "insert_after_heading":
-                    # For insert_after_heading, we need to find the anchor and insert after it
-                    anchor_text = op.get("anchor_text", "")
-                    if anchor_text:
-                        anchor_pos = new_content.find(anchor_text)
-                        if anchor_pos != -1:
-                            # Find end of line after anchor
-                            line_end = new_content.find("\n", anchor_pos + len(anchor_text))
-                            if line_end == -1:
-                                line_end = len(new_content)
-                            insert_pos = line_end + 1
-                            new_content = new_content[:insert_pos] + text + "\n" + new_content[insert_pos:]
-                        else:
-                            logger.warning(f"⚠️ Anchor text not found for insert_after_heading: {anchor_text}")
-                    else:
-                        # Fallback to end
-                        new_content = new_content + "\n" + text
+            applied_ops = []
+            skipped_ops = []
             
-            applied_count = len(selected_ops)
+            # Process operations one at a time, re-resolving after each
+            remaining_ops = selected_ops.copy()
+            
+            while remaining_ops:
+                op = remaining_ops.pop(0)
+                op_type = op.get("op_type", "replace_range")
+                original_start = op.get("start", 0)
+                original_end = op.get("end", original_start)
+                text = op.get("text", "")
+                original_text = op.get("original_text", "")
+                anchor_text = op.get("anchor_text", "")
+                
+                # FIX 1: Validate operation before applying
+                if op_type in ("replace_range", "delete_range") and original_text:
+                    # Check if the text at the resolved position matches original_text
+                    if original_start < len(new_content) and original_end <= len(new_content):
+                        actual_text = new_content[original_start:original_end]
+                        if actual_text != original_text:
+                            logger.error(f"❌ Operation validation failed: original_text mismatch")
+                            logger.error(f"   Operation: {op_type} at [{original_start}:{original_end}]")
+                            logger.error(f"   Expected length: {len(original_text)}, Actual length: {len(actual_text)}")
+                            logger.error(f"   Expected preview: {repr(original_text[:100])}")
+                            logger.error(f"   Actual preview: {repr(actual_text[:100])}")
+                            
+                            # Try to re-resolve this operation with current content
+                            logger.info(f"   🔄 Attempting to re-resolve operation with current content...")
+                            frontmatter_end = get_frontmatter_end(new_content)
+                            try:
+                                resolved_start, resolved_end, resolved_text, resolved_confidence = resolve_operation(
+                                    new_content,
+                                    op,
+                                    frontmatter_end=frontmatter_end,
+                                    require_anchors=False
+                                )
+                                
+                                if resolved_start >= 0 and resolved_end > resolved_start:
+                                    # Re-resolution succeeded - update operation
+                                    logger.info(f"   ✅ Re-resolution succeeded: [{resolved_start}:{resolved_end}] confidence={resolved_confidence:.2f}")
+                                    op["start"] = resolved_start
+                                    op["end"] = resolved_end
+                                    op["text"] = resolved_text
+                                    op["confidence"] = resolved_confidence
+                                    
+                                    # Validate the re-resolved position
+                                    actual_text = new_content[resolved_start:resolved_end]
+                                    if actual_text != original_text:
+                                        logger.warning(f"   ⚠️ Re-resolved position still doesn't match original_text exactly")
+                                        logger.warning(f"      This may indicate content has changed significantly")
+                                        # Continue anyway - let it apply and see what happens
+                                else:
+                                    logger.error(f"   ❌ Re-resolution failed - skipping operation")
+                                    skipped_ops.append(op)
+                                    continue
+                            except Exception as e:
+                                logger.error(f"   ❌ Re-resolution error: {e} - skipping operation")
+                                skipped_ops.append(op)
+                                continue
+                    else:
+                        logger.error(f"❌ Operation validation failed: position out of bounds")
+                        logger.error(f"   Operation: {op_type} at [{original_start}:{original_end}], content length: {len(new_content)}")
+                        skipped_ops.append(op)
+                        continue
+                
+                # Apply the operation
+                try:
+                    start = op.get("start", 0)
+                    end = op.get("end", start)
+                    
+                    if op_type == "delete_range":
+                        if start < len(new_content) and end <= len(new_content):
+                            new_content = new_content[:start] + new_content[end:]
+                            applied_ops.append(op)
+                        else:
+                            logger.error(f"❌ Delete operation out of bounds: [{start}:{end}], content length: {len(new_content)}")
+                            skipped_ops.append(op)
+                    elif op_type == "replace_range":
+                        if start < len(new_content) and end <= len(new_content):
+                            new_content = new_content[:start] + text + new_content[end:]
+                            applied_ops.append(op)
+                        else:
+                            logger.error(f"❌ Replace operation out of bounds: [{start}:{end}], content length: {len(new_content)}")
+                            skipped_ops.append(op)
+                    elif op_type == "insert_after_heading":
+                        # For insert_after_heading, we need to find the anchor and insert after it
+                        if anchor_text:
+                            anchor_pos = new_content.find(anchor_text)
+                            if anchor_pos != -1:
+                                # Find end of line after anchor
+                                line_end = new_content.find("\n", anchor_pos + len(anchor_text))
+                                if line_end == -1:
+                                    line_end = len(new_content)
+                                insert_pos = line_end + 1
+                                new_content = new_content[:insert_pos] + text + "\n" + new_content[insert_pos:]
+                                applied_ops.append(op)
+                            else:
+                                logger.warning(f"⚠️ Anchor text not found for insert_after_heading: {anchor_text[:50]}")
+                                skipped_ops.append(op)
+                        else:
+                            # Fallback to end
+                            new_content = new_content + "\n" + text
+                            applied_ops.append(op)
+                except Exception as e:
+                    logger.error(f"❌ Error applying operation: {e}")
+                    logger.error(f"   Operation: {op_type} at [{op.get('start', 0)}:{op.get('end', 0)}]")
+                    skipped_ops.append(op)
+                    continue
+                
+                # FIX 2: Re-resolve remaining operations after content change
+                if remaining_ops:
+                    logger.info(f"🔄 Re-resolving {len(remaining_ops)} remaining operation(s) after content change...")
+                    frontmatter_end = get_frontmatter_end(new_content)
+                    
+                    for remaining_op in remaining_ops:
+                        # Only re-resolve if operation has original_text or anchor_text
+                        if remaining_op.get("original_text") or remaining_op.get("anchor_text"):
+                            try:
+                                resolved_start, resolved_end, resolved_text, resolved_confidence = resolve_operation(
+                                    new_content,
+                                    remaining_op,
+                                    frontmatter_end=frontmatter_end,
+                                    require_anchors=False
+                                )
+                                
+                                if resolved_start >= 0 and resolved_end >= resolved_start:
+                                    # Update operation with new positions
+                                    remaining_op["start"] = resolved_start
+                                    remaining_op["end"] = resolved_end
+                                    remaining_op["text"] = resolved_text
+                                    remaining_op["confidence"] = resolved_confidence
+                                    logger.debug(f"   ✅ Re-resolved operation: [{resolved_start}:{resolved_end}] confidence={resolved_confidence:.2f}")
+                                else:
+                                    logger.warning(f"   ⚠️ Re-resolution failed for operation - will use original positions")
+                            except Exception as e:
+                                logger.warning(f"   ⚠️ Re-resolution error for operation: {e} - will use original positions")
+            
+            applied_count = len(applied_ops)
+            if skipped_ops:
+                logger.warning(f"⚠️ Skipped {len(skipped_ops)} operation(s) due to validation failures")
+                applied_count = len(applied_ops)
             
         elif edit_type == "content":
             # Apply content edit

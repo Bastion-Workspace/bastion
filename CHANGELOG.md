@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Fix: Added 'reference' to allowed editor types in frontend for proper reference agent routing
+- Fix: Backend now accepts reference documents even if not editable for reference_agent analysis
+- Refactor: Removed unnecessary short-circuit routing hack, using normal intent classification
+- Feature: Added in-editor suggestion capabilities for editor-interactive agents (fiction, outline, electronics)
+- Feature: Media service integrations in progress (SubSonic, Audiobookshelf, Deezer)
+- Fix: Fiction agent continuity file creation now uses same folder resolution as electronics agent (folder_id or folder_path from canonical_path)
+- Fix: Enhanced cursor detection with complete gRPC proto support for fiction editing agent
 - Fix: Chat message copy now preserves markdown formatting as rich text (HTML) while keeping raw markdown syntax for plain text editors
 - Feature: Added Dictionary Agent with short-circuit routing for "define:" queries (instant lexicographic lookups)
 - Fix: Resolved conversation ID mismatch causing 403 errors when accessing conversations from checkpoint list
@@ -13,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Feature: Added intelligent reference file creation to general and electronics agents (>1500 char threshold)
 - Refactor: Migrated electronics_agent to use batch editing for atomic, efficient document updates
 - Update: Enhanced both project agents with automatic file creation and frontmatter management
+- Fix: Resolved FictionEditingState NameError by using forward references for type-safe state access helpers
+- Fix: Improved type safety in fiction editing agent with Pydantic model conversion for structured_edit and continuity_state
+- Fix: Enhanced operation resolution in fiction editing agent with better anchor text matching and error handling
 
 ### Bug Fixes
 - Fix: Resolved KeyError in electronics agent when user approves pending save operations

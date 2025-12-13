@@ -16,6 +16,8 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from .base_agent import BaseAgent, TaskStatus
+from orchestrator.subgraphs import build_context_preparation_subgraph
+from orchestrator.utils.frontmatter_utils import strip_frontmatter_block
 
 logger = logging.getLogger(__name__)
 
@@ -24,52 +26,13 @@ logger = logging.getLogger(__name__)
 # Utility Functions
 # ============================================
 
-def _strip_frontmatter_block(text: str) -> str:
-    """Strip YAML frontmatter from text."""
-    try:
-        return re.sub(r'^---\s*\n[\s\S]*?\n---\s*\n', '', text, flags=re.MULTILINE)
-    except Exception:
-        return text
-
-
-@dataclass
-class ChapterRange:
-    chapter_number: Optional[int]
-    start: int
-    end: int
-
-
-def find_chapter_ranges(text: str) -> List[ChapterRange]:
-    """Find chapter ranges in manuscript text."""
-    if not text:
-        return []
-    
-    pattern = re.compile(r"^##\s+Chapter\s+(\d+)\b.*$", re.MULTILINE)
-    matches = list(pattern.finditer(text))
-    if not matches:
-        return []
-    
-    ranges: List[ChapterRange] = []
-    for idx, m in enumerate(matches):
-        start = m.start()
-        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
-        chapter_num: Optional[int] = None
-        try:
-            chapter_num = int(m.group(1))
-        except Exception:
-            chapter_num = None
-        ranges.append(ChapterRange(chapter_number=chapter_num, start=start, end=end))
-    return ranges
-
-
-def locate_chapter_index(ranges: List[ChapterRange], cursor_offset: int) -> int:
-    """Locate which chapter contains the cursor offset."""
-    if cursor_offset < 0:
-        return -1
-    for i, r in enumerate(ranges):
-        if r.start <= cursor_offset < r.end:
-            return i
-    return -1
+# Chapter detection utilities are now in context subgraph
+# Import them for backward compatibility
+from orchestrator.subgraphs.fiction_context_subgraph import (
+    find_chapter_ranges,
+    locate_chapter_index,
+    ChapterRange
+)
 
 
 def paragraph_bounds(text: str, cursor_offset: int) -> Tuple[int, int]:
@@ -131,8 +94,12 @@ class ProofreadingAgent(BaseAgent):
         """Build LangGraph workflow for proofreading agent"""
         workflow = StateGraph(ProofreadingState)
         
+        # Build context preparation subgraph (reusable)
+        context_subgraph = build_context_preparation_subgraph(checkpointer)
+        
         # Add nodes
-        workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("context_preparation", context_subgraph)
+        workflow.add_node("infer_mode", self._infer_and_set_mode_node)
         workflow.add_node("load_style_guide", self._load_style_guide_node)
         workflow.add_node("determine_scope", self._determine_scope_node)
         workflow.add_node("proofread_content", self._proofread_content_node)
@@ -140,10 +107,11 @@ class ProofreadingAgent(BaseAgent):
         workflow.add_node("format_response", self._format_response_node)
         
         # Entry point
-        workflow.set_entry_point("prepare_context")
+        workflow.set_entry_point("context_preparation")
         
-        # Flow: prepare_context -> load_style_guide -> determine_scope -> proofread_content -> generate_operations -> format_response -> END
-        workflow.add_edge("prepare_context", "load_style_guide")
+        # Flow: context_preparation -> infer_mode -> load_style_guide -> determine_scope -> proofread_content -> generate_operations -> format_response -> END
+        workflow.add_edge("context_preparation", "infer_mode")
+        workflow.add_edge("infer_mode", "load_style_guide")
         workflow.add_edge("load_style_guide", "determine_scope")
         workflow.add_edge("determine_scope", "proofread_content")
         workflow.add_edge("proofread_content", "generate_operations")
@@ -152,54 +120,13 @@ class ProofreadingAgent(BaseAgent):
         
         return workflow.compile(checkpointer=checkpointer)
     
+    # Context preparation is now handled by context subgraph
+    # This method is kept for backward compatibility but not used in workflow
     async def _prepare_context_node(self, state: ProofreadingState) -> Dict[str, Any]:
-        """Prepare context from active editor"""
-        try:
-            logger.info("Preparing proofreading context...")
-            
-            shared_memory = state.get("shared_memory", {}) or {}
-            active_editor = shared_memory.get("active_editor", {}) or {}
-            
-            manuscript = active_editor.get("content", "") or ""
-            filename = active_editor.get("filename") or "document.md"
-            frontmatter = active_editor.get("frontmatter", {}) or {}
-            cursor_offset = int(active_editor.get("cursor_offset", -1))
-            
-            # Robust type detection
-            doc_type_raw = frontmatter.get("type", "")
-            doc_type = str(doc_type_raw).strip().lower()
-            if doc_type not in ("fiction", "non-fiction", "nonfiction", "article"):
-                return {
-                    "response": {
-                        "task_status": TaskStatus.ERROR.value,
-                        "response": "Active editor is not fiction/non-fiction/article; proofreading agent skipping.",
-                        "error": "invalid_document_type"
-                    },
-                    "task_status": "error",
-                    "error": "invalid_document_type"
-                }
-            
-            # Determine mode from user query
-            mode = self._infer_mode_from_request(state)
-            
-            return {
-                "manuscript_content": manuscript,
-                "active_editor": active_editor,
-                "mode": mode,
-                "task_status": "in_progress"
-            }
-            
-        except Exception as e:
-            logger.error(f"Error preparing context: {e}")
-            return {
-                "response": {
-                    "task_status": TaskStatus.ERROR.value,
-                    "response": f"Error preparing context: {str(e)}",
-                    "error": str(e)
-                },
-                "task_status": "error",
-                "error": str(e)
-            }
+        """Prepare context from active editor (DEPRECATED - use context subgraph)"""
+        # Context subgraph handles this now
+        # This is a no-op wrapper for backward compatibility
+        return {}
     
     async def _load_style_guide_node(self, state: ProofreadingState) -> Dict[str, Any]:
         """Load referenced style guide from frontmatter"""
@@ -233,7 +160,7 @@ class ProofreadingAgent(BaseAgent):
                 if loaded_files.get("style") and len(loaded_files["style"]) > 0:
                     style_text = loaded_files["style"][0].get("content", "")
                     if style_text:
-                        style_text = _strip_frontmatter_block(style_text)
+                        style_text = strip_frontmatter_block(style_text)
                         logger.info("Style guide loaded successfully")
             except Exception as e:
                 logger.warning(f"Failed to load style guide: {e}")
@@ -254,34 +181,41 @@ class ProofreadingAgent(BaseAgent):
         try:
             logger.info("Determining proofreading scope...")
             
-            manuscript = state.get("manuscript_content", "")
+            # Get manuscript from state (set by context subgraph)
+            manuscript = state.get("manuscript_content") or state.get("manuscript", "")
             active_editor = state.get("active_editor", {}) or {}
-            cursor_offset = int(active_editor.get("cursor_offset", -1))
+            cursor_offset = state.get("cursor_offset", -1)
             
-            body = _strip_frontmatter_block(manuscript)
+            # Get chapter ranges from context subgraph (if available)
+            chapter_ranges = state.get("chapter_ranges", [])
+            
+            body = strip_frontmatter_block(manuscript)
             word_count = len((body or "").split())
             scope_text = body
             
             if word_count >= 7500:
                 # Scope to chapter or paragraph
                 try:
-                    chapter_ranges = find_chapter_ranges(manuscript)
+                    # Use chapter ranges from context subgraph, or find them if not available
+                    if not chapter_ranges:
+                        chapter_ranges = find_chapter_ranges(manuscript)
+                    
                     if cursor_offset >= 0 and chapter_ranges:
                         idx = locate_chapter_index(chapter_ranges, cursor_offset)
                         if idx != -1:
                             rng = chapter_ranges[idx]
-                            scope_text = _strip_frontmatter_block(manuscript[rng.start:rng.end])
+                            scope_text = strip_frontmatter_block(manuscript[rng.start:rng.end])
                         else:
                             # Fallback to paragraph
                             p0, p1 = paragraph_bounds(manuscript, max(cursor_offset, 0))
-                            scope_text = _strip_frontmatter_block(manuscript[p0:p1])
+                            scope_text = strip_frontmatter_block(manuscript[p0:p1])
                     else:
                         # Fallback to paragraph around 0
                         p0, p1 = paragraph_bounds(manuscript, 0)
-                        scope_text = _strip_frontmatter_block(manuscript[p0:p1])
+                        scope_text = strip_frontmatter_block(manuscript[p0:p1])
                 except Exception:
                     p0, p1 = paragraph_bounds(manuscript, max(cursor_offset, 0))
-                    scope_text = _strip_frontmatter_block(manuscript[p0:p1])
+                    scope_text = strip_frontmatter_block(manuscript[p0:p1])
             
             logger.info(f"Proofreading scope: {len(scope_text)} characters, {len(scope_text.split())} words")
             
@@ -292,8 +226,8 @@ class ProofreadingAgent(BaseAgent):
         except Exception as e:
             logger.error(f"Error determining scope: {e}")
             # Fallback to full document
-            manuscript = state.get("manuscript_content", "")
-            body = _strip_frontmatter_block(manuscript)
+            manuscript = state.get("manuscript_content") or state.get("manuscript", "")
+            body = strip_frontmatter_block(manuscript)
             return {
                 "scope_text": body
             }
@@ -322,8 +256,6 @@ class ProofreadingAgent(BaseAgent):
                 "- explanation: short reason only when unclear\n\n"
                 "CRITICAL SCOPE ANALYSIS: When a change affects surrounding grammar, select the full sentence or clause."
             )
-            
-            now_line = f"Current Date/Time: {datetime.now().isoformat()}"
             
             style_block = (
                 "=== AUTHOR'S STYLE GUIDE ===\n"
@@ -357,9 +289,10 @@ class ProofreadingAgent(BaseAgent):
             )
             
             # Call LLM using centralized mechanism
+            datetime_context = self._get_datetime_context()
             messages = [
                 SystemMessage(content=system_prompt),
-                SystemMessage(content=now_line),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=user_prompt)
             ]
             

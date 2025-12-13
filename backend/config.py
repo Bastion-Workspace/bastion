@@ -122,6 +122,11 @@ class Settings(BaseSettings):
     # Feature Flags
     USE_VECTOR_SERVICE: bool = False  # Use new Vector Service for embeddings (gradual rollout)
     
+    # Dynamic Tool Loading Configuration
+    ENABLE_DYNAMIC_TOOL_LOADING: bool = True  # Enable Kiro-style dynamic tool loading
+    DYNAMIC_TOOL_ANALYSIS_MODEL: str = "fast"  # Use fast model for tool analysis
+    TOOL_LOADING_STRATEGY: str = "keyword_based"  # keyword_based|intent_based|hybrid
+    
     # Embedding Storage Configuration
     STORAGE_BATCH_SIZE: int = 50     # Smaller batches for more reliable storage
     STORAGE_TIMEOUT_SECONDS: int = 30 # Timeout per batch storage operation

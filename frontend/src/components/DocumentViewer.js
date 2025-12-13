@@ -40,8 +40,9 @@ import PDFDocumentViewer from './PDFDocumentViewer';
 import AudioPlayer from './AudioPlayer';
 import { useEditor } from '../contexts/EditorContext';
 import { parseFrontmatter } from '../utils/frontmatterUtils';
+import { useTheme } from '../contexts/ThemeContext';
 
-const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHeading = null }) => {
+const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHeading = null, initialScrollPosition = 0, onScrollChange }) => {
   const [document, setDocument] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -50,6 +51,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   const [saving, setSaving] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const { setEditorState } = useEditor();
+  const { darkMode } = useTheme();
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [epubTitle, setEpubTitle] = useState('');
@@ -755,7 +757,9 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
         content: editContent,
         contentLength: (editContent || '').length,
         frontmatter: mergedFrontmatter,
-        canonicalPath: document?.canonical_path || null
+        canonicalPath: document?.canonical_path || null,
+        documentId: document?.document_id || null,
+        folderId: document?.folder_id || null
       }));
     } else {
       setEditorState({
@@ -784,6 +788,9 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
         cursorOffset: -1,
         selectionStart: -1,
         selectionEnd: -1,
+        canonicalPath: null,
+        documentId: null,
+        folderId: null,
       });
       // Also clear the localStorage cache to prevent stale data
       try {
@@ -1030,26 +1037,60 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                 placeholder="Enter filename..."
               />
             ) : (
-              <Typography 
-                variant="caption" 
-                color="text.secondary" 
-                onClick={handleFilenameClick}
-                sx={{ 
-                  whiteSpace: 'nowrap', 
-                  overflow: 'hidden', 
-                  textOverflow: 'ellipsis',
-                  cursor: 'pointer',
-                  display: 'block',
-                  '&:hover': {
-                    backgroundColor: 'action.hover',
-                    borderRadius: 1,
-                    px: 0.5
-                  }
-                }}
-                title="Click to rename file"
-              >
-                {document.filename}
-              </Typography>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+                <Typography 
+                  variant="caption" 
+                  color="text.secondary" 
+                  onClick={handleFilenameClick}
+                  sx={{ 
+                    whiteSpace: 'nowrap', 
+                    overflow: 'hidden', 
+                    textOverflow: 'ellipsis',
+                    cursor: 'pointer',
+                    '&:hover': {
+                      backgroundColor: 'action.hover',
+                      borderRadius: 1,
+                      px: 0.5
+                    }
+                  }}
+                  title="Click to rename file"
+                >
+                  {document.filename}
+                </Typography>
+                
+                {/* Word Count and Reading Time */}
+                {isEditing && editContent && (
+                  <Typography 
+                    variant="caption" 
+                    color="text.secondary"
+                    sx={{ 
+                      display: 'flex', 
+                      alignItems: 'center', 
+                      gap: 1.5,
+                      opacity: 0.8
+                    }}
+                  >
+                    {(() => {
+                      // Calculate word count (excluding frontmatter for markdown files)
+                      let textForCount = editContent;
+                      if (document.filename?.toLowerCase().endsWith('.md')) {
+                        // Remove frontmatter (---...--- at start)
+                        textForCount = editContent.replace(/^---\n[\s\S]*?\n---\n/, '');
+                      }
+                      const wordCount = textForCount.trim().split(/\s+/).filter(word => word.length > 0).length;
+                      const readingTime = Math.max(1, Math.ceil(wordCount / 200)); // Average reading speed: 200 words/min
+                      
+                      return (
+                        <>
+                          <span>{wordCount.toLocaleString()} words</span>
+                          <span>•</span>
+                          <span>{readingTime} min read</span>
+                        </>
+                      );
+                    })()}
+                  </Typography>
+                )}
+              </Box>
             )}
           </Box>
 
@@ -1210,7 +1251,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
 
         {/* Content area (single scroll) */}
         <Box ref={contentBoxRef} sx={{ flex: 1, minHeight: 0, overflow: 'auto', p: 2, backgroundColor: 'background.default' }}>
-          <Paper variant="outlined" sx={{ p: 2, backgroundColor: 'grey.50' }}>
+          <Paper variant="outlined" sx={{ p: 2, backgroundColor: darkMode ? '#1e1e1e' : 'grey.50' }}>
             {isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? (
               fnameLower.endsWith('.org') ? (
                 showPreview ? (
@@ -1227,6 +1268,8 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                           onChange={setEditContent}
                           scrollToLine={scrollToLine}
                           scrollToHeading={scrollToHeading}
+                          initialScrollPosition={initialScrollPosition}
+                          onScrollChange={onScrollChange}
                         />
                       </Box>
                     </Box>
@@ -1258,6 +1301,8 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                     onChange={setEditContent}
                     scrollToLine={scrollToLine}
                     scrollToHeading={scrollToHeading}
+                    initialScrollPosition={initialScrollPosition}
+                    onScrollChange={onScrollChange}
                   />
                 )
               ) : fnameLower.endsWith('.md') ? (
@@ -1266,6 +1311,8 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                   onChange={setEditContent} 
                   filename={document.filename}
                   canonicalPath={document.canonical_path}
+                  initialScrollPosition={initialScrollPosition}
+                  onScrollChange={onScrollChange}
                 />
               ) : (
                 <TextField
@@ -1390,7 +1437,16 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                 )}
               </>
             ) : (
-              <Typography variant="body1" sx={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+              <Typography 
+                variant="body1" 
+                sx={{ 
+                  whiteSpace: 'pre-wrap', 
+                  lineHeight: 1.6,
+                  color: darkMode ? '#d4d4d4' : 'text.primary',
+                  fontFamily: 'monospace',
+                  fontSize: '14px'
+                }}
+              >
                 {document.content}
               </Typography>
             )}

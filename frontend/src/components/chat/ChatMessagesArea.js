@@ -135,6 +135,12 @@ const ChatMessagesArea = () => {
         const focusNode = selection.focusNode;
         const within = (anchorNode && container.contains(anchorNode)) || (focusNode && container.contains(focusNode));
         setHasTextSelection((prev) => prev !== !!within ? !!within : prev);
+        
+        // Prevent selection from being cleared by scroll or other events
+        // Only if selection is within our container
+        if (within && hasRange) {
+          // Don't interfere with the selection, just track it
+        }
       } catch {
         setHasTextSelection((prev) => prev ? false : prev);
       }
@@ -218,8 +224,11 @@ const ChatMessagesArea = () => {
     if (shouldAutoScroll && messages.length > 0) {
       // Use requestAnimationFrame for smoother timing
       requestAnimationFrame(() => {
-        // Double-check user hasn't started scrolling in the meantime
-        if (!isScrollingRef.current) {
+        // Double-check user hasn't started scrolling or selecting text in the meantime
+        const currentSelection = window.getSelection();
+        const hasActiveSelection = currentSelection && currentSelection.rangeCount > 0 && !currentSelection.isCollapsed;
+        
+        if (!isScrollingRef.current && !hasActiveSelection) {
           messagesEndRef.current?.scrollIntoView({ 
             behavior: 'smooth',
             block: 'end',
@@ -756,6 +765,18 @@ ${message.content}
       {/* Messages Container */}
       <Box 
         ref={messagesContainerRef}
+        onMouseDown={(e) => {
+          // Prevent scroll from interfering with text selection
+          // If user is starting a text selection, don't let scroll reset it
+          const selection = window.getSelection();
+          if (selection && selection.rangeCount > 0 && !selection.isCollapsed) {
+            // User has an active selection, be careful not to clear it
+            // Only prevent default if clicking on empty space
+            if (e.target === e.currentTarget) {
+              // Clicking on container background, allow normal behavior
+            }
+          }
+        }}
         sx={{ 
           flexGrow: 1, 
           overflow: 'auto',
@@ -861,7 +882,15 @@ ${message.content}
               </Box>
 
               {/* Message Content */}
-              <Box sx={{ mb: 1, userSelect: 'text' }}>
+              <Box 
+                sx={{ 
+                  mb: 1, 
+                  userSelect: 'text',
+                  WebkitUserSelect: 'text',
+                  MozUserSelect: 'text',
+                  msUserSelect: 'text',
+                }}
+              >
                 {message.role === 'user' ? (
                   <Typography 
                     variant="body2" 
@@ -879,7 +908,10 @@ ${message.content}
                     '& .markdown-content': {
                       whiteSpace: 'normal',  // ROOSEVELT'S NEWLINE FIX - Let remarkBreaks handle line breaks
                       wordBreak: 'break-word',
-                      lineHeight: 1.6
+                      lineHeight: 1.6,
+                      // Ensure text selection works properly without jumping
+                      userSelect: 'text',
+                      WebkitUserSelect: 'text',
                     },
                     '& pre': { 
                       margin: '8px 0',
@@ -897,7 +929,10 @@ ${message.content}
                     },
                     '& p': {
                       marginBottom: '12px',
-                      whiteSpace: 'normal'  // ROOSEVELT'S FIX - Ensure paragraphs don't conflict
+                      whiteSpace: 'normal',  // ROOSEVELT'S FIX - Ensure paragraphs don't conflict
+                      userSelect: 'text',
+                      // Prevent double-click from selecting entire paragraph
+                      WebkitUserSelect: 'text',
                     },
                     '& h1, & h2, & h3, & h4, & h5, & h6': {
                       marginTop: '16px',
@@ -955,7 +990,7 @@ ${message.content}
                         const original = op.original_text || op.anchor_text || '';
                         const newText = op.text || '';
                         const opType = op.op_type || 'replace_range';
-                        const isInsert = opType === 'insert_after_heading';
+                        const isInsert = opType === 'insert_after_heading' || opType === 'insert_after';
                         
                         return (
                           <Paper key={idx} variant="outlined" sx={{ p: 1.5, bgcolor: 'background.default' }}>

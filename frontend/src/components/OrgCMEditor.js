@@ -153,10 +153,12 @@ const createBaseTheme = (darkMode) => EditorView.baseTheme({
   }
 });
 
-const OrgCMEditor = React.forwardRef(({ value, onChange, scrollToLine = null, scrollToHeading = null }, ref) => {
+const OrgCMEditor = React.forwardRef(({ value, onChange, scrollToLine = null, scrollToHeading = null, initialScrollPosition = 0, onScrollChange }, ref) => {
   const { darkMode } = useTheme();
   const editorRef = useRef(null);
   const [currentHeadingLine, setCurrentHeadingLine] = useState(null);
+  const scrollCallbackTimeoutRef = useRef(null);
+  const hasRestoredInitialScrollRef = useRef(false);
   
   // Expose editor methods to parent via ref
   React.useImperativeHandle(ref, () => ({
@@ -271,6 +273,78 @@ const OrgCMEditor = React.forwardRef(({ value, onChange, scrollToLine = null, sc
     
     return () => clearTimeout(scrollTimeout);
   }, [value, scrollToLine, scrollToHeading]);
+  
+  // Restore initial scroll position on mount (for tab switching and page reload)
+  useEffect(() => {
+    if (!hasRestoredInitialScrollRef.current && editorRef.current && initialScrollPosition > 0) {
+      // Wait for editor to be fully initialized
+      const restoreTimeout = setTimeout(() => {
+        if (editorRef.current?.view) {
+          const view = editorRef.current.view;
+          const scrollDOM = view.scrollDOM;
+          if (scrollDOM) {
+            scrollDOM.scrollTop = initialScrollPosition;
+            console.log('📜 Restored initial org scroll position:', initialScrollPosition);
+            hasRestoredInitialScrollRef.current = true;
+          }
+        }
+      }, 100);
+      
+      return () => clearTimeout(restoreTimeout);
+    }
+  }, [initialScrollPosition]);
+  
+  // Track scroll changes and notify parent (debounced)
+  useEffect(() => {
+    if (!editorRef.current || !onScrollChange) return;
+    
+    const checkAndAttach = () => {
+      if (editorRef.current?.view) {
+        const scrollDOM = editorRef.current.view.scrollDOM;
+        if (scrollDOM) {
+          const handleScroll = () => {
+            // Clear any pending callback
+            if (scrollCallbackTimeoutRef.current) {
+              clearTimeout(scrollCallbackTimeoutRef.current);
+            }
+            
+            // Debounce scroll position updates (300ms)
+            scrollCallbackTimeoutRef.current = setTimeout(() => {
+              if (scrollDOM && onScrollChange) {
+                const scrollTop = scrollDOM.scrollTop;
+                onScrollChange(scrollTop);
+              }
+            }, 300);
+          };
+          
+          scrollDOM.addEventListener('scroll', handleScroll, { passive: true });
+          
+          return () => {
+            scrollDOM.removeEventListener('scroll', handleScroll);
+            if (scrollCallbackTimeoutRef.current) {
+              clearTimeout(scrollCallbackTimeoutRef.current);
+            }
+          };
+        }
+      }
+      return null;
+    };
+    
+    // Editor might not be ready immediately, try after a short delay
+    const timer = setTimeout(() => {
+      const cleanup = checkAndAttach();
+      if (cleanup) {
+        return cleanup;
+      }
+    }, 100);
+    
+    return () => {
+      clearTimeout(timer);
+      if (scrollCallbackTimeoutRef.current) {
+        clearTimeout(scrollCallbackTimeoutRef.current);
+      }
+    };
+  }, [onScrollChange]);
 
   return (
     <Box sx={{ bgcolor: 'background.paper', p: 2, borderRadius: 1 }}>
@@ -288,7 +362,7 @@ const OrgCMEditor = React.forwardRef(({ value, onChange, scrollToLine = null, sc
         ref={editorRef}
         value={value}
         height="50vh"
-        basicSetup={true}
+        basicSetup={false}
         extensions={extensions}
         onChange={(val) => onChange && onChange(val)}
       />

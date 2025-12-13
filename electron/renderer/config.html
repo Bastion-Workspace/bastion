@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bastion Configuration</title>
+    <link rel="stylesheet" href="config.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Bastion Configuration</h1>
+            <p class="subtitle">Configure your connection settings</p>
+        </div>
+
+        <form id="configForm" class="config-form">
+            <div class="form-group">
+                <label for="serverUrl">Server URL</label>
+                <input 
+                    type="url" 
+                    id="serverUrl" 
+                    name="serverUrl" 
+                    placeholder="http://192.168.80.XXX:3051"
+                    required
+                    autocomplete="off"
+                />
+                <small class="help-text">Enter the full URL of your Bastion instance</small>
+            </div>
+
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input 
+                    type="text" 
+                    id="username" 
+                    name="username" 
+                    placeholder="admin"
+                    required
+                    autocomplete="username"
+                />
+            </div>
+
+            <div class="form-group">
+                <label for="password">Password</label>
+                <div class="password-wrapper">
+                    <input 
+                        type="password" 
+                        id="password" 
+                        name="password" 
+                        placeholder="Enter your password"
+                        required
+                        autocomplete="current-password"
+                    />
+                    <button type="button" class="toggle-password" id="togglePassword" aria-label="Toggle password visibility">
+                        <span class="eye-icon">👁️</span>
+                    </button>
+                </div>
+            </div>
+
+            <div id="errorMessage" class="error-message" style="display: none;"></div>
+            <div id="successMessage" class="success-message" style="display: none;"></div>
+
+            <div class="form-actions">
+                <button type="submit" id="saveButton" class="btn btn-primary">
+                    Save Configuration
+                </button>
+                <button type="button" id="cancelButton" class="btn btn-secondary">
+                    Cancel
+                </button>
+            </div>
+        </form>
+    </div>
+
+    <script src="config.js"></script>
+</body>
+</html>
+

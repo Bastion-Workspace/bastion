@@ -9,6 +9,7 @@ import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime, timedelta
 import json
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -398,6 +399,62 @@ class WeatherTools:
                 "location": location_variant
             }
     
+    def _calculate_moon_phase(self, date: datetime = None) -> Dict[str, Any]:
+        """Calculate moon phase for a given date"""
+        if date is None:
+            date = datetime.utcnow()
+        
+        # Known new moon date (January 6, 2000 18:14 UTC)
+        known_new_moon = datetime(2000, 1, 6, 18, 14, 0)
+        
+        # Calculate days since known new moon
+        days_since_new_moon = (date - known_new_moon).total_seconds() / 86400.0
+        
+        # Lunar cycle is approximately 29.53 days
+        lunar_cycle = 29.53058867
+        phase = (days_since_new_moon % lunar_cycle) / lunar_cycle
+        
+        # Determine phase name and icon
+        if phase < 0.0625:
+            phase_name = "New Moon"
+            phase_icon = "🌑"
+            phase_value = 0
+        elif phase < 0.1875:
+            phase_name = "Waxing Crescent"
+            phase_icon = "🌒"
+            phase_value = 1
+        elif phase < 0.3125:
+            phase_name = "First Quarter"
+            phase_icon = "🌓"
+            phase_value = 2
+        elif phase < 0.4375:
+            phase_name = "Waxing Gibbous"
+            phase_icon = "🌔"
+            phase_value = 3
+        elif phase < 0.5625:
+            phase_name = "Full Moon"
+            phase_icon = "🌕"
+            phase_value = 4
+        elif phase < 0.6875:
+            phase_name = "Waning Gibbous"
+            phase_icon = "🌖"
+            phase_value = 5
+        elif phase < 0.8125:
+            phase_name = "Last Quarter"
+            phase_icon = "🌗"
+            phase_value = 6
+        else:
+            phase_name = "Waning Crescent"
+            phase_icon = "🌘"
+            phase_value = 7
+        
+        return {
+            "phase_name": phase_name,
+            "phase_icon": phase_icon,
+            "phase_value": phase_value,
+            "illumination": round((1 - abs(phase - 0.5) * 2) * 100, 1)
+        }
+    
     def _format_current_weather(self, data: Dict[str, Any], location: str, units: str) -> Dict[str, Any]:
         """Format current weather data into a user-friendly response"""
         try:
@@ -409,6 +466,9 @@ class WeatherTools:
             main = data["main"]
             weather = data["weather"][0]
             wind = data.get("wind", {})
+            
+            # Calculate moon phase
+            moon_phase = self._calculate_moon_phase()
             
             return {
                 "success": True,
@@ -429,6 +489,7 @@ class WeatherTools:
                     "visibility": data.get("visibility", 0) / 1000 if data.get("visibility") else None,  # Convert to km
                     "cloudiness": data["clouds"]["all"] if "clouds" in data else 0
                 },
+                "moon_phase": moon_phase,
                 "units": {
                     "temperature": temp_unit,
                     "wind_speed": wind_unit,

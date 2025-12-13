@@ -54,6 +54,24 @@ class SettingsService extends ApiServiceBase {
     return this.put('/api/settings/user/timezone', timezoneData);
   }
 
+  // User zip code methods
+  getUserZipCode = async () => {
+    return this.get('/api/settings/user/zip-code');
+  }
+
+  setUserZipCode = async (zipCodeData) => {
+    return this.put('/api/settings/user/zip-code', zipCodeData);
+  }
+
+  // User time format methods
+  getUserTimeFormat = async () => {
+    return this.get('/api/settings/user/time-format');
+  }
+
+  setUserTimeFormat = async (timeFormatData) => {
+    return this.put('/api/settings/user/time-format', timeFormatData);
+  }
+
   // Prompt settings methods
   getPromptSettings = async () => {
     return this.get('/api/settings/prompt');

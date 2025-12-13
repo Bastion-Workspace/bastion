@@ -527,8 +527,10 @@ class ContentAnalysisAgent(BaseAgent):
             )
             
             llm = self._get_llm(temperature=0.2, state=state)
+            datetime_context = self._get_datetime_context()
             messages = [
                 SystemMessage(content=system_prompt),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=user_prompt)
             ]
             
@@ -705,8 +707,10 @@ Provide detailed, specific information in each field. The summary field should b
         
         try:
             llm = self._get_llm(temperature=0.2, model=model_name)
+            datetime_context = self._get_datetime_context()
             messages = [
                 SystemMessage(content="You are an expert document summarizer. Create structured, comprehensive summaries with specific details. Return ONLY valid JSON."),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=summary_prompt)
             ]
             
@@ -884,8 +888,10 @@ Provide a comprehensive comparative analysis based on the document summaries abo
 """
             
             llm = self._get_llm(temperature=0.3, model=model_name)
+            datetime_context = self._get_datetime_context()
             messages = [
                 SystemMessage(content="You are an expert comparative analyst. Provide structured, detailed comparative analysis. Return ONLY valid JSON."),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=comparison_prompt)
             ]
             
@@ -1053,8 +1059,10 @@ Provide a comprehensive comparative analysis based on the document summaries abo
             
             # Call LLM for comparison
             llm = self._get_llm(temperature=0.3, model=model_name)
+            datetime_context = self._get_datetime_context()
             messages = [
                 SystemMessage(content="You are a document comparison expert. Provide structured, detailed comparative analysis. Return ONLY valid JSON."),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content=comparison_prompt)
             ]
             

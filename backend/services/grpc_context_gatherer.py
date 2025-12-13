@@ -228,6 +228,7 @@ class GRPCContextGatherer:
                 
                 if chat_model:
                     grpc_request.metadata["user_chat_model"] = chat_model
+                    logger.info(f"🎯 SENDING TO ORCHESTRATOR: user_chat_model = {chat_model}")
                 if fast_model:
                     grpc_request.metadata["user_fast_model"] = fast_model
                 if image_model:
@@ -268,10 +269,16 @@ class GRPCContextGatherer:
                 return
             
             # CRITICAL: Reject if is_editable is False or missing - this ensures stale editor data is cleared
+            # EXCEPTION: Reference documents (type: reference) should ALWAYS be sent even if not editable
+            # because reference_agent needs to READ them (journals, logs, etc.)
             is_editable = active_editor.get("is_editable")
-            if not is_editable or is_editable is False:
+            frontmatter_type = active_editor.get("frontmatter", {}).get("type", "").strip().lower()
+            
+            if (not is_editable or is_editable is False) and frontmatter_type != "reference":
                 logger.info(f"⚠️ EDITOR CONTEXT: Skipping - active_editor.is_editable is False or missing (editor tab likely closed)")
                 return
+            elif frontmatter_type == "reference" and not is_editable:
+                logger.info(f"📚 EDITOR CONTEXT: Including reference document even though not editable (reference_agent needs to read it)")
             
             filename = active_editor.get("filename", "")
             if not filename.endswith(".md"):
@@ -312,6 +319,22 @@ class GRPCContextGatherer:
             else:
                 logger.warning(f"⚠️ CONTEXT: Active editor has no canonical_path - relative references may fail!")
             
+            # Extract cursor and selection state
+            cursor_offset = active_editor.get("cursor_offset", -1)
+            selection_start = active_editor.get("selection_start", -1)
+            selection_end = active_editor.get("selection_end", -1)
+            
+            # Extract document metadata
+            document_id = active_editor.get("document_id") or ""
+            folder_id = active_editor.get("folder_id") or ""
+            file_path = active_editor.get("file_path") or ""
+            
+            # Log cursor state for debugging
+            if cursor_offset >= 0:
+                logger.info(f"✅ CONTEXT: Cursor detected at offset {cursor_offset}")
+            if selection_start >= 0 and selection_end > selection_start:
+                logger.info(f"✅ CONTEXT: Selection detected from {selection_start} to {selection_end}")
+            
             grpc_request.active_editor.CopyFrom(
                 orchestrator_pb2.ActiveEditor(
                     is_editable=True,
@@ -321,7 +344,13 @@ class GRPCContextGatherer:
                     content_length=len(active_editor.get("content", "")),
                     frontmatter=frontmatter,
                     editor_preference=editor_preference,
-                    canonical_path=canonical_path
+                    canonical_path=canonical_path,
+                    cursor_offset=cursor_offset,
+                    selection_start=selection_start,
+                    selection_end=selection_end,
+                    document_id=document_id,
+                    folder_id=folder_id,
+                    file_path=file_path
                 )
             )
             

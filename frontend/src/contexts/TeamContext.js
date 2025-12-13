@@ -312,6 +312,11 @@ export const TeamProvider = ({ children }) => {
   useEffect(() => {
     if (!isAuthenticated || !user) return;
 
+    let reconnectAttempts = 0;
+    let reconnectTimeout = null;
+    const maxReconnectDelay = 30000; // 30 seconds max
+    const initialReconnectDelay = 1000; // Start with 1 second
+
     const connectWebSocket = () => {
       const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
       if (!token) {
@@ -327,6 +332,7 @@ export const TeamProvider = ({ children }) => {
 
       ws.onopen = () => {
         console.log('Team WebSocket connected');
+        reconnectAttempts = 0; // Reset on successful connection
       };
 
       ws.onmessage = (event) => {
@@ -367,18 +373,35 @@ export const TeamProvider = ({ children }) => {
       };
 
       ws.onerror = (error) => {
-        console.error('Team WebSocket error:', error);
+        // Only log errors in development to reduce console noise
+        if (process.env.NODE_ENV === 'development') {
+          console.error('Team WebSocket error:', error);
+        }
       };
 
       ws.onclose = () => {
-        console.log('Team WebSocket disconnected, reconnecting...');
-        setTimeout(connectWebSocket, 3000);
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (max)
+        const delay = Math.min(
+          initialReconnectDelay * Math.pow(2, reconnectAttempts),
+          maxReconnectDelay
+        );
+        reconnectAttempts++;
+        
+        // Only log reconnection attempts in development
+        if (process.env.NODE_ENV === 'development') {
+          console.log(`Team WebSocket disconnected, reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
+        }
+        
+        reconnectTimeout = setTimeout(connectWebSocket, delay);
       };
     };
 
     connectWebSocket();
 
     return () => {
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
       if (wsRef.current) {
         wsRef.current.close();
       }

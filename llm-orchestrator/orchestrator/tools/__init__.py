@@ -37,6 +37,20 @@ from orchestrator.tools.information_analysis_tools import (
     INFORMATION_ANALYSIS_TOOLS
 )
 
+from orchestrator.tools.math_tools import (
+    calculate_expression_tool,
+    list_available_formulas_tool,
+    MATH_TOOLS
+)
+
+from orchestrator.tools.math_formulas import (
+    evaluate_formula_tool
+)
+
+from orchestrator.tools.unit_conversions import (
+    convert_units_tool
+)
+
 __all__ = [
     # Document tools
     'search_documents_tool',
@@ -62,6 +76,12 @@ __all__ = [
     # Information analysis tools
     'analyze_information_needs_tool',
     'generate_project_aware_queries_tool',
-    'INFORMATION_ANALYSIS_TOOLS'
+    'INFORMATION_ANALYSIS_TOOLS',
+    # Math tools
+    'calculate_expression_tool',
+    'evaluate_formula_tool',
+    'convert_units_tool',
+    'list_available_formulas_tool',
+    'MATH_TOOLS'
 ]
 

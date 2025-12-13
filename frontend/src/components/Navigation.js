@@ -31,12 +31,15 @@ import {
   Mail,
   MailOutline,
   Group,
+  MusicNote,
 } from '@mui/icons-material';
+import { useQuery } from 'react-query';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { useCapabilities } from '../contexts/CapabilitiesContext';
 import { useMessaging } from '../contexts/MessagingContext';
 import { useTeam } from '../contexts/TeamContext';
+import apiService from '../services/apiService';
 
 const Navigation = () => {
   const navigate = useNavigate();
@@ -50,10 +53,23 @@ const Navigation = () => {
   const [logoError, setLogoError] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
 
+  // Check if user has any media source configured
+  const { data: mediaSources } = useQuery(
+    'mediaSources',
+    () => apiService.music.getSources(),
+    {
+      retry: false,
+      refetchOnWindowFocus: false,
+    }
+  );
+
+  const hasMediaConfig = mediaSources?.sources && mediaSources.sources.length > 0;
+
   const navItems = [
       { label: 'Documents', path: '/documents', icon: <Description /> },
       { label: 'Teams', path: '/teams', icon: <Group />, badge: pendingInvitations?.length || 0 },
       ...(isAdmin || has('feature.news.view') ? [{ label: 'News', path: '/news', icon: <Description /> }] : []),
+      ...(hasMediaConfig ? [{ label: 'Media', path: '/media', icon: <MusicNote /> }] : []),
   ];
 
   const isActive = (path) => location.pathname === path;

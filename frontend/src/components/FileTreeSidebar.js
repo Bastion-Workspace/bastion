@@ -1616,7 +1616,7 @@ const FileTreeSidebar = ({
         userId: user?.user_id,
         folderId,
         docType: finalDocType
-      }).then(() => {
+      }).then((response) => {
         // Auto-expand the target folder so the user sees the new file
         if (folderId) {
           setExpandedFolders(prev => {
@@ -1630,6 +1630,13 @@ const FileTreeSidebar = ({
         }
         // Invalidate the precise query key so react-query refetches the tree
         queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]);
+        // Auto-open the newly created file in the editor
+        if (response?.document_id) {
+          // Use the global ref exposed by DocumentsPage
+          if (window.tabbedContentManagerRef?.openDocument) {
+            window.tabbedContentManagerRef.openDocument(response.document_id, finalFilename);
+          }
+        }
       }).catch((err) => {
         console.error('❌ Failed to create markdown document:', err);
         alert('Failed to create markdown document');
@@ -1677,7 +1684,7 @@ const FileTreeSidebar = ({
         userId: user?.user_id,
         folderId,
         docType: finalDocType
-      }).then(() => {
+      }).then((response) => {
         // Auto-expand the target folder so the user sees the new file
         if (folderId) {
           setExpandedFolders(prev => {
@@ -1691,6 +1698,13 @@ const FileTreeSidebar = ({
         }
         // Invalidate the precise query key so react-query refetches the tree
         queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]);
+        // Auto-open the newly created file in the editor
+        if (response?.document_id) {
+          // Use the global ref exposed by DocumentsPage
+          if (window.tabbedContentManagerRef?.openDocument) {
+            window.tabbedContentManagerRef.openDocument(response.document_id, finalFilename);
+          }
+        }
       }).catch((err) => {
         console.error('❌ Failed to create org document:', err);
         alert('Failed to create org document');
@@ -2679,7 +2693,7 @@ const FileTreeSidebar = ({
                 
                 {/* Vectorization Settings - Submenu */}
                 <MenuItem
-                  onMouseEnter={(e) => {
+                  onClick={(e) => {
                     setVectorizationSubmenu(e.currentTarget);
                   }}
                 >
@@ -2897,7 +2911,7 @@ const FileTreeSidebar = ({
             
             {/* Vectorization Settings - Submenu for Documents */}
             <MenuItem
-              onMouseEnter={(e) => {
+              onClick={(e) => {
                 setVectorizationSubmenu(e.currentTarget);
               }}
             >
@@ -3296,9 +3310,14 @@ const FileTreeSidebar = ({
                     }
                     return updated;
                   });
-                  // Invalidate both folders for server truth
+                  // Invalidate and refetch both folders to show file in new location
                   queryClient.invalidateQueries(['folders', 'contents', moveDestinationId]);
                   queryClient.invalidateQueries(['folders', 'contents', oldFolderId]);
+                  // Explicitly refetch folder contents for both old and new folders
+                  await queryClient.refetchQueries(['folders', 'contents', moveDestinationId]);
+                  await queryClient.refetchQueries(['folders', 'contents', oldFolderId]);
+                  // Refresh folder tree as well
+                  refetch();
                 }
               } catch (e) {
                 console.error('Move failed:', e);

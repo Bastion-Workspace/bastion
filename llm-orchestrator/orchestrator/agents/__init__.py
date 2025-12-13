@@ -27,6 +27,7 @@ from orchestrator.agents.site_crawl_agent import SiteCrawlAgent, get_site_crawl_
 from orchestrator.agents.rules_editing_agent import RulesEditingAgent, get_rules_editing_agent
 from orchestrator.agents.proofreading_agent import ProofreadingAgent, get_proofreading_agent
 from orchestrator.agents.general_project_agent import GeneralProjectAgent, get_general_project_agent
+from orchestrator.agents.reference_agent import ReferenceAgent, get_reference_agent
 
 __all__ = [
     'FullResearchAgent',
@@ -73,6 +74,8 @@ __all__ = [
     'ProofreadingAgent',
     'get_proofreading_agent',
     'GeneralProjectAgent',
-    'get_general_project_agent'
+    'get_general_project_agent',
+    'ReferenceAgent',
+    'get_reference_agent'
 ]
 

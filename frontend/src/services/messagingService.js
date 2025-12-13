@@ -16,6 +16,7 @@ class MessagingService {
     this.newRoomHandlers = new Set(); // Set of new room callbacks
     this.reconnectTimeouts = new Map(); // room_id -> timeout
     this.userWebSocket = null; // User-level WebSocket for all room notifications
+    this.userWebSocketReconnectAttempts = 0; // Track reconnection attempts for exponential backoff
   }
 
   // =====================
@@ -443,24 +444,34 @@ class MessagingService {
   // User-level WebSocket for notifications across all rooms
   connectUserWebSocket() {
     if (this.userWebSocket) {
-      console.log('💬 User WebSocket already connected');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('💬 User WebSocket already connected');
+      }
       return;
     }
 
     const token = localStorage.getItem('token');
     if (!token) {
-      console.error('❌ No token available for user WebSocket');
+      // Only log errors, not warnings about missing tokens
+      if (process.env.NODE_ENV === 'development') {
+        console.error('❌ No token available for user WebSocket');
+      }
       return;
     }
 
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/messaging/ws/user?token=${token}`;
     
-    console.log('💬 Connecting user WebSocket...');
+    if (process.env.NODE_ENV === 'development') {
+      console.log('💬 Connecting user WebSocket...');
+    }
     const ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
-      console.log('✅ User WebSocket connected');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('✅ User WebSocket connected');
+      }
       this.userWebSocket = ws;
+      this.userWebSocketReconnectAttempts = 0; // Reset on successful connection
       
       // Start heartbeat
       const heartbeatInterval = setInterval(() => {
@@ -507,21 +518,36 @@ class MessagingService {
     };
     
     ws.onclose = () => {
-      console.log('💬 User WebSocket disconnected');
       if (ws.heartbeatInterval) {
         clearInterval(ws.heartbeatInterval);
       }
       this.userWebSocket = null;
       
+      // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (max)
+      const maxDelay = 30000; // 30 seconds max
+      const initialDelay = 1000; // Start with 1 second
+      const delay = Math.min(
+        initialDelay * Math.pow(2, this.userWebSocketReconnectAttempts),
+        maxDelay
+      );
+      this.userWebSocketReconnectAttempts++;
+      
+      // Only log reconnection attempts in development
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`💬 User WebSocket disconnected, reconnecting in ${delay}ms (attempt ${this.userWebSocketReconnectAttempts})...`);
+      }
+      
       // Attempt reconnection after delay
       setTimeout(() => {
-        console.log('🔄 Attempting to reconnect user WebSocket...');
         this.connectUserWebSocket();
-      }, 3000);
+      }, delay);
     };
     
     ws.onerror = (error) => {
-      console.error('❌ User WebSocket error:', error);
+      // Only log errors in development to reduce console noise
+      if (process.env.NODE_ENV === 'development') {
+        console.error('❌ User WebSocket error:', error);
+      }
     };
   }
 

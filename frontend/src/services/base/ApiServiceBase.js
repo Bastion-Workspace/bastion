@@ -119,20 +119,26 @@ class ApiServiceBase {
 
     const fullURL = `${this.baseURL}${url}`;
     
-    console.log('🌐 API Request:', {
-      url: fullURL,
-      method: config.method || 'GET',
-      headers: Object.keys(config.headers),
-      hasBody: !!config.body
-    });
+    // Only log in development mode to reduce console noise
+    const isDev = process.env.NODE_ENV === 'development';
+    if (isDev) {
+      console.log('🌐 API Request:', {
+        url: fullURL,
+        method: config.method || 'GET',
+        headers: Object.keys(config.headers),
+        hasBody: !!config.body
+      });
+    }
 
     const response = await fetch(fullURL, config);
 
-    console.log('🌐 API Response:', {
-      status: response.status,
-      ok: response.ok,
-      url: response.url
-    });
+    if (isDev) {
+      console.log('🌐 API Response:', {
+        status: response.status,
+        ok: response.ok,
+        url: response.url
+      });
+    }
 
     // Handle 401 errors by attempting token refresh
     if (response.status === 401 && !isAuthEndpoint) {
@@ -174,7 +180,9 @@ class ApiServiceBase {
               }
               
               const result = await retryResponse.json();
-              console.log('🌐 API Success after refresh:', result);
+              if (process.env.NODE_ENV === 'development') {
+                console.log('🌐 API Success after refresh:', result);
+              }
               return result;
             }
           }
@@ -205,7 +213,10 @@ class ApiServiceBase {
     }
 
     const result = await response.json();
-    console.log('🌐 API Success:', result);
+    // Only log in development mode to reduce console noise
+    if (process.env.NODE_ENV === 'development') {
+      console.log('🌐 API Success:', result);
+    }
     return result;
   }
 

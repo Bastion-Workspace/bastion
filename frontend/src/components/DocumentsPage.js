@@ -247,7 +247,7 @@ const DocumentsPage = () => {
   return (
     <Box sx={{ 
       display: 'flex', 
-      height: { xs: 'calc(var(--appvh, 100vh) - 64px)', md: 'calc(100dvh - 64px)' },
+      height: { xs: 'calc(var(--appvh, 100vh) - 64px - 32px)', md: 'calc(100dvh - 64px - 32px)' },
       overflow: 'hidden',
       paddingBottom: 'env(safe-area-inset-bottom)'
     }}>

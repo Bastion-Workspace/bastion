@@ -12,10 +12,20 @@ from enum import Enum
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph
+from openai import NotFoundError, APIError, RateLimitError, AuthenticationError
 
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
+
+
+class OpenRouterError(Exception):
+    """Custom exception for OpenRouter API errors with user-friendly messages"""
+    def __init__(self, user_message: str, error_type: str, original_error: str = ""):
+        self.user_message = user_message
+        self.error_type = error_type
+        self.original_error = original_error
+        super().__init__(user_message)
 
 
 class TaskStatus(str, Enum):
@@ -222,15 +232,24 @@ class BaseAgent:
     
     def _get_llm(self, temperature: float = 0.7, model: Optional[str] = None, state: Optional[Dict[str, Any]] = None) -> ChatOpenAI:
         """Get configured LLM instance, using user model preferences if available"""
-        # Check for user model preferences in state metadata
+        # Check for user model preferences in state metadata or shared_memory
         user_model = None
         if state:
-            metadata = state.get("metadata", {})
             if model is None:  # Only override if no explicit model provided
+                # First check metadata (standard location)
+                metadata = state.get("metadata", {})
                 user_model = metadata.get("user_chat_model")
+                
+                # Fallback to shared_memory (for agents like research that don't have metadata in state)
+                if not user_model:
+                    shared_memory = state.get("shared_memory", {})
+                    user_model = shared_memory.get("user_chat_model")
+                
+                logger.debug(f"🔍 MODEL SELECTION: user_chat_model from metadata/shared_memory = {user_model}")
         
         # Use user model, explicit model, or default
         final_model = model or user_model or settings.DEFAULT_MODEL
+        logger.info(f"🎯 SELECTED MODEL: {final_model} (explicit={model}, user={user_model}, default={settings.DEFAULT_MODEL})")
         
         return ChatOpenAI(
             model=final_model,
@@ -247,6 +266,153 @@ class BaseAgent:
             if user_fast_model:
                 return user_fast_model
         return settings.FAST_MODEL
+    
+    def _handle_openrouter_error(self, error: Exception) -> Dict[str, Any]:
+        """
+        Transform OpenRouter API errors into user-friendly messages
+        
+        Args:
+            error: The exception raised by OpenRouter API
+            
+        Returns:
+            Dict with user-friendly error message and error type
+        """
+        error_type = "api_error"
+        user_message = "An error occurred while processing your request."
+        
+        # Handle specific OpenRouter error types
+        if isinstance(error, NotFoundError):
+            error_str = str(error)
+            # Check for ignored providers error
+            if "All providers have been ignored" in error_str or "ignored providers" in error_str.lower():
+                user_message = (
+                    "⚠️ **OpenRouter Configuration Issue**\n\n"
+                    "All available AI providers have been ignored in your OpenRouter settings. "
+                    "This means no models are available to process your request.\n\n"
+                    "**To fix this:**\n"
+                    "1. Visit https://openrouter.ai/settings/preferences\n"
+                    "2. Review your ignored providers list\n"
+                    "3. Remove providers from the ignored list or adjust your account requirements\n"
+                    "4. Try your request again\n\n"
+                    "If you need help, check your OpenRouter account settings or contact support."
+                )
+                error_type = "provider_configuration_error"
+            else:
+                user_message = (
+                    f"⚠️ **Model Not Found**\n\n"
+                    f"The requested AI model is not available. This could mean:\n"
+                    f"- The model name is incorrect\n"
+                    f"- The model is not available in your OpenRouter account\n"
+                    f"- Your account doesn't have access to this model\n\n"
+                    f"**Error details:** {str(error)}"
+                )
+                error_type = "model_not_found"
+        
+        elif isinstance(error, RateLimitError):
+            user_message = (
+                "⚠️ **Rate Limit Exceeded**\n\n"
+                "You've exceeded the rate limit for API requests. Please wait a moment and try again.\n\n"
+                "If this persists, you may need to:\n"
+                "- Upgrade your OpenRouter plan\n"
+                "- Reduce the frequency of requests\n"
+                "- Check your account usage limits"
+            )
+            error_type = "rate_limit_error"
+        
+        elif isinstance(error, AuthenticationError):
+            user_message = (
+                "⚠️ **Authentication Error**\n\n"
+                "There's an issue with your OpenRouter API credentials. Please check:\n"
+                "- Your API key is correct and active\n"
+                "- Your account has sufficient credits\n"
+                "- Your account is in good standing"
+            )
+            error_type = "authentication_error"
+        
+        elif isinstance(error, APIError):
+            error_str = str(error)
+            # Check for common OpenRouter-specific errors
+            if "account requirements" in error_str.lower() or "provider" in error_str.lower():
+                user_message = (
+                    "⚠️ **OpenRouter Account Configuration**\n\n"
+                    "Your OpenRouter account settings are preventing this request. "
+                    "This could be due to:\n"
+                    "- Provider restrictions in your account preferences\n"
+                    "- Account requirements not being met by available providers\n"
+                    "- Model availability restrictions\n\n"
+                    "**To resolve:**\n"
+                    "1. Visit https://openrouter.ai/settings/preferences\n"
+                    "2. Review and adjust your provider preferences\n"
+                    "3. Check your account requirements\n"
+                    "4. Try your request again\n\n"
+                    f"**Error details:** {error_str}"
+                )
+                error_type = "account_configuration_error"
+            else:
+                user_message = (
+                    f"⚠️ **API Error**\n\n"
+                    f"An error occurred while communicating with OpenRouter:\n\n"
+                    f"**Error details:** {error_str}"
+                )
+                error_type = "api_error"
+        
+        else:
+            # Generic error - check if it's an OpenAI-compatible error
+            error_str = str(error)
+            if "openrouter" in error_str.lower() or "provider" in error_str.lower():
+                user_message = (
+                    f"⚠️ **OpenRouter Error**\n\n"
+                    f"An error occurred with OpenRouter:\n\n"
+                    f"**Error details:** {error_str}\n\n"
+                    f"If this persists, check your OpenRouter account settings at "
+                    f"https://openrouter.ai/settings/preferences"
+                )
+                error_type = "openrouter_error"
+            else:
+                user_message = f"An unexpected error occurred: {error_str}"
+        
+        return {
+            "error_message": user_message,
+            "error_type": error_type,
+            "original_error": str(error)
+        }
+    
+    async def _safe_llm_invoke(
+        self, 
+        llm: ChatOpenAI, 
+        messages: List[Any],
+        error_context: str = "LLM call"
+    ) -> Any:
+        """
+        Safely invoke LLM with OpenRouter error handling
+        
+        Args:
+            llm: ChatOpenAI instance to use
+            messages: List of messages to send
+            error_context: Context string for error logging
+            
+        Returns:
+            LLM response object
+            
+        Raises:
+            OpenRouterError: Raises a custom exception with user-friendly message
+        """
+        try:
+            return await llm.ainvoke(messages)
+        except (NotFoundError, APIError, RateLimitError, AuthenticationError) as e:
+            error_info = self._handle_openrouter_error(e)
+            logger.error(f"❌ {error_context} failed: {error_info['error_type']} - {error_info['original_error']}")
+            
+            # Raise a custom exception that agents can catch and handle
+            raise OpenRouterError(
+                error_info["error_message"],
+                error_info["error_type"],
+                original_error=str(e)
+            )
+        except Exception as e:
+            # Re-raise non-OpenRouter errors as-is
+            logger.error(f"❌ {error_context} failed with unexpected error: {e}")
+            raise
     
     def _extract_conversation_history(self, messages: List[Any], limit: int = 10) -> List[Dict[str, str]]:
         """Extract conversation history from LangChain messages"""
@@ -453,9 +619,35 @@ class BaseAgent:
             logger.debug(f"Could not load checkpoint state for pending operation: {e}")
         return None
     
+    def _get_datetime_context(self) -> str:
+        """
+        Get current date/time context for agent grounding
+        
+        Returns formatted datetime string for inclusion in prompts.
+        This ensures all agents know the current date/time for proper grounding.
+        """
+        from datetime import datetime
+        now = datetime.now()
+        return (
+            f"CURRENT DATE AND TIME: {now.strftime('%Y-%m-%d %H:%M:%S %Z')} "
+            f"({now.isoformat()})\n"
+            f"DATE CONTEXT: Today is {now.strftime('%A, %B %d, %Y')}. "
+            f"The current time is {now.strftime('%I:%M %p %Z')}."
+        )
+    
     def _build_messages(self, system_prompt: str, user_query: str, conversation_history: List[Dict[str, str]] = None) -> List[Any]:
-        """Build message list for LLM"""
+        """
+        Build message list for LLM with automatic datetime context
+        
+        All agents automatically receive current date/time context for proper grounding.
+        This ensures agents can interpret "currently", "recent", "now", etc. correctly.
+        """
+        # Start with system prompt
         messages = [SystemMessage(content=system_prompt)]
+        
+        # Add datetime context for grounding (CRITICAL for all agents)
+        datetime_context = self._get_datetime_context()
+        messages.append(SystemMessage(content=datetime_context))
         
         # Add conversation history if provided
         if conversation_history:
@@ -472,6 +664,15 @@ class BaseAgent:
     
     def _create_error_response(self, error_message: str, task_status: TaskStatus = TaskStatus.ERROR) -> Dict[str, Any]:
         """Create standardized error response"""
+        # Check if this is an OpenRouterError with user-friendly message
+        if isinstance(error_message, OpenRouterError):
+            return {
+                "task_status": task_status.value,
+                "response": error_message.user_message,
+                "error_message": error_message.user_message,
+                "error_type": error_message.error_type,
+                "timestamp": datetime.now().isoformat()
+            }
         return {
             "task_status": task_status.value,
             "response": f"Error: {error_message}",
@@ -567,6 +768,51 @@ class BaseAgent:
         else:
             # Default to professional for unknown styles
             return """COMMUNICATION STYLE: Professional, clear, and respectful. Maintain a helpful and courteous tone."""
+    
+    async def _get_dynamic_tool_categories(
+        self,
+        query: str,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> List[str]:
+        """
+        Get tool categories needed for this query (for future dynamic loading)
+        
+        This is a helper method for agents that may want to optimize tool usage
+        based on query analysis. Currently, llm-orchestrator agents call tools
+        directly, but this can be used for logging/analytics or future optimizations.
+        
+        Args:
+            query: User query string
+            metadata: Optional metadata
+            
+        Returns:
+            List of tool category names that would be needed
+        """
+        try:
+            # Simple keyword-based detection (can be enhanced with LLM analysis)
+            query_lower = query.lower()
+            categories = []
+            
+            if any(kw in query_lower for kw in ["weather", "temperature", "forecast"]):
+                categories.append("weather")
+            if any(kw in query_lower for kw in ["calculate", "compute", "math"]):
+                categories.append("math")
+            if any(kw in query_lower for kw in ["aws", "cost", "pricing"]):
+                categories.append("aws_pricing")
+            if any(kw in query_lower for kw in ["search web", "look up", "find online"]):
+                categories.append("search_web")
+            if any(kw in query_lower for kw in ["org file", "todo", "task"]):
+                categories.append("org_files")
+            
+            # Always include core categories
+            categories.append("search_local")
+            categories.append("document_ops")
+            
+            return list(set(categories))  # Remove duplicates
+            
+        except Exception as e:
+            logger.debug(f"Tool category detection failed: {e}")
+            return ["search_local", "document_ops"]  # Default fallback
     
     async def process(
         self, 

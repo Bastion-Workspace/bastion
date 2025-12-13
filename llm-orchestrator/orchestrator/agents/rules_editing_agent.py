@@ -16,6 +16,7 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from .base_agent import BaseAgent
+from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
 
 logger = logging.getLogger(__name__)
 
@@ -107,59 +108,7 @@ def paragraph_bounds(text: str, cursor_offset: int) -> Tuple[int, int]:
 # Simplified Resolver (Progressive Search)
 # ============================================
 
-def _resolve_operation_simple(
-    rules_text: str,
-    op_dict: Dict[str, Any],
-    selection: Optional[Dict[str, int]] = None,
-    frontmatter_end: int = 0
-) -> Tuple[int, int, str, float]:
-    """
-    Simplified operation resolver using progressive search.
-    Returns (start, end, text, confidence)
-    """
-    op_type = op_dict.get("op_type", "replace_range")
-    text = op_dict.get("text", "")
-    
-    # Try anchor_text first (for insert_after_heading)
-    anchor_text = op_dict.get("anchor_text")
-    if anchor_text and op_type == "insert_after_heading":
-        idx = rules_text.find(anchor_text)
-        if idx != -1:
-            # Find end of line after anchor
-            line_end = rules_text.find("\n", idx)
-            if line_end == -1:
-                line_end = len(rules_text)
-            insert_pos = line_end + 1
-            return insert_pos, insert_pos, text, 0.9
-    
-    # Try original_text (for replace/delete)
-    original_text = op_dict.get("original_text")
-    if original_text:
-        idx = rules_text.find(original_text)
-        if idx != -1:
-            if op_type == "delete_range":
-                return idx, idx + len(original_text), "", 0.9
-            else:
-                return idx, idx + len(original_text), text, 0.9
-    
-    # Try left_context + right_context
-    left_ctx = op_dict.get("left_context")
-    right_ctx = op_dict.get("right_context")
-    if left_ctx and right_ctx:
-        pattern = re.escape(left_ctx) + r"([\s\S]{0,400}?)" + re.escape(right_ctx)
-        m = re.search(pattern, rules_text)
-        if m:
-            start = m.start(1)
-            end = m.end(1)
-            if op_type == "delete_range":
-                return start, end, "", 0.85
-            else:
-                return start, end, text, 0.85
-    
-    # Fallback: use approximate positions from op_dict
-    start = op_dict.get("start", 0)
-    end = op_dict.get("end", 0)
-    return start, end, text, 0.5
+# Removed: _resolve_operation_simple - now using centralized resolver from orchestrator.utils.editor_operation_resolver
 
 
 # ============================================
@@ -249,7 +198,7 @@ class RulesEditingAgent(BaseAgent):
             '  "summary": string,\n'
             '  "chapter_index": integer|null,\n'
             '  "safety": one of ["low", "medium", "high"],\n'
-            '  "operations": [ { "op_type": one of ["replace_range", "delete_range", "insert_after_heading"], "start": integer, "end": integer, "text": string } ]\n'
+            '  "operations": [ { "op_type": one of ["replace_range", "delete_range", "insert_after_heading", "insert_after"], "start": integer, "end": integer, "text": string } ]\n'
             "}\n\n"
             "OUTPUT RULES:\n"
             "- Output MUST be a single JSON object only.\n"
@@ -482,16 +431,12 @@ class RulesEditingAgent(BaseAgent):
             if characters_bodies:
                 context_parts.append("".join([f"=== CHARACTER DOC ===\n{b}\n\n" for b in characters_bodies]))
             
-            # Check for revision mode
-            revision_mode = current_request and any(k in current_request.lower() for k in ["revise", "revision", "tweak", "adjust", "polish", "tighten"])
-            if revision_mode:
-                context_parts.append("REVISION MODE: Apply minimal targeted edits per the user's rubric. Prefer paragraph-level replace_range ops.\n\n")
+            context_parts.append("Provide a ManuscriptEdit JSON plan for the rules document.")
             
-            context_parts.append("Maintain the FORMATTING CONTRACT sections where present; if creating new content, adhere to the scaffold. Provide a ManuscriptEdit JSON plan strictly within scope.")
-            
+            datetime_context = self._get_datetime_context()
             messages = [
                 SystemMessage(content=system_prompt),
-                SystemMessage(content=f"Current Date/Time: {datetime.now().isoformat()}"),
+                SystemMessage(content=datetime_context),
                 HumanMessage(content="".join(context_parts))
             ]
             
@@ -560,18 +505,18 @@ class RulesEditingAgent(BaseAgent):
                     "task_status": "error"
                 }
             
-            # Check edit intent - if no edit intent, suppress operations
-            edit_intent = False
-            try:
-                lr = (current_request or "").lower()
-                edit_intent = any(k in lr for k in [
-                    "edit", "change", "replace", "update", "revise", "rewrite",
-                    "insert", "add ", "delete", "adjust", "fix ", "fix:", "modify"
-                ])
-            except Exception:
-                edit_intent = False
-            if not edit_intent:
-                structured_edit["operations"] = []
+            # Trust the LLM: It understands semantic intent and will generate operations when appropriate.
+            # If the user asks a question, the LLM will return empty operations. If they want edits/generation,
+            # the LLM will generate operations. No brittle keyword matching needed.
+            
+            # Log what we got from the LLM
+            ops_count = len(structured_edit.get("operations", [])) if structured_edit else 0
+            logger.info(f"LLM generated {ops_count} operation(s)")
+            if ops_count > 0:
+                for i, op in enumerate(structured_edit.get("operations", [])):
+                    op_type = op.get("op_type", "unknown")
+                    text_preview = (op.get("text", "") or "")[:100]
+                    logger.info(f"  Operation {i+1}: {op_type}, text preview: {text_preview}...")
             
             return {
                 "llm_response": content,
@@ -613,11 +558,17 @@ class RulesEditingAgent(BaseAgent):
             fm_end_idx = _frontmatter_end_index(rules)
             selection = {"start": selection_start, "end": selection_end} if selection_start >= 0 and selection_end >= 0 else None
             
+            # Check if file is empty (only frontmatter)
+            body_only = _strip_frontmatter_block(rules)
+            is_empty_file = not body_only.strip()
+            
             # Check revision mode
             revision_mode = current_request and any(k in current_request.lower() for k in ["revise", "revision", "tweak", "adjust", "polish", "tighten", "edit only"])
             
             editor_operations = []
             operations = structured_edit.get("operations", [])
+            
+            logger.info(f"Resolving {len(operations)} operation(s) from structured_edit")
             
             for op in operations:
                 # Sanitize op text
@@ -630,12 +581,23 @@ class RulesEditingAgent(BaseAgent):
                 
                 # Resolve operation
                 try:
-                    resolved_start, resolved_end, resolved_text, resolved_confidence = _resolve_operation_simple(
-                        rules,
-                        op,
+                    # Use centralized resolver
+                    cursor_pos = state.get("cursor_offset", -1)
+                    cursor_pos = cursor_pos if cursor_pos >= 0 else None
+                    resolved_start, resolved_end, resolved_text, resolved_confidence = resolve_editor_operation(
+                        content=rules,
+                        op_dict=op,
                         selection=selection,
-                        frontmatter_end=fm_end_idx
+                        frontmatter_end=fm_end_idx,
+                        cursor_offset=cursor_pos
                     )
+                    
+                    # Special handling for empty files: ensure operations insert after frontmatter
+                    if is_empty_file and resolved_start < fm_end_idx:
+                        resolved_start = fm_end_idx
+                        resolved_end = fm_end_idx
+                        resolved_confidence = 0.7
+                        logger.info(f"Empty file detected - adjusting operation to insert after frontmatter at {fm_end_idx}")
                     
                     logger.info(f"Resolved {op.get('op_type')} [{resolved_start}:{resolved_end}] confidence={resolved_confidence:.2f}")
                     
@@ -700,6 +662,8 @@ class RulesEditingAgent(BaseAgent):
                     logger.warning(f"Failed to resolve operation: {e}")
                     continue
             
+            logger.info(f"Successfully resolved {len(editor_operations)} operation(s) out of {len(operations)}")
+            
             return {
                 "editor_operations": editor_operations
             }
@@ -738,6 +702,8 @@ class RulesEditingAgent(BaseAgent):
             preview = "\n\n".join([op.get("text", "").strip() for op in editor_operations if op.get("text", "").strip()])
             response_text = preview if preview else (structured_edit.get("summary") or "Edit plan ready.")
             
+            logger.info(f"Response formatting: {len(editor_operations)} operation(s), preview length: {len(preview)}, response_text: {response_text[:200]}...")
+            
             # Build response dict
             response_dict = {
                 "response": response_text,
@@ -754,13 +720,12 @@ class RulesEditingAgent(BaseAgent):
                 }
                 response_dict["content_preview"] = response_text[:2000]
             
-            # Add assistant message to state for checkpointing
-            updated_state = self._add_assistant_response_to_messages(state, response_text)
+            # Note: Messages are handled by LangGraph checkpointing automatically
+            # No need to manually add them here (consistent with fiction_editing_agent)
             
             return {
                 "response": response_dict,
-                "task_status": "complete",
-                **updated_state
+                "task_status": "complete"
             }
             
         except Exception as e:
@@ -839,12 +804,54 @@ class RulesEditingAgent(BaseAgent):
             # Invoke LangGraph workflow with checkpointing
             final_state = await workflow.ainvoke(initial_state, config=config)
             
-            # Return response from final state
-            return final_state.get("response", {
-                "response": "Rules editing failed",
-                "task_status": "error",
-                "agent_type": "rules_editing_agent"
-            })
+            # Extract final response
+            response = final_state.get("response", {})
+            task_status = final_state.get("task_status", "complete")
+            
+            # Debug logging
+            logger.info(f"Final state response type: {type(response)}, keys: {response.keys() if isinstance(response, dict) else 'not a dict'}")
+            if isinstance(response, dict):
+                logger.info(f"Response dict has 'response' key: {'response' in response}, value type: {type(response.get('response'))}, value preview: {str(response.get('response', ''))[:200]}")
+            
+            if task_status == "error":
+                error_msg = final_state.get("error", "Unknown error")
+                logger.error(f"Rules editing agent failed: {error_msg}")
+                return {
+                    "response": f"Rules editing failed: {error_msg}",
+                    "task_status": "error",
+                    "agent_results": {}
+                }
+            
+            # Extract response text - handle nested structure
+            response_text = response.get("response", "") if isinstance(response, dict) else str(response) if response else ""
+            if not response_text:
+                response_text = "Rules editing complete"  # Fallback only if truly empty
+            
+            # Build result dict matching fiction_editing_agent pattern
+            result = {
+                "response": response_text,
+                "task_status": task_status,
+                "agent_results": {
+                    "editor_operations": response.get("editor_operations", []) if isinstance(response, dict) else [],
+                    "manuscript_edit": response.get("manuscript_edit") if isinstance(response, dict) else None
+                }
+            }
+            
+            # Add editor operations at top level for compatibility with gRPC service
+            editor_ops_from_response = response.get("editor_operations", []) if isinstance(response, dict) else []
+            manuscript_edit_from_response = response.get("manuscript_edit") if isinstance(response, dict) else None
+            
+            logger.info(f"Extracting operations: found {len(editor_ops_from_response)} operation(s) in response dict")
+            
+            if editor_ops_from_response:
+                result["editor_operations"] = editor_ops_from_response
+                logger.info(f"✅ Added {len(editor_ops_from_response)} editor operation(s) to result")
+            if manuscript_edit_from_response:
+                result["manuscript_edit"] = manuscript_edit_from_response
+                logger.info(f"✅ Added manuscript_edit to result")
+            
+            logger.info(f"Rules editing agent completed: {task_status}, result keys: {result.keys()}, has editor_ops: {'editor_operations' in result}")
+            return result
             
         except Exception as e:
             logger.error(f"Rules Editing Agent failed: {e}")

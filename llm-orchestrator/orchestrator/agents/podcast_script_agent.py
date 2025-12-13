@@ -13,6 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from langgraph.graph import StateGraph, END
 from orchestrator.agents.base_agent import BaseAgent
+from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,8 @@ class PodcastScriptAgent(BaseAgent):
                 "Operation types:\n"
                 "- replace_range: Replace existing text with new text\n"
                 "- delete_range: Remove existing text\n"
-                "- insert_after_heading: Add content after a specific heading\n\n"
+                "- insert_after_heading: Add content after a specific heading\n"
+                "- insert_after: Insert text after a specific anchor (for continuing paragraphs/sentences)\n\n"
                 "CRITICAL: Provide \"original_text\" with EXACT verbatim text from the document for replace/delete operations.\n"
                 "CRITICAL: For insert_after_heading, provide \"anchor_text\" with the exact heading line.\n\n"
             )
@@ -339,9 +341,10 @@ class PodcastScriptAgent(BaseAgent):
             llm = self._get_llm(temperature=0.3, state=state)
             
             # Build LangChain messages
+            datetime_context = self._get_datetime_context()
             messages = [
                 SystemMessage(content=system_prompt),
-                SystemMessage(content=f"Current Date/Time: {datetime.now().isoformat()}")
+                SystemMessage(content=datetime_context)
             ]
             
             if content_block:
@@ -742,56 +745,7 @@ class PodcastScriptAgent(BaseAgent):
                 "operations": []
             }
     
-    def _resolve_operation_simple(
-        self,
-        content: str,
-        op_dict: Dict[str, Any],
-        frontmatter_end: int = 0
-    ) -> Tuple[int, int, str, float]:
-        """Resolve operation to exact positions using progressive search"""
-        
-        op_type = op_dict.get("op_type", "replace_range")
-        original_text = op_dict.get("original_text")
-        anchor_text = op_dict.get("anchor_text")
-        occurrence_index = op_dict.get("occurrence_index", 0)
-        text = op_dict.get("text", "")
-        
-        # Strategy 1: Exact match with original_text
-        if original_text and op_type in ("replace_range", "delete_range"):
-            count = 0
-            search_from = 0
-            while True:
-                pos = content.find(original_text, search_from)
-                if pos == -1:
-                    break
-                if count == occurrence_index:
-                    end_pos = pos + len(original_text)
-                    # Guard frontmatter
-                    pos = max(pos, frontmatter_end)
-                    end_pos = max(end_pos, pos)
-                    return pos, end_pos, text, 1.0
-                count += 1
-                search_from = pos + 1
-        
-        # Strategy 2: Anchor text for insert_after_heading
-        if anchor_text and op_type == "insert_after_heading":
-            pos = content.find(anchor_text)
-            if pos != -1:
-                # Find end of line after anchor
-                line_end = content.find("\n", pos)
-                if line_end == -1:
-                    line_end = len(content)
-                insert_pos = line_end + 1
-                # Guard frontmatter
-                insert_pos = max(insert_pos, frontmatter_end)
-                return insert_pos, insert_pos, text, 0.9
-        
-        # Fallback: use approximate positions
-        start = op_dict.get("start", frontmatter_end)
-        end = op_dict.get("end", start)
-        start = max(start, frontmatter_end)
-        end = max(end, start)
-        return start, end, text, 0.5
+    # Removed: _resolve_operation_simple - now using centralized resolver from orchestrator.utils.editor_operation_resolver
     
     def _get_frontmatter_end(self, content: str) -> int:
         """Find frontmatter end position"""
@@ -815,16 +769,31 @@ class PodcastScriptAgent(BaseAgent):
                 }
             
             fm_end_idx = self._get_frontmatter_end(editor_content)
+            
+            # Check if file is empty (only frontmatter)
+            body_only = editor_content[fm_end_idx:] if fm_end_idx < len(editor_content) else ""
+            is_empty_file = not body_only.strip()
+            
             editor_operations = []
             operations = structured_edit.get("operations", [])
             
             for op in operations:
                 try:
-                    resolved_start, resolved_end, resolved_text, resolved_confidence = self._resolve_operation_simple(
-                        editor_content,
-                        op,
-                        frontmatter_end=fm_end_idx
+                    # Use centralized resolver
+                    resolved_start, resolved_end, resolved_text, resolved_confidence = resolve_editor_operation(
+                        content=editor_content,
+                        op_dict=op,
+                        selection=None,
+                        frontmatter_end=fm_end_idx,
+                        cursor_offset=None
                     )
+                    
+                    # Special handling for empty files: ensure operations insert after frontmatter
+                    if is_empty_file and resolved_start < fm_end_idx:
+                        resolved_start = fm_end_idx
+                        resolved_end = fm_end_idx
+                        resolved_confidence = 0.7
+                        logger.info(f"Empty file detected - adjusting operation to insert after frontmatter at {fm_end_idx}")
                     
                     logger.info(f"Resolved {op.get('op_type')} [{resolved_start}:{resolved_end}] confidence={resolved_confidence:.2f}")
                     

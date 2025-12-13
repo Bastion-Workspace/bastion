@@ -1354,6 +1354,17 @@ class DocumentRepository:
             
             logger.info(f"📁 Repository: Create or get folder '{folder_name}' (parent: {parent_id}, user: {user_id}, team: {team_id}, collection: {collection_type})")
             
+            # Check if parent folder is exempt - new folders should inherit exemption
+            exempt_from_vectorization = folder_data.get("exempt_from_vectorization")  # Allow explicit override
+            if exempt_from_vectorization is None and parent_id:
+                try:
+                    parent_exempt = await self.is_folder_exempt(parent_id)
+                    if parent_exempt:
+                        exempt_from_vectorization = True
+                        logger.info(f"🚫 Folder '{folder_name}' inherits exemption from parent {parent_id} → setting TRUE at creation")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to check parent folder exemption for {parent_id}: {e}")
+            
             # **ROOSEVELT'S NULL-SAFE UPSERT!**
             # PostgreSQL's ON CONFLICT with partial indexes requires different syntax
             # for root folders (NULL parent) vs. non-root folders
@@ -1364,12 +1375,18 @@ class DocumentRepository:
                     # TEAM root folder - includes team_id in conflict constraint
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                         ON CONFLICT (team_id, name, collection_type) 
                         WHERE parent_folder_id IS NULL AND team_id IS NOT NULL
-                        DO UPDATE SET updated_at = EXCLUDED.updated_at
-                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                        DO UPDATE SET 
+                            updated_at = EXCLUDED.updated_at,
+                            exempt_from_vectorization = CASE 
+                                WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
+                                THEN TRUE 
+                                ELSE document_folders.exempt_from_vectorization 
+                            END
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
                     """, 
                         folder_data["folder_id"],
                         folder_name,
@@ -1377,6 +1394,7 @@ class DocumentRepository:
                         user_id,
                         team_id,
                         collection_type,
+                        exempt_from_vectorization,
                         folder_data["created_at"],
                         folder_data["updated_at"]
                     )
@@ -1384,12 +1402,18 @@ class DocumentRepository:
                     # USER root folder - includes user_id in conflict constraint
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                         ON CONFLICT (user_id, name, collection_type) 
                         WHERE parent_folder_id IS NULL AND user_id IS NOT NULL
-                        DO UPDATE SET updated_at = EXCLUDED.updated_at
-                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                        DO UPDATE SET 
+                            updated_at = EXCLUDED.updated_at,
+                            exempt_from_vectorization = CASE 
+                                WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
+                                THEN TRUE 
+                                ELSE document_folders.exempt_from_vectorization 
+                            END
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
                     """, 
                         folder_data["folder_id"],
                         folder_name,
@@ -1397,6 +1421,7 @@ class DocumentRepository:
                         user_id,
                         team_id,
                         collection_type,
+                        exempt_from_vectorization,
                         folder_data["created_at"],
                         folder_data["updated_at"]
                     )
@@ -1404,12 +1429,18 @@ class DocumentRepository:
                     # GLOBAL root folder - user_id is NULL, constraint doesn't include user_id
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                         ON CONFLICT (name, collection_type) 
                         WHERE parent_folder_id IS NULL AND user_id IS NULL
-                        DO UPDATE SET updated_at = EXCLUDED.updated_at
-                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                        DO UPDATE SET 
+                            updated_at = EXCLUDED.updated_at,
+                            exempt_from_vectorization = CASE 
+                                WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
+                                THEN TRUE 
+                                ELSE document_folders.exempt_from_vectorization 
+                            END
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
                     """, 
                         folder_data["folder_id"],
                         folder_name,
@@ -1417,6 +1448,7 @@ class DocumentRepository:
                         user_id,
                         team_id,
                         collection_type,
+                        exempt_from_vectorization,
                         folder_data["created_at"],
                         folder_data["updated_at"]
                     )
@@ -1426,12 +1458,18 @@ class DocumentRepository:
                     # TEAM non-root folder - includes team_id in conflict constraint
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                         ON CONFLICT (team_id, name, parent_folder_id, collection_type)
                         WHERE parent_folder_id IS NOT NULL AND team_id IS NOT NULL
-                        DO UPDATE SET updated_at = EXCLUDED.updated_at
-                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                        DO UPDATE SET 
+                            updated_at = EXCLUDED.updated_at,
+                            exempt_from_vectorization = CASE 
+                                WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
+                                THEN TRUE 
+                                ELSE document_folders.exempt_from_vectorization 
+                            END
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
                     """, 
                         folder_data["folder_id"],
                         folder_name,
@@ -1439,6 +1477,7 @@ class DocumentRepository:
                         user_id,
                         team_id,
                         collection_type,
+                        exempt_from_vectorization,
                         folder_data["created_at"],
                         folder_data["updated_at"]
                     )
@@ -1446,12 +1485,18 @@ class DocumentRepository:
                     # USER non-root folder - includes user_id in conflict constraint
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                         ON CONFLICT (user_id, name, parent_folder_id, collection_type)
                         WHERE parent_folder_id IS NOT NULL AND user_id IS NOT NULL
-                        DO UPDATE SET updated_at = EXCLUDED.updated_at
-                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                        DO UPDATE SET 
+                            updated_at = EXCLUDED.updated_at,
+                            exempt_from_vectorization = CASE 
+                                WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
+                                THEN TRUE 
+                                ELSE document_folders.exempt_from_vectorization 
+                            END
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
                     """, 
                         folder_data["folder_id"],
                         folder_name,
@@ -1459,6 +1504,7 @@ class DocumentRepository:
                         user_id,
                         team_id,
                         collection_type,
+                        exempt_from_vectorization,
                         folder_data["created_at"],
                         folder_data["updated_at"]
                     )
@@ -1466,12 +1512,18 @@ class DocumentRepository:
                     # GLOBAL non-root folder - user_id is NULL, constraint doesn't include user_id
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                         ON CONFLICT (name, parent_folder_id, collection_type)
                         WHERE parent_folder_id IS NOT NULL AND user_id IS NULL
-                        DO UPDATE SET updated_at = EXCLUDED.updated_at
-                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
+                        DO UPDATE SET 
+                            updated_at = EXCLUDED.updated_at,
+                            exempt_from_vectorization = CASE 
+                                WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
+                                THEN TRUE 
+                                ELSE document_folders.exempt_from_vectorization 
+                            END
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
                     """, 
                         folder_data["folder_id"],
                         folder_name,
@@ -1479,6 +1531,7 @@ class DocumentRepository:
                         user_id,
                         team_id,
                         collection_type,
+                        exempt_from_vectorization,
                         folder_data["created_at"],
                         folder_data["updated_at"]
                     )

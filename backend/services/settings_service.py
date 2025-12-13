@@ -387,6 +387,91 @@ class SettingsService:
             logger.error(f"Failed to set timezone for user {user_id}: {e}")
             return False
     
+    async def get_user_zip_code(self, user_id: str) -> Optional[str]:
+        """Get user's zip code preference"""
+        try:
+            row = await fetch_one("SELECT preferences FROM users WHERE user_id = $1", user_id)
+            if row and (row.get("preferences") is not None or (len(row) > 0 and row[0] is not None)):
+                prefs = row.get("preferences") if isinstance(row, dict) else row[0]
+                if isinstance(prefs, str):
+                    try:
+                        prefs = json.loads(prefs)
+                    except Exception:
+                        prefs = {}
+                if isinstance(prefs, dict):
+                    return prefs.get("zip_code")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to get zip code for user {user_id}: {e}")
+            return None
+    
+    async def set_user_zip_code(self, user_id: str, zip_code: str) -> bool:
+        """Set user's zip code preference"""
+        try:
+            row = await fetch_one("SELECT preferences FROM users WHERE user_id = $1", user_id)
+            if not row:
+                logger.warning(f"User {user_id} not found")
+                return False
+            prefs = row.get("preferences") if isinstance(row, dict) else row[0]
+            if isinstance(prefs, str):
+                try:
+                    prefs = json.loads(prefs)
+                except Exception:
+                    prefs = {}
+            if not isinstance(prefs, dict):
+                prefs = {}
+            prefs["zip_code"] = zip_code
+            await execute("UPDATE users SET preferences = $1, updated_at = NOW() WHERE user_id = $2", json.dumps(prefs), user_id)
+            logger.info(f"Updated zip code for user {user_id} to {zip_code}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set zip code for user {user_id}: {e}")
+            return False
+    
+    async def get_user_time_format(self, user_id: str) -> str:
+        """Get user's time format preference (12h or 24h)"""
+        try:
+            row = await fetch_one("SELECT preferences FROM users WHERE user_id = $1", user_id)
+            if row and (row.get("preferences") is not None or (len(row) > 0 and row[0] is not None)):
+                prefs = row.get("preferences") if isinstance(row, dict) else row[0]
+                if isinstance(prefs, str):
+                    try:
+                        prefs = json.loads(prefs)
+                    except Exception:
+                        prefs = {}
+                if isinstance(prefs, dict):
+                    return prefs.get("time_format", "24h")
+            return "24h"
+        except Exception as e:
+            logger.warning(f"Failed to get time format for user {user_id}: {e}")
+            return "24h"
+    
+    async def set_user_time_format(self, user_id: str, time_format: str) -> bool:
+        """Set user's time format preference (12h or 24h)"""
+        try:
+            if time_format not in ["12h", "24h"]:
+                logger.warning(f"Invalid time format: {time_format}, defaulting to 24h")
+                time_format = "24h"
+            row = await fetch_one("SELECT preferences FROM users WHERE user_id = $1", user_id)
+            if not row:
+                logger.warning(f"User {user_id} not found")
+                return False
+            prefs = row.get("preferences") if isinstance(row, dict) else row[0]
+            if isinstance(prefs, str):
+                try:
+                    prefs = json.loads(prefs)
+                except Exception:
+                    prefs = {}
+            if not isinstance(prefs, dict):
+                prefs = {}
+            prefs["time_format"] = time_format
+            await execute("UPDATE users SET preferences = $1, updated_at = NOW() WHERE user_id = $2", json.dumps(prefs), user_id)
+            logger.info(f"Updated time format for user {user_id} to {time_format}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set time format for user {user_id}: {e}")
+            return False
+    
     async def get_user_prompt_settings(self, user_id: str):
         """Get prompt settings for a specific user"""
         try:

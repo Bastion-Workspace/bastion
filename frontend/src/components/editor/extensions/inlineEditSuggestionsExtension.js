@@ -156,17 +156,19 @@ const inlineEditSuggestionsPlugin = ViewPlugin.fromClass(class {
   }
   
   update(update) {
-    // Handle state effects
-    for (const effect of update.effects) {
-      if (effect.is(addSuggestion)) {
-        const { suggestionId, from, to, original, suggested, proposalId, onAccept, onReject } = effect.value;
-        this.addSuggestion(suggestionId, from, to, original, suggested, proposalId, onAccept, onReject);
-      } else if (effect.is(removeSuggestion)) {
-        this.removeSuggestion(effect.value);
-      } else if (effect.is(clearAllSuggestions)) {
-        this.suggestions.clear();
-        this.acceptCallbacks.clear();
-        this.rejectCallbacks.clear();
+    // Handle state effects - check if effects is iterable
+    if (update.effects && typeof update.effects[Symbol.iterator] === 'function') {
+      for (const effect of update.effects) {
+        if (effect.is(addSuggestion)) {
+          const { suggestionId, from, to, original, suggested, proposalId, onAccept, onReject } = effect.value;
+          this.addSuggestion(suggestionId, from, to, original, suggested, proposalId, onAccept, onReject);
+        } else if (effect.is(removeSuggestion)) {
+          this.removeSuggestion(effect.value);
+        } else if (effect.is(clearAllSuggestions)) {
+          this.suggestions.clear();
+          this.acceptCallbacks.clear();
+          this.rejectCallbacks.clear();
+        }
       }
     }
     
