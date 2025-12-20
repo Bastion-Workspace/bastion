@@ -28,7 +28,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: ./electron
-        run: npm ci
+        run: npm install
 
       - name: Extract version
         id: version
