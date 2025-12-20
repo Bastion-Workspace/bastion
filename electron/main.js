@@ -231,8 +231,8 @@ function createMenu() {
             dialog.showMessageBox(mainWindow, {
               type: 'info',
               title: 'About Bastion',
-              message: 'Bastion Desktop Application',
-              detail: `Version ${app.getVersion()}\n\nBastion AI Workspace Desktop Client`
+              message: 'Bastion - The Ultimate Workspace',
+              detail: `Version ${app.getVersion()}\n\nAI-powered platform for knowledge management, creative writing, and productivity.\n\nYour personal command center for research, writing, collaboration, and more.`
             });
           }
         }
