@@ -2122,14 +2122,23 @@ Since this file is empty (only frontmatter), follow these rules:
                     "task_status": "error"
                 }
             
-            # Build preview
+            # Build response text with summary and preview
+            summary = structured_edit.get("summary", "").strip()
             generated_preview = "\n\n".join([
                 op.get("text", "").strip()
                 for op in editor_operations
                 if op.get("text", "").strip()
             ]).strip()
             
-            response_text = generated_preview if generated_preview else (structured_edit.get("summary", "Edit plan ready."))
+            # Always include summary if available; optionally add preview
+            if summary and generated_preview:
+                response_text = f"{summary}\n\n---\n\n{generated_preview}"
+            elif summary:
+                response_text = summary
+            elif generated_preview:
+                response_text = generated_preview
+            else:
+                response_text = "Edit plan ready."
             
             # Build response with editor operations
             response = {
