@@ -15,7 +15,8 @@ import {
   Button,
   TextField,
   Tooltip,
-  Collapse
+  Collapse,
+  Divider
 } from '@mui/material';
 import {
   Add as AddIcon,
@@ -33,7 +34,10 @@ const WORKSPACE_COLORS = ['#1976d2', '#388e3c', '#d32f2f', '#f57c00', '#7b1fa2',
 
 const DataWorkspacesSection = ({ onWorkspaceClick }) => {
   const [workspaces, setWorkspaces] = useState([]);
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(() => {
+    const saved = localStorage.getItem('dataWorkspacesExpanded');
+    return saved !== null ? JSON.parse(saved) : true;
+  });
   const [loading, setLoading] = useState(false);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [shareDialogOpen, setShareDialogOpen] = useState(false);
@@ -49,6 +53,11 @@ const DataWorkspacesSection = ({ onWorkspaceClick }) => {
   useEffect(() => {
     loadWorkspaces();
   }, []);
+
+  // Persist expanded state to localStorage
+  useEffect(() => {
+    localStorage.setItem('dataWorkspacesExpanded', JSON.stringify(expanded));
+  }, [expanded]);
 
   const loadWorkspaces = async () => {
     try {
@@ -128,9 +137,11 @@ const DataWorkspacesSection = ({ onWorkspaceClick }) => {
   };
 
   return (
-    <Box sx={{ mt: 2 }}>
-      {/* Header */}
-      <Box sx={{ px: 2 }}>
+    <>
+      <Divider sx={{ my: 0.5 }} />
+      <Box>
+        {/* Header */}
+        <Box sx={{ px: 2, pb: 0.5 }}>
         <Box 
           sx={{ 
             display: 'flex', 
@@ -147,19 +158,6 @@ const DataWorkspacesSection = ({ onWorkspaceClick }) => {
           <Typography variant="subtitle2" sx={{ fontWeight: 600, color: 'text.secondary', fontSize: '0.75rem', textTransform: 'uppercase', ml: 0.5 }}>
             💾 Data Workspaces
           </Typography>
-          <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center' }}>
-            <Tooltip title="Create Workspace">
-              <IconButton
-                size="small"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setCreateDialogOpen(true);
-                }}
-              >
-                <AddIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
-          </Box>
         </Box>
         
         {/* Filter Tabs */}
@@ -205,7 +203,27 @@ const DataWorkspacesSection = ({ onWorkspaceClick }) => {
           ) : workspaces.length === 0 ? (
             <ListItem>
               <ListItemText 
-                primary={<Typography variant="caption" color="text.secondary">No workspaces yet</Typography>}
+                primary={
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Typography variant="caption" color="text.secondary">No workspaces yet</Typography>
+                    <Tooltip title="Create Workspace">
+                      <IconButton
+                        size="small"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCreateDialogOpen(true);
+                        }}
+                        sx={{ 
+                          width: 20, 
+                          height: 20,
+                          '& .MuiSvgIcon-root': { fontSize: '0.875rem' }
+                        }}
+                      >
+                        <AddIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </Box>
+                }
               />
             </ListItem>
           ) : (
@@ -394,7 +412,8 @@ const DataWorkspacesSection = ({ onWorkspaceClick }) => {
           workspaceName={selectedWorkspace.name}
         />
       )}
-    </Box>
+      </Box>
+    </>
   );
 };
 

@@ -1,0 +1,124 @@
+syntax = "proto3";
+
+package crawl_service;
+
+// Crawl Service - Dedicated web crawling microservice using Crawl4AI
+service CrawlService {
+  // Single URL crawl
+  rpc Crawl(CrawlRequest) returns (CrawlResponse);
+  
+  // Parallel multi-URL crawl
+  rpc CrawlMany(CrawlManyRequest) returns (CrawlManyResponse);
+  
+  // Adaptive intelligent crawl
+  rpc AdaptiveCrawl(AdaptiveCrawlRequest) returns (CrawlResponse);
+  
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ============================================================================
+// Single URL Crawl Messages
+// ============================================================================
+
+message CrawlRequest {
+  string url = 1;
+  string extraction_strategy = 2;  // "markdown", "text", "html", "llm_extraction"
+  string chunking_strategy = 3;     // "NlpSentenceChunking", "RegexChunking", etc.
+  optional string css_selector = 4;
+  optional string llm_question = 5;  // For LLM extraction
+  optional int32 max_content_length = 6;
+  optional bool include_links = 7;
+  optional bool include_metadata = 8;
+  optional int32 timeout_seconds = 9;
+  optional bool virtual_scroll = 10;
+  optional double scroll_delay = 11;
+  optional bool use_fit_markdown = 12;  // Use fit_markdown for LLM optimization
+  optional string user_id = 13;
+}
+
+message CrawlResponse {
+  bool success = 1;
+  string url = 2;
+  string title = 3;
+  string content = 4;  // Main content (markdown/text/html based on strategy)
+  string markdown = 5;  // Always include markdown version
+  string html = 6;      // Original HTML
+  map<string, string> metadata = 7;
+  repeated string links = 8;
+  repeated string images = 9;
+  int32 content_length = 10;
+  float fetch_time_seconds = 11;
+  int32 status_code = 12;
+  optional string error = 13;
+  optional string extracted_content = 14;  // For LLM extraction results
+}
+
+// ============================================================================
+// Parallel Multi-URL Crawl Messages
+// ============================================================================
+
+message CrawlManyRequest {
+  repeated string urls = 1;
+  string extraction_strategy = 2;
+  string chunking_strategy = 3;
+  optional int32 max_concurrent = 4;  // Default: 5
+  optional double rate_limit_seconds = 5;  // Delay between requests
+  optional string css_selector = 6;
+  optional string llm_question = 7;
+  optional int32 max_content_length = 8;
+  optional bool include_links = 9;
+  optional bool include_metadata = 10;
+  optional int32 timeout_seconds = 11;
+  optional bool virtual_scroll = 12;
+  optional double scroll_delay = 13;
+  optional bool use_fit_markdown = 14;
+  optional string user_id = 15;
+}
+
+message CrawlManyResponse {
+  bool success = 1;
+  repeated CrawlResponse results = 2;
+  int32 urls_requested = 3;
+  int32 successful_crawls = 4;
+  int32 failed_crawls = 5;
+  int64 total_content_length = 6;
+  float total_time_seconds = 7;
+  optional string error = 8;
+}
+
+// ============================================================================
+// Adaptive Crawl Messages
+// ============================================================================
+
+message AdaptiveCrawlRequest {
+  string seed_url = 1;
+  string query = 2;  // What information to find
+  optional int32 max_depth = 3;  // Default: 3
+  optional int32 max_pages = 4;  // Default: 50
+  optional bool stop_when_satisfied = 5;  // Default: true
+  optional string extraction_strategy = 6;  // Default: "markdown"
+  optional bool use_fit_markdown = 7;
+  optional string user_id = 8;
+}
+
+// ============================================================================
+// Health Check Messages
+// ============================================================================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;  // "healthy", "degraded", "unhealthy"
+  bool crawl4ai_available = 2;
+  bool browser_available = 3;
+  string service_version = 4;
+  map<string, string> details = 5;
+}
+
+
+
+
+
+
+

@@ -1,0 +1,479 @@
+# Editor Operations Reference Guide
+
+## Overview
+
+This guide documents all available editor operations for agents that edit documents (fiction, outlines, characters, rules, etc.). All editor-type agents MUST use these operations correctly.
+
+**Location**: `llm-orchestrator/orchestrator/utils/editor_operation_resolver.py`  
+**Models**: `llm-orchestrator/orchestrator/models/editor_models.py`
+
+## Available Operation Types
+
+### 1. `insert_after_heading`
+
+**Purpose**: Add content AFTER a specific header/section heading WITHOUT removing anything.
+
+**When to Use**:
+- Adding new content below headers
+- Adding content to empty sections (after section headers)
+- Adding new sections after existing sections
+- Adding content after chapter headings
+
+**Required Fields**:
+- `op_type`: `"insert_after_heading"`
+- `anchor_text`: EXACT, COMPLETE header line (e.g., `"### Traits"`, `"## Chapter 2"`)
+- `text`: New content to insert
+
+**Optional Fields**:
+- `start`, `end`: Approximate positions (resolver will find exact position)
+- `left_context`, `right_context`: Additional context for positioning
+- `occurrence_index`: Which occurrence if header appears multiple times (default: 0, uses last occurrence)
+
+**Example**:
+```json
+{
+  "op_type": "insert_after_heading",
+  "anchor_text": "### Traits",
+  "text": "- Analytical thinker\n- Selfish in most matters\n- Deeply protective of his sister Jill"
+}
+```
+
+**Resolver Behavior**:
+- Searches entire document for `anchor_text` (from frontmatter end to document end)
+- Uses LAST occurrence for consistency (new chapters at end, most recent section edits)
+- Finds end of heading line and inserts after it
+- For chapter headings, finds end of entire chapter before inserting
+
+**Best Practices**:
+- ✅ Use this when adding content below ANY header
+- ✅ This is the SAFEST method - it NEVER deletes headers
+- ✅ Use even when section has placeholder text - resolver positions correctly
+- ❌ NEVER include the header in `text` field - it will be duplicated
+- ❌ Don't use `replace_range` with header included - use this instead
+
+---
+
+### 2. `insert_after`
+
+**Purpose**: Insert text after a specific anchor point, typically for continuing paragraphs or mid-sentence additions.
+
+**When to Use**:
+- Continuing text mid-paragraph
+- Adding to existing sentences
+- Inserting content after specific text (not a header)
+- Continuing bullet lists or descriptions
+
+**Required Fields**:
+- `op_type`: `"insert_after"`
+- `anchor_text`: EXACT text (last few words) where you want to insert after
+- `text`: New content to insert
+
+**Optional Fields**:
+- `start`, `end`: Approximate positions (resolver will find exact position)
+- `left_context`, `right_context`: Additional context for positioning
+- `occurrence_index`: Which occurrence if text appears multiple times (default: 0, uses last occurrence)
+
+**Example**:
+```json
+{
+  "op_type": "insert_after",
+  "anchor_text": "She was known for her",
+  "text": " analytical mind and methodical approach to problem-solving."
+}
+```
+
+**Resolver Behavior**:
+- Searches entire document for `anchor_text`
+- Finds the end of the paragraph containing the anchor
+- Inserts at paragraph boundary (before next `\n\n` or heading)
+- Uses LAST occurrence for consistency
+
+**Best Practices**:
+- ✅ Use for continuing existing text mid-paragraph
+- ✅ Provide enough anchor text (10-20 words) for reliable matching
+- ✅ Use exact text from file - don't paraphrase
+- ❌ Don't use for adding content below headers (use `insert_after_heading` instead)
+
+---
+
+### 3. `replace_range`
+
+**Purpose**: Replace ONLY specific content, preserving headers/structure above it.
+
+**When to Use**:
+- Changing existing content
+- Updating placeholder text
+- Revising specific sentences or paragraphs
+- Making granular edits (e.g., "blue eyes" → "green eyes")
+
+**Required Fields**:
+- `op_type`: `"replace_range"`
+- `original_text`: EXACT, VERBATIM text from file to replace (minimum 10-20 words, complete sentences)
+- `text`: New content to replace with
+
+**Optional Fields**:
+- `start`, `end`: Approximate positions (resolver will find exact position)
+- `left_context`, `right_context`: Additional context for positioning
+- `occurrence_index`: Which occurrence if text appears multiple times (default: 0)
+
+**Example**:
+```json
+{
+  "op_type": "replace_range",
+  "original_text": "- [To be developed based on story needs]",
+  "text": "- Analytical thinker\n- Selfish in most matters\n- Deeply protective of his sister Jill"
+}
+```
+
+**Resolver Behavior**:
+- First tries exact match of `original_text`
+- If exact match fails, tries normalized whitespace matching
+- Falls back to substring matching (first/last 30 characters)
+- Returns (-1, -1, text, 0.0) if all searches fail
+
+**Best Practices**:
+- ✅ Include complete sentences with natural boundaries (10-20+ words)
+- ✅ Copy text EXACTLY as it appears in file (including punctuation, whitespace)
+- ✅ For granular edits, match EXACT text to change (e.g., `original_text="blue"` to change "blue" to "green")
+- ❌ NEVER include header lines in `original_text` (e.g., don't include `"### Traits\n"`)
+- ❌ Don't retype or paraphrase - copy verbatim from file
+- ❌ Don't use for adding content below headers (use `insert_after_heading` instead)
+
+**Critical Rule**: 
+```
+❌ BAD:  original_text="### Traits\n- [To be developed]"
+✅ GOOD: original_text="- [To be developed based on story needs]"
+```
+
+---
+
+### 4. `delete_range`
+
+**Purpose**: Remove specific content from the document.
+
+**When to Use**:
+- Removing placeholder text
+- Deleting obsolete sections
+- Removing unwanted content
+
+**Required Fields**:
+- `op_type`: `"delete_range"`
+- `original_text`: EXACT, VERBATIM text from file to delete (minimum 10-20 words)
+- `text`: `""` (empty string)
+
+**Optional Fields**:
+- `start`, `end`: Approximate positions (resolver will find exact position)
+- `left_context`, `right_context`: Additional context for positioning
+- `occurrence_index`: Which occurrence if text appears multiple times (default: 0)
+
+**Example**:
+```json
+{
+  "op_type": "delete_range",
+  "original_text": "- [Connections to other characters to be established]",
+  "text": ""
+}
+```
+
+**Resolver Behavior**:
+- Same progressive search as `replace_range`
+- Finds exact text and removes it
+- Operations targeting frontmatter are skipped (for safety)
+
+**Best Practices**:
+- ✅ Include complete sentences with natural boundaries (10-20+ words)
+- ✅ Copy text EXACTLY as it appears in file
+- ✅ Use empty string for `text` field
+- ❌ NEVER include header lines in `original_text`
+- ❌ Don't delete headers - only delete content below them
+
+---
+
+## Common Anchor Fields
+
+All operations support these optional anchor fields for precise positioning:
+
+### `anchor_text`
+- **For `insert_after_heading`**: EXACT, COMPLETE header line (e.g., `"### Traits"`, `"## Chapter 2"`)
+- **For `insert_after`**: EXACT text (last few words) where you want to insert after
+- **Required for**: `insert_after_heading`, `insert_after`
+- **Optional for**: `replace_range`, `delete_range` (can help with positioning)
+
+### `original_text`
+- **For `replace_range`**: EXACT text to replace (minimum 10-20 words, complete sentences)
+- **For `delete_range`**: EXACT text to delete (minimum 10-20 words, complete sentences)
+- **Required for**: `replace_range`, `delete_range`
+- **Optional for**: `insert_after_heading`, `insert_after` (alternative to `anchor_text`)
+
+### `left_context` and `right_context`
+- **Purpose**: Additional context for positioning when exact match is difficult
+- **Format**: Exact surrounding text (minimum 10-20 words each)
+- **Use when**: Exact `original_text` or `anchor_text` matching might be ambiguous
+- **Example**: 
+  ```json
+  {
+    "op_type": "replace_range",
+    "original_text": "the specific text to change",
+    "left_context": "Text that comes before the target",
+    "right_context": "Text that comes after the target",
+    "text": "new replacement text"
+  }
+  ```
+
+### `occurrence_index`
+- **Purpose**: Specify which occurrence to match if text appears multiple times
+- **Format**: Integer (0-based, default: 0 for first occurrence)
+- **Note**: For `insert_after_heading` and `insert_after`, resolver uses LAST occurrence by default for consistency
+
+---
+
+## Frontmatter Protection
+
+**CRITICAL**: All operations are automatically protected from modifying frontmatter.
+
+**Resolver Behavior**:
+- Calculates `frontmatter_end` index (where YAML frontmatter ends)
+- All operations are clamped to never occur before `frontmatter_end`
+- `delete_range` operations targeting frontmatter are skipped entirely
+- `insert_after_heading` and `insert_after` operations are repositioned to start after frontmatter
+
+**Best Practices**:
+- ✅ Never manually calculate frontmatter positions - resolver handles this
+- ✅ Always pass `frontmatter_end` to resolver (or let it auto-detect)
+- ✅ Trust the resolver to protect frontmatter automatically
+- ❌ Don't try to insert at position 0 or before frontmatter end
+
+---
+
+## Operation Resolution Process
+
+The resolver (`resolve_editor_operation`) uses progressive search strategies:
+
+1. **Selection-based** (highest priority): If user has text selected, use selection bounds
+2. **Exact `original_text` matching**: Find exact text in document
+3. **Anchor text matching**: For inserts, search entire document for `anchor_text`
+4. **Normalized whitespace matching**: If exact match fails, try whitespace-normalized matching
+5. **Substring fallback**: Try first/last 30 characters if full match fails
+6. **Context-based matching**: Use `left_context` + `right_context` if provided
+
+**Confidence Scores**:
+- `1.0`: Exact match (selection or exact `original_text`)
+- `0.9`: Anchor text found (for inserts)
+- `0.85`: Normalized whitespace match
+- `0.7-0.8`: Substring or context match
+- `<0.7`: Weak match (fallback positioning)
+- `0.0`: Resolution failed
+
+---
+
+## Decision Tree: Which Operation to Use?
+
+```
+1. Adding content below a header?
+   → Use `insert_after_heading` with `anchor_text` = exact header line
+
+2. Continuing text mid-paragraph or mid-sentence?
+   → Use `insert_after` with `anchor_text` = last few words before insertion
+
+3. Replacing existing content (including placeholders)?
+   → Use `replace_range` with `original_text` = exact text to replace
+   → ⚠️ NEVER include headers in `original_text`!
+
+4. Deleting specific content?
+   → Use `delete_range` with `original_text` = exact text to delete
+   → ⚠️ NEVER include headers in `original_text`!
+
+5. Section has placeholder text like '[To be developed]'?
+   → Use `replace_range` to replace ONLY the placeholder (NO header!)
+
+6. Section is completely empty below a header?
+   → Use `insert_after_heading` with `anchor_text` = header line
+```
+
+---
+
+## Common Mistakes to Avoid
+
+### ❌ Mistake 1: Including Headers in `original_text`
+```json
+// ❌ BAD
+{
+  "op_type": "replace_range",
+  "original_text": "### Traits\n- [To be developed]",
+  "text": "- Analytical thinker"
+}
+
+// ✅ GOOD
+{
+  "op_type": "replace_range",
+  "original_text": "- [To be developed based on story needs]",
+  "text": "- Analytical thinker"
+}
+```
+
+### ❌ Mistake 2: Using `replace_range` When Should Use `insert_after_heading`
+```json
+// ❌ BAD - This will delete the header!
+{
+  "op_type": "replace_range",
+  "original_text": "### Traits\n- [To be developed]",
+  "text": "- Analytical thinker"
+}
+
+// ✅ GOOD - Preserves header
+{
+  "op_type": "insert_after_heading",
+  "anchor_text": "### Traits",
+  "text": "- Analytical thinker"
+}
+```
+
+### ❌ Mistake 3: Not Providing Enough Anchor Text
+```json
+// ❌ BAD - Too short, might match multiple places
+{
+  "op_type": "replace_range",
+  "original_text": "blue",
+  "text": "green"
+}
+
+// ✅ GOOD - Complete sentence with context
+{
+  "op_type": "replace_range",
+  "original_text": "She had piercing blue eyes that seemed to see right through you.",
+  "text": "She had piercing green eyes that seemed to see right through you."
+}
+```
+
+### ❌ Mistake 4: Paraphrasing Instead of Exact Text
+```json
+// ❌ BAD - Paraphrased, won't match
+{
+  "op_type": "replace_range",
+  "original_text": "character is analytical",
+  "text": "character is methodical and precise"
+}
+
+// ✅ GOOD - Exact text from file
+{
+  "op_type": "replace_range",
+  "original_text": "Jack is an analytical thinker who approaches problems methodically.",
+  "text": "Jack is a methodical and precise thinker who approaches problems systematically."
+}
+```
+
+### ❌ Mistake 5: Inserting at Beginning of File
+```json
+// ❌ BAD - No anchor, might insert at position 0
+{
+  "op_type": "insert_after_heading",
+  "text": "New content"
+}
+
+// ✅ GOOD - Proper anchor after frontmatter
+{
+  "op_type": "insert_after_heading",
+  "anchor_text": "## Basic Information",
+  "text": "New content"
+}
+```
+
+---
+
+## Integration with Agents
+
+### Required Pattern for All Editor Agents
+
+All agents that use editor operations MUST:
+
+1. **Use the centralized resolver**: `resolve_editor_operation()` from `orchestrator.utils.editor_operation_resolver`
+2. **Protect frontmatter**: Pass `frontmatter_end` to resolver (or let it auto-detect)
+3. **Validate operations**: Use Pydantic models from `orchestrator.models.editor_models`
+4. **Handle resolution failures**: Check confidence scores and handle failures gracefully
+
+### Example Integration
+
+```python
+from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
+from orchestrator.utils.frontmatter_utils import frontmatter_end_index
+
+# In your agent's operation resolution node:
+fm_end_idx = frontmatter_end_index(text)
+selection = {"start": selection_start, "end": selection_end} if selection_start >= 0 else None
+
+for op in operations:
+    resolved_start, resolved_end, resolved_text, confidence = resolve_editor_operation(
+        content=text,
+        op_dict=op,
+        selection=selection,
+        frontmatter_end=fm_end_idx,
+        cursor_offset=cursor_pos
+    )
+    
+    # Validate resolution
+    if resolved_start < 0 or resolved_end < 0:
+        logger.warning(f"Operation resolution failed: {op.get('op_type')}")
+        continue
+    
+    # Ensure frontmatter protection
+    if resolved_start < fm_end_idx:
+        if op.get("op_type") == "delete_range":
+            continue  # Skip deletions targeting frontmatter
+        resolved_start = max(resolved_start, fm_end_idx)
+        resolved_end = max(resolved_end, fm_end_idx)
+    
+    # Build resolved operation
+    resolved_op = {
+        "op_type": op.get("op_type"),
+        "start": resolved_start,
+        "end": resolved_end,
+        "text": resolved_text,
+        "pre_hash": _slice_hash(text[resolved_start:resolved_end]),
+        "confidence": confidence
+    }
+```
+
+---
+
+## Testing Checklist
+
+When implementing editor operations in a new agent:
+
+- [ ] All four operation types are documented in system prompt
+- [ ] Examples show correct usage (no headers in `original_text`)
+- [ ] Frontmatter protection is implemented
+- [ ] Resolver is called with proper parameters
+- [ ] Resolution failures are handled gracefully
+- [ ] Confidence scores are logged for debugging
+- [ ] Operations are validated with Pydantic models
+- [ ] Test cases cover all operation types
+- [ ] Test cases verify frontmatter protection
+- [ ] Test cases verify anchor text matching
+
+---
+
+## Related Documentation
+
+- **JSON Schema Patterns**: `.cursor/rules/editor-agent-json-schema-pattern.mdc`
+- **Models**: `llm-orchestrator/orchestrator/models/editor_models.py`
+- **Resolver**: `llm-orchestrator/orchestrator/utils/editor_operation_resolver.py`
+- **Frontmatter Utils**: `llm-orchestrator/orchestrator/utils/frontmatter_utils.py`
+
+---
+
+## Summary
+
+**Available Operations**:
+1. `insert_after_heading` - Add content below headers (SAFEST for structured documents)
+2. `insert_after` - Continue text mid-paragraph or mid-sentence
+3. `replace_range` - Replace existing content (granular edits)
+4. `delete_range` - Remove content
+
+**Critical Rules**:
+- ✅ NEVER include headers in `original_text` for `replace_range`/`delete_range`
+- ✅ Use `insert_after_heading` when adding content below headers
+- ✅ Provide EXACT, VERBATIM text from file (minimum 10-20 words)
+- ✅ Always use centralized resolver for operation resolution
+- ✅ Trust resolver to protect frontmatter automatically
+
+**Remember**: A well-organized edit preserves document structure. When you preserve headers and structure, you preserve the document's organization. When you gobble up headers, you create chaos!

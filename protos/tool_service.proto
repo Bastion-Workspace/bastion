@@ -9,6 +9,7 @@ service ToolService {
   rpc FindDocumentsByTags(FindDocumentsByTagsRequest) returns (FindDocumentsByTagsResponse);
   rpc GetDocument(DocumentRequest) returns (DocumentResponse);
   rpc GetDocumentContent(DocumentRequest) returns (DocumentContentResponse);
+  rpc GetDocumentChunks(DocumentRequest) returns (DocumentChunksResponse);
   rpc FindDocumentByPath(FindDocumentByPathRequest) returns (FindDocumentByPathResponse);
   
   // RSS operations
@@ -125,6 +126,19 @@ message DocumentContentResponse {
   string document_id = 1;
   string content = 2;
   string format = 3;  // "text", "markdown", "html"
+}
+
+message DocumentChunksResponse {
+  string document_id = 1;
+  repeated DocumentChunk chunks = 2;
+}
+
+message DocumentChunk {
+  string chunk_id = 1;
+  string document_id = 2;
+  string content = 3;
+  int32 chunk_index = 4;
+  string metadata = 5;  // JSON string of metadata
 }
 
 message FindDocumentByPathRequest {
@@ -467,16 +481,13 @@ message WebSearchResult {
 }
 
 message WebCrawlRequest {
-  string url = 1;
-  string user_id = 2;
+  string url = 1;  // Single URL (for backward compatibility)
+  repeated string urls = 2;  // Multiple URLs
+  string user_id = 3;
 }
 
 message WebCrawlResponse {
-  string url = 1;
-  string title = 2;
-  string content = 3;
-  string html = 4;
-  map<string, string> metadata = 5;
+  repeated WebCrawlResult results = 1;
 }
 
 message SearchAndCrawlRequest {
@@ -494,7 +505,8 @@ message WebCrawlResult {
   string url = 1;
   string title = 2;
   string content = 3;
-  map<string, string> metadata = 4;
+  string html = 4;  // HTML content
+  map<string, string> metadata = 5;
 }
 
 // Recursive Website Crawling Messages
@@ -573,6 +585,7 @@ message QueryExpansionRequest {
   string query = 1;
   int32 num_variations = 2;
   string user_id = 3;
+  optional string conversation_context = 4;  // Last 2 messages formatted as "User: ...\nAssistant: ..."
 }
 
 message QueryExpansionResponse {

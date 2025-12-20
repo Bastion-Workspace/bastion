@@ -246,6 +246,7 @@ class DocumentFolder(BaseModel):
     parent_folder_id: Optional[str] = Field(None, description="Parent folder ID")
     user_id: Optional[str] = Field(None, description="Owner user ID")
     team_id: Optional[str] = Field(None, description="Team ID if this is a team folder")
+    created_by: Optional[str] = Field(None, description="User ID who created this folder (for ownership tracking)")
     collection_type: str = Field(default="user", description="Collection type")
     category: Optional[DocumentCategory] = Field(None, description="Folder category (inherited by documents)")
     tags: List[str] = Field(default_factory=list, description="Folder tags (inherited by documents)")

@@ -34,11 +34,7 @@ router = APIRouter(prefix="/api/settings", tags=["Settings"])
 
 
 # Pydantic models for settings validation
-class IntentClassificationModelRequest(BaseModel):
-    value: str
-    description: str = "Model used for fast intent classification"
-    category: str = "classification"
-
+# IntentClassificationModelRequest removed - no longer used (deprecated endpoints removed)
 
 class TimezoneRequest(BaseModel):
     timezone: str
@@ -50,6 +46,14 @@ class ZipCodeRequest(BaseModel):
 
 class TimeFormatRequest(BaseModel):
     time_format: str
+
+
+class PreferredNameRequest(BaseModel):
+    preferred_name: str
+
+
+class AiContextRequest(BaseModel):
+    ai_context: str
 
 
 class PromptSettingsRequest(BaseModel):
@@ -83,44 +87,10 @@ async def get_all_settings():
 
 
 
-# DEPRECATED: Use /api/models/classification instead
-@router.put("/intent_classification_model")
-async def update_intent_classification_model_deprecated(
-    request: IntentClassificationModelRequest,
-    current_user: AuthenticatedUserResponse = Depends(get_current_user)
-):
-    """DEPRECATED: Use /api/models/classification endpoint instead"""
-    logger.warning(f"⚠️ DEPRECATED: User {current_user.username} is using deprecated /api/settings/intent_classification_model endpoint")
-    raise HTTPException(
-        status_code=422, 
-        detail="This endpoint is deprecated. Please use /api/models/classification instead. The frontend should be updated to use the new endpoint."
-    )
-
-
-@router.get("/intent_classification_model")
-async def get_intent_classification_model_deprecated():
-    """DEPRECATED: Use /api/models/classification endpoint instead"""
-    logger.warning(f"⚠️ DEPRECATED: User is using deprecated GET /api/settings/intent_classification_model endpoint")
-    raise HTTPException(
-        status_code=422, 
-        detail="This endpoint is deprecated. Please use /api/models/classification instead. The frontend should be updated to use the new endpoint."
-    )
-
-
-@router.post("/test/intent-classification-model")
-async def test_intent_classification_model_validation(
-    request: IntentClassificationModelRequest
-):
-    """Test endpoint to verify Pydantic model validation"""
-    logger.info(f"🧪 Test endpoint called with request: {request}")
-    logger.info(f"🧪 Request type: {type(request)}")
-    logger.info(f"🧪 Request dict: {request.dict()}")
-    return {
-        "success": True,
-        "message": "Pydantic model validation successful",
-        "data": request.dict()
-        } 
-
+# Deprecated endpoints removed:
+# - PUT /intent_classification_model - Use /api/models/classification instead
+# - GET /intent_classification_model - Use /api/models/classification instead
+# - POST /test/intent-classification-model - Test endpoint removed
 
 
 @router.put("/{key}", response_model=SettingUpdateResponse)
@@ -482,7 +452,109 @@ async def get_prompt_options():
             "political_bias": PoliticalBias.NEUTRAL.value,
             "persona_style": PersonaStyle.PROFESSIONAL.value
         }
-    } 
+    }
+
+
+@router.get("/user/preferred-name")
+async def get_user_preferred_name(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get current user's preferred name"""
+    try:
+        logger.info(f"👤 Getting preferred name for user: {current_user.username}")
+        preferred_name = await settings_service.get_user_preferred_name(current_user.user_id)
+        return {
+            "success": True,
+            "preferred_name": preferred_name or "",
+            "user_id": current_user.user_id
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to get preferred name for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/user/preferred-name")
+async def set_user_preferred_name(
+    request: PreferredNameRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Set current user's preferred name"""
+    try:
+        logger.info(f"👤 Setting preferred name for user {current_user.username} to: {request.preferred_name}")
+        success = await settings_service.set_user_preferred_name(current_user.user_id, request.preferred_name)
+        
+        if success:
+            logger.info(f"✅ Preferred name updated successfully for user {current_user.username}")
+            return {
+                "success": True,
+                "message": "Preferred name updated successfully",
+                "preferred_name": request.preferred_name,
+                "user_id": current_user.user_id
+            }
+        else:
+            logger.error(f"❌ Failed to update preferred name for user {current_user.username}")
+            return {
+                "success": False,
+                "message": "Failed to update preferred name"
+            }
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to set preferred name for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/user/ai-context")
+async def get_user_ai_context(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get current user's AI context"""
+    try:
+        logger.info(f"🤖 Getting AI context for user: {current_user.username}")
+        ai_context = await settings_service.get_user_ai_context(current_user.user_id)
+        return {
+            "success": True,
+            "ai_context": ai_context or "",
+            "user_id": current_user.user_id
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to get AI context for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/user/ai-context")
+async def set_user_ai_context(
+    request: AiContextRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Set current user's AI context (max 500 characters)"""
+    try:
+        # Validate length
+        if len(request.ai_context) > 500:
+            raise HTTPException(status_code=400, detail="AI context must be 500 characters or less")
+        
+        logger.info(f"🤖 Setting AI context for user {current_user.username}")
+        success = await settings_service.set_user_ai_context(current_user.user_id, request.ai_context)
+        
+        if success:
+            logger.info(f"✅ AI context updated successfully for user {current_user.username}")
+            return {
+                "success": True,
+                "message": "AI context updated successfully",
+                "ai_context": request.ai_context,
+                "user_id": current_user.user_id
+            }
+        else:
+            logger.error(f"❌ Failed to update AI context for user {current_user.username}")
+            return {
+                "success": False,
+                "message": "Failed to update AI context"
+            }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to set AI context for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e)) 
 
 
 @router.get("/{category}")

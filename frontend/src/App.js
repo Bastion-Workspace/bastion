@@ -86,9 +86,12 @@ const MainContent = () => {
   return (
     <Box sx={{ 
       display: 'flex', 
-      height: { xs: 'calc(var(--appvh, 100vh) - 64px - 32px)', md: 'calc(100dvh - 64px - 32px)' },
+      height: { xs: 'calc(var(--appvh, 100vh) - 59px - 32px)', md: 'calc(100dvh - 59px - 32px)' },
       position: 'relative',
-      paddingBottom: 'env(safe-area-inset-bottom)'
+      paddingBottom: 'env(safe-area-inset-bottom)',
+      width: '100%',
+      maxWidth: '100vw',
+      overflow: 'hidden'
     }}>
       {/* Main Content Area - Responsive to chat sidebar */}
       <Box sx={{ 
@@ -99,6 +102,8 @@ const MainContent = () => {
         minWidth: 0, // Allow content to shrink below its natural size
         display: 'flex',
         flexDirection: 'column',
+        width: '100%',
+        maxWidth: { xs: '100vw', md: 'none' }
       }}>
         <Container 
           maxWidth={isDocumentsRoute || isMediaRoute ? false : 'xl'} 
@@ -144,8 +149,8 @@ const MainContent = () => {
         <Box sx={{
           position: 'fixed',
           right: 0,
-          top: '66px',
-          height: { xs: 'calc(var(--appvh, 100vh) - 66px - 32px)', md: 'calc(100dvh - 66px - 32px)' },
+          top: '61px',
+          height: { xs: 'calc(var(--appvh, 100vh) - 61px - 32px)', md: 'calc(100dvh - 61px - 32px)' },
           width: isCollapsed ? 0 : (isFullWidth ? '100vw' : `${sidebarWidth}px`),
           backgroundColor: 'background.paper',
           borderLeft: '1px solid',

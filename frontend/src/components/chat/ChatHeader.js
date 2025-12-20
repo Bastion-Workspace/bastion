@@ -32,6 +32,35 @@ const ChatHeader = ({
   onClearChat,
   onOpenSettings,
 }) => {
+  // Format cost for display (per 1M tokens by default)
+  const formatCost = (cost) => {
+    if (!cost) return 'Free';
+    if (cost < 0.001) return `$${(cost * 1000000).toFixed(2)}`;
+    if (cost < 1) return `$${(cost * 1000).toFixed(2)}`;
+    return `$${cost.toFixed(3)}`;
+  };
+
+  // Format pricing string for display
+  const formatPricing = (modelInfo) => {
+    if (!modelInfo) return '';
+    
+    const parts = [];
+    
+    // Add context length
+    if (modelInfo.context_length) {
+      parts.push(`${modelInfo.context_length.toLocaleString()} ctx`);
+    }
+    
+    // Add pricing if available
+    if (modelInfo.input_cost || modelInfo.output_cost) {
+      const inputPrice = modelInfo.input_cost ? formatCost(modelInfo.input_cost) : 'Free';
+      const outputPrice = modelInfo.output_cost ? formatCost(modelInfo.output_cost) : 'Free';
+      parts.push(`I/O: ${inputPrice} / ${outputPrice}`);
+    }
+    
+    return parts.join(' • ');
+  };
+
   return (
     <Paper elevation={1} sx={{ p: 1.5 }}>
       <Box display="flex" justifyContent="space-between" alignItems="center">
@@ -68,31 +97,44 @@ const ChatHeader = ({
                 value={currentModel?.current_model || ''}
                 onChange={(e) => onModelSelect(e.target.value)}
                 label="AI Model"
-                startAdornment={<SmartToy sx={{ mr: 1, color: 'primary.main' }} />}
                 disabled={isSelectingModel}
               >
                 {enabledModels.enabled_models.map((modelId) => {
                   const modelInfo = availableModels?.models?.find(m => m.id === modelId);
                   const isSelected = currentModel?.current_model === modelId;
+                  const pricingInfo = formatPricing(modelInfo);
                   return (
                     <MenuItem key={modelId} value={modelId}>
-                      <Box display="flex" alignItems="center" justifyContent="space-between" width="100%">
-                        <Box>
-                          <Typography variant="body2" sx={{ fontWeight: isSelected ? 'bold' : 'normal' }}>
-                            {modelInfo?.name || modelId}
-                          </Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {modelInfo?.provider} • {modelInfo?.context_length?.toLocaleString()} ctx
-                          </Typography>
+                      <Box display="flex" alignItems="center" justifyContent="space-between" width="100%" sx={{ gap: 1 }}>
+                        <Typography 
+                          variant="body2" 
+                          sx={{ 
+                            fontWeight: isSelected ? 'bold' : 'normal',
+                            flex: 1,
+                            textAlign: 'left'
+                          }}
+                        >
+                          {modelInfo?.name || modelId}
+                        </Typography>
+                        <Box display="flex" alignItems="center" gap={1}>
+                          {pricingInfo && (
+                            <Typography 
+                              variant="caption" 
+                              color="text.secondary"
+                              sx={{ textAlign: 'right', whiteSpace: 'nowrap' }}
+                            >
+                              {pricingInfo}
+                            </Typography>
+                          )}
+                          {isSelected && (
+                            <Chip 
+                              label="Active" 
+                              size="small" 
+                              color="success" 
+                              variant="outlined"
+                            />
+                          )}
                         </Box>
-                        {isSelected && (
-                          <Chip 
-                            label="Active" 
-                            size="small" 
-                            color="success" 
-                            variant="outlined"
-                          />
-                        )}
                       </Box>
                     </MenuItem>
                   );

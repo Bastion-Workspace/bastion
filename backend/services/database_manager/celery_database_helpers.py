@@ -35,11 +35,11 @@ async def celery_fetch_one(query: str, *args, rls_context: Dict[str, str] = None
                 # Handle None values properly for RLS context
                 if user_id is None:
                     # Set to NULL for global/admin operations
-                    await conn.execute("SELECT set_config('app.current_user_id', NULL, true)")
+                    await conn.execute("SELECT set_config('app.current_user_id', NULL, false)")
                 else:
-                    await conn.execute("SELECT set_config('app.current_user_id', $1, true)", str(user_id))
+                    await conn.execute("SELECT set_config('app.current_user_id', $1, false)", str(user_id))
                 
-                await conn.execute("SELECT set_config('app.current_user_role', $1, true)", user_role)
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_role)
                 logger.debug(f"🔍 Set RLS context on Celery connection: user_id={user_id}, role={user_role}")
             
             result = await conn.fetchrow(query, *args)
@@ -70,11 +70,11 @@ async def celery_fetch_all(query: str, *args, rls_context: Dict[str, str] = None
                 # Handle None values properly for RLS context
                 if user_id is None:
                     # Set to NULL for global/admin operations
-                    await conn.execute("SELECT set_config('app.current_user_id', NULL, true)")
+                    await conn.execute("SELECT set_config('app.current_user_id', NULL, false)")
                 else:
-                    await conn.execute("SELECT set_config('app.current_user_id', $1, true)", str(user_id))
+                    await conn.execute("SELECT set_config('app.current_user_id', $1, false)", str(user_id))
                 
-                await conn.execute("SELECT set_config('app.current_user_role', $1, true)", user_role)
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_role)
                 logger.debug(f"🔍 Set RLS context on Celery connection: user_id={user_id}, role={user_role}")
             
             results = await conn.fetch(query, *args)
@@ -125,11 +125,11 @@ async def celery_execute(query: str, *args, rls_context: Dict[str, str] = None) 
                 # Handle None values properly for RLS context
                 if user_id is None:
                     # Set to NULL for global/admin operations
-                    await conn.execute("SELECT set_config('app.current_user_id', NULL, true)")
+                    await conn.execute("SELECT set_config('app.current_user_id', NULL, false)")
                 else:
-                    await conn.execute("SELECT set_config('app.current_user_id', $1, true)", str(user_id))
+                    await conn.execute("SELECT set_config('app.current_user_id', $1, false)", str(user_id))
                 
-                await conn.execute("SELECT set_config('app.current_user_role', $1, true)", user_role)
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_role)
                 logger.debug(f"🔍 Set RLS context on Celery connection: user_id={user_id}, role={user_role}")
             
             result = await conn.execute(query, *args)

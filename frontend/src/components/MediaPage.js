@@ -1054,7 +1054,7 @@ const MediaPage = () => {
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
       {/* Tabs - right against the top, no scrollbar */}
-      <Box sx={{ borderBottom: 1, borderColor: 'divider', flexShrink: 0, display: 'flex', alignItems: 'center' }}>
+      <Box sx={{ borderBottom: 1, borderColor: 'divider', flexShrink: 0, display: 'flex', alignItems: 'center', px: 1.3125 }}>
         <Tabs 
           value={activeTab} 
           onChange={handleTabChange} 
@@ -1086,7 +1086,7 @@ const MediaPage = () => {
           ))}
         </Tabs>
         {isStreamingService && (
-          <Box sx={{ pr: 2 }}>
+          <Box sx={{ pr: 0.5 }}>
             <Button
               variant="outlined"
               startIcon={<Search />}

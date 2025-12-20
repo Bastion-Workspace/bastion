@@ -33,6 +33,7 @@ class DirectSearchService:
         limit: int = 20,
         similarity_threshold: float = 0.3,  # Lowered from 0.7 to 0.3 for better recall
         user_id: Optional[str] = None,
+        team_ids: Optional[List[str]] = None,
         document_types: Optional[List[str]] = None,
         categories: Optional[List[str]] = None,
         tags: Optional[List[str]] = None,
@@ -47,7 +48,8 @@ class DirectSearchService:
             query: Search query text
             limit: Maximum number of results to return
             similarity_threshold: Minimum similarity score (0.0 to 1.0)
-            user_id: Optional user ID for filtering results
+            user_id: Optional user ID for filtering results (triggers hybrid search: user + team + global)
+            team_ids: Optional list of team IDs to include in search (searches team collections)
             document_types: Filter by document types (pdf, txt, etc.)
             categories: Filter by document categories
             tags: Filter by document tags
@@ -82,11 +84,13 @@ class DirectSearchService:
             # Perform vector search using EmbeddingServiceWrapper's search_similar method
             # Note: EmbeddingServiceWrapper expects query_embedding (vector), not query_text (string)
             # Support tag and category filtering for metadata-based searches
+            # Include team_ids for hybrid search across user, team, and global collections
             search_results = await self.embedding_manager.search_similar(
                 query_embedding=query_embeddings[0],
                 limit=limit,
                 score_threshold=similarity_threshold,
                 user_id=user_id if user_id and user_id != "system" else None,
+                team_ids=team_ids if team_ids else None,
                 filter_category=categories[0] if categories and len(categories) > 0 else None,
                 filter_tags=tags if tags else None
             )
@@ -97,7 +101,8 @@ class DirectSearchService:
                 formatted_result = await self._format_search_result(
                     result, 
                     query, 
-                    include_metadata
+                    include_metadata,
+                    user_id
                 )
                 if formatted_result:
                     filtered_results.append(formatted_result)
@@ -130,7 +135,8 @@ class DirectSearchService:
         self, 
         result: Dict, 
         query: str, 
-        include_metadata: bool
+        include_metadata: bool,
+        user_id: Optional[str] = None
     ) -> Optional[Dict]:
         """Format a single search result for display"""
         try:
@@ -147,7 +153,7 @@ class DirectSearchService:
             # Get document metadata if requested
             document_metadata = {}
             if include_metadata:
-                doc_info = await self.document_repository.get_document_by_id(document_id)
+                doc_info = await self.document_repository.get_document_by_id(document_id, user_id)
                 if doc_info:
                     document_metadata = {
                         "document_id": document_id,
@@ -171,6 +177,7 @@ class DirectSearchService:
             
             formatted_result = {
                 "chunk_id": chunk_id,
+                "document_id": document_id,  # CRITICAL: Always include document_id at top level for RLS compatibility
                 "similarity_score": round(similarity_score, 4),
                 "text": chunk_text,
                 "highlighted_text": highlighted_text,

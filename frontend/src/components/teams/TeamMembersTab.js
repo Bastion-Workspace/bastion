@@ -11,16 +11,20 @@ import {
   Menu,
   MenuItem,
   CircularProgress,
-  Alert
+  Alert,
+  Button
 } from '@mui/material';
 import {
   MoreVert,
   Person,
-  Message
+  Message,
+  PersonAdd
 } from '@mui/icons-material';
 import { useTeam } from '../../contexts/TeamContext';
 import { useMessaging } from '../../contexts/MessagingContext';
 import { useAuth } from '../../contexts/AuthContext';
+import TeamInviteDialog from './TeamInviteDialog';
+import teamService from '../../services/teams/TeamService';
 
 const TeamMembersTab = ({ teamId }) => {
   const { user } = useAuth();
@@ -35,12 +39,38 @@ const TeamMembersTab = ({ teamId }) => {
   const { createRoom, openRoom, loadRooms } = useMessaging();
   const [anchorEl, setAnchorEl] = useState(null);
   const [selectedMember, setSelectedMember] = useState(null);
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [teamInvitations, setTeamInvitations] = useState([]);
+
+  const loadTeamInvitations = React.useCallback(async () => {
+    if (!teamId) return;
+    try {
+      const invitations = await teamService.getTeamInvitations(teamId);
+      setTeamInvitations(invitations || []);
+    } catch (error) {
+      console.error('Failed to load team invitations:', error);
+    }
+  }, [teamId]);
 
   useEffect(() => {
     if (teamId) {
       loadTeamMembers(teamId);
+      loadTeamInvitations();
     }
-  }, [teamId, loadTeamMembers]);
+  }, [teamId, loadTeamMembers, loadTeamInvitations]);
+
+  // Listen for team member changes
+  useEffect(() => {
+    const handleMemberChange = (event) => {
+      if (event.detail?.teamId === teamId) {
+        loadTeamMembers(teamId);
+        loadTeamInvitations();
+      }
+    };
+    
+    window.addEventListener('teamMemberChanged', handleMemberChange);
+    return () => window.removeEventListener('teamMemberChanged', handleMemberChange);
+  }, [teamId, loadTeamMembers, loadTeamInvitations]);
 
   const handleMenuOpen = (event, member) => {
     setAnchorEl(event.currentTarget);
@@ -92,9 +122,10 @@ const TeamMembersTab = ({ teamId }) => {
   };
 
   const members = teamMembers[teamId] || [];
+  const pendingInvitations = teamInvitations.filter(inv => inv.status === 'pending');
   const isAdmin = currentTeam?.user_role === 'admin';
 
-  if (isLoading && members.length === 0) {
+  if (isLoading && members.length === 0 && pendingInvitations.length === 0) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', py: 4 }}>
         <CircularProgress />
@@ -104,7 +135,20 @@ const TeamMembersTab = ({ teamId }) => {
 
   return (
     <Box>
+      {isAdmin && (
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 2 }}>
+          <Button
+            variant="contained"
+            startIcon={<PersonAdd />}
+            onClick={() => setAddDialogOpen(true)}
+          >
+            Add User
+          </Button>
+        </Box>
+      )}
+      
       <Grid container spacing={2}>
+        {/* Active Members */}
         {members.map((member) => (
           <Grid item xs={12} sm={6} md={4} key={member.user_id}>
             <Card>
@@ -162,6 +206,42 @@ const TeamMembersTab = ({ teamId }) => {
             </Card>
           </Grid>
         ))}
+
+        {/* Pending Invitations */}
+        {pendingInvitations.map((invitation) => (
+          <Grid item xs={12} sm={6} md={4} key={invitation.invitation_id}>
+            <Card sx={{ opacity: 0.8 }}>
+              <CardContent>
+                <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                  {invitation.invited_avatar_url ? (
+                    <Avatar src={invitation.invited_avatar_url} sx={{ width: 48, height: 48, mr: 2 }} />
+                  ) : (
+                    <Avatar sx={{ width: 48, height: 48, mr: 2, bgcolor: 'warning.main' }}>
+                      <Person />
+                    </Avatar>
+                  )}
+                  <Box sx={{ flexGrow: 1 }}>
+                    <Typography variant="h6">
+                      {invitation.invited_display_name || invitation.invited_username}
+                    </Typography>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5 }}>
+                      <Chip
+                        label="Member"
+                        size="small"
+                        color="default"
+                      />
+                      <Chip
+                        label="Invite Sent"
+                        size="small"
+                        color="warning"
+                      />
+                    </Box>
+                  </Box>
+                </Box>
+              </CardContent>
+            </Card>
+          </Grid>
+        ))}
       </Grid>
 
       <Menu
@@ -182,6 +262,13 @@ const TeamMembersTab = ({ teamId }) => {
           Remove from Team
         </MenuItem>
       </Menu>
+
+      <TeamInviteDialog
+        open={addDialogOpen}
+        onClose={() => setAddDialogOpen(false)}
+        teamId={teamId}
+        mode="add"
+      />
     </Box>
   );
 };

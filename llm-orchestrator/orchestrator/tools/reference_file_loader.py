@@ -231,6 +231,39 @@ async def load_referenced_files(
     try:
         loaded_files = {}
         
+        # Debug logging BEFORE the check
+        logger.info("="*80)
+        logger.info("🔍 REFERENCE FILE LOADER DEBUG:")
+        logger.info(f"   active_editor type: {type(active_editor)}")
+        logger.info(f"   active_editor is None: {active_editor is None}")
+        
+        if active_editor:
+            try:
+                logger.info(f"   active_editor keys: {list(active_editor.keys())}")
+                logger.info(f"   has 'content': {bool(active_editor.get('content'))}")
+                content_val = active_editor.get('content', '')
+                logger.info(f"   content type: {type(content_val)}")
+                logger.info(f"   content length: {len(content_val) if content_val else 0}")
+                logger.info(f"   has 'filename': {bool(active_editor.get('filename'))}")
+                logger.info(f"   filename value: {active_editor.get('filename')}")
+                logger.info(f"   has 'frontmatter': {bool(active_editor.get('frontmatter'))}")
+                frontmatter_debug = active_editor.get('frontmatter', {})
+                if frontmatter_debug:
+                    logger.info(f"   frontmatter type: {type(frontmatter_debug)}")
+                    logger.info(f"   frontmatter keys: {list(frontmatter_debug.keys())}")
+                    logger.info(f"   frontmatter has 'outline': {bool(frontmatter_debug.get('outline'))}")
+                    logger.info(f"   frontmatter['outline'] value: {frontmatter_debug.get('outline')}")
+                else:
+                    logger.info(f"   frontmatter is empty or None")
+            except Exception as debug_err:
+                logger.error(f"   DEBUG LOGGING ERROR: {debug_err}")
+                import traceback
+                logger.error(traceback.format_exc())
+        else:
+            logger.info(f"   active_editor is falsy (empty dict or None)")
+        
+        logger.info("="*80)
+        
         # Check if we have an active editor with actual content
         if not active_editor or (not active_editor.get("content") and not active_editor.get("filename") and not active_editor.get("frontmatter")):
             logger.info("📄 No active editor - skipping referenced file loading")

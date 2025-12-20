@@ -40,9 +40,7 @@ class SourceType(str, Enum):
 class PermissionType(str, Enum):
     """Types of permissions that can be requested"""
     WEB_SEARCH = "web_search"
-    SEARCH_AND_CRAWL = "search_and_crawl"
     CRAWL_WEB_CONTENT = "crawl_web_content"
-    ANALYZE_AND_INGEST = "analyze_and_ingest"
 
 
 # ===== CORE DATA MODELS =====

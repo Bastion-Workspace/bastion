@@ -354,7 +354,12 @@ class FileManagerService:
                         break
             
             # Get new folder's physical path
-            new_folder_path = await self.folder_service.get_folder_physical_path(request.new_folder_id)
+            # Pass user_id and role for RLS context (especially needed for team folders)
+            new_folder_path = await self.folder_service.get_folder_physical_path(
+                request.new_folder_id,
+                user_id=request.user_id,
+                user_role=request.current_user_role
+            )
             if not new_folder_path:
                 raise ValueError(f"Failed to get physical path for folder: {request.new_folder_id}")
             
@@ -380,13 +385,79 @@ class FileManagerService:
             else:
                 logger.warning(f"⚠️ File not found on disk: {old_file_path} (database will be updated anyway)")
             
-            # Update document folder in database
+            # Get destination folder info to determine collection_type and team_id
+            dest_folder = await self.folder_service.get_folder(
+                request.new_folder_id,
+                user_id=request.user_id,
+                user_role=request.current_user_role
+            )
+            if not dest_folder:
+                raise ValueError(f"Destination folder not found: {request.new_folder_id}")
+            
+            # Prepare update fields
+            update_fields = {"folder_id": request.new_folder_id}
+            
+            # Update collection_type, team_id, and user_id based on destination folder
+            if dest_folder.collection_type == "team" and dest_folder.team_id:
+                # Moving to team folder: set collection_type='team', team_id, and user_id=NULL
+                update_fields["collection_type"] = "team"
+                update_fields["team_id"] = str(dest_folder.team_id)
+                update_fields["user_id"] = None
+                logger.info(f"📦 Moving document to team folder - setting collection_type='team', team_id={dest_folder.team_id}, user_id=NULL")
+            elif dest_folder.collection_type == "user" and dest_folder.user_id:
+                # Moving to user folder: set collection_type='user', user_id, team_id=NULL
+                update_fields["collection_type"] = "user"
+                update_fields["user_id"] = str(dest_folder.user_id)
+                update_fields["team_id"] = None
+                logger.info(f"📦 Moving document to user folder - setting collection_type='user', user_id={dest_folder.user_id}")
+            elif dest_folder.collection_type == "global":
+                # Moving to global folder: set collection_type='global', user_id=NULL, team_id=NULL
+                update_fields["collection_type"] = "global"
+                update_fields["user_id"] = None
+                update_fields["team_id"] = None
+                logger.info(f"📦 Moving document to global folder - setting collection_type='global'")
+            
+            # Update document in database with all fields
+            # Note: RLS context will be auto-detected by the repository using admin context
             success = await self.document_service.document_repository.update(
                 request.document_id,
-                folder_id=request.new_folder_id
+                **update_fields
             )
             if not success:
                 raise ValueError(f"Failed to update document: {request.document_id}")
+            
+            # **ROOSEVELT FOLDER INHERITANCE**: Apply folder metadata if folder has metadata
+            # This ensures documents inherit category/tags from their new folder and vector DB is updated
+            if request.new_folder_id:
+                try:
+                    folder_metadata = await self.folder_service.get_folder_metadata(request.new_folder_id)
+                    
+                    if folder_metadata.get('inherit_tags', True):
+                        folder_category = folder_metadata.get('category')
+                        folder_tags = folder_metadata.get('tags', [])
+                        
+                        if folder_category or folder_tags:
+                            from models.api_models import DocumentUpdateRequest, DocumentCategory
+                            
+                            # Parse category enum
+                            doc_category = None
+                            if folder_category:
+                                try:
+                                    doc_category = DocumentCategory(folder_category)
+                                except ValueError:
+                                    logger.warning(f"⚠️ Invalid folder category '{folder_category}'")
+                            
+                            # Update document with folder metadata
+                            # This will update both PostgreSQL and Qdrant vector database
+                            update_request = DocumentUpdateRequest(
+                                category=doc_category,
+                                tags=folder_tags if folder_tags else None
+                            )
+                            await self.document_service.update_document_metadata(request.document_id, update_request)
+                            logger.info(f"📋 FOLDER INHERITANCE: Applied folder metadata to moved document {request.document_id} - category={folder_category}, tags={folder_tags}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to apply folder metadata inheritance during move: {e}")
+                    # Don't fail the move operation if metadata inheritance fails
             
             # Send WebSocket notification
             websocket_sent = await self.websocket_notifier.notify_file_moved(
@@ -427,8 +498,8 @@ class FileManagerService:
             folder_id = doc.folder_id
             items_deleted = 1
             
-            # Delete document
-            success = await self.document_service.document_repository.delete(request.document_id)
+            # Delete document with proper user context
+            success = await self.document_service.document_repository.delete(request.document_id, doc.user_id)
             if not success:
                 raise ValueError(f"Failed to delete document: {request.document_id}")
             

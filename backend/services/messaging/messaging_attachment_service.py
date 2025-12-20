@@ -143,7 +143,7 @@ class MessagingAttachmentService:
         
         # Verify user is room participant
         async with self.db_pool.acquire() as conn:
-            await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
             
             is_participant = await conn.fetchval("""
                 SELECT EXISTS(
@@ -182,7 +182,7 @@ class MessagingAttachmentService:
             
             # Save to database
             async with self.db_pool.acquire() as conn:
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 attachment_id = await conn.fetchval("""
                     INSERT INTO message_attachments (
@@ -223,7 +223,7 @@ class MessagingAttachmentService:
         await self._ensure_initialized()
         
         async with self.db_pool.acquire() as conn:
-            await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
             
             row = await conn.fetchrow("""
                 SELECT 
@@ -255,7 +255,7 @@ class MessagingAttachmentService:
         await self._ensure_initialized()
         
         async with self.db_pool.acquire() as conn:
-            await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
             
             rows = await conn.fetch("""
                 SELECT 

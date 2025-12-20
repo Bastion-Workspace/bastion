@@ -85,13 +85,41 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
                 return {
                     "editor_operations": [],
                     "task_status": "complete",
-                    "resolution_complete": True
+                    "resolution_complete": True,
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "manuscript": state.get("manuscript", ""),
+                    "filename": state.get("filename", ""),
+                    "current_chapter_text": state.get("current_chapter_text", ""),
+                    "current_chapter_number": state.get("current_chapter_number"),
+                    "chapter_ranges": state.get("chapter_ranges", []),
+                    "current_request": state.get("current_request", ""),
+                    "active_editor": state.get("active_editor", {}),
+                    "frontmatter": state.get("frontmatter", {}),
+                    "structured_edit": state.get("structured_edit"),
                 }
             return {
                 "editor_operations": [],
                 "error": "No operations to resolve",
                 "task_status": "error",
-                "resolution_complete": True
+                "resolution_complete": True,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
             }
         
         operations = structured_edit.operations
@@ -100,7 +128,21 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
                 "editor_operations": [],
                 "error": "No operations to resolve",
                 "task_status": "error",
-                "resolution_complete": True
+                "resolution_complete": True,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
             }
         
         # Check if this is a question with no edits needed (empty operations array)
@@ -110,7 +152,21 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
             return {
                 "editor_operations": [],
                 "task_status": "complete",
-                "resolution_complete": True
+                "resolution_complete": True,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
             }
         
         fm_end_idx = _frontmatter_end_index(manuscript)
@@ -146,7 +202,21 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
             "resolution_chapter_ranges": chapter_ranges,
             "resolution_current_chapter_number": current_chapter_number,
             "resolution_requested_chapter_number": requested_chapter_number,
-            "resolution_complete": False
+            "resolution_complete": False,
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
         }
         
     except Exception as e:
@@ -157,7 +227,21 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
             "editor_operations": [],
             "error": str(e),
             "task_status": "error",
-            "resolution_complete": True
+            "resolution_complete": True,
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
         }
 
 
@@ -181,7 +265,24 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
         if not operations:
             return {
                 "resolved_operations": [],
-                "resolution_complete": True
+                "resolution_complete": True,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+                "resolution_manuscript": state.get("resolution_manuscript", ""),
+                "resolution_structured_edit": state.get("resolution_structured_edit"),
+                "resolution_operations": state.get("resolution_operations", []),
             }
         
         editor_operations = []
@@ -386,7 +487,24 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
         
         return {
             "resolved_operations": editor_operations,
-            "resolution_complete": False
+            "resolution_complete": False,
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+            "resolution_manuscript": state.get("resolution_manuscript", ""),
+            "resolution_structured_edit": state.get("resolution_structured_edit"),
+            "resolution_operations": state.get("resolution_operations", []),
         }
         
     except Exception as e:
@@ -397,7 +515,24 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
             "resolved_operations": [],
             "error": str(e),
             "task_status": "error",
-            "resolution_complete": True
+            "resolution_complete": True,
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+            "resolution_manuscript": state.get("resolution_manuscript", ""),
+            "resolution_structured_edit": state.get("resolution_structured_edit"),
+            "resolution_operations": state.get("resolution_operations", []),
         }
 
 
@@ -426,7 +561,24 @@ async def validate_resolved_operations_node(state: Dict[str, Any]) -> Dict[str, 
         # All operations validated
         return {
             "validated_operations": resolved_operations,
-            "resolution_complete": False
+            "resolution_complete": False,
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+            "resolution_manuscript": state.get("resolution_manuscript", ""),
+            "resolution_structured_edit": state.get("resolution_structured_edit"),
+            "resolution_operations": state.get("resolution_operations", []),
         }
         
     except Exception as e:
@@ -437,7 +589,24 @@ async def validate_resolved_operations_node(state: Dict[str, Any]) -> Dict[str, 
             "validated_operations": state.get("resolved_operations", []),
             "error": str(e),
             "task_status": "error",
-            "resolution_complete": True
+            "resolution_complete": True,
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+            "resolution_manuscript": state.get("resolution_manuscript", ""),
+            "resolution_structured_edit": state.get("resolution_structured_edit"),
+            "resolution_operations": state.get("resolution_operations", []),
         }
 
 
@@ -450,7 +619,24 @@ async def finalize_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         return {
             "editor_operations": validated_operations,
-            "resolution_complete": True
+            "resolution_complete": True,
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+            "resolution_manuscript": state.get("resolution_manuscript", ""),
+            "resolution_structured_edit": state.get("resolution_structured_edit"),
+            "resolution_operations": state.get("resolution_operations", []),
         }
         
     except Exception as e:
@@ -461,7 +647,24 @@ async def finalize_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "editor_operations": [],
             "error": str(e),
             "task_status": "error",
-            "resolution_complete": True
+            "resolution_complete": True,
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+            "resolution_manuscript": state.get("resolution_manuscript", ""),
+            "resolution_structured_edit": state.get("resolution_structured_edit"),
+            "resolution_operations": state.get("resolution_operations", []),
         }
 
 

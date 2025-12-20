@@ -135,6 +135,36 @@ def _route_from_intent(self, state: Dict[str, Any]) -> str:
 
 ## Agent Development Standards
 
+### Editor Agent JSON Schema Pattern (CRITICAL)
+
+**For ALL agents that return ManuscriptEdit structured output**, see [editor-agent-json-schema-pattern.mdc](mdc:.cursor/rules/editor-agent-json-schema-pattern.mdc) for detailed requirements.
+
+### Editor Operations Reference (CRITICAL)
+
+**For ALL agents that use editor operations** (fiction_editing_agent, outline_editing_agent, character_development_agent, rules_editing_agent, etc.), see [editor-operations-reference.mdc](mdc:.cursor/rules/editor-operations-reference.mdc) for complete documentation of available operations.
+
+**Available Operations**:
+- `insert_after_heading` - Add content below headers (SAFEST for structured documents)
+- `insert_after` - Continue text mid-paragraph or mid-sentence
+- `replace_range` - Replace existing content (granular edits)
+- `delete_range` - Remove content
+
+**Critical Rules**:
+- ✅ NEVER include headers in `original_text` for `replace_range`/`delete_range`
+- ✅ Use `insert_after_heading` when adding content below headers
+- ✅ Provide EXACT, VERBATIM text from file (minimum 10-20 words)
+- ✅ Always use centralized resolver: `resolve_editor_operation()` from `orchestrator.utils.editor_operation_resolver`
+- ✅ Trust resolver to protect frontmatter automatically
+
+**Key requirements:**
+- ✅ Show VALID JSON example (not schema notation)
+- ❌ NEVER include fake `"type": "ManuscriptEdit"` field
+- ✅ Use field definitions AFTER the example
+- ✅ Reinforce structure at both system prompt and generation time
+- ✅ Include explicit warnings about common mistakes
+
+**Applies to:** fiction_editing_agent, outline_editing_agent, rules_editing_agent, character_development_agent, podcast_script_agent (editing mode), substack_agent (editing mode)
+
 ### LLM Orchestrator Agent Requirements (CRITICAL)
 
 **All agents in llm-orchestrator MUST follow these patterns:**
@@ -300,9 +330,341 @@ response = await chat_service.openai_client.chat.completions.create(...)  # NEVE
 - [ ] Compiles with `workflow.compile(checkpointer=checkpointer)`
 - [ ] All nodes follow `_*_node` naming pattern
 - [ ] All nodes return `Dict[str, Any]`
+- [ ] **Each node preserves critical state** (see State Preservation below)
 - [ ] Implements `process()` method with standard pattern
 - [ ] Uses `_get_llm()` for all LLM calls
 - [ ] Handles errors gracefully in nodes
+
+#### 10. State Preservation Across Nodes (CRITICAL)
+
+**LangGraph State Behavior**: When a node returns a dict, it **UPDATES** the state. **Keys not in the return dict are DROPPED!**
+
+**Problem Pattern:**
+```python
+# ❌ BAD: Node B drops active_editor
+async def _node_a(self, state: YourState) -> Dict[str, Any]:
+    active_editor = state.get("active_editor", {})
+    # Process...
+    return {
+        "active_editor": active_editor,  # Set in state
+        "result_a": "data"
+    }
+
+async def _node_b(self, state: YourState) -> Dict[str, Any]:
+    # Can access active_editor here
+    active_editor = state.get("active_editor", {})
+    # Process...
+    return {
+        "result_b": "data"
+        # ❌ active_editor NOT returned → DROPPED FROM STATE!
+    }
+
+async def _node_c(self, state: YourState) -> Dict[str, Any]:
+    active_editor = state.get("active_editor", {})
+    # ❌ active_editor is {} or missing - was dropped by node_b!
+```
+
+**Solution Pattern:**
+```python
+# ✅ GOOD: Each node preserves critical state
+async def _node_b(self, state: YourState) -> Dict[str, Any]:
+    active_editor = state.get("active_editor", {})
+    # Process...
+    return {
+        "result_b": "data",
+        "active_editor": state.get("active_editor", {}),  # ✅ Preserve for next node
+        "shared_memory": state.get("shared_memory", {}),  # ✅ Preserve
+        "messages": state.get("messages", []),  # ✅ Preserve
+        "user_id": state.get("user_id", "system"),  # ✅ Preserve
+        "metadata": state.get("metadata", {}),  # ✅ Preserve
+        "query": state.get("query", "")  # ✅ Preserve
+    }
+```
+
+**Critical State Keys to Preserve:**
+- `metadata` - **MUST preserve for user model preference!** Contains `user_chat_model` used by `_get_llm()`
+- `user_id` - **MUST preserve for database queries** (folder lookups, document access)
+- `active_editor` - Editor context with content, frontmatter, cursor
+- `shared_memory` - Cross-agent and cross-turn context
+- `messages` - Conversation history
+- `query` - Original user query
+- `manuscript` / `filename` / `frontmatter` - Document context (fiction agents)
+
+**CRITICAL FAILURES:**
+- Missing `metadata` → LLM falls back to DEFAULT_MODEL instead of user's chosen model!
+- Missing `user_id` → Database queries use "system" as fallback and fail to find user-owned documents/folders!
+
+**Best Practice:**
+1. **Identify critical state** - What does this workflow need across all nodes?
+2. **Every node returns critical state** - Even if unchanged
+3. **Error paths too** - Preserve state even in exception handlers
+4. **Subgraphs especially** - State flows through multiple internal nodes
+
+**Testing State Preservation:**
+- Add debug logging: `logger.info(f"Node X state keys: {list(state.keys())}")`
+- Check each node's return dict includes critical keys
+- Verify downstream nodes receive expected state
+- **Test with user model preference** - Ensure subgraphs use correct model, not default!
+
+### Subgraph State Preservation (CRITICAL FOR ALL SUBGRAPHS)
+
+**Problem:** Subgraphs that don't preserve critical state cause cascading failures in parent workflows.
+
+**Real-World Example - Model Fallback Bug:**
+```
+Parent Agent: uses anthropic/claude-sonnet-4.5 (user's choice) ✅
+  ↓
+Generation Subgraph Node 1: returns {output: "data"} ❌ Drops metadata!
+  ↓
+Generation Subgraph Node 2: state.get("metadata") → None
+  ↓
+_get_llm(state=state): No metadata → Falls back to DEFAULT_MODEL ❌
+  ↓
+Result: Wrong model used! (google/gemini-2.5-pro instead of user's Claude choice)
+```
+
+**MANDATORY Pattern for ALL Subgraph Nodes:**
+
+Every node in a subgraph must return these 5 critical keys:
+
+```python
+async def any_subgraph_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        # ... node logic ...
+        
+        return {
+            # Node-specific outputs
+            "node_output": result,
+            "is_complete": True,
+            
+            # ✅ CRITICAL: ALWAYS preserve these 5 keys
+            "metadata": state.get("metadata", {}),      # User model preference!
+            "user_id": state.get("user_id", "system"),  # Database access!
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+        }
+        
+    except Exception as e:
+        logger.error(f"Node failed: {e}")
+        return {
+            "error": str(e),
+            "task_status": "error",
+            
+            # ✅ CRITICAL: Preserve even on error!
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+        }
+```
+
+**Why Each Key Matters:**
+
+| Key | Why Critical | What Breaks If Missing |
+|-----|--------------|----------------------|
+| `metadata` | Contains `user_chat_model` | LLM calls fall back to DEFAULT_MODEL |
+| `user_id` | Database query context | Queries fail with "system" user (no access to user's documents) |
+| `shared_memory` | Cross-agent context | Agent continuity broken, loses conversation state |
+| `messages` | Conversation history | LLM loses context, can't reference previous turns |
+| `query` | Original user request | Downstream nodes can't access user's intent |
+
+**Subgraph Construction Checklist:**
+
+When building a subgraph:
+- [ ] Identify ALL nodes in the subgraph
+- [ ] For EACH node (including error handlers):
+  - [ ] Add the 5 critical keys to return dict (success path)
+  - [ ] Add the 5 critical keys to return dict (error path)
+  - [ ] Use `state.get(key, default)` pattern for safety
+- [ ] Test the subgraph with user model preference set
+- [ ] Verify model doesn't fall back to default
+- [ ] Verify database queries succeed
+
+**Common Subgraph Anti-Patterns:**
+
+```python
+# ❌ BAD: Only returns node-specific output
+return {"context_parts": parts}
+
+# ❌ BAD: Only preserves some critical keys
+return {
+    "context_parts": parts,
+    "user_id": state.get("user_id"),  # Missing metadata!
+}
+
+# ❌ BAD: Success path preserves, error path doesn't
+try:
+    return {"result": data, "metadata": state.get("metadata", {})}
+except:
+    return {"error": str(e)}  # Missing metadata!
+
+# ✅ GOOD: All critical keys in success AND error paths
+try:
+    return {
+        "result": data,
+        "metadata": state.get("metadata", {}),
+        "user_id": state.get("user_id", "system"),
+        "shared_memory": state.get("shared_memory", {}),
+        "messages": state.get("messages", []),
+        "query": state.get("query", ""),
+    }
+except Exception as e:
+    return {
+        "error": str(e),
+        "task_status": "error",
+        "metadata": state.get("metadata", {}),
+        "user_id": state.get("user_id", "system"),
+        "shared_memory": state.get("shared_memory", {}),
+        "messages": state.get("messages", []),
+        "query": state.get("query", ""),
+    }
+```
+
+**Debugging State Loss in Subgraphs:**
+
+If you see unexpected behavior (wrong model, database failures, etc.):
+
+1. **Check for state dropping**: Add logging at each node entry/exit
+2. **Verify critical keys**: Log `list(state.keys())` at each node
+3. **Test model selection**: Add logging in `_get_llm()` to show which model is selected
+4. **Trace the path**: Follow state through each node in the subgraph
+
+**Real-World Fix Example (fiction_generation_subgraph):**
+
+Before (wrong model used):
+```python
+# Node returned only its output
+return {"generation_context_parts": parts}
+# Result: metadata dropped, LLM falls back to default model
+```
+
+After (correct model used):
+```python
+return {
+    "generation_context_parts": parts,
+    "metadata": state.get("metadata", {}),  # ✅ User model preserved!
+    "user_id": state.get("user_id", "system"),
+    "shared_memory": state.get("shared_memory", {}),
+    "messages": state.get("messages", []),
+    "query": state.get("query", ""),
+}
+# Result: User's chosen model (Claude) used correctly!
+```
+
+**Validation Subgraph Example (fiction_validation_subgraph):**
+
+Validation subgraphs must preserve BOTH critical 5 keys AND domain-specific context:
+
+```python
+async def validate_consistency_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        # ... validation logic ...
+        return {
+            "consistency_warnings": warnings,
+            # ✅ CRITICAL 5
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            # ✅ Domain-specific context (fiction agents)
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+        }
+    except Exception as e:
+        return {
+            "consistency_warnings": [],
+            # ✅ Preserve ALL keys even on error!
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+        }
+```
+
+**Resolution Subgraph Example (fiction_resolution_subgraph):**
+
+Resolution subgraphs use prefixed state keys internally but must preserve BOTH original AND prefixed keys:
+
+```python
+async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        # Uses prefixed keys internally
+        manuscript = state.get("resolution_manuscript", "")
+        operations = state.get("resolution_operations", [])
+        # ... resolution logic ...
+        
+        return {
+            "resolved_operations": editor_operations,
+            "resolution_complete": False,
+            # ✅ CRITICAL 5
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            # ✅ Domain-specific context
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+            # ✅ Prefixed keys (for next nodes in subgraph)
+            "resolution_manuscript": state.get("resolution_manuscript", ""),
+            "resolution_structured_edit": state.get("resolution_structured_edit"),
+            "resolution_operations": state.get("resolution_operations", []),
+        }
+    except Exception as e:
+        return {
+            "resolved_operations": [],
+            "error": str(e),
+            "task_status": "error",
+            "resolution_complete": True,
+            # ✅ Preserve ALL keys even on error!
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+            "resolution_manuscript": state.get("resolution_manuscript", ""),
+            "resolution_structured_edit": state.get("resolution_structured_edit"),
+            "resolution_operations": state.get("resolution_operations", []),
+        }
+```
+
+**Key Takeaway:** Subgraphs that operate on domain-specific data (like fiction manuscripts) must preserve BOTH the critical 5 keys AND all domain context keys. Missing domain context causes downstream nodes to lose critical information (e.g., `chapter_ranges` being empty makes LLM think file is empty).
 
 ### Base Agent Extension (Backend Agents)
 - Extend [backend/services/langgraph_agents/base_agent.py](mdc:backend/services/langgraph_agents/base_agent.py)
@@ -731,6 +1093,10 @@ def _parse_json_response(self, content: str) -> Dict[str, Any]:
 - **Nodes that raise exceptions** - nodes should return error states, not raise
 - **Missing entry point** - always set entry point with `workflow.set_entry_point()`
 - **Missing edges** - all nodes must be connected with edges or conditional edges
+- **Dropping state keys in nodes** - nodes must return all critical state keys to preserve them
+- **Subgraph nodes dropping metadata** - causes LLM to fall back to default model instead of user's choice!
+- **Subgraph nodes missing critical 5 keys** - metadata, user_id, shared_memory, messages, query
+- **Not testing with user model preference** - subgraph may silently use wrong model
 
 ### ✅ DO THESE INSTEAD:
 - **Structured Pydantic models** for all agent communication
@@ -749,6 +1115,10 @@ def _parse_json_response(self, content: str) -> Dict[str, Any]:
 - **Error handling in nodes** - return error states, don't raise exceptions
 - **Consistent naming** - follow `_*_node` pattern for all node methods
 - **Standard process method** - implement `process()` with checkpoint management
+- **Explicit state preservation** - each node returns all critical state keys (active_editor, shared_memory, messages, etc.)
+- **ALL subgraph nodes preserve the 5 critical keys** - metadata, user_id, shared_memory, messages, query (in success AND error paths!)
+- **Test with user model preference** - verify subgraphs use correct model, not default
+- **Subgraph state checklist** - every node, every path, all 5 keys
 
 **Remember: A well-organized LangGraph system ensures every agent knows its role and executes it perfectly.**
 

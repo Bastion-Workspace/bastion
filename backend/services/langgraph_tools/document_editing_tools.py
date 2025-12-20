@@ -385,7 +385,7 @@ async def update_document_content_tool(
         )
         
         # Check if document is exempt from vectorization BEFORE processing
-        is_exempt = await document_service.document_repository.is_document_exempt(document_id)
+        is_exempt = await document_service.document_repository.is_document_exempt(document_id, user_id)
         if is_exempt:
             logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping embedding and KG extraction")
             await document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
@@ -731,7 +731,7 @@ async def apply_operations_directly(
         )
         
         # Check if document is exempt from vectorization BEFORE processing
-        is_exempt = await document_service.document_repository.is_document_exempt(document_id)
+        is_exempt = await document_service.document_repository.is_document_exempt(document_id, user_id)
         if is_exempt:
             logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping embedding and KG extraction")
             await document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
@@ -993,9 +993,12 @@ async def apply_document_edit_proposal(
                                     # Validate the re-resolved position
                                     actual_text = new_content[resolved_start:resolved_end]
                                     if actual_text != original_text:
-                                        logger.warning(f"   ⚠️ Re-resolved position still doesn't match original_text exactly")
-                                        logger.warning(f"      This may indicate content has changed significantly")
-                                        # Continue anyway - let it apply and see what happens
+                                        logger.error(f"   ❌ Re-resolved position validation failed - original_text mismatch")
+                                        logger.error(f"      Expected: {repr(original_text[:100])}")
+                                        logger.error(f"      Actual: {repr(actual_text[:100])}")
+                                        logger.error(f"      Skipping operation to prevent document corruption")
+                                        skipped_ops.append(op)
+                                        continue
                                 else:
                                     logger.error(f"   ❌ Re-resolution failed - skipping operation")
                                     skipped_ops.append(op)

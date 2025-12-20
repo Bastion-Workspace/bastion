@@ -61,6 +61,41 @@ const DocumentsPage = () => {
   const MIN_SIDEBAR_WIDTH = 240;
   const MAX_SIDEBAR_WIDTH = 500;
   
+  // Mobile detection and responsive behavior
+  const [isMobile, setIsMobile] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return window.matchMedia && window.matchMedia('(max-width: 900px)').matches;
+    }
+    return false;
+  });
+
+  // Monitor screen size changes
+  useEffect(() => {
+    const checkMobile = () => {
+      const mobile = window.matchMedia && window.matchMedia('(max-width: 900px)').matches;
+      setIsMobile(mobile);
+      
+      // Auto-collapse sidebar on mobile, restore on desktop
+      if (mobile && !sidebarCollapsed) {
+        setSidebarCollapsed(true);
+      }
+    };
+
+    checkMobile();
+    
+    if (window.matchMedia) {
+      const mediaQuery = window.matchMedia('(max-width: 900px)');
+      if (mediaQuery.addEventListener) {
+        mediaQuery.addEventListener('change', checkMobile);
+        return () => mediaQuery.removeEventListener('change', checkMobile);
+      } else {
+        // Fallback for older browsers
+        mediaQuery.addListener(checkMobile);
+        return () => mediaQuery.removeListener(checkMobile);
+      }
+    }
+  }, []);
+  
   // Clear selected folder if it doesn't exist (handles database wipes)
   useEffect(() => {
     if (selectedFolderId) {
@@ -247,7 +282,7 @@ const DocumentsPage = () => {
   return (
     <Box sx={{ 
       display: 'flex', 
-      height: { xs: 'calc(var(--appvh, 100vh) - 64px - 32px)', md: 'calc(100dvh - 64px - 32px)' },
+      height: { xs: 'calc(var(--appvh, 100vh) - 59px - 32px)', md: 'calc(100dvh - 59px - 32px)' },
       overflow: 'hidden',
       paddingBottom: 'env(safe-area-inset-bottom)'
     }}>
@@ -255,16 +290,21 @@ const DocumentsPage = () => {
       {!sidebarCollapsed && (
         <Box
           sx={{
-            position: 'relative',
-            width: `${sidebarWidth}px`,
+            position: isMobile ? 'fixed' : 'relative',
+            width: isMobile ? { xs: '280px', sm: `${Math.min(sidebarWidth, 320)}px` } : `${sidebarWidth}px`,
+            maxWidth: isMobile ? '85vw' : 'none',
+            left: 0,
+            top: 0,
+            bottom: 0,
+            zIndex: isMobile ? 1300 : 'auto',
             backgroundColor: 'background.paper',
             borderRight: '1px solid',
             borderColor: 'divider',
             display: 'flex',
             flexDirection: 'column',
             flexShrink: 0,
-            boxShadow: '2px 0 8px rgba(0,0,0,0.1)',
-            transition: 'width 0.2s ease-in-out',
+            boxShadow: isMobile ? '4px 0 12px rgba(0,0,0,0.15)' : '2px 0 8px rgba(0,0,0,0.1)',
+            transition: 'width 0.2s ease-in-out, transform 0.2s ease-in-out',
             overflow: 'hidden',
             height: '100%'
           }}
@@ -280,26 +320,27 @@ const DocumentsPage = () => {
             onToggleCollapse={toggleSidebar}
           />
           
-          {/* ROOSEVELT: Resize Handle */}
-          <Box
-            onMouseDown={handleResizeStart}
-            sx={{
-              position: 'absolute',
-              right: -2,
-              top: 0,
-              bottom: 0,
-              width: 4,
-              cursor: 'ew-resize',
-              backgroundColor: isResizing ? 'primary.main' : 'transparent',
-              '&:hover': {
-                backgroundColor: 'primary.light',
-              },
-              zIndex: 1,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center'
-            }}
-          >
+          {/* ROOSEVELT: Resize Handle - Hidden on mobile */}
+          {!isMobile && (
+            <Box
+              onMouseDown={handleResizeStart}
+              sx={{
+                position: 'absolute',
+                right: -2,
+                top: 0,
+                bottom: 0,
+                width: 4,
+                cursor: 'ew-resize',
+                backgroundColor: isResizing ? 'primary.main' : 'transparent',
+                '&:hover': {
+                  backgroundColor: 'primary.light',
+                },
+                zIndex: 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center'
+              }}
+            >
             <DragIndicator 
               sx={{ 
                 color: 'text.secondary', 
@@ -310,6 +351,7 @@ const DocumentsPage = () => {
               }} 
             />
           </Box>
+          )}
         </Box>
       )}
 
@@ -348,7 +390,10 @@ const DocumentsPage = () => {
         display: 'flex', 
         flexDirection: 'column',
         position: 'relative',
-        height: '100%'
+        height: '100%',
+        width: '100%',
+        maxWidth: '100vw',
+        overflow: 'hidden'
       }}>
         {/* Tabbed Content Area */}
         <Box sx={{ 

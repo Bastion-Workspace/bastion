@@ -16,10 +16,9 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
 from orchestrator.tools import (
-    search_documents_tool,
     get_document_content_tool,
     search_web_tool,
-    search_and_crawl_tool,
+    crawl_web_content_tool,
     expand_query_tool,
     search_conversation_cache_tool
 )
@@ -28,6 +27,12 @@ from orchestrator.backend_tool_client import get_backend_tool_client
 from orchestrator.utils.formatting_detection import detect_formatting_need
 from orchestrator.models import ResearchAssessmentResult, ResearchGapAnalysis, QuickAnswerAssessment, QueryTypeDetection
 from orchestrator.agents.base_agent import BaseAgent
+from orchestrator.subgraphs import (
+    build_research_workflow_subgraph, 
+    build_gap_analysis_subgraph,
+    build_web_research_subgraph,
+    build_assessment_subgraph
+)
 from config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -38,11 +43,12 @@ class ResearchRound(str, Enum):
     QUICK_ANSWER_CHECK = "quick_answer_check"
     CACHE_CHECK = "cache_check"
     INITIAL_LOCAL = "initial_local"
-    ROUND_2_GAP_FILLING = "round_2_gap_filling"
-    WEB_ROUND_1 = "web_round_1"
-    ASSESS_WEB_ROUND_1 = "assess_web_round_1"
-    GAP_ANALYSIS_WEB = "gap_analysis_web"
-    WEB_ROUND_2 = "web_round_2"
+    ROUND_2_GAP_FILLING = "round_2_gap_filling"  # Legacy - kept for backward compatibility
+    ROUND_2_PARALLEL = "round_2_parallel"
+    WEB_ROUND_1 = "web_round_1"  # Legacy - kept for backward compatibility
+    ASSESS_WEB_ROUND_1 = "assess_web_round_1"  # Legacy - kept for backward compatibility
+    GAP_ANALYSIS_WEB = "gap_analysis_web"  # Legacy - kept for backward compatibility
+    WEB_ROUND_2 = "web_round_2"  # Legacy - kept for backward compatibility
     FINAL_SYNTHESIS = "final_synthesis"
 
 
@@ -64,6 +70,8 @@ class ResearchState(TypedDict):
     quick_answer_provided: bool
     quick_answer_content: str
     skip_quick_answer: bool
+    quick_vector_results: List[Dict[str, Any]]  # Vector search results from quick check
+    quick_vector_relevance: Optional[str]  # "high" | "medium" | "low" | "none"
     
     # Research rounds
     current_round: str
@@ -109,6 +117,14 @@ class ResearchState(TypedDict):
     sources_used: List[str]
     routing_recommendation: Optional[str]
     
+    # Full document analysis
+    full_doc_analysis_needed: bool
+    document_ids_to_analyze: List[str]
+    analysis_queries: List[str]
+    full_doc_insights: Dict[str, Any]
+    documents_analyzed: List[str]
+    full_doc_decision_reasoning: str
+    
     # Control
     research_complete: bool
     error: str
@@ -132,6 +148,143 @@ class FullResearchAgent(BaseAgent):
     def __init__(self):
         super().__init__("full_research_agent")
         # LLMs will be created lazily using _get_llm() to respect user model preferences
+        self._research_subgraphs = {}  # Cache subgraphs by (skip_cache, skip_expansion) config
+        self._full_doc_analysis_subgraph = None  # Full document analysis subgraph
+    
+    def _get_research_subgraph(self, checkpointer, skip_cache: bool = False, skip_expansion: bool = False):
+        """Get or build research workflow subgraph"""
+        # For Round 2, we need a different subgraph config (skip cache, skip expansion)
+        cache_key = (skip_cache, skip_expansion)
+        if not hasattr(self, '_research_subgraphs'):
+            self._research_subgraphs = {}
+        
+        if cache_key not in self._research_subgraphs:
+            self._research_subgraphs[cache_key] = build_research_workflow_subgraph(
+                checkpointer, 
+                skip_cache=skip_cache, 
+                skip_expansion=skip_expansion
+            )
+        return self._research_subgraphs[cache_key]
+    
+    def _get_web_research_subgraph(self, checkpointer):
+        """Get or build web research subgraph"""
+        if self._web_research_subgraph is None:
+            self._web_research_subgraph = build_web_research_subgraph(checkpointer)
+        return self._web_research_subgraph
+    
+    def _get_assessment_subgraph(self, checkpointer):
+        """Get or build assessment subgraph"""
+        if self._assessment_subgraph is None:
+            self._assessment_subgraph = build_assessment_subgraph(checkpointer)
+        return self._assessment_subgraph
+    
+    async def _call_research_subgraph_node(self, state: ResearchState) -> Dict[str, Any]:
+        """Call research workflow subgraph to perform core research"""
+        try:
+            logger.info("🔬 Calling research workflow subgraph")
+            
+            workflow = await self._get_workflow()
+            checkpointer = workflow.checkpointer
+            research_sg = self._get_research_subgraph(checkpointer, skip_cache=False, skip_expansion=False)
+            
+            # Prepare subgraph state from agent state - ensure query is explicitly passed
+            query = state.get("query", "")
+            messages = state.get("messages", [])
+            shared_memory = state.get("shared_memory", {})
+            subgraph_state = {
+                "query": query,
+                "original_query": query,
+                "shared_memory": shared_memory,
+                "messages": messages,
+                "user_id": shared_memory.get("user_id", "system"),  # Get user_id from shared_memory
+                "metadata": state.get("metadata", {})
+            }
+            
+            logger.info(f"🔬 Passing query to research subgraph: '{query[:100]}'")
+            logger.info(f"🔍 DEBUG: Passing {len(messages)} messages to research subgraph")
+            
+            # Run subgraph
+            config = self._get_checkpoint_config(state.get("metadata", {}))
+            result = await research_sg.ainvoke(subgraph_state, config)
+            
+            logger.info("✅ Research subgraph completed")
+            
+            # Map subgraph results back to ResearchState format
+            research_findings = result.get("research_findings", {})
+            sources_found = result.get("sources_found", [])
+            citations = result.get("citations", [])
+            research_sufficient = result.get("research_sufficient", False)
+            round1_sufficient = result.get("round1_sufficient", False)
+            
+            # CRITICAL: First try to get round1_results and web_round1_results directly from subgraph result
+            # (they should be preserved by synthesize_findings_node)
+            subgraph_round1_results = result.get("round1_results", {})
+            subgraph_web_round1_results = result.get("web_round1_results", {})
+            
+            # Extract round1 results - prefer direct from subgraph, fallback to research_findings
+            if subgraph_round1_results and subgraph_round1_results.get("search_results"):
+                round1_results = subgraph_round1_results
+                logger.info(f"✅ Using round1_results from subgraph: {len(round1_results.get('search_results', ''))} chars")
+            else:
+                round1_results = {
+                    "search_results": research_findings.get("local_results", ""),
+                    "documents_found": len([s for s in sources_found if s.get("source") == "local"]),
+                    "round1_document_ids": [s.get("document_id") for s in sources_found if s.get("source") == "local" and s.get("document_id")]
+                }
+                logger.info(f"⚠️ Using fallback round1_results from research_findings: {len(round1_results.get('search_results', ''))} chars")
+            
+            # Extract web_round1_results - prefer direct from subgraph, fallback to research_findings
+            if subgraph_web_round1_results and subgraph_web_round1_results.get("content"):
+                web_round1_results = subgraph_web_round1_results
+                logger.info(f"✅ Using web_round1_results from subgraph: {len(web_round1_results.get('content', ''))} chars")
+            else:
+                web_round1_results = {
+                    "content": research_findings.get("web_results", ""),
+                    "sources_found": [s for s in sources_found if s.get("source") == "web"]
+                }
+                logger.info(f"⚠️ Using fallback web_round1_results from research_findings: {len(web_round1_results.get('content', ''))} chars")
+            
+            # Extract round1 assessment if available
+            round1_assessment = result.get("round1_assessment", {})
+            
+            # Extract gap analysis if available (from subgraph's gap_analysis node)
+            gap_analysis = result.get("gap_analysis", {})
+            identified_gaps = result.get("identified_gaps", [])
+            
+            # Check if we had a cache hit
+            cache_hit = result.get("cache_hit", False)
+            cached_context = result.get("cached_context", "")
+            
+            return {
+                "round1_results": round1_results,
+                "web_round1_results": web_round1_results,
+                "sources_found": sources_found,
+                "citations": citations,
+                "round1_sufficient": round1_sufficient or research_sufficient,
+                "round1_assessment": round1_assessment,
+                "gap_analysis": gap_analysis,
+                "identified_gaps": identified_gaps,
+                "cache_hit": cache_hit,
+                "cached_context": cached_context,
+                "current_round": ResearchRound.ROUND_2_PARALLEL.value if not (round1_sufficient or research_sufficient) else ResearchRound.FINAL_SYNTHESIS.value,
+                "research_findings": research_findings
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Research subgraph error: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {
+                "round1_results": {"error": str(e), "search_results": ""},
+                "web_round1_results": {"error": str(e), "content": ""},
+                "sources_found": [],
+                "citations": [],
+                "round1_sufficient": False,
+                "cache_hit": False,
+                "cached_context": "",
+                "current_round": ResearchRound.ROUND_2_PARALLEL.value,
+                "error": str(e)
+            }
     
     def _build_workflow(self, checkpointer) -> StateGraph:
         """Build sophisticated multi-round research workflow"""
@@ -141,17 +294,16 @@ class FullResearchAgent(BaseAgent):
         # Add quick answer check node (first node - entry point)
         workflow.add_node("quick_answer_check", self._quick_answer_check_node)
         
-        # Add nodes for each stage
-        workflow.add_node("cache_check", self._cache_check_node)
-        workflow.add_node("query_expansion", self._query_expansion_node)
-        workflow.add_node("round1_parallel_search", self._round1_parallel_search_node)
-        workflow.add_node("assess_combined_round1", self._assess_combined_round1_node)
-        workflow.add_node("gap_analysis", self._gap_analysis_node)
-        workflow.add_node("round2_gap_filling", self._round2_gap_filling_node)
-        workflow.add_node("web_round1", self._web_round1_node)
-        workflow.add_node("assess_web_round1", self._assess_web_round1_node)
-        workflow.add_node("gap_analysis_web", self._gap_analysis_web_node)
-        workflow.add_node("web_round2", self._web_round2_node)
+        # Add research subgraph node (replaces cache_check, query_expansion, round1_parallel_search, assess_combined_round1, gap_analysis)
+        workflow.add_node("research_subgraph", self._call_research_subgraph_node)
+        
+        # Add full document analysis nodes
+        workflow.add_node("full_doc_analysis_decision", self._full_document_analysis_decision_node)
+        workflow.add_node("full_doc_analysis_subgraph", self._call_full_document_analysis_subgraph_node)
+        workflow.add_node("gap_analysis_check", self._gap_analysis_check_node)
+        
+        # Add nodes for additional research rounds (unique to FullResearchAgent)
+        workflow.add_node("round2_parallel", self._round2_parallel_node)
         workflow.add_node("detect_query_type", self._detect_query_type_node)
         workflow.add_node("final_synthesis", self._final_synthesis_node)
         
@@ -164,82 +316,46 @@ class FullResearchAgent(BaseAgent):
             self._route_from_quick_answer,
             {
                 "quick_answer": END,  # Short-circuit with quick answer
-                "full_research": "cache_check"  # Continue normal research
+                "full_research": "research_subgraph"  # Continue with research subgraph
             }
         )
         
-        # Cache check routing
+        # Research subgraph routing - check if cache hit or if we need more research
         workflow.add_conditional_edges(
-            "cache_check",
-            self._route_from_cache,
+            "research_subgraph",
+            self._route_from_research_subgraph,
             {
-                "use_cache": "detect_query_type",
-                "do_research": "query_expansion"
+                "use_cache": "detect_query_type",  # Cache hit - go straight to synthesis
+                "sufficient": "full_doc_analysis_decision",  # Research sufficient - check if full docs needed
+                "needs_round2": "full_doc_analysis_decision"  # Need Round 2 - check if full docs needed first
             }
         )
         
-        # Query expansion always goes to parallel round 1 search
-        workflow.add_edge("query_expansion", "round1_parallel_search")
-        
-        # Round 1 parallel search goes to combined assessment
-        workflow.add_edge("round1_parallel_search", "assess_combined_round1")
-        
-        # Combined Round 1 assessment routing (now has both local and web data)
+        # Full document analysis decision routing
         workflow.add_conditional_edges(
-            "assess_combined_round1",
-            self._route_from_combined_round1,
+            "full_doc_analysis_decision",
+            self._route_from_full_doc_decision,
             {
-                "sufficient": "detect_query_type",
-                "needs_gap_filling": "gap_analysis",
-                "needs_web_round2": "web_round2"
+                "analyze_full_docs": "full_doc_analysis_subgraph",  # Need full doc analysis
+                "skip_full_docs": "gap_analysis_check"  # Skip full doc analysis
             }
         )
         
-        # Gap analysis routes to Round 2 Local or Web Round 1
+        # Full document analysis subgraph always goes to gap analysis check
+        workflow.add_edge("full_doc_analysis_subgraph", "gap_analysis_check")
+        
+        # Gap analysis check - determine if we need round 2 or can proceed to synthesis
         workflow.add_conditional_edges(
-            "gap_analysis",
-            self._route_from_gap_analysis,
+            "gap_analysis_check",
+            self._route_from_gap_analysis_check,
             {
-                "round2_local": "round2_gap_filling",
-                "needs_web": "web_round1"
+                "needs_round2": "round2_parallel",  # Need Round 2
+                "proceed_to_synthesis": "detect_query_type"  # Can proceed to synthesis
             }
         )
         
-        # Round 2 Local routes to either Web Round 1 or query type detection
-        workflow.add_conditional_edges(
-            "round2_gap_filling",
-            self._route_from_round2,
-            {
-                "sufficient": "detect_query_type",
-                "needs_web": "web_round1"
-            }
-        )
-        
-        # Web Round 1 goes to assessment
-        workflow.add_edge("web_round1", "assess_web_round1")
-        
-        # Web Round 1 assessment routes to query type detection or gap analysis
-        workflow.add_conditional_edges(
-            "assess_web_round1",
-            self._route_from_web_round1,
-            {
-                "sufficient": "detect_query_type",
-                "needs_web_gap_analysis": "gap_analysis_web"
-            }
-        )
-        
-        # Web gap analysis routes to Round 2 Web or query type detection
-        workflow.add_conditional_edges(
-            "gap_analysis_web",
-            self._route_from_web_gap_analysis,
-            {
-                "web_round2": "web_round2",
-                "sufficient": "detect_query_type"
-            }
-        )
-        
-        # Web Round 2 goes to query type detection, then synthesis
-        workflow.add_edge("web_round2", "detect_query_type")
+        # Round 2 Parallel always proceeds to query type detection then synthesis
+        workflow.add_edge("round2_parallel", "detect_query_type")
         
         # Query type detection always goes to synthesis
         workflow.add_edge("detect_query_type", "final_synthesis")
@@ -264,96 +380,462 @@ class FullResearchAgent(BaseAgent):
     
     # ===== Routing Functions =====
     
-    def _route_from_cache(self, state: ResearchState) -> str:
-        """Route based on cache hit"""
+    def _route_from_research_subgraph(self, state: ResearchState) -> str:
+        """Route after research subgraph completes"""
+        # Check if we had a cache hit
         if state.get("cache_hit") and state.get("cached_context"):
-            logger.info("Cache hit - using cached research")
+            logger.info("Research subgraph: Cache hit - using cached research")
             return "use_cache"
-        logger.info("Cache miss - proceeding with research")
-        return "do_research"
-    
-    def _route_from_combined_round1(self, state: ResearchState) -> str:
-        """Route based on combined Round 1 assessment (local + web)"""
+        
+        # Check if research is sufficient
         if state.get("round1_sufficient"):
-            logger.info("Combined Round 1 sufficient - proceeding to synthesis")
+            logger.info("Research subgraph: Research sufficient - checking if full docs needed")
             return "sufficient"
         
-        round1_assessment = state.get("round1_assessment", {})
-        needs_more_local = round1_assessment.get("needs_more_local", False)
-        needs_more_web = round1_assessment.get("needs_more_web", False)
-        best_source = round1_assessment.get("best_source", "both")
-        
-        # If we need more web data, go to web round 2
-        if needs_more_web:
-            logger.info("Combined Round 1: Needs more web data - routing to Web Round 2")
-            return "needs_web_round2"
-        
-        # If we need more local data, do gap analysis for Round 2 local
-        if needs_more_local:
-            logger.info("Combined Round 1: Needs more local data - routing to gap analysis")
-            return "needs_gap_filling"
-        
-        # Default: do gap analysis to determine next steps
-        logger.info("Combined Round 1 insufficient - doing gap analysis")
-        return "needs_gap_filling"
-    
-    def _route_from_round1(self, state: ResearchState) -> str:
-        """Route based on Round 1 sufficiency (legacy - redirects to combined routing)"""
-        return self._route_from_combined_round1(state)
-    
-    def _route_from_gap_analysis(self, state: ResearchState) -> str:
-        """Route from gap analysis based on severity and web search needs"""
+        # Check gap analysis flags (both are independent)
         gap_analysis = state.get("gap_analysis", {})
-        severity = gap_analysis.get("gap_severity", "moderate")
-        needs_web_search = gap_analysis.get("needs_web_search", False)
+        needs_local = gap_analysis.get("needs_local_search", False)
+        needs_web = gap_analysis.get("needs_web_search", False)
         
-        # Severe gaps + needs web search → skip Round 2 Local, go to Web Round 1
-        if severity == "severe" and needs_web_search:
-            logger.info("Gap analysis: Severe gaps + web search needed - skipping Round 2 Local, going to Web Round 1")
-            return "needs_web"
+        # If either local or web is needed, check if full docs needed first
+        if needs_local or needs_web:
+            logger.info(f"Research subgraph: Needs Round 2 (local={needs_local}, web={needs_web}) - checking if full docs needed")
+            return "needs_round2"
         
-        # Minor/Moderate gaps → try Round 2 Local first
-        if severity in ["minor", "moderate"]:
-            logger.info(f"Gap analysis: {severity} gaps - trying Round 2 Local first")
-            return "round2_local"
-        
-        # Default: try Round 2 Local
-        logger.info("Gap analysis: Default - trying Round 2 Local")
-        return "round2_local"
-    
-    def _route_from_round2(self, state: ResearchState) -> str:
-        """Route based on Round 2 Local sufficiency"""
-        round2_sufficient = state.get("round2_sufficient", False)
-        
-        if round2_sufficient:
-            logger.info("Round 2 Local sufficient - proceeding to synthesis")
-            return "sufficient"
-        
-        logger.info("Round 2 Local insufficient - proceeding to Web Round 1")
-        return "needs_web"
-    
-    def _route_from_web_round1(self, state: ResearchState) -> str:
-        """Route based on Web Round 1 sufficiency"""
-        if state.get("web_round1_sufficient"):
-            logger.info("Web Round 1 sufficient - proceeding to synthesis")
-            return "sufficient"
-        
-        logger.info("Web Round 1 insufficient - doing web gap analysis for Round 2 Web")
-        return "needs_web_gap_analysis"
-    
-    def _route_from_web_gap_analysis(self, state: ResearchState) -> str:
-        """Route from web gap analysis - decide if Round 2 Web is needed"""
-        web_gap_analysis = state.get("web_gap_analysis", {})
-        needs_web_round2 = web_gap_analysis.get("needs_web_round2", False)
-        
-        if needs_web_round2:
-            logger.info("Web gap analysis: Round 2 Web needed")
-            return "web_round2"
-        
-        logger.info("Web gap analysis: Round 2 Web not needed - proceeding to synthesis")
+        # Default: proceed to full doc analysis decision
+        logger.info("Research subgraph: No additional searches needed - checking if full docs needed")
         return "sufficient"
     
+    def _route_from_full_doc_decision(self, state: ResearchState) -> str:
+        """Route after full document analysis decision"""
+        if state.get("full_doc_analysis_needed"):
+            logger.info("Full doc decision: Will analyze full documents")
+            return "analyze_full_docs"
+        else:
+            logger.info("Full doc decision: Skipping full document analysis")
+            return "skip_full_docs"
+    
+    def _route_from_gap_analysis_check(self, state: ResearchState) -> str:
+        """Route after gap analysis check (with or without full doc insights)"""
+        # Check gap analysis flags
+        gap_analysis = state.get("gap_analysis", {})
+        needs_local = gap_analysis.get("needs_local_search", False)
+        needs_web = gap_analysis.get("needs_web_search", False)
+        
+        # If either local or web is needed, go to parallel Round 2
+        if needs_local or needs_web:
+            logger.info(f"Gap analysis check: Needs Round 2 (local={needs_local}, web={needs_web})")
+            return "needs_round2"
+        
+        # Default: proceed to synthesis
+        logger.info("Gap analysis check: No additional searches needed - proceeding to synthesis")
+        return "proceed_to_synthesis"
+    
     # ===== Workflow Nodes =====
+    
+    async def _full_document_analysis_decision_node(self, state: ResearchState) -> Dict[str, Any]:
+        """
+        Hybrid decision: rules + LLM to determine if full docs needed
+        
+        Phase 1: Fast rule-based pre-screening
+        Phase 2: LLM decision (only if rules pass) to generate targeted queries
+        """
+        try:
+            query = state.get("query", "")
+            round1_results = state.get("round1_results", {})
+            sources_found = state.get("sources_found", [])
+            
+            # Configuration constants
+            MIN_QUALITY_CHUNKS = 3
+            MIN_CHUNKS_PER_DOC = 3
+            MIN_CHUNK_SCORE = 0.7
+            MAX_DOC_TOKENS = 100000  # 100k tokens
+            LLM_CONFIDENCE_THRESHOLD = 0.6
+            MAX_DOCS_TO_ANALYZE = 2
+            MAX_PARALLEL_QUERIES = 4
+            
+            logger.info("🔍 Evaluating if full document analysis is needed")
+            
+            # ============================================
+            # PHASE 1: Fast Rule-Based Pre-Screening
+            # ============================================
+            
+            # Skip if query is too short/simple
+            if len(query.split()) < 5:
+                logger.info("❌ Skip full doc: Query too simple (< 5 words)")
+                return {"full_doc_analysis_needed": False}
+            
+            # Extract document IDs from sources
+            document_ids = []
+            for source in sources_found:
+                if source.get("type") == "document" and source.get("document_id"):
+                    document_ids.append(source.get("document_id"))
+            
+            if not document_ids:
+                logger.info("❌ Skip full doc: No document IDs found in sources")
+                return {"full_doc_analysis_needed": False}
+            
+            # Get chunk information from round1_results
+            # Try to extract from round1_document_ids and re-query for chunk details
+            round1_document_ids = round1_results.get("round1_document_ids", [])
+            if not round1_document_ids:
+                # Fallback to sources
+                round1_document_ids = document_ids[:5]
+            
+            # Re-query to get chunk details for analysis
+            # We need to check if documents have multiple high-quality chunks
+            from orchestrator.subgraphs.intelligent_document_retrieval_subgraph import retrieve_documents_intelligently
+            
+            shared_memory = state.get("shared_memory", {})
+            user_id = shared_memory.get("user_id", "system") if shared_memory else "system"
+            
+            # Quick retrieval to get chunk structure
+            try:
+                chunk_result = await retrieve_documents_intelligently(
+                    query=query,
+                    user_id=user_id,
+                    mode="fast",
+                    max_results=5,
+                    small_doc_threshold=15000
+                )
+                
+                retrieved_docs = chunk_result.get("retrieved_documents", [])
+                
+                if not retrieved_docs:
+                    logger.info("❌ Skip full doc: No documents retrieved")
+                    return {"full_doc_analysis_needed": False}
+                
+                # Analyze chunk patterns
+                doc_chunk_counts = {}
+                high_quality_chunks = []
+                cross_ref_signals = []
+                
+                for doc in retrieved_docs:
+                    doc_id = doc.get("document_id")
+                    if not doc_id:
+                        continue
+                    
+                    # Check retrieval strategy
+                    strategy = doc.get("retrieval_strategy", "")
+                    
+                    # If full_document, it's already small - skip
+                    if strategy == "full_document":
+                        continue
+                    
+                    # If multi_chunk, count chunks
+                    if strategy == "multi_chunk":
+                        chunks = doc.get("chunks", [])
+                        high_quality = [c for c in chunks if c.get("relevance_score", 0.0) >= MIN_CHUNK_SCORE]
+                        if len(high_quality) >= MIN_CHUNKS_PER_DOC:
+                            doc_chunk_counts[doc_id] = len(high_quality)
+                            high_quality_chunks.extend(high_quality)
+                            
+                            # Check for cross-reference signals
+                            for chunk in high_quality:
+                                content = chunk.get("content", "").lower()
+                                if any(signal in content for signal in ["see section", "as discussed", "mentioned earlier", "refer to chapter", "in part"]):
+                                    cross_ref_signals.append(doc_id)
+                                    break
+                
+                # RULE: Need at least one document with 3+ high-quality chunks
+                promising_docs = {
+                    doc_id: count for doc_id, count in doc_chunk_counts.items() 
+                    if count >= MIN_CHUNKS_PER_DOC
+                }
+                
+                if not promising_docs:
+                    logger.info("❌ Skip full doc: No document with 3+ quality chunks")
+                    return {"full_doc_analysis_needed": False}
+                
+                # Check document sizes (skip if > 100k tokens)
+                from orchestrator.backend_tool_client import get_backend_tool_client
+                client = await get_backend_tool_client()
+                
+                reasonable_docs = {}
+                for doc_id in promising_docs.keys():
+                    try:
+                        doc_size = await client.get_document_size(doc_id, user_id)
+                        estimated_tokens = doc_size // 4  # Rough estimate
+                        if estimated_tokens < MAX_DOC_TOKENS:
+                            reasonable_docs[doc_id] = promising_docs[doc_id]
+                    except Exception as e:
+                        logger.warning(f"Could not check size for doc {doc_id}: {e}")
+                        # Assume reasonable if we can't check
+                        reasonable_docs[doc_id] = promising_docs[doc_id]
+                
+                if not reasonable_docs:
+                    logger.info("❌ Skip full doc: All promising docs too large")
+                    return {"full_doc_analysis_needed": False}
+                
+                # Check total high-quality chunks
+                if len(high_quality_chunks) < MIN_QUALITY_CHUNKS:
+                    logger.info(f"❌ Skip full doc: Too few quality chunks ({len(high_quality_chunks)} < {MIN_QUALITY_CHUNKS})")
+                    return {"full_doc_analysis_needed": False}
+                
+            except Exception as e:
+                logger.warning(f"Error checking chunk patterns: {e}, skipping full doc analysis")
+                return {"full_doc_analysis_needed": False}
+            
+            # ============================================
+            # PHASE 2: LLM Decision (only if rules passed)
+            # ============================================
+            logger.info(f"✅ Rules passed: {len(reasonable_docs)} promising docs, asking LLM...")
+            
+            # Build context for LLM
+            chunk_preview = "\n\n".join([
+                f"[Doc {c.get('document_id', 'unknown')[:8]}] Score: {c.get('relevance_score', 0.0):.2f}\n{c.get('content', '')[:200]}..."
+                for c in high_quality_chunks[:5]
+            ])
+            
+            top_doc_id = max(reasonable_docs.items(), key=lambda x: x[1])[0]
+            top_doc_count = reasonable_docs[top_doc_id]
+            
+            decision_prompt = f"""You are evaluating whether to retrieve full documents for deeper analysis.
+
+QUERY: {query}
+
+CHUNK ANALYSIS:
+- Found {len(high_quality_chunks)} high-quality chunks across {len(reasonable_docs)} documents
+- Top document has {top_doc_count} relevant chunks
+- Cross-reference signals found: {len(cross_ref_signals)} document(s)
+
+CHUNK PREVIEW:
+{chunk_preview}
+
+EVALUATION CRITERIA:
+1. Do chunks appear fragmentary or incomplete?
+2. Does the query require synthesis across sections? (e.g., "relationship between X and Y", "how did X evolve")
+3. Would full document context significantly improve answer quality?
+4. Are chunks referencing other sections ("see chapter X", "as discussed earlier")?
+
+Respond with ONLY valid JSON matching this exact schema:
+{{
+    "should_retrieve_full_docs": boolean,
+    "confidence": number (0.0-1.0),
+    "reasoning": "brief explanation",
+    "suggested_queries": ["query1", "query2", "query3"]  // 3-4 specific questions to ask of full docs
+}}
+
+Examples where full docs help:
+- "What was the relationship between Dan Reingold and Bernie Ebbers?" (needs full narrative)
+- "How did the author's perspective evolve throughout the book?" (needs full arc)
+- "Compare the methodology in sections 2 and 5" (needs cross-referencing)
+
+Examples where chunks are sufficient:
+- "What is the definition of X?" (factual, single answer)
+- "List the key findings" (can be extracted from chunks)
+- "What year did X happen?" (simple fact)
+
+Your decision:"""
+            
+            llm = self._get_llm(temperature=0.3, state=state)
+            datetime_context = self._get_datetime_context()
+            
+            decision_messages = [
+                SystemMessage(content="You are a document analysis decision maker. Always respond with valid JSON matching the exact schema provided."),
+                SystemMessage(content=datetime_context)
+            ]
+            
+            # Include conversation history if available
+            conversation_messages = state.get("messages", [])
+            if conversation_messages:
+                decision_messages.extend(conversation_messages)
+            
+            decision_messages.append(HumanMessage(content=decision_prompt))
+            
+            response = await llm.ainvoke(decision_messages)
+            
+            # Parse LLM response
+            try:
+                text = response.content.strip()
+                if '```json' in text:
+                    m = re.search(r'```json\s*\n([\s\S]*?)\n```', text)
+                    if m:
+                        text = m.group(1).strip()
+                elif '```' in text:
+                    m = re.search(r'```\s*\n([\s\S]*?)\n```', text)
+                    if m:
+                        text = m.group(1).strip()
+                
+                json_match = re.search(r'\{[\s\S]*\}', text)
+                if json_match:
+                    text = json_match.group(0)
+                
+                decision = json.loads(text)
+                
+                if decision.get("should_retrieve_full_docs") and decision.get("confidence", 0.0) >= LLM_CONFIDENCE_THRESHOLD:
+                    suggested_queries = decision.get("suggested_queries", [])
+                    if not suggested_queries:
+                        # Fallback: generate queries from original query
+                        suggested_queries = [
+                            f"What specific details about {query}?",
+                            f"How does this relate to the main topic?",
+                            f"What context is missing from the chunks?"
+                        ]
+                    
+                    # Select top documents (by chunk count)
+                    sorted_docs = sorted(reasonable_docs.items(), key=lambda x: x[1], reverse=True)
+                    doc_ids_to_analyze = [doc_id for doc_id, _ in sorted_docs[:MAX_DOCS_TO_ANALYZE]]
+                    
+                    logger.info(f"✅ LLM decided YES (confidence={decision.get('confidence', 0.0):.2f}): {decision.get('reasoning', '')}")
+                    logger.info(f"📄 Will analyze {len(doc_ids_to_analyze)} documents with {len(suggested_queries[:MAX_PARALLEL_QUERIES])} queries")
+                    
+                    return {
+                        "full_doc_analysis_needed": True,
+                        "document_ids_to_analyze": doc_ids_to_analyze,
+                        "analysis_queries": suggested_queries[:MAX_PARALLEL_QUERIES],
+                        "full_doc_decision_reasoning": decision.get("reasoning", "")
+                    }
+                else:
+                    logger.info(f"❌ LLM decided NO (confidence={decision.get('confidence', 0.0):.2f}): {decision.get('reasoning', '')}")
+                    return {"full_doc_analysis_needed": False}
+                    
+            except (json.JSONDecodeError, Exception) as e:
+                logger.warning(f"LLM decision parsing failed: {e}, defaulting to NO")
+                return {"full_doc_analysis_needed": False}
+            
+        except Exception as e:
+            logger.error(f"Full document analysis decision error: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {"full_doc_analysis_needed": False}
+    
+    async def _gap_analysis_check_node(self, state: ResearchState) -> Dict[str, Any]:
+        """Simple pass-through node to check gap analysis after full doc analysis"""
+        # This node just passes through state - routing logic handles the decision
+        return {}
+    
+    async def _call_full_document_analysis_subgraph_node(self, state: ResearchState) -> Dict[str, Any]:
+        """Call full document analysis subgraph to analyze full documents"""
+        try:
+            logger.info("📚 Calling full document analysis subgraph")
+            
+            document_ids = state.get("document_ids_to_analyze", [])
+            analysis_queries = state.get("analysis_queries", [])
+            original_query = state.get("query", "")
+            
+            if not document_ids or not analysis_queries:
+                logger.warning("Missing required inputs for full document analysis")
+                return {
+                    "full_doc_insights": {},
+                    "documents_analyzed": [],
+                    "synthesis": ""
+                }
+            
+            workflow = await self._get_workflow()
+            checkpointer = workflow.checkpointer
+            
+            # Get or build full document analysis subgraph
+            if not hasattr(self, '_full_doc_analysis_subgraph') or self._full_doc_analysis_subgraph is None:
+                from orchestrator.subgraphs import build_full_document_analysis_subgraph
+                self._full_doc_analysis_subgraph = build_full_document_analysis_subgraph(checkpointer)
+            
+            # Prepare subgraph state
+            shared_memory = state.get("shared_memory", {})
+            user_id = shared_memory.get("user_id", "system") if shared_memory else "system"
+            
+            subgraph_state = {
+                "document_ids": document_ids,
+                "analysis_queries": analysis_queries,
+                "original_query": original_query,
+                "chunk_context": [],  # Could pass chunk results if needed
+                "user_id": user_id,
+                "messages": state.get("messages", []),
+                "metadata": state.get("metadata", {})
+            }
+            
+            logger.info(f"📚 Analyzing {len(document_ids)} documents with {len(analysis_queries)} queries")
+            
+            # Run subgraph
+            config = self._get_checkpoint_config(state.get("metadata", {}))
+            result = await self._full_doc_analysis_subgraph.ainvoke(subgraph_state, config)
+            
+            logger.info("✅ Full document analysis subgraph completed")
+            
+            return {
+                "full_doc_insights": result.get("full_doc_insights", {}),
+                "documents_analyzed": result.get("documents_analyzed", []),
+                "synthesis": result.get("synthesis", "")
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Full document analysis subgraph error: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {
+                "full_doc_insights": {},
+                "documents_analyzed": [],
+                "synthesis": ""
+            }
+    
+    async def _quick_vector_search(self, query: str, limit: int = 8, user_id: str = "system") -> List[Dict[str, Any]]:
+        """
+        Perform fast vector search for quick answer context using intelligent retrieval subgraph
+        
+        Args:
+            query: Search query
+            limit: Maximum number of results (default: 8 for speed)
+            user_id: User ID for searching user-specific documents (default: "system")
+            
+        Returns:
+            List of document results with scores, or empty list on error
+        """
+        try:
+            import asyncio
+            from orchestrator.subgraphs.intelligent_document_retrieval_subgraph import retrieve_documents_intelligently
+            
+            # Use intelligent retrieval subgraph with fast mode and timeout
+            try:
+                result = await asyncio.wait_for(
+                    retrieve_documents_intelligently(
+                        query=query,
+                        user_id=user_id,
+                        mode="fast",  # Quick retrieval for quick answer check
+                        max_results=limit,
+                        small_doc_threshold=5000
+                    ),
+                    timeout=2.0
+                )
+                
+                # Extract documents from subgraph result
+                retrieved_docs = result.get("retrieved_documents", [])
+                
+                # Format results for relevance analysis (maintain compatibility)
+                formatted_results = []
+                for doc in retrieved_docs:
+                    formatted_results.append({
+                        'document_id': doc.get('document_id'),
+                        'title': doc.get('title', doc.get('filename', 'Unknown')),
+                        'filename': doc.get('filename', ''),
+                        'content_preview': doc.get('content_preview', ''),
+                        'relevance_score': doc.get('relevance_score', 0.0),
+                        'metadata': doc.get('metadata', {})
+                    })
+                
+                logger.info(f"Quick vector search found {len(formatted_results)} results via intelligent retrieval")
+                return formatted_results
+                
+            except asyncio.TimeoutError:
+                logger.warning("Quick vector search timed out after 2 seconds - falling back to basic search")
+                # Fallback to basic search
+                from orchestrator.tools import search_documents_structured
+                search_result = await search_documents_structured(query=query, limit=limit, user_id=user_id)
+                results = search_result.get('results', [])
+                formatted_results = []
+                for doc in results:
+                    formatted_results.append({
+                        'document_id': doc.get('document_id'),
+                        'title': doc.get('title', doc.get('filename', 'Unknown')),
+                        'filename': doc.get('filename', ''),
+                        'content_preview': doc.get('content_preview', ''),
+                        'relevance_score': doc.get('relevance_score', 0.0),
+                        'metadata': doc.get('metadata', {})
+                    })
+                return formatted_results
+            
+        except Exception as e:
+            logger.warning(f"Quick vector search failed: {e} - continuing without vector results")
+            return []
     
     async def _quick_answer_check_node(self, state: ResearchState) -> Dict[str, Any]:
         """Check if query can be answered quickly from general knowledge without searching"""
@@ -367,12 +849,17 @@ class FullResearchAgent(BaseAgent):
                 return {
                     "quick_answer_provided": False,
                     "quick_answer_content": "",
-                    "current_round": ResearchRound.QUICK_ANSWER_CHECK.value
+                    "current_round": ResearchRound.QUICK_ANSWER_CHECK.value,
+                    "quick_vector_results": [],
+                    "quick_vector_relevance": None
                 }
             
             logger.info(f"Quick answer check for: {query}")
             
-            # Use LLM to evaluate if query can be answered from general knowledge
+            # Run LLM evaluation and vector search in parallel for speed
+            import asyncio
+            
+            # Prepare LLM evaluation prompt
             evaluation_prompt = f"""Evaluate whether this query can be answered accurately from general knowledge without searching documents or the web.
 
 USER QUERY: {query}
@@ -419,11 +906,88 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
             
             llm = self._get_llm(temperature=0.3, state=state)
             datetime_context = self._get_datetime_context()
-            response = await llm.ainvoke([
+            
+            # Check for agent handoff context
+            shared_memory = state.get("shared_memory", {})
+            handoff_context = shared_memory.get("handoff_context", {})
+            handoff_note = ""
+            
+            if handoff_context:
+                source_agent = handoff_context.get("source_agent", "unknown")
+                reference_doc = handoff_context.get("reference_document", {})
+                
+                if reference_doc.get("has_content"):
+                    ref_content = reference_doc.get("content", "")[:1000]  # First 1000 chars for context
+                    ref_filename = reference_doc.get("filename", "unknown")
+                    handoff_note = f"""
+
+**AGENT HANDOFF CONTEXT**:
+- Delegated by: {source_agent}
+- User has reference document: {ref_filename}
+- Document preview: {ref_content}{"..." if len(reference_doc.get("content", "")) > 1000 else ""}
+
+When answering, you can reference data from the user's document above."""
+                    logger.info(f"🔗 Handoff context detected from {source_agent}")
+            
+            # Build messages including conversation history for context
+            messages_for_llm = [
                 SystemMessage(content="You are a query evaluator. Always respond with valid JSON matching the exact schema provided."),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content=evaluation_prompt)
-            ])
+                SystemMessage(content=datetime_context)
+            ]
+            
+            # Include conversation history if available (critical for follow-up queries)
+            conversation_messages = state.get("messages", [])
+            if conversation_messages:
+                # Add conversation history so LLM has context
+                messages_for_llm.extend(conversation_messages)
+                logger.info(f"🔍 Including {len(conversation_messages)} conversation messages for context")
+            
+            # Add the evaluation prompt with handoff context
+            full_prompt = evaluation_prompt + handoff_note
+            messages_for_llm.append(HumanMessage(content=full_prompt))
+            
+            # Run LLM evaluation and vector search in parallel
+            async def llm_evaluation_task():
+                """LLM evaluation task"""
+                return await llm.ainvoke(messages_for_llm)
+            
+            async def vector_search_task():
+                """Vector search task"""
+                # Extract user_id from shared_memory (stored in process method)
+                user_id = shared_memory.get("user_id", "system") if shared_memory else "system"
+                logger.debug(f"Quick vector search using user_id: {user_id}")
+                return await self._quick_vector_search(query, limit=8, user_id=user_id)
+            
+            # Initialize vector_results to empty list in case of early errors
+            vector_results = []
+            
+            # Execute both in parallel
+            logger.info("Running LLM evaluation and vector search in parallel...")
+            try:
+                llm_response, vector_results = await asyncio.gather(
+                    llm_evaluation_task(),
+                    vector_search_task(),
+                    return_exceptions=True
+                )
+                
+                # Handle exceptions
+                if isinstance(llm_response, Exception):
+                    logger.error(f"LLM evaluation failed: {llm_response}")
+                    raise llm_response
+                if isinstance(vector_results, Exception):
+                    logger.warning(f"Vector search failed: {vector_results} - continuing without vector results")
+                    vector_results = []
+                
+                response = llm_response
+            except Exception as e:
+                logger.error(f"Parallel execution failed: {e}")
+                # If parallel execution fails, try LLM only
+                try:
+                    response = await llm.ainvoke(messages_for_llm)
+                    vector_results = []  # Ensure it's defined
+                except Exception as llm_error:
+                    logger.error(f"LLM fallback also failed: {llm_error}")
+                    raise llm_error
             
             # Parse response with Pydantic validation
             try:
@@ -446,14 +1010,56 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
                 # Validate with Pydantic
                 assessment = QuickAnswerAssessment.parse_raw(text)
                 
-                if assessment.can_answer_quickly and assessment.quick_answer:
-                    # Format the quick answer with offer for deeper research
-                    formatted_answer = f"""{assessment.quick_answer}
-
----
-*Would you like me to perform a deeper search for more detailed information, sources, or alternative perspectives? Just let me know!*"""
+                # Analyze vector search results for relevance
+                vector_relevance = "none"
+                high_relevance_docs = []
+                medium_relevance_docs = []
+                
+                if vector_results:
+                    for doc in vector_results:
+                        score = doc.get('relevance_score', 0.0)
+                        if score >= 0.7:
+                            high_relevance_docs.append(doc)
+                        elif score >= 0.5:
+                            medium_relevance_docs.append(doc)
                     
-                    logger.info(f"Quick answer provided: confidence={assessment.confidence}")
+                    if high_relevance_docs:
+                        vector_relevance = "high"
+                    elif medium_relevance_docs:
+                        vector_relevance = "medium"
+                    elif vector_results:
+                        vector_relevance = "low"
+                    
+                    logger.info(f"Vector search relevance: {vector_relevance} ({len(high_relevance_docs)} high, {len(medium_relevance_docs)} medium)")
+                
+                if assessment.can_answer_quickly and assessment.quick_answer:
+                    # Format the quick answer with intelligent merging based on vector results
+                    formatted_answer = assessment.quick_answer
+                    
+                    # High relevance: Include citations in answer
+                    if vector_relevance == "high" and high_relevance_docs:
+                        citations_text = "\n\n**Sources from your documents:**\n"
+                        for doc in high_relevance_docs[:3]:  # Top 3 most relevant
+                            title = doc.get('title', doc.get('filename', 'Unknown'))
+                            filename = doc.get('filename', '')
+                            citations_text += f"- {title}"
+                            if filename and filename != title:
+                                citations_text += f" ({filename})"
+                            citations_text += "\n"
+                        formatted_answer += citations_text
+                        logger.info(f"Included {len(high_relevance_docs[:3])} high-relevance document citations")
+                    
+                    # Medium relevance: Mention docs are available
+                    elif vector_relevance == "medium" and medium_relevance_docs:
+                        doc_mention = f"\n\n*Note: I found {len(medium_relevance_docs)} potentially relevant document(s) in your knowledge base. "
+                        doc_mention += "Would you like me to search deeper for more specific information from your documents?*"
+                        formatted_answer += doc_mention
+                        logger.info(f"Mentioned {len(medium_relevance_docs)} medium-relevance documents")
+                    
+                    # Add standard offer for deeper research
+                    formatted_answer += "\n\n---\n*Would you like me to perform a deeper search for more detailed information, sources, or alternative perspectives? Just let me know!*"
+                    
+                    logger.info(f"Quick answer provided: confidence={assessment.confidence}, vector_relevance={vector_relevance}")
                     logger.info(f"Reasoning: {assessment.reasoning}")
                     
                     # Update shared_memory to track agent selection for conversation continuity
@@ -467,14 +1073,30 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
                         "final_response": formatted_answer,
                         "research_complete": True,
                         "current_round": ResearchRound.QUICK_ANSWER_CHECK.value,
+                        "quick_vector_results": vector_results,
+                        "quick_vector_relevance": vector_relevance,
                         "shared_memory": shared_memory
                     }
                 else:
                     logger.info(f"Query requires full research: {assessment.reasoning}")
+                    # Store vector results even if proceeding to full research (may be useful later)
+                    vector_relevance = "none"
+                    if vector_results:
+                        has_high = any(doc.get('relevance_score', 0.0) >= 0.7 for doc in vector_results)
+                        has_medium = any(doc.get('relevance_score', 0.0) >= 0.5 for doc in vector_results)
+                        if has_high:
+                            vector_relevance = "high"
+                        elif has_medium:
+                            vector_relevance = "medium"
+                        else:
+                            vector_relevance = "low"
+                    
                     return {
                         "quick_answer_provided": False,
                         "quick_answer_content": "",
-                        "current_round": ResearchRound.QUICK_ANSWER_CHECK.value
+                        "current_round": ResearchRound.QUICK_ANSWER_CHECK.value,
+                        "quick_vector_results": vector_results,
+                        "quick_vector_relevance": vector_relevance
                     }
                     
             except (json.JSONDecodeError, ValidationError, Exception) as e:
@@ -482,10 +1104,24 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
                 logger.warning(f"Raw response: {response.content[:500]}")
                 # Fallback: proceed to full research if parsing fails
                 logger.info("Quick answer assessment parsing failed - proceeding to full research")
+                # Determine vector relevance for state
+                vector_relevance = "none"
+                if vector_results:
+                    has_high = any(doc.get('relevance_score', 0.0) >= 0.7 for doc in vector_results)
+                    has_medium = any(doc.get('relevance_score', 0.0) >= 0.5 for doc in vector_results)
+                    if has_high:
+                        vector_relevance = "high"
+                    elif has_medium:
+                        vector_relevance = "medium"
+                    else:
+                        vector_relevance = "low"
+                
                 return {
                     "quick_answer_provided": False,
                     "quick_answer_content": "",
-                    "current_round": ResearchRound.QUICK_ANSWER_CHECK.value
+                    "current_round": ResearchRound.QUICK_ANSWER_CHECK.value,
+                    "quick_vector_results": vector_results if 'vector_results' in locals() else [],
+                    "quick_vector_relevance": vector_relevance
                 }
             
         except Exception as e:
@@ -494,7 +1130,9 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
             return {
                 "quick_answer_provided": False,
                 "quick_answer_content": "",
-                "current_round": ResearchRound.QUICK_ANSWER_CHECK.value
+                "current_round": ResearchRound.QUICK_ANSWER_CHECK.value,
+                "quick_vector_results": [],
+                "quick_vector_relevance": "none"
             }
     
     def _route_from_quick_answer(self, state: ResearchState) -> str:
@@ -505,161 +1143,103 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
         logger.info("Proceeding to full research workflow")
         return "full_research"
     
-    async def _cache_check_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Check conversation cache for previous research"""
-        try:
-            query = state["query"]
-            logger.info(f"Checking cache for: {query}")
-            
-            # Track tool usage
-            shared_memory = state.get("shared_memory", {})
-            previous_tools = shared_memory.get("previous_tools_used", [])
-            if "search_conversation_cache_tool" not in previous_tools:
-                previous_tools.append("search_conversation_cache_tool")
-                shared_memory["previous_tools_used"] = previous_tools
-                state["shared_memory"] = shared_memory
-            
-            # Search cache
-            cache_result = await search_conversation_cache_tool(query=query, freshness_hours=24)
-            logger.info("🎯 Tool used: search_conversation_cache_tool (cache check)")
-            
-            if cache_result["cache_hit"] and cache_result["entries"]:
-                # Found cached research
-                cached_context = "\n\n".join([
-                    f"[{entry['agent_name']}]: {entry['content']}"
-                    for entry in cache_result["entries"]
-                ])
-                
-                logger.info(f"Cache HIT - found {len(cache_result['entries'])} cached entries")
-                
-                return {
-                    "cache_hit": True,
-                    "cached_context": cached_context,
-                    "current_round": ResearchRound.CACHE_CHECK.value
-                }
-            
-            logger.info("Cache MISS - no previous research found")
-            return {
-                "cache_hit": False,
-                "cached_context": "",
-                "current_round": ResearchRound.CACHE_CHECK.value
-            }
-            
-        except Exception as e:
-            logger.error(f"Cache check error: {e}")
-            return {
-                "cache_hit": False,
-                "cached_context": "",
-                "current_round": ResearchRound.CACHE_CHECK.value
-            }
+    # ===== Workflow Nodes =====
+    # Note: The following nodes are now handled by the research workflow subgraph:
+    # - cache_check -> research_subgraph
+    # - query_expansion -> research_subgraph  
+    # - round1_parallel_search -> research_subgraph
+    # - assess_combined_round1 -> research_subgraph
+    # - gap_analysis -> research_subgraph (via universal gap_analysis_subgraph)
     
-    async def _query_expansion_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Expand query with semantic variations"""
+    async def _round2_parallel_node(self, state: ResearchState) -> Dict[str, Any]:
+        """Round 2: Parallel local and web gap-filling searches based on gap analysis flags"""
         try:
             query = state["query"]
-            logger.info(f"Expanding query: {query}")
+            gap_analysis = state.get("gap_analysis", {})
+            identified_gaps = state.get("identified_gaps", [])
             
-            # Track tool usage
-            shared_memory = state.get("shared_memory", {})
-            previous_tools = shared_memory.get("previous_tools_used", [])
-            if "expand_query_tool" not in previous_tools:
-                previous_tools.append("expand_query_tool")
-                shared_memory["previous_tools_used"] = previous_tools
-                state["shared_memory"] = shared_memory
+            needs_local = gap_analysis.get("needs_local_search", False)
+            needs_web = gap_analysis.get("needs_web_search", False)
             
-            # Expand query
-            expansion_result = await expand_query_tool(query=query, num_variations=3)
-            logger.info("🎯 Tool used: expand_query_tool (query expansion)")
+            logger.info(f"Round 2 Parallel: local={needs_local}, web={needs_web}, gaps={len(identified_gaps)}")
             
-            expanded_queries = expansion_result.get("expanded_queries", [query])
-            key_entities = expansion_result.get("key_entities", [])
-            
-            logger.info(f"Generated {len(expanded_queries)} query variations, {len(key_entities)} entities")
-            
-            return {
-                "expanded_queries": expanded_queries,
-                "key_entities": key_entities,
-                "original_query": query
-            }
-            
-        except Exception as e:
-            logger.error(f"Query expansion error: {e}")
-            return {
-                "expanded_queries": [state["query"]],
-                "key_entities": [],
-                "original_query": state["query"]
-            }
-    
-    async def _round1_parallel_search_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Round 1: Parallel local and web search for faster results and better decision-making"""
-        try:
-            query = state["query"]
-            expanded_queries = state.get("expanded_queries", [query])
-            shared_memory = state.get("shared_memory", {})
-            
-            # Check dynamic tool analysis to see if web search is needed
-            tool_analysis = shared_memory.get("tool_analysis", {})
-            conditional_tools = tool_analysis.get("conditional_tools", [])
-            needs_web = any("web" in tool.lower() or "crawl" in tool.lower() for tool in conditional_tools)
-            
-            logger.info(f"Round 1: Parallel search - local + web with {len(expanded_queries)} queries")
-            if needs_web:
-                logger.info("🎯 Web search tools detected in dynamic analysis - including web search")
-            else:
-                logger.info("🎯 Core tools only - web search may be added if local insufficient")
-            
-            # Run local and web search in parallel
-            import asyncio
-            from orchestrator.tools.web_tools import search_and_crawl_tool
+            # Prepare gap queries
+            gap_queries = identified_gaps[:3] if identified_gaps else [query]
             
             async def local_search_task():
-                """Local search task"""
+                """Local gap-filling search using Research Subgraph"""
+                if not needs_local:
+                    logger.info("Skipping Round 2 Local - not needed per gap analysis")
+                    return None
+                
                 try:
-                    all_results = []
-                    # Track tool usage
-                    shared_memory = state.get("shared_memory", {})
-                    previous_tools = shared_memory.get("previous_tools_used", [])
-                    if "search_documents_tool" not in previous_tools:
-                        previous_tools.append("search_documents_tool")
-                        shared_memory["previous_tools_used"] = previous_tools
-                        state["shared_memory"] = shared_memory
+                    logger.info(f"Round 2 Local: Searching for {len(gap_queries)} gaps")
                     
-                    for q in expanded_queries[:3]:  # Limit to top 3
-                        result = await search_documents_tool(query=q, limit=10)
-                        all_results.append(result)
-                    logger.info("🎯 Tool used: search_documents_tool (local search)")
-                    combined_results = "\n\n".join(all_results)
-                    return {
-                        "search_results": combined_results,
-                        "queries_used": expanded_queries[:3],
-                        "result_count": len(all_results)
+                    # Get workflow and research subgraph
+                    workflow = await self._get_workflow()
+                    checkpointer = workflow.checkpointer
+                    research_sg = self._get_research_subgraph(checkpointer, skip_cache=True, skip_expansion=True)
+                    
+                    # Prepare subgraph state with gap queries
+                    shared_memory = state.get("shared_memory", {})
+                    subgraph_state = {
+                        "query": gap_queries[0],
+                        "provided_queries": gap_queries,
+                        "shared_memory": shared_memory,
+                        "messages": state.get("messages", []),
+                        "user_id": shared_memory.get("user_id", "system"),  # Get user_id from shared_memory
+                        "metadata": state.get("metadata", {})
                     }
+                    
+                    # Run subgraph
+                    config = self._get_checkpoint_config(state.get("metadata", {}))
+                    result = await research_sg.ainvoke(subgraph_state, config)
+                    
+                    logger.info("✅ Round 2 Local complete")
+                    return result
+                    
                 except Exception as e:
-                    logger.error(f"Local search error: {e}")
-                    return {"error": str(e), "search_results": ""}
+                    logger.error(f"Round 2 Local error: {e}")
+                    return {"error": str(e)}
             
             async def web_search_task():
-                """Web search task"""
+                """Web gap-filling search using Web Research Subgraph"""
+                if not needs_web:
+                    logger.info("Skipping Round 2 Web - not needed per gap analysis")
+                    return None
+                
                 try:
-                    # Track tool usage for dynamic loading context
-                    shared_memory = state.get("shared_memory", {})
-                    previous_tools = shared_memory.get("previous_tools_used", [])
-                    if "search_and_crawl_tool" not in previous_tools:
-                        previous_tools.append("search_and_crawl_tool")
-                        shared_memory["previous_tools_used"] = previous_tools
-                        state["shared_memory"] = shared_memory
+                    logger.info(f"Round 2 Web: Searching for {len(gap_queries)} gaps")
                     
-                    web_result = await search_and_crawl_tool(query=query, max_results=10)
-                    logger.info("🎯 Tool used: search_and_crawl_tool (web search)")
-                    return {
-                        "content": web_result,
-                        "query_used": query
+                    # Get web research subgraph
+                    workflow = await self._get_workflow()
+                    checkpointer = workflow.checkpointer if workflow else None
+                    web_research_sg = self._get_web_research_subgraph(checkpointer)
+                    
+                    # Prepare subgraph state with gap queries
+                    web_subgraph_state = {
+                        "query": gap_queries[0],
+                        "queries": gap_queries if len(gap_queries) > 1 else None,
+                        "max_results": 10,
+                        "crawl_top_n": 5,  # Default to 5, but will crawl more if many high-relevance results
+                        "shared_memory": state.get("shared_memory", {}),
+                        "messages": state.get("messages", []),
+                        "metadata": state.get("metadata", {})
                     }
+                    
+                    # Run subgraph
+                    config = self._get_checkpoint_config(state.get("metadata", {}))
+                    result = await web_research_sg.ainvoke(web_subgraph_state, config)
+                    
+                    logger.info("✅ Round 2 Web complete")
+                    return result
+                    
                 except Exception as e:
-                    logger.error(f"Web search error: {e}")
-                    return {"error": str(e), "content": ""}
+                    logger.error(f"Round 2 Web error: {e}")
+                    return {"error": str(e)}
             
-            # Execute both searches in parallel
+            # Execute searches in parallel
+            import asyncio
             local_result, web_result = await asyncio.gather(
                 local_search_task(),
                 web_search_task(),
@@ -669,611 +1249,52 @@ Example for "What was the relationship between Dan Reingold and Bernie Ebbers?":
             # Handle exceptions
             if isinstance(local_result, Exception):
                 logger.error(f"Local search exception: {local_result}")
-                local_result = {"error": str(local_result), "search_results": ""}
+                local_result = None
             
             if isinstance(web_result, Exception):
                 logger.error(f"Web search exception: {web_result}")
-                web_result = {"error": str(web_result), "content": ""}
+                web_result = None
             
-            logger.info(f"✅ Parallel search complete: local={bool(local_result.get('search_results'))}, web={bool(web_result.get('content'))}")
+            # Combine results
+            combined_sources = []
+            combined_findings = {}
             
-            return {
-                "round1_results": local_result,
-                "web_round1_results": web_result,
-                "current_round": ResearchRound.INITIAL_LOCAL.value
-            }
+            if local_result:
+                local_sources = local_result.get("sources_found", [])
+                combined_sources.extend(local_sources)
+                combined_findings["local_round2"] = local_result.get("research_findings", {}).get("local_results", "")
             
-        except Exception as e:
-            logger.error(f"Round 1 parallel search error: {e}")
-            return {
-                "round1_results": {"error": str(e), "search_results": ""},
-                "web_round1_results": {"error": str(e), "content": ""},
-                "current_round": ResearchRound.INITIAL_LOCAL.value
-            }
-    
-    async def _round1_local_search_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Round 1: Initial local search (legacy - kept for backward compatibility)"""
-        return await self._round1_parallel_search_node(state)
-    
-    async def _assess_combined_round1_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Assess combined Round 1 results (local + web) for quality and sufficiency"""
-        try:
-            query = state["query"]
-            round1_results = state.get("round1_results", {})
-            web_round1_results = state.get("web_round1_results", {})
+            if web_result:
+                web_sources = web_result.get("sources_found", [])
+                combined_sources.extend(web_sources)
+                combined_findings["web_round2"] = web_result.get("web_results", {}).get("content", "")
             
-            local_results = round1_results.get("search_results", "")
-            web_results = web_round1_results.get("content", "")
-            
-            logger.info("Assessing combined Round 1 results (local + web)")
-            
-            # Use LLM to assess quality with structured output - now includes both local and web
-            assessment_prompt = f"""Assess the quality and sufficiency of these combined search results (local documents + web search) for answering the user's query.
-
-USER QUERY: {query}
-
-LOCAL DOCUMENT RESULTS:
-{local_results[:1500] if local_results else "No local results found."}
-
-WEB SEARCH RESULTS:
-{web_results[:1500] if web_results else "No web results found."}
-
-Evaluate:
-1. Do the results (local + web combined) contain relevant information?
-2. Is there enough detail to answer the query comprehensively?
-3. What information is still missing (if any)?
-4. Which source (local vs web) provides better information?
-
-STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact schema:
-{{
-    "sufficient": boolean,
-    "has_relevant_info": boolean,
-    "missing_info": ["list", "of", "specific", "gaps"],
-    "confidence": number (0.0-1.0),
-    "reasoning": "brief explanation of assessment",
-    "best_source": "local" | "web" | "both",
-    "needs_more_local": boolean,
-    "needs_more_web": boolean
-}}
-
-Example:
-{{
-    "sufficient": true,
-    "has_relevant_info": true,
-    "missing_info": [],
-    "confidence": 0.9,
-    "reasoning": "Combined local and web results provide comprehensive information to answer the query",
-    "best_source": "both",
-    "needs_more_local": false,
-    "needs_more_web": false
-}}"""
-            
-            llm = self._get_llm(temperature=0.7, state=state)
-            datetime_context = self._get_datetime_context()
-            response = await llm.ainvoke([
-                SystemMessage(content="You are a research quality assessor. Always respond with valid JSON."),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content=assessment_prompt)
-            ])
-            
-            # Parse response with Pydantic validation
-            try:
-                # Clean response content - strip markdown code fences
-                text = response.content.strip()
-                if '```json' in text:
-                    m = re.search(r'```json\s*\n([\s\S]*?)\n```', text)
-                    if m:
-                        text = m.group(1).strip()
-                elif '```' in text:
-                    m = re.search(r'```\s*\n([\s\S]*?)\n```', text)
-                    if m:
-                        text = m.group(1).strip()
-                
-                # Try to find JSON object if still wrapped in other text
-                json_match = re.search(r'\{[\s\S]*\}', text)
-                if json_match:
-                    text = json_match.group(0)
-                
-                # Validate with Pydantic
-                assessment = ResearchAssessmentResult.parse_raw(text)
-                sufficient = assessment.sufficient
-                
-                # Extract additional fields if present
-                assessment_dict = json.loads(text) if isinstance(text, str) else text
-                best_source = assessment_dict.get("best_source", "both")
-                needs_more_local = assessment_dict.get("needs_more_local", False)
-                needs_more_web = assessment_dict.get("needs_more_web", False)
-                
-                logger.info(f"Combined Round 1 assessment: sufficient={sufficient}, confidence={assessment.confidence}, best_source={best_source}")
-                logger.info(f"Assessment reasoning: {assessment.reasoning}")
-                
-            except (json.JSONDecodeError, ValidationError, Exception) as e:
-                logger.warning(f"Failed to parse assessment with Pydantic: {e}")
-                logger.warning(f"Raw response: {response.content[:500]}")
-                # Fallback: conservative assumption that more research needed
-                sufficient = False
-                best_source = "both"
-                needs_more_local = True
-                needs_more_web = False
-                logger.info(f"Combined Round 1 assessment (fallback): sufficient={sufficient}")
-            
-            return {
-                "round1_sufficient": sufficient,
-                "round1_assessment": {
-                    "sufficient": assessment.sufficient if 'assessment' in locals() else sufficient,
-                    "has_relevant_info": assessment.has_relevant_info if 'assessment' in locals() else True,
-                    "confidence": assessment.confidence if 'assessment' in locals() else 0.5,
-                    "reasoning": assessment.reasoning if 'assessment' in locals() else response.content[:200],
-                    "best_source": best_source if 'best_source' in locals() else "both",
-                    "needs_more_local": needs_more_local if 'needs_more_local' in locals() else False,
-                    "needs_more_web": needs_more_web if 'needs_more_web' in locals() else False
-                },
-                "gap_analysis": {
-                    "has_local_gaps": not sufficient,
-                    "assessment_text": response.content
-                }
-            }
-            
-        except Exception as e:
-            logger.error(f"Combined Round 1 assessment error: {e}")
-            return {
-                "round1_sufficient": False,
-                "round1_assessment": {
-                    "sufficient": False,
-                    "has_relevant_info": False,
-                    "confidence": 0.0,
-                    "reasoning": f"Assessment error: {str(e)}",
-                    "best_source": "both",
-                    "needs_more_local": True,
-                    "needs_more_web": False
-                },
-                "gap_analysis": {"has_local_gaps": True}
-            }
-    
-    async def _assess_round1_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Assess Round 1 results quality and sufficiency (legacy - redirects to combined assessment)"""
-        return await self._assess_combined_round1_node(state)
-    
-    async def _gap_analysis_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Analyze gaps in Round 1 results"""
-        try:
-            query = state["query"]
-            round1_results = state.get("round1_results", {})
-            
-            logger.info("Performing gap analysis")
-            
-            # Use LLM to identify specific gaps with structured output
-            gap_prompt = f"""Analyze what information is missing from the search results to fully answer the query.
-
-USER QUERY: {query}
-
-RESULTS SO FAR: {round1_results.get('search_results', '')[:1500]}
-
-Identify:
-1. Specific missing entities, people, facts, or concepts
-2. Targeted search queries that could fill those specific gaps
-3. Whether web search would be beneficial
-4. How severe the information gaps are
-
-STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact schema:
-{{
-    "missing_entities": ["specific", "missing", "entities"],
-    "suggested_queries": ["targeted search query 1", "targeted search query 2"],
-    "needs_web_search": boolean,
-    "gap_severity": "minor" | "moderate" | "severe",
-    "reasoning": "explanation of gaps and how to fill them"
-}}
-
-Example:
-{{
-    "missing_entities": ["Dan Reingold's employer", "specific dates of interactions", "nature of professional relationship"],
-    "suggested_queries": ["Dan Reingold analyst firm WorldCom", "Reingold Ebbers professional relationship timeline"],
-    "needs_web_search": false,
-    "gap_severity": "moderate",
-    "reasoning": "Local results provide context but lack specific details about their professional interactions and Reingold's role"
-}}"""
-            
-            llm = self._get_llm(temperature=0.7, state=state)
-            datetime_context = self._get_datetime_context()
-            response = await llm.ainvoke([
-                SystemMessage(content="You are a research gap analyst. Always respond with valid JSON."),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content=gap_prompt)
-            ])
-            
-            logger.info("Gap analysis complete")
-            
-            # Parse the LLM response with Pydantic validation
-            identified_gaps = []
-            try:
-                # Clean response content - strip markdown code fences
-                text = response.content.strip()
-                if '```json' in text:
-                    m = re.search(r'```json\s*\n([\s\S]*?)\n```', text)
-                    if m:
-                        text = m.group(1).strip()
-                elif '```' in text:
-                    m = re.search(r'```\s*\n([\s\S]*?)\n```', text)
-                    if m:
-                        text = m.group(1).strip()
-                
-                # Try to find JSON object if still wrapped in other text
-                json_match = re.search(r'\{[\s\S]*\}', text)
-                if json_match:
-                    text = json_match.group(0)
-                
-                # Validate with Pydantic
-                gap_analysis = ResearchGapAnalysis.parse_raw(text)
-                
-                # Extract suggested queries first (most specific)
-                if gap_analysis.suggested_queries:
-                    identified_gaps = gap_analysis.suggested_queries
-                elif gap_analysis.missing_entities:
-                    # Use missing entities as search terms
-                    identified_gaps = gap_analysis.missing_entities
-                else:
-                    # Fallback to original query if no specific gaps found
-                    identified_gaps = [query]
-                    
-                logger.info(f"Gap analysis: severity={gap_analysis.gap_severity}, web_search={gap_analysis.needs_web_search}")
-                logger.info(f"Missing entities: {gap_analysis.missing_entities}")
-                logger.info(f"Suggested queries: {gap_analysis.suggested_queries}")
-                logger.info(f"Reasoning: {gap_analysis.reasoning}")
-                
-                # Store needs_web_search flag in state for routing decision
-                return {
-                    "gap_analysis": {
-                        "analysis": response.content,
-                        "has_local_gaps": True,
-                        "needs_web_search": gap_analysis.needs_web_search,
-                        "gap_severity": gap_analysis.gap_severity
-                    },
-                    "identified_gaps": identified_gaps
-                }
-                
-            except (json.JSONDecodeError, ValidationError, Exception) as e:
-                logger.warning(f"Failed to parse gap analysis with Pydantic: {e}")
-                logger.warning(f"Raw response: {response.content[:500]}")
-                # Fallback: use original query and assume web search needed
-                identified_gaps = [query]
-                logger.info(f"Gap analysis (fallback): using original query, assuming web search needed")
-                return {
-                    "gap_analysis": {
-                        "analysis": response.content if 'response' in locals() else "",
-                        "has_local_gaps": True,
-                        "needs_web_search": True,  # Default to web search on fallback
-                        "gap_severity": "severe"
-                    },
-                    "identified_gaps": identified_gaps
-                }
-            
-        except Exception as e:
-            logger.error(f"Gap analysis error: {e}")
-            return {
-                "gap_analysis": {"has_local_gaps": False},
-                "identified_gaps": []
-            }
-    
-    async def _round2_gap_filling_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Round 2: Targeted search to fill identified gaps"""
-        try:
-            query = state["query"]
-            identified_gaps = state.get("identified_gaps", [])
-            
-            logger.info(f"Round 2: Gap filling for {len(identified_gaps)} gaps")
-            
-            # Track tool usage
-            shared_memory = state.get("shared_memory", {})
-            previous_tools = shared_memory.get("previous_tools_used", [])
-            if "search_documents_tool" not in previous_tools:
-                previous_tools.append("search_documents_tool")
-                shared_memory["previous_tools_used"] = previous_tools
-                state["shared_memory"] = shared_memory
-            
-            # Search for gaps
-            gap_results = []
-            for gap in identified_gaps[:3]:
-                result = await search_documents_tool(query=gap, limit=5)
-                gap_results.append(result)
-            logger.info("🎯 Tool used: search_documents_tool (round 2 gap filling)")
-            
-            combined_gap_results = "\n\n".join(gap_results)
-            
-            # Simple sufficiency check
-            has_results = len(combined_gap_results) > 100
+            logger.info(f"✅ Round 2 Parallel complete: {len(combined_sources)} total sources")
             
             return {
                 "round2_results": {
-                    "gap_results": combined_gap_results,
-                    "gaps_addressed": len(gap_results)
+                    "local_result": local_result,
+                    "web_result": web_result,
+                    "combined_sources": len(combined_sources)
                 },
-                "round2_sufficient": has_results,
-                "current_round": ResearchRound.ROUND_2_GAP_FILLING.value
+                "sources_found": combined_sources,
+                "research_findings": {
+                    **state.get("research_findings", {}),
+                    **combined_findings
+                },
+                "round2_sufficient": True,  # Always proceed to synthesis after Round 2
+                "current_round": ResearchRound.FINAL_SYNTHESIS.value
             }
             
         except Exception as e:
-            logger.error(f"Round 2 gap filling error: {e}")
+            logger.error(f"Round 2 Parallel error: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return {
                 "round2_results": {"error": str(e)},
-                "round2_sufficient": False,
-                "current_round": ResearchRound.ROUND_2_GAP_FILLING.value
-            }
-    
-    async def _web_round1_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Web Round 1: Initial web search when local sources insufficient"""
-        try:
-            query = state["query"]
-            expanded_queries = state.get("expanded_queries", [query])
-            
-            logger.info(f"Web Round 1: {query}")
-            
-            # Track tool usage
-            shared_memory = state.get("shared_memory", {})
-            previous_tools = shared_memory.get("previous_tools_used", [])
-            if "search_and_crawl_tool" not in previous_tools:
-                previous_tools.append("search_and_crawl_tool")
-                shared_memory["previous_tools_used"] = previous_tools
-                state["shared_memory"] = shared_memory
-            
-            # Use search_and_crawl for comprehensive web research
-            web_result = await search_and_crawl_tool(query=query, max_results=10)
-            logger.info("🎯 Tool used: search_and_crawl_tool (web round 1)")
-            
-            return {
-                "web_round1_results": {
-                    "content": web_result,
-                    "query_used": query
-                },
-                "web_search_results": {  # Legacy field
-                    "content": web_result,
-                    "query_used": query
-                },
-                "web_permission_granted": True,  # No HITL currently
-                "current_round": ResearchRound.WEB_ROUND_1.value
-            }
-            
-        except Exception as e:
-            logger.error(f"Web Round 1 error: {e}")
-            return {
-                "web_round1_results": {"error": str(e)},
-                "web_search_results": {"error": str(e)},
-                "current_round": ResearchRound.WEB_ROUND_1.value
-            }
-    
-    async def _assess_web_round1_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Assess Web Round 1 results quality and sufficiency"""
-        try:
-            query = state["query"]
-            web_round1_results = state.get("web_round1_results", {})
-            web_content = web_round1_results.get("content", "")
-            
-            # Extract text content if it's a formatted string
-            if isinstance(web_content, str):
-                search_results = web_content
-            else:
-                search_results = str(web_content)
-            
-            logger.info("Assessing Web Round 1 results quality")
-            
-            # Use LLM to assess quality with structured output
-            assessment_prompt = f"""Assess the quality and sufficiency of these web search results for answering the user's query.
-
-USER QUERY: {query}
-
-WEB SEARCH RESULTS:
-{search_results[:2000]}
-
-Evaluate:
-1. Do the results contain relevant information?
-2. Is there enough detail to answer the query comprehensively?
-3. What information is missing (if any)?
-
-STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact schema:
-{{
-    "sufficient": boolean,
-    "has_relevant_info": boolean,
-    "missing_info": ["list", "of", "specific", "gaps"],
-    "confidence": number (0.0-1.0),
-    "reasoning": "brief explanation of assessment"
-}}"""
-            
-            llm = self._get_llm(temperature=0.7, state=state)
-            datetime_context = self._get_datetime_context()
-            response = await llm.ainvoke([
-                SystemMessage(content="You are a research quality assessor. Always respond with valid JSON."),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content=assessment_prompt)
-            ])
-            
-            # Parse response with Pydantic validation
-            try:
-                text = response.content.strip()
-                if '```json' in text:
-                    m = re.search(r'```json\s*\n([\s\S]*?)\n```', text)
-                    if m:
-                        text = m.group(1).strip()
-                elif '```' in text:
-                    m = re.search(r'```\s*\n([\s\S]*?)\n```', text)
-                    if m:
-                        text = m.group(1).strip()
-                
-                json_match = re.search(r'\{[\s\S]*\}', text)
-                if json_match:
-                    text = json_match.group(0)
-                
-                assessment = ResearchAssessmentResult.parse_raw(text)
-                sufficient = assessment.sufficient
-                
-                logger.info(f"Web Round 1 assessment: sufficient={sufficient}, confidence={assessment.confidence}, relevant={assessment.has_relevant_info}")
-                logger.info(f"Assessment reasoning: {assessment.reasoning}")
-                
-            except (json.JSONDecodeError, ValidationError, Exception) as e:
-                logger.warning(f"Failed to parse web assessment with Pydantic: {e}")
-                sufficient = False
-            
-            return {
-                "web_round1_sufficient": sufficient,
-                "web_round1_assessment": {
-                    "sufficient": sufficient,
-                    "has_relevant_info": assessment.has_relevant_info if 'assessment' in locals() else True,
-                    "confidence": assessment.confidence if 'assessment' in locals() else 0.5,
-                    "reasoning": assessment.reasoning if 'assessment' in locals() else "Assessment parsing failed"
-                }
-            }
-            
-        except Exception as e:
-            logger.error(f"Web Round 1 assessment error: {e}")
-            return {
-                "web_round1_sufficient": False,
-                "web_round1_assessment": {
-                    "sufficient": False,
-                    "has_relevant_info": False,
-                    "confidence": 0.0,
-                    "reasoning": f"Assessment error: {str(e)}"
-                }
-            }
-    
-    async def _gap_analysis_web_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Analyze gaps in Web Round 1 results"""
-        try:
-            query = state["query"]
-            web_round1_results = state.get("web_round1_results", {})
-            web_content = web_round1_results.get("content", "")
-            
-            if isinstance(web_content, str):
-                search_results = web_content
-            else:
-                search_results = str(web_content)
-            
-            logger.info("Performing web gap analysis")
-            
-            # Use LLM to identify specific gaps with structured output
-            gap_prompt = f"""Analyze what information is missing from the web search results to fully answer the query.
-
-USER QUERY: {query}
-
-WEB SEARCH RESULTS SO FAR:
-{search_results[:1500]}
-
-Identify:
-1. Specific missing entities, people, facts, or concepts
-2. Whether a second round of web search would be beneficial
-3. How severe the information gaps are
-
-STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact schema:
-{{
-    "missing_entities": ["specific", "missing", "entities"],
-    "suggested_queries": ["targeted web search query 1", "targeted web search query 2"],
-    "needs_web_round2": boolean,
-    "gap_severity": "minor" | "moderate" | "severe",
-    "reasoning": "explanation of gaps and whether Round 2 Web would help"
-}}"""
-            
-            llm = self._get_llm(temperature=0.7, state=state)
-            datetime_context = self._get_datetime_context()
-            response = await llm.ainvoke([
-                SystemMessage(content="You are a research gap analyst. Always respond with valid JSON."),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content=gap_prompt)
-            ])
-            
-            logger.info("Web gap analysis complete")
-            
-            # Parse the LLM response with Pydantic validation
-            web_identified_gaps = []
-            try:
-                text = response.content.strip()
-                if '```json' in text:
-                    m = re.search(r'```json\s*\n([\s\S]*?)\n```', text)
-                    if m:
-                        text = m.group(1).strip()
-                elif '```' in text:
-                    m = re.search(r'```\s*\n([\s\S]*?)\n```', text)
-                    if m:
-                        text = m.group(1).strip()
-                
-                json_match = re.search(r'\{[\s\S]*\}', text)
-                if json_match:
-                    text = json_match.group(0)
-                
-                gap_analysis = ResearchGapAnalysis.parse_raw(text)
-                
-                # Extract suggested queries
-                if gap_analysis.suggested_queries:
-                    web_identified_gaps = gap_analysis.suggested_queries
-                elif gap_analysis.missing_entities:
-                    web_identified_gaps = gap_analysis.missing_entities
-                else:
-                    web_identified_gaps = [query]
-                
-                logger.info(f"Web gap analysis: severity={gap_analysis.gap_severity}, needs_round2={gap_analysis.needs_web_search}")
-                logger.info(f"Web missing entities: {gap_analysis.missing_entities}")
-                logger.info(f"Web suggested queries: {gap_analysis.suggested_queries}")
-                
-                return {
-                    "web_gap_analysis": {
-                        "analysis": response.content,
-                        "needs_web_round2": gap_analysis.needs_web_search,  # Reuse needs_web_search field
-                        "gap_severity": gap_analysis.gap_severity
-                    },
-                    "web_identified_gaps": web_identified_gaps
-                }
-                
-            except (json.JSONDecodeError, ValidationError, Exception) as e:
-                logger.warning(f"Failed to parse web gap analysis: {e}")
-                return {
-                    "web_gap_analysis": {
-                        "needs_web_round2": False,  # Default to no Round 2 if parsing fails
-                        "gap_severity": "minor"
-                    },
-                    "web_identified_gaps": []
-                }
-            
-        except Exception as e:
-            logger.error(f"Web gap analysis error: {e}")
-            return {
-                "web_gap_analysis": {"needs_web_round2": False},
-                "web_identified_gaps": []
-            }
-    
-    async def _web_round2_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Web Round 2: Targeted web search to fill identified gaps"""
-        try:
-            query = state["query"]
-            web_identified_gaps = state.get("web_identified_gaps", [])
-            
-            logger.info(f"Web Round 2: Gap filling for {len(web_identified_gaps)} gaps")
-            
-            # Use the first identified gap query, or original query
-            search_query = web_identified_gaps[0] if web_identified_gaps else query
-            
-            logger.info(f"Web Round 2 search: {search_query}")
-            
-            # Track tool usage
-            shared_memory = state.get("shared_memory", {})
-            previous_tools = shared_memory.get("previous_tools_used", [])
-            if "search_and_crawl_tool" not in previous_tools:
-                previous_tools.append("search_and_crawl_tool")
-                shared_memory["previous_tools_used"] = previous_tools
-                state["shared_memory"] = shared_memory
-            
-            # Use search_and_crawl for targeted web research
-            web_result = await search_and_crawl_tool(query=search_query, max_results=10)
-            logger.info("🎯 Tool used: search_and_crawl_tool (web round 2)")
-            
-            return {
-                "web_round2_results": {
-                    "content": web_result,
-                    "query_used": search_query
-                },
-                "current_round": ResearchRound.WEB_ROUND_2.value
-            }
-            
-        except Exception as e:
-            logger.error(f"Web Round 2 error: {e}")
-            return {
-                "web_round2_results": {"error": str(e)},
-                "current_round": ResearchRound.WEB_ROUND_2.value
+                "sources_found": [],
+                "round2_sufficient": True,  # Proceed to synthesis even on error
+                "current_round": ResearchRound.FINAL_SYNTHESIS.value
             }
     
     async def _detect_query_type_node(self, state: ResearchState) -> Dict[str, Any]:
@@ -1346,11 +1367,21 @@ Example for "How should I structure a research paper?":
             
             llm = self._get_llm(temperature=0.3, state=state)
             datetime_context = self._get_datetime_context()
-            response = await llm.ainvoke([
+            
+            # Build messages including conversation history for context
+            detection_messages = [
                 SystemMessage(content="You are a query type classifier. Always respond with valid JSON matching the exact schema provided."),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content=detection_prompt)
-            ])
+                SystemMessage(content=datetime_context)
+            ]
+            
+            # Include conversation history if available (critical for follow-up queries)
+            conversation_messages = state.get("messages", [])
+            if conversation_messages:
+                detection_messages.extend(conversation_messages)
+            
+            detection_messages.append(HumanMessage(content=detection_prompt))
+            
+            response = await llm.ainvoke(detection_messages)
             
             # Parse response with Pydantic validation
             try:
@@ -1437,6 +1468,17 @@ Example for "How should I structure a research paper?":
             web_round2_results = state.get("web_round2_results", {})
             # Legacy field for backward compatibility
             web_results = state.get("web_search_results", {}) or web_round1_results
+            # Full document analysis insights
+            full_doc_insights = state.get("full_doc_insights", {})
+            full_doc_synthesis = full_doc_insights.get("synthesis", "")
+            
+            # Log what we have for synthesis
+            round1_content_len = len(round1_results.get("search_results", "")) if round1_results else 0
+            round2_content_len = len(round2_results.get("gap_results", "")) if round2_results else 0
+            web1_content_len = len(web_round1_results.get("content", "")) if web_round1_results else 0
+            web2_content_len = len(web_round2_results.get("content", "")) if web_round2_results else 0
+            full_doc_content_len = len(full_doc_synthesis) if full_doc_synthesis else 0
+            logger.info(f"📊 Synthesis node received: round1={round1_content_len} chars, round2={round2_content_len} chars, web1={web1_content_len} chars, web2={web2_content_len} chars, full_doc={full_doc_content_len} chars")
             
             logger.info("Synthesizing final response from all sources")
             
@@ -1447,24 +1489,27 @@ Example for "How should I structure a research paper?":
                 context_parts.append(f"CACHED RESEARCH:\n{cached_context}")
             
             if round1_results:
-                context_parts.append(f"LOCAL SEARCH ROUND 1:\n{round1_results.get('search_results', '')[:2000]}")
+                context_parts.append(f"LOCAL SEARCH ROUND 1:\n{round1_results.get('search_results', '')[:20000]}")
             
             if round2_results:
-                context_parts.append(f"LOCAL SEARCH ROUND 2:\n{round2_results.get('gap_results', '')[:1500]}")
+                context_parts.append(f"LOCAL SEARCH ROUND 2:\n{round2_results.get('gap_results', '')[:20000]}")
             
             if web_round1_results:
                 web_content = web_round1_results.get("content", "")
                 if isinstance(web_content, str):
-                    context_parts.append(f"WEB SEARCH ROUND 1:\n{web_content[:2000]}")
+                    context_parts.append(f"WEB SEARCH ROUND 1:\n{web_content}")
                 else:
-                    context_parts.append(f"WEB SEARCH ROUND 1:\n{str(web_content)[:2000]}")
+                    context_parts.append(f"WEB SEARCH ROUND 1:\n{str(web_content)}")
             
             if web_round2_results:
                 web2_content = web_round2_results.get("content", "")
                 if isinstance(web2_content, str):
-                    context_parts.append(f"WEB SEARCH ROUND 2:\n{web2_content[:1500]}")
+                    context_parts.append(f"WEB SEARCH ROUND 2:\n{web2_content}")
                 else:
-                    context_parts.append(f"WEB SEARCH ROUND 2:\n{str(web2_content)[:1500]}")
+                    context_parts.append(f"WEB SEARCH ROUND 2:\n{str(web2_content)}")
+            
+            if full_doc_synthesis:
+                context_parts.append(f"FULL DOCUMENT ANALYSIS:\n{full_doc_synthesis}")
             
             full_context = "\n\n".join(context_parts)
             
@@ -1502,6 +1547,12 @@ Provide a well-organized response that:
 5. Cite sources where appropriate
 6. Use clear, professional language
 
+**CRITICAL**: Only include options that are directly relevant to the query. Do NOT include:
+- Unrelated results (e.g., different restaurants with similar names, different people with similar names)
+- Tangential information that doesn't answer the query
+- Results that are clearly about different entities or topics
+- Low-relevance matches that don't contribute to answering the query
+
 Format as:
 ## Option 1: [Name]
 [Description, characteristics, advantages, trade-offs, when to use]
@@ -1535,6 +1586,12 @@ Provide a well-organized response that:
 6. Cites sources where appropriate
 7. Uses clear, professional language
 
+**CRITICAL**: Only include information that is directly relevant to the query. Do NOT include:
+- Unrelated results (e.g., different restaurants with similar names, different people with similar names)
+- Tangential information that doesn't answer the query
+- Results that are clearly about different entities or topics
+- Low-relevance matches that don't contribute to answering the query
+
 Your comprehensive response:"""
             
             else:
@@ -1553,15 +1610,61 @@ Provide a well-organized, thorough response that:
 4. Acknowledges any remaining gaps
 5. Uses clear, professional language
 
+**CRITICAL**: Only include information that is directly relevant to the query. Do NOT include:
+- Unrelated results (e.g., different restaurants with similar names, different people with similar names)
+- Tangential information that doesn't answer the query
+- Results that are clearly about different entities or topics
+- Low-relevance matches that don't contribute to answering the query
+
+If no relevant information was found, simply state that clearly without listing unrelated results.
+
 Your comprehensive response:"""
             
             synthesis_llm = self._get_llm(temperature=0.3, state=state)
             datetime_context = self._get_datetime_context()
-            response = await synthesis_llm.ainvoke([
+            
+            # Check for agent handoff context
+            shared_memory = state.get("shared_memory", {})
+            handoff_context = shared_memory.get("handoff_context", {})
+            handoff_note = ""
+            
+            if handoff_context:
+                source_agent = handoff_context.get("source_agent", "unknown")
+                reference_doc = handoff_context.get("reference_document", {})
+                
+                if reference_doc.get("has_content"):
+                    ref_content = reference_doc.get("content", "")
+                    ref_filename = reference_doc.get("filename", "unknown")
+                    handoff_note = f"""
+
+**AGENT HANDOFF CONTEXT**:
+- Delegated by: {source_agent}
+- User has reference document: {ref_filename}
+
+**USER'S REFERENCE DOCUMENT CONTENT**:
+{ref_content}
+
+When synthesizing your answer, integrate information from the user's reference document with your research findings."""
+                    logger.info(f"🔗 Handoff context available for synthesis from {source_agent}")
+            
+            # Build messages including conversation history for context
+            synthesis_messages = [
                 SystemMessage(content="You are an expert research synthesizer."),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content=synthesis_prompt)
-            ])
+                SystemMessage(content=datetime_context)
+            ]
+            
+            # Include conversation history if available (critical for follow-up queries)
+            conversation_messages = state.get("messages", [])
+            if conversation_messages:
+                # Add conversation history so synthesis understands context
+                synthesis_messages.extend(conversation_messages)
+                logger.info(f"🔍 Including {len(conversation_messages)} conversation messages for synthesis context")
+            
+            # Add the synthesis prompt with handoff context
+            full_synthesis_prompt = synthesis_prompt + handoff_note
+            synthesis_messages.append(HumanMessage(content=full_synthesis_prompt))
+            
+            response = await synthesis_llm.ainvoke(synthesis_messages)
             
             final_response = response.content
             
@@ -1695,6 +1798,14 @@ Your comprehensive response:"""
             workflow = await self._get_workflow()
             config = self._get_checkpoint_config(metadata)
             
+            # Prepare new messages (current query)
+            new_messages = self._prepare_messages_with_query(messages, query)
+            
+            # Load and merge checkpointed messages to preserve conversation history
+            conversation_messages = await self._load_and_merge_checkpoint_messages(
+                workflow, config, new_messages, look_back_limit=10
+            )
+            
             # Load shared_memory from checkpoint if available
             checkpoint_state = await workflow.aget_state(config)
             existing_shared_memory = {}
@@ -1704,6 +1815,14 @@ Your comprehensive response:"""
             # Merge with any shared_memory from metadata
             shared_memory = metadata.get("shared_memory", {}) or {}
             shared_memory.update(existing_shared_memory)
+            
+            # Ensure user_chat_model is in metadata if it's in shared_memory (for subgraph nodes)
+            if "user_chat_model" in shared_memory and "user_chat_model" not in metadata:
+                metadata["user_chat_model"] = shared_memory["user_chat_model"]
+            
+            # Store user_id in shared_memory so it's available in state
+            if user_id and user_id != "system":
+                shared_memory["user_id"] = user_id
             
             # Check if this is a follow-up to a quick answer
             skip_quick_answer = False
@@ -1734,12 +1853,14 @@ Your comprehensive response:"""
             except Exception as e:
                 logger.debug(f"Could not check checkpoint state for follow-up detection: {e}")
             
-            # Call research method with skip_quick_answer flag and shared_memory
+            # Call research method with skip_quick_answer flag, shared_memory, conversation messages, and metadata
             result = await self.research(
                 query=query,
                 conversation_id=conversation_id,
                 skip_quick_answer=skip_quick_answer,
-                shared_memory=shared_memory
+                shared_memory=shared_memory,
+                messages=conversation_messages,
+                metadata=metadata  # Pass metadata to preserve user_chat_model
             )
             
             # Format response in standard agent format
@@ -1762,7 +1883,7 @@ Your comprehensive response:"""
                 "error_message": str(e)
             }
     
-    async def research(self, query: str, conversation_id: str = None, skip_quick_answer: bool = False, shared_memory: Dict[str, Any] = None) -> Dict[str, Any]:
+    async def research(self, query: str, conversation_id: str = None, skip_quick_answer: bool = False, shared_memory: Dict[str, Any] = None, messages: List[Any] = None, metadata: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         Execute complete research workflow
         
@@ -1771,6 +1892,8 @@ Your comprehensive response:"""
             conversation_id: Optional conversation ID for caching
             skip_quick_answer: If True, skip quick answer check and proceed directly to full research
             shared_memory: Optional shared memory dictionary for cross-agent communication
+            messages: Optional conversation history (for context in research)
+            metadata: Optional metadata dictionary (preserves user_chat_model, etc.)
             
         Returns:
             Complete research results with answer and metadata
@@ -1797,17 +1920,45 @@ Your comprehensive response:"""
             shared_memory["tool_analysis"] = tool_analysis
             shared_memory["dynamic_tools_loaded"] = tool_analysis["all_tools"]
             
+            # Prepare messages for state (use conversation history if provided, otherwise just current query)
+            if messages:
+                # Use provided conversation history (includes previous messages from checkpoint)
+                state_messages = list(messages)
+            else:
+                # Fallback: just current query
+                from langchain_core.messages import HumanMessage
+                state_messages = [HumanMessage(content=query)]
+            
+            # Preserve metadata (including user_chat_model) for state and subgraphs
+            state_metadata = metadata or {}
+            if conversation_id:
+                state_metadata["conversation_id"] = conversation_id
+            
+            # Ensure user_chat_model is in both metadata and shared_memory (bidirectional sync)
+            if shared_memory is None:
+                shared_memory = {}
+            # Copy from shared_memory to metadata if not present
+            if "user_chat_model" in shared_memory and "user_chat_model" not in state_metadata:
+                state_metadata["user_chat_model"] = shared_memory["user_chat_model"]
+            # Copy from metadata to shared_memory if not present
+            if "user_chat_model" in state_metadata and "user_chat_model" not in shared_memory:
+                shared_memory["user_chat_model"] = state_metadata["user_chat_model"]
+            
             # Initialize state
             initial_state = {
                 "query": query,
                 "original_query": query,
                 "expanded_queries": [],
                 "key_entities": [],
-                "messages": [HumanMessage(content=query)],
+                "messages": state_messages,
                 "shared_memory": shared_memory or {},
+                "metadata": state_metadata,  # Include full metadata in state
+                "user_id": state_metadata.get("user_id", "system"),
                 "quick_answer_provided": False,
                 "quick_answer_content": "",
                 "skip_quick_answer": skip_quick_answer,
+                "quick_vector_results": [],
+                "quick_vector_relevance": None,
                 "current_round": "",
                 "cache_hit": False,
                 "cached_context": "",
@@ -1830,6 +1981,12 @@ Your comprehensive response:"""
                 "query_type_detection": {},
                 "should_present_options": False,
                 "num_options": None,
+                "full_doc_analysis_needed": False,
+                "document_ids_to_analyze": [],
+                "analysis_queries": [],
+                "full_doc_insights": {},
+                "documents_analyzed": [],
+                "full_doc_decision_reasoning": "",
                 "final_response": "",
                 "citations": [],
                 "sources_used": [],
@@ -1841,9 +1998,8 @@ Your comprehensive response:"""
             # Get workflow and checkpoint config
             workflow = await self._get_workflow()
             
-            # Create metadata for checkpoint config
-            metadata = {"conversation_id": conversation_id} if conversation_id else {}
-            config = self._get_checkpoint_config(metadata)
+            # Use preserved metadata for checkpoint config
+            config = self._get_checkpoint_config(state_metadata)
             
             # Run workflow with checkpointing
             result = await workflow.ainvoke(initial_state, config=config)

@@ -63,16 +63,15 @@ class WebIngestSelectedOutput(BaseModel):
 class WebIngestSelectedTool:
     """MCP tool for ingesting selected web search results"""
     
-    def __init__(self, web_content_tool=None, document_service=None, embedding_manager=None, user_document_service=None, crawl4ai_tool=None):
+    def __init__(self, web_content_tool=None, document_service=None, embedding_manager=None, user_document_service=None):
         """Initialize with required services"""
         self.web_content_tool = web_content_tool
         self.document_service = document_service
         self.user_document_service = user_document_service
         self.embedding_manager = embedding_manager
-        self.crawl4ai_tool = crawl4ai_tool  # Optional Crawl4AI tool for fallback
         self.current_user_id = None  # Will be set by MCP chat service
         self.name = "web_ingest_selected_results"
-        self.description = "Ingest selected web search results into the knowledge base using Crawl4AI for superior content extraction"
+        self.description = "Ingest selected web search results into the knowledge base"
         
     async def initialize(self):
         """Initialize the web ingest selected tool"""
@@ -202,54 +201,9 @@ class WebIngestSelectedTool:
                         priority=selected_result.priority
                     )
             
-            # Fetch content
+            # Fetch content using web_content_tool
             fetch_start = time.time()
-            
-            # PRIORITY: Use Crawl4AI for superior content extraction
-            if self.crawl4ai_tool:
-                try:
-                    logger.info(f"🌐 Using Crawl4AI for superior content extraction: {url}")
-                    from mcp.tools.crawl4ai_tool import Crawl4AIInput
-                    
-                    crawl4ai_input = Crawl4AIInput(
-                        url=url,
-                        extraction_strategy="markdown",
-                        max_content_length=input_data.max_content_length,
-                        include_links=True,
-                        include_metadata=True,
-                        timeout=60  # Longer timeout for Crawl4AI
-                    )
-                    
-                    crawl4ai_response = await self.crawl4ai_tool.execute(crawl4ai_input)
-                    
-                    if crawl4ai_response.success and crawl4ai_response.data.result.content:
-                        logger.info(f"✅ Crawl4AI extraction successful for: {url}")
-                        
-                        # Ingest the Crawl4AI content
-                        document_id = await self._ingest_content(
-                            url, title, crawl4ai_response.data.result, selected_result, input_data
-                        )
-                        
-                        fetch_time = time.time() - fetch_start
-                        
-                        return IngestedResult(
-                            url=url,
-                            title=title,
-                            source=source,
-                            document_id=document_id,
-                            ingestion_status="success",
-                            content_length=len(crawl4ai_response.data.result.content),
-                            fetch_time=fetch_time,
-                            selection_reason=selected_result.selection_reason,
-                            priority=selected_result.priority
-                        )
-                    else:
-                        logger.warning(f"⚠️ Crawl4AI extraction failed for: {url}, falling back to web_content_tool")
-                except Exception as e:
-                    logger.warning(f"⚠️ Crawl4AI extraction error for {url}: {e}, falling back to web_content_tool")
-            
-            # FALLBACK: Use web_content_tool if Crawl4AI is not available or fails
-            logger.info(f"🔄 Using web_content_tool fallback for: {url}")
+            logger.info(f"🌐 Fetching content for: {url}")
             
             # Create input for web content tool
             from mcp.tools.web_content_tool import WebContentInput
@@ -286,7 +240,7 @@ class WebIngestSelectedTool:
                     priority=selected_result.priority
                 )
             else:
-                logger.warning(f"⚠️ Both Crawl4AI and web_content_tool failed for: {url}")
+                logger.warning(f"⚠️ web_content_tool failed for: {url}")
                 
                 # Create fallback content from search result metadata
                 fallback_content = self._create_fallback_content(selected_result, input_data.original_query)

@@ -169,46 +169,60 @@ CREATE POLICY chat_rooms_insert_policy ON chat_rooms
 
 CREATE POLICY chat_rooms_update_policy ON chat_rooms
     FOR UPDATE USING (
+        -- Allow if user is a participant in the room
         room_id IN (
             SELECT room_id FROM room_participants 
-            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+            WHERE user_id = current_setting('app.current_user_id', false)::varchar
         )
-        OR current_setting('app.current_user_role', true) = 'admin'
+        -- OR if user is admin
+        OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 CREATE POLICY chat_rooms_delete_policy ON chat_rooms
     FOR DELETE USING (
-        created_by = current_setting('app.current_user_id', true)::varchar
-        OR current_setting('app.current_user_role', true) = 'admin'
+        -- Allow room creator to delete
+        created_by = current_setting('app.current_user_id', false)::varchar
+        -- OR any participant can delete
+        OR room_id IN (
+            SELECT room_id FROM room_participants 
+            WHERE user_id = current_setting('app.current_user_id', false)::varchar
+        )
+        -- OR admin can delete
+        OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 -- RLS policies for room_participants
 CREATE POLICY room_participants_select_policy ON room_participants
     FOR SELECT USING (
-        room_id IN (
-            SELECT room_id FROM room_participants 
-            WHERE user_id = current_setting('app.current_user_id', true)::varchar
-        )
-        OR current_setting('app.current_user_role', true) = 'admin'
+        -- User can see their own participation records
+        user_id = current_setting('app.current_user_id', false)::varchar
+        OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 CREATE POLICY room_participants_insert_policy ON room_participants
     FOR INSERT WITH CHECK (
+        -- Allow if current user is creator of the room
         room_id IN (
             SELECT room_id FROM chat_rooms 
-            WHERE created_by = current_setting('app.current_user_id', true)::varchar
+            WHERE created_by = current_setting('app.current_user_id', false)::varchar
         )
-        OR current_setting('app.current_user_role', true) = 'admin'
+        -- OR if current user is already a participant (can add others)
+        OR room_id IN (
+            SELECT room_id FROM room_participants 
+            WHERE user_id = current_setting('app.current_user_id', false)::varchar
+        )
+        -- OR if current user is admin
+        OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 CREATE POLICY room_participants_delete_policy ON room_participants
     FOR DELETE USING (
-        user_id = current_setting('app.current_user_id', true)::varchar
+        user_id = current_setting('app.current_user_id', false)::varchar
         OR room_id IN (
             SELECT room_id FROM chat_rooms 
-            WHERE created_by = current_setting('app.current_user_id', true)::varchar
+            WHERE created_by = current_setting('app.current_user_id', false)::varchar
         )
-        OR current_setting('app.current_user_role', true) = 'admin'
+        OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 -- RLS policies for chat_messages

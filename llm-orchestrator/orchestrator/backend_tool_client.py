@@ -209,6 +209,92 @@ class BackendToolClient:
             logger.error(f"Unexpected error getting document content: {e}")
             return None
     
+    async def get_document_size(self, document_id: str, user_id: str = "system") -> int:
+        """
+        Get total character count of a document
+        
+        Args:
+            document_id: Document ID
+            user_id: User ID for access control
+            
+        Returns:
+            Total character count, or 0 if not found or error
+        """
+        try:
+            # Get full document content and calculate size
+            content = await self.get_document_content(document_id, user_id)
+            if content:
+                return len(content)
+            return 0
+            
+        except Exception as e:
+            logger.error(f"Failed to get document size: {e}")
+            return 0
+    
+    async def get_document_chunks(
+        self,
+        document_id: str,
+        user_id: str = "system",
+        limit: Optional[int] = 5
+    ) -> List[Dict[str, Any]]:
+        """
+        Get multiple chunks from a specific document, sorted by chunk_index
+        
+        Args:
+            document_id: Document ID to retrieve chunks from
+            user_id: User ID for access control
+            limit: Maximum number of chunks to return (None = all chunks)
+            
+        Returns:
+            List of chunk dictionaries with content, chunk_index, etc.
+        """
+        try:
+            await self._ensure_connected()
+            
+            request = tool_service_pb2.DocumentRequest(
+                document_id=document_id,
+                user_id=user_id
+            )
+            
+            response = await self._stub.GetDocumentChunks(request)
+            
+            # Convert proto response to list of dicts
+            chunks = []
+            for chunk_proto in response.chunks:
+                # Parse metadata JSON string
+                metadata = {}
+                if chunk_proto.metadata:
+                    try:
+                        import json
+                        metadata = json.loads(chunk_proto.metadata)
+                    except:
+                        pass
+                
+                chunks.append({
+                    'chunk_id': chunk_proto.chunk_id,
+                    'document_id': chunk_proto.document_id,
+                    'content': chunk_proto.content,
+                    'chunk_index': chunk_proto.chunk_index,
+                    'metadata': metadata
+                })
+            
+            # Apply limit if specified
+            if limit is not None:
+                chunks = chunks[:limit]
+            
+            logger.info(f"Retrieved {len(chunks)} chunks for document {document_id}")
+            return chunks
+            
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.NOT_FOUND:
+                logger.warning(f"Document chunks not found: {document_id}")
+                return []
+            logger.error(f"Get document chunks failed: {e.code()} - {e.details()}")
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error getting document chunks: {e}")
+            return []
+    
     async def find_document_by_path(
         self,
         file_path: str,
@@ -1174,72 +1260,14 @@ class BackendToolClient:
                 "error": str(e)
             }
     
-    async def search_and_crawl(
-        self,
-        query: str,
-        max_results: int = 10,
-        user_id: str = "system"
-    ) -> Dict[str, Any]:
-        """
-        Combined search and crawl operation
-        
-        Args:
-            query: Search query
-            max_results: Maximum number of results to crawl
-            user_id: User ID
-            
-        Returns:
-            Dict with 'search_results' and 'crawled_content'
-        """
-        try:
-            await self._ensure_connected()
-            
-            request = tool_service_pb2.SearchAndCrawlRequest(
-                query=query,
-                num_results=max_results,
-                user_id=user_id
-            )
-            
-            response = await self._stub.SearchAndCrawl(request)
-            
-            search_results = []
-            for result in response.search_results:
-                search_results.append({
-                    'title': result.title,
-                    'url': result.url,
-                    'snippet': result.snippet,
-                    'content': result.snippet  # WebSearchResult doesn't have content field, use snippet
-                })
-            
-            crawled_content = []
-            for result in response.crawl_results:
-                crawled_content.append({
-                    'url': result.url,
-                    'title': result.title,
-                    'content': result.content,
-                    'html': result.content,  # WebCrawlResult doesn't have html field, use content
-                    'metadata': dict(result.metadata)
-                })
-            
-            return {
-                'search_results': search_results,
-                'crawled_content': crawled_content
-            }
-            
-        except grpc.RpcError as e:
-            logger.error(f"Search and crawl failed: {e.code()} - {e.details()}")
-            return {'search_results': [], 'crawled_content': []}
-        except Exception as e:
-            logger.error(f"Unexpected error in search and crawl: {e}")
-            return {'search_results': [], 'crawled_content': []}
-    
     # ===== Query Enhancement =====
     
     async def expand_query(
         self,
         query: str,
         num_variations: int = 3,
-        user_id: str = "system"
+        user_id: str = "system",
+        conversation_context: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Expand query with variations
@@ -1248,6 +1276,7 @@ class BackendToolClient:
             query: Original query
             num_variations: Number of variations to generate
             user_id: User ID
+            conversation_context: Optional conversation context (last 2 messages) to help resolve vague references
             
         Returns:
             Dict with 'original_query', 'expanded_queries', 'key_entities', 'expansion_count'
@@ -1260,6 +1289,10 @@ class BackendToolClient:
                 num_variations=num_variations,
                 user_id=user_id
             )
+            
+            # Add conversation context if provided
+            if conversation_context:
+                request.conversation_context = conversation_context
             
             response = await self._stub.ExpandQuery(request)
             

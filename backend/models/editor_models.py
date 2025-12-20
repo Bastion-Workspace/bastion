@@ -15,7 +15,7 @@ class EditorSuggestionRequest(BaseModel):
     language: Optional[str] = Field(default="markdown", description="Language mode of the buffer")
     cursor_offset: Optional[int] = Field(default=None, description="Cursor offset in the full document")
     frontmatter: Optional[Dict[str, Any]] = Field(default=None, description="Parsed frontmatter (YAML) if present")
-    max_chars: int = Field(default=80, ge=1, le=400, description="Maximum suggested characters to return")
+    max_chars: int = Field(default=300, ge=1, le=400, description="Maximum suggested characters to return")
     temperature: float = Field(default=0.25, ge=0.0, le=1.0, description="Creativity for continuation")
 
 

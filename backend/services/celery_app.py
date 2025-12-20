@@ -23,7 +23,8 @@ celery_app = Celery(
     include=[
         "services.celery_tasks.orchestrator_tasks",
         "services.celery_tasks.agent_tasks",
-        "services.celery_tasks.rss_tasks"
+        "services.celery_tasks.rss_tasks",
+        "services.celery_tasks.entertainment_sync_tasks"
     ]
 )
 
@@ -102,6 +103,11 @@ celery_app.conf.update(
         'purge-old-news-articles': {
             'task': 'services.celery_tasks.rss_tasks.purge_old_news_task',
             'schedule': 86400.0,  # 24 hours in seconds
+        },
+        # Entertainment content sync - run every hour
+        'sync-entertainment-content': {
+            'task': 'services.celery_tasks.entertainment_sync_tasks.scheduled_entertainment_sync',
+            'schedule': 3600.0,  # 1 hour in seconds
         },
     },
     # Beat scheduler settings

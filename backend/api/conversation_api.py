@@ -72,6 +72,10 @@ async def list_conversations(skip: int = 0, limit: int = 50, current_user: Authe
             connection_string = f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
             conn = await asyncpg.connect(connection_string)
             try:
+                # Set RLS context for Row-Level Security policies
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", current_user.user_id)
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", current_user.role)
+                
                 rows = await conn.fetch(
                     """
                         SELECT 
@@ -433,6 +437,10 @@ async def update_conversation(conversation_id: str, request: UpdateConversationR
             except Exception as e:
                 logger.warning(f"⚠️ Failed to update LangGraph checkpoint JSON: {e}")
             # Legacy compatibility update (same connection)
+            # Set RLS context for Row-Level Security policies
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", current_user.user_id)
+            await conn.execute("SELECT set_config('app.current_user_role', $1, false)", current_user.role)
+            
             updates = []
             values = []
             if request.title is not None:

@@ -19,6 +19,9 @@ import {
   FileDownload,
   Fullscreen,
   FullscreenExit,
+  Edit,
+  ToggleOn,
+  ToggleOff,
 } from '@mui/icons-material';
 import ChatMessagesArea from './chat/ChatMessagesArea';
 import ChatInputArea from './chat/ChatInputArea';
@@ -309,9 +312,12 @@ const ChatSidebar = () => {
     >
       {/* Header */}
       <Box sx={{ 
-        p: 2, 
+        py: 0.75,
+        px: 1.5,
+        height: 44,
         borderBottom: '1px solid', 
         borderColor: 'divider',
+        backgroundColor: 'background.paper',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between'
@@ -358,23 +364,29 @@ const ChatSidebar = () => {
           )}
         </Tooltip>
         
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
           {editorOpen && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mr: 1 }}>
-              <input
-                id="editorPreferenceToggle"
-                type="checkbox"
-                checked={editorPreference === 'prefer'}
-                onChange={(e) => setEditorPreference(e.target.checked ? 'prefer' : 'ignore')}
-              />
-              <label htmlFor="editorPreferenceToggle" style={{ fontSize: 12 }}>Prefer Editor</label>
-            </Box>
+            <Tooltip title={editorPreference === 'prefer' ? 'Prefer Editor (on)' : 'Prefer Editor (off)'}>
+              <IconButton
+                onClick={() => setEditorPreference(editorPreference === 'prefer' ? 'ignore' : 'prefer')}
+                size="small"
+                color={editorPreference === 'prefer' ? 'primary' : 'default'}
+                sx={{ 
+                  width: 32, 
+                  height: 32,
+                  '& .MuiSvgIcon-root': { fontSize: '1.1rem' }
+                }}
+              >
+                {editorPreference === 'prefer' ? <ToggleOn /> : <ToggleOff />}
+              </IconButton>
+            </Tooltip>
           )}
           <Tooltip title="New Chat">
             <IconButton 
               onClick={handleNewChat}
               size="small"
               color="primary"
+              sx={{ width: 32, height: 32 }}
             >
               <Add />
             </IconButton>
@@ -385,6 +397,7 @@ const ChatSidebar = () => {
               onClick={() => setHistoryWindowOpen(!historyWindowOpen)}
               size="small"
               color={historyWindowOpen ? 'primary' : 'default'}
+              sx={{ width: 32, height: 32 }}
             >
               <History />
             </IconButton>
@@ -396,6 +409,7 @@ const ChatSidebar = () => {
                 onClick={handleExportConversation}
                 size="small"
                 color="default"
+                sx={{ width: 32, height: 32 }}
               >
                 <FileDownload />
               </IconButton>
@@ -407,13 +421,14 @@ const ChatSidebar = () => {
               onClick={handleFullWidthToggle}
               size="small"
               color={isFullWidth ? 'primary' : 'default'}
+              sx={{ width: 32, height: 32 }}
             >
               {isFullWidth ? <FullscreenExit /> : <Fullscreen />}
             </IconButton>
           </Tooltip>
           
           <Tooltip title="Collapse Chat">
-            <IconButton onClick={toggleSidebar} size="small">
+            <IconButton onClick={toggleSidebar} size="small" sx={{ width: 32, height: 32 }}>
               <ChevronRight />
             </IconButton>
           </Tooltip>
@@ -421,7 +436,7 @@ const ChatSidebar = () => {
       </Box>
 
       {/* Messages Area */}
-      <Box sx={{ flexGrow: 1, overflow: 'hidden' }}>
+      <Box sx={{ flexGrow: 1, overflow: 'hidden', backgroundColor: 'background.default' }}>
         <ChatMessagesArea />
       </Box>
 

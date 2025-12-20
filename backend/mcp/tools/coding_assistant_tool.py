@@ -240,10 +240,16 @@ class CodingAssistantTool:
                 model = "anthropic/claude-3.5-sonnet"  # Emergency fallback
             
             # Import datetime context utility
-            from utils.system_prompt_utils import add_datetime_context_to_system_prompt
+            from utils.system_prompt_utils import add_datetime_context_to_system_prompt_for_user
             
-            system_prompt = add_datetime_context_to_system_prompt(
-                "You are an expert software engineer with deep knowledge across multiple programming languages and frameworks. Generate high-quality, production-ready code with clear explanations."
+            # Try to get user_id from config or context if available
+            user_id = None
+            if self.config and isinstance(self.config, dict):
+                user_id = self.config.get('user_id')
+            
+            system_prompt = await add_datetime_context_to_system_prompt_for_user(
+                "You are an expert software engineer with deep knowledge across multiple programming languages and frameworks. Generate high-quality, production-ready code with clear explanations.",
+                user_id=user_id
             )
             
             messages = [

@@ -1478,13 +1478,13 @@ While you don't have specific electronics documents in your library yet, I can p
                 # Build system prompt
                 system_prompt = self._build_electronics_prompt()
 
-                # Extract conversation history for context
-                conversation_history = []
-                if messages:
-                    conversation_history = self._extract_conversation_history(messages, limit=10)
-
-                # Build messages with conversation history
-                llm_messages = self._build_messages(system_prompt, prompt, conversation_history)
+                # Build messages with conversation history using standardized helper
+                llm_messages = self._build_conversational_agent_messages(
+                    system_prompt=system_prompt,
+                    user_prompt=prompt,  # prompt already has all context embedded
+                    messages_list=messages,
+                    look_back_limit=10
+                )
 
                 logger.info("🤖 Calling LLM for general electronics guidance")
 
@@ -1671,13 +1671,13 @@ While you don't have specific electronics documents in your library yet, I can p
             # Build system prompt
             system_prompt = self._build_electronics_prompt()
 
-            # Extract conversation history for context
-            conversation_history = []
-            if messages:
-                conversation_history = self._extract_conversation_history(messages, limit=10)
-
-            # Build messages with conversation history
-            llm_messages = self._build_messages(system_prompt, prompt, conversation_history)
+            # Build messages with conversation history using standardized helper
+            llm_messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=prompt,  # prompt already has all context embedded
+                messages_list=messages,
+                look_back_limit=10
+            )
 
             logger.info(f"🤖 Calling LLM for electronics response")
 

@@ -25,9 +25,11 @@ from orchestrator.agents.outline_editing_agent import OutlineEditingAgent, get_o
 from orchestrator.agents.story_analysis_agent import StoryAnalysisAgent, get_story_analysis_agent
 from orchestrator.agents.site_crawl_agent import SiteCrawlAgent, get_site_crawl_agent
 from orchestrator.agents.rules_editing_agent import RulesEditingAgent, get_rules_editing_agent
+from orchestrator.agents.style_editing_agent import StyleEditingAgent, get_style_editing_agent
 from orchestrator.agents.proofreading_agent import ProofreadingAgent, get_proofreading_agent
 from orchestrator.agents.general_project_agent import GeneralProjectAgent, get_general_project_agent
 from orchestrator.agents.reference_agent import ReferenceAgent, get_reference_agent
+from orchestrator.agents.knowledge_builder_agent import KnowledgeBuilderAgent, get_knowledge_builder_agent
 
 __all__ = [
     'FullResearchAgent',
@@ -71,11 +73,15 @@ __all__ = [
     'get_site_crawl_agent',
     'RulesEditingAgent',
     'get_rules_editing_agent',
+    'StyleEditingAgent',
+    'get_style_editing_agent',
     'ProofreadingAgent',
     'get_proofreading_agent',
     'GeneralProjectAgent',
     'get_general_project_agent',
     'ReferenceAgent',
-    'get_reference_agent'
+    'get_reference_agent',
+    'KnowledgeBuilderAgent',
+    'get_knowledge_builder_agent'
 ]
 

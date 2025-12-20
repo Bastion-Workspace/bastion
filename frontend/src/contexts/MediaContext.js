@@ -446,14 +446,27 @@ export const MusicProvider = ({ children }) => {
       setOriginalQueue(tracks);
       setCurrentParentId(parentId);
       
-      // If shuffle is enabled, shuffle the queue and pick a random starting track
+      // If shuffle is enabled, handle shuffle logic
       if (shuffleMode && tracks.length > 1) {
-        const shuffled = [...tracks].sort(() => Math.random() - 0.5);
-        setQueue(shuffled);
-        // Start with a random track from the shuffled queue
-        const randomIndex = Math.floor(Math.random() * shuffled.length);
-        setCurrentIndex(randomIndex);
-        setCurrentTrack(shuffled[randomIndex]);
+        // Check if the selected track exists in the tracks array
+        const trackIndex = tracks.findIndex(t => t.id === track.id);
+        
+        if (trackIndex >= 0) {
+          // Specific track was clicked: play it first, then shuffle the rest
+          const remainingTracks = tracks.filter(t => t.id !== track.id);
+          const shuffled = [...remainingTracks].sort(() => Math.random() - 0.5);
+          const newQueue = [track, ...shuffled];
+          setQueue(newQueue);
+          setCurrentIndex(0);
+          setCurrentTrack(track);
+        } else {
+          // Track not found in array (shouldn't happen, but fallback to random)
+          const shuffled = [...tracks].sort(() => Math.random() - 0.5);
+          setQueue(shuffled);
+          const randomIndex = Math.floor(Math.random() * shuffled.length);
+          setCurrentIndex(randomIndex);
+          setCurrentTrack(shuffled[randomIndex]);
+        }
       } else {
         // Normal mode: play in order starting with selected track
         setQueue(tracks);
@@ -646,6 +659,86 @@ export const MusicProvider = ({ children }) => {
     const secs = Math.floor(seconds % 60);
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   }, []);
+
+  // Media Session API integration for hardware media keys
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) {
+      console.log('Media Session API not supported');
+      return;
+    }
+
+    // Update metadata when track changes
+    if (currentTrack) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: currentTrack.title || 'Unknown Track',
+        artist: currentTrack.artist || 'Unknown Artist',
+        album: currentTrack.album || 'Unknown Album',
+        artwork: currentTrack.artwork ? [
+          { src: currentTrack.artwork, sizes: '512x512', type: 'image/jpeg' }
+        ] : []
+      });
+    } else {
+      navigator.mediaSession.metadata = null;
+    }
+
+    // Register action handlers for hardware media keys
+    navigator.mediaSession.setActionHandler('play', () => {
+      console.log('Media Session: play action');
+      if (!isPlaying && audioRef.current && currentTrack) {
+        togglePlayPause();
+      }
+    });
+
+    navigator.mediaSession.setActionHandler('pause', () => {
+      console.log('Media Session: pause action');
+      if (isPlaying && audioRef.current) {
+        togglePlayPause();
+      }
+    });
+
+    navigator.mediaSession.setActionHandler('previoustrack', () => {
+      console.log('Media Session: previoustrack action');
+      if (queue.length > 0) {
+        handlePrevious();
+      }
+    });
+
+    navigator.mediaSession.setActionHandler('nexttrack', () => {
+      console.log('Media Session: nexttrack action');
+      if (queue.length > 0) {
+        handleNext();
+      }
+    });
+
+    // Optional: seek forward/backward (if you want to support these later)
+    navigator.mediaSession.setActionHandler('seekbackward', (details) => {
+      console.log('Media Session: seekbackward action');
+      const skipTime = details.seekOffset || 10;
+      if (audioRef.current) {
+        audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - skipTime);
+      }
+    });
+
+    navigator.mediaSession.setActionHandler('seekforward', (details) => {
+      console.log('Media Session: seekforward action');
+      const skipTime = details.seekOffset || 10;
+      if (audioRef.current) {
+        audioRef.current.currentTime = Math.min(duration, audioRef.current.currentTime + skipTime);
+      }
+    });
+
+    // Cleanup: remove handlers when component unmounts
+    return () => {
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.setActionHandler('play', null);
+        navigator.mediaSession.setActionHandler('pause', null);
+        navigator.mediaSession.setActionHandler('previoustrack', null);
+        navigator.mediaSession.setActionHandler('nexttrack', null);
+        navigator.mediaSession.setActionHandler('seekbackward', null);
+        navigator.mediaSession.setActionHandler('seekforward', null);
+      }
+    };
+  }, [currentTrack, isPlaying, queue, handleNext, handlePrevious, togglePlayPause, duration]);
 
   const value = {
     // State

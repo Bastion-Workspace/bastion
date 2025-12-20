@@ -71,7 +71,9 @@ class QueryExpansionService:
         self, 
         query_text: str, 
         num_expansions: int = 2,
-        expansion_model: Optional[str] = None
+        expansion_model: Optional[str] = None,
+        conversation_context: Optional[str] = None,
+        user_id: Optional[str] = None
     ) -> List[str]:
         """
         Generate alternative query formulations using LLM with caching
@@ -80,6 +82,7 @@ class QueryExpansionService:
             query_text: Original search query
             num_expansions: Number of alternative queries to generate
             expansion_model: Model to use (defaults to settings.FAST_MODEL)
+            conversation_context: Optional conversation context (last 2 messages) to help resolve vague references
             
         Returns:
             List of alternative query strings
@@ -92,8 +95,11 @@ class QueryExpansionService:
             return []
         
         try:
-            # Check cache first
-            cached_expansions = self._get_cached_expansions(query_text)
+            # Check cache first (but include context in cache key if provided)
+            cache_key = query_text
+            if conversation_context:
+                cache_key = f"{query_text}|||{conversation_context[:100]}"
+            cached_expansions = self._get_cached_expansions(cache_key)
             if cached_expansions is not None:
                 return cached_expansions[:num_expansions]
             
@@ -115,14 +121,28 @@ class QueryExpansionService:
                 logger.warning("No model specified for query expansion and no fast model configured")
                 return []
             
+            # Build expansion prompt with optional conversation context
+            context_section = ""
+            if conversation_context:
+                context_section = f"""
+
+**PREVIOUS CONVERSATION CONTEXT**:
+{conversation_context}
+
+**IMPORTANT**: The current query may contain vague references like "this", "that", "it", "they", etc. Use the conversation context above to understand what these references mean. When generating alternative queries, incorporate the relevant context from the previous conversation to make the queries more specific and meaningful.
+
+For example, if the context shows a discussion about "Rob Reiner investigation" and the current query is "Were the Obamas involved in this?", generate queries that explicitly include "Rob Reiner" or "Rob Reiner investigation" rather than just generic "Obama involvement" queries.
+"""
+            
             # Enhanced prompt for better document discovery
-            expansion_prompt = f"""Create {num_expansions} alternative search queries for: "{query_text}"
+            expansion_prompt = f"""Create {num_expansions} alternative search queries for: "{query_text}"{context_section}
 
 Consider these strategies:
 1. If it looks like a filename or document ID, try variations without extensions
 2. If it's a number, try different formats (e.g., "795254" -> "795254.pdf", "document 795254")
 3. If it's a title, try synonyms and related terms
 4. If it's a topic, try broader and narrower terms
+5. If the query contains vague references (this, that, it, they), use the conversation context to resolve them
 
 Generate different ways to search for the same information using:
 - Synonyms and related terms
@@ -130,14 +150,20 @@ Generate different ways to search for the same information using:
 - Abbreviations and acronyms
 - Broader and narrower concepts
 - File extensions and document types
+- Context from previous conversation (if provided)
 
 Return only a JSON array of the {num_expansions} alternative queries:
 ["alternative query 1", "alternative query 2"]"""
 
             logger.info(f"Generating query expansions with model: {model_to_use}")
+            if conversation_context:
+                logger.info(f"Using conversation context for query expansion ({len(conversation_context)} chars)")
             
-            system_prompt = add_datetime_context_to_system_prompt(
-                "You generate alternative search queries. Return only a valid JSON array with no additional text or explanations."
+            # Use user's timezone for date/time context
+            from utils.system_prompt_utils import add_datetime_context_to_system_prompt_for_user
+            system_prompt = await add_datetime_context_to_system_prompt_for_user(
+                "You generate alternative search queries. Return only a valid JSON array with no additional text or explanations.",
+                user_id=user_id
             )
             
             # Make LLM call with timeout
@@ -198,9 +224,9 @@ Return only a JSON array of the {num_expansions} alternative queries:
             
             final_expansions = filtered_expansions[:5]  # Limit to 5 total
             
-            # Cache the expansions
+            # Cache the expansions (using cache_key that includes context if provided)
             if final_expansions:
-                self._cache_expansions(query_text, final_expansions)
+                self._cache_expansions(cache_key, final_expansions)
             
             logger.info(f"✅ Generated {len(final_expansions)} query expansions")
             return final_expansions[:num_expansions]

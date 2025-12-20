@@ -403,7 +403,7 @@ const ConversationSidebar = ({
         animate={{ width: getSidebarWidth() }}
         transition={{ duration: 0.3, ease: "easeInOut" }}
         sx={{
-          height: { xs: 'calc(var(--appvh, 100vh) - 64px)', md: 'calc(100dvh - 64px)' },
+          height: { xs: 'calc(var(--appvh, 100vh) - 59px)', md: 'calc(100dvh - 59px)' },
           display: 'flex',
           flexDirection: 'column',
           borderRadius: 0,
@@ -411,18 +411,18 @@ const ConversationSidebar = ({
           overflow: 'hidden',
           position: 'fixed',
           left: 0,
-          top: '64px',
+          top: '59px',
           zIndex: 1200,
         }}
       >
         {/* Header */}
         <Box sx={{ 
-          p: isCollapsed ? 1 : 2, 
+          p: isCollapsed ? 1 : 1.5, 
           borderBottom: '1px solid #e0e0e0',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          minHeight: 64,
+          minHeight: 44,
         }}>
           {!isCollapsed && (
             <Typography variant="h6" sx={{ fontWeight: 600 }}>

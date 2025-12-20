@@ -62,6 +62,14 @@ AGENT_CAPABILITIES = {
         'context_boost': 20,
         'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
     },
+    'style_editing_agent': {
+        'domains': ['fiction', 'writing', 'style'],
+        'actions': ['observation', 'generation', 'modification'],
+        'editor_types': ['style'],
+        'keywords': ['style guide', 'narrative voice', 'pov', 'tense', 'pacing', 'analyze examples', 'generate style'],
+        'context_boost': 20,
+        'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
+    },
     'weather_agent': {
         'domains': ['weather', 'forecast', 'climate'],
         'actions': ['query', 'observation'],
@@ -145,6 +153,19 @@ AGENT_CAPABILITIES = {
         'editor_types': ['reference'],
         'keywords': ['journal', 'log', 'record', 'tracking', 'diary', 'food log', 'weight log', 'mood log'],
         'context_boost': 20  # Strong preference when editor type matches
+    },
+    'knowledge_builder_agent': {
+        'domains': ['research', 'knowledge', 'information', 'truth'],
+        'actions': ['query', 'analysis'],
+        'editor_types': [],
+        'keywords': [
+            'distill', 'distill knowledge', 'build knowledge',
+            'compile knowledge', 'research document', 'investigate',
+            'find the truth', 'verify claims', 'fact check',
+            'cross-reference', 'truth investigation'
+        ],
+        'context_boost': 0,
+        'requires_explicit_keywords': False
     }
 }
 
@@ -178,6 +199,7 @@ def detect_domain(
                 'outline': 'fiction',
                 'character': 'fiction',
                 'rules': 'fiction',
+                'style': 'fiction',
                 'podcast': 'content',
                 'substack': 'content',
                 'blog': 'content',
@@ -214,6 +236,7 @@ def detect_domain(
                 'outline_editing_agent': 'fiction',
                 'character_development_agent': 'fiction',
                 'rules_editing_agent': 'fiction',
+                'style_editing_agent': 'fiction',
                 'proofreading_agent': 'fiction',
                 'weather_agent': 'weather',
                 'research_agent': 'general',
@@ -305,6 +328,8 @@ def route_within_domain(
             return 'character_development_agent'
         elif editor_type == 'rules':
             return 'rules_editing_agent'
+        elif editor_type == 'style':
+            return 'style_editing_agent'
         elif editor_type == 'fiction':
             # Only route to fiction_editing_agent if fiction editor is active
             return 'fiction_editing_agent'
@@ -371,10 +396,20 @@ def score_agent_capabilities(
     action_intent: str,
     query: str,
     editor_context: Optional[Dict[str, Any]] = None,
-    last_agent: Optional[str] = None
+    last_agent: Optional[str] = None,
+    editor_preference: str = 'prefer'
 ) -> float:
     """
     Score how well an agent matches the required capabilities
+    
+    Args:
+        agent: Agent name
+        domain: Detected domain
+        action_intent: Action intent
+        query: User query
+        editor_context: Editor context (if available)
+        last_agent: Last agent used (for continuity)
+        editor_preference: Editor preference setting ('prefer' or 'ignore')
     
     Returns: Score (higher = better match)
     """
@@ -388,6 +423,13 @@ def score_agent_capabilities(
     requires_editor = capabilities.get('requires_editor', False)
     has_editor_types = bool(capabilities.get('editor_types', []))
     editing_actions = ['generation', 'modification']
+    
+    # HARD GATE: Editor-gated agents (agents with editor_types) can ONLY route when editor_preference == 'prefer'
+    # This ensures that "prefer editor" MUST be checked for editor-gated agents like reference_agent
+    if has_editor_types and editor_preference != 'prefer':
+        # Editor-gated agent but "prefer editor" is not checked - block routing
+        logger.info(f"🚫 HARD GATE: Blocking {agent} - editor_preference is '{editor_preference}' (not 'prefer'), agent has editor_types: {capabilities.get('editor_types')}")
+        return 0.0
     
     # Editing agents (agents with editor_types) require an editor for editing actions
     # Even if requires_editor is not explicitly set, if agent has editor_types and action is editing, require editor
@@ -416,8 +458,15 @@ def score_agent_capabilities(
             return 0.0
     
     # Domain match
-    if domain in capabilities['domains']:
+    domain_match = domain in capabilities['domains']
+    if domain_match:
         score += 10.0
+    else:
+        # Penalize domain mismatch to prevent continuity from overriding semantic intent
+        # Only apply penalty if agent has specific domain requirements (not general agents)
+        if capabilities['domains'] and 'general' not in capabilities['domains']:
+            score -= 15.0  # Strong penalty for domain mismatch
+            logger.debug(f"  -15.0 penalty: {agent} domain mismatch (detected: '{domain}', agent domains: {capabilities['domains']})")
     
     # Editor context match (strong boost)
     if editor_context:
@@ -468,9 +517,15 @@ def score_agent_capabilities(
         logger.debug(f"  +10.0 document question boost for {agent} (editor matches)")
     
     # Conversation continuity (reduced boost to avoid overriding semantic intent)
+    # Only apply continuity boost if there's at least some semantic match (domain OR keywords)
+    # This prevents continuity from routing queries to completely irrelevant agents
     if last_agent == agent:
-        score += 2.0  # Reduced from 3.0 to allow semantic queries to override
-        logger.debug(f"  +2.0 continuity boost for {agent} (last_agent match)")
+        has_semantic_match = domain_match or keyword_matches > 0
+        if has_semantic_match:
+            score += 2.0  # Reduced from 3.0 to allow semantic queries to override
+            logger.debug(f"  +2.0 continuity boost for {agent} (last_agent match, semantic relevance confirmed)")
+        else:
+            logger.debug(f"  No continuity boost for {agent} - domain mismatch and no keyword matches (preventing irrelevant routing)")
     
     return score
 
@@ -480,10 +535,19 @@ def find_best_agent_match(
     action_intent: str,
     query: str,
     editor_context: Optional[Dict[str, Any]] = None,
-    conversation_history: Optional[Dict[str, Any]] = None
+    conversation_history: Optional[Dict[str, Any]] = None,
+    editor_preference: str = 'prefer'
 ) -> Tuple[str, float]:
     """
     Find best agent match using capability scoring
+    
+    Args:
+        domain: Detected domain
+        action_intent: Action intent
+        query: User query
+        editor_context: Editor context (if available)
+        conversation_history: Conversation history for continuity
+        editor_preference: Editor preference setting ('prefer' or 'ignore')
     
     Returns: (agent_name, confidence_score)
     """
@@ -506,7 +570,8 @@ def find_best_agent_match(
             action_intent=action_intent,
             query=query,
             editor_context=editor_context,
-            last_agent=last_agent
+            last_agent=last_agent,
+            editor_preference=editor_preference
         )
         scores[agent] = score
     

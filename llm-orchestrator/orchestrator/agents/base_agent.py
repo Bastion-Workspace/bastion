@@ -283,8 +283,23 @@ class BaseAgent:
         # Handle specific OpenRouter error types
         if isinstance(error, NotFoundError):
             error_str = str(error)
+            # Check for data policy error
+            if "data policy" in error_str.lower() or "free model training" in error_str.lower():
+                user_message = (
+                    "⚠️ **OpenRouter Data Policy Configuration**\n\n"
+                    "No endpoints found matching your data policy settings. This means your OpenRouter account "
+                    "has data policy restrictions that prevent the selected model from being used.\n\n"
+                    "**To fix this:**\n"
+                    "1. Visit https://openrouter.ai/settings/privacy\n"
+                    "2. Review your data policy settings (Free model training, etc.)\n"
+                    "3. Adjust your privacy/data policy preferences to allow the model you're trying to use\n"
+                    "4. Try your request again\n\n"
+                    "**Note:** Some models may require specific data policy settings. Check the model's requirements "
+                    "on OpenRouter if this issue persists."
+                )
+                error_type = "data_policy_error"
             # Check for ignored providers error
-            if "All providers have been ignored" in error_str or "ignored providers" in error_str.lower():
+            elif "All providers have been ignored" in error_str or "ignored providers" in error_str.lower():
                 user_message = (
                     "⚠️ **OpenRouter Configuration Issue**\n\n"
                     "All available AI providers have been ignored in your OpenRouter settings. "
@@ -303,8 +318,10 @@ class BaseAgent:
                     f"The requested AI model is not available. This could mean:\n"
                     f"- The model name is incorrect\n"
                     f"- The model is not available in your OpenRouter account\n"
-                    f"- Your account doesn't have access to this model\n\n"
-                    f"**Error details:** {str(error)}"
+                    f"- Your account doesn't have access to this model\n"
+                    f"- Your data policy settings don't match this model's requirements\n\n"
+                    f"**Error details:** {str(error)}\n\n"
+                    f"**To resolve:** Check your OpenRouter settings at https://openrouter.ai/settings/privacy"
                 )
                 error_type = "model_not_found"
         
@@ -359,15 +376,32 @@ class BaseAgent:
         else:
             # Generic error - check if it's an OpenAI-compatible error
             error_str = str(error)
-            if "openrouter" in error_str.lower() or "provider" in error_str.lower():
-                user_message = (
-                    f"⚠️ **OpenRouter Error**\n\n"
-                    f"An error occurred with OpenRouter:\n\n"
-                    f"**Error details:** {error_str}\n\n"
-                    f"If this persists, check your OpenRouter account settings at "
-                    f"https://openrouter.ai/settings/preferences"
-                )
-                error_type = "openrouter_error"
+            # Check for OpenRouter errors in the error message
+            if "openrouter" in error_str.lower() or "provider" in error_str.lower() or "data policy" in error_str.lower():
+                # Check for data policy errors even in generic exceptions
+                if "data policy" in error_str.lower() or "free model training" in error_str.lower():
+                    user_message = (
+                        "⚠️ **OpenRouter Data Policy Configuration**\n\n"
+                        "No endpoints found matching your data policy settings. This means your OpenRouter account "
+                        "has data policy restrictions that prevent the selected model from being used.\n\n"
+                        "**To fix this:**\n"
+                        "1. Visit https://openrouter.ai/settings/privacy\n"
+                        "2. Review your data policy settings (Free model training, etc.)\n"
+                        "3. Adjust your privacy/data policy preferences to allow the model you're trying to use\n"
+                        "4. Try your request again\n\n"
+                        "**Note:** Some models may require specific data policy settings. Check the model's requirements "
+                        "on OpenRouter if this issue persists."
+                    )
+                    error_type = "data_policy_error"
+                else:
+                    user_message = (
+                        f"⚠️ **OpenRouter Error**\n\n"
+                        f"An error occurred with OpenRouter:\n\n"
+                        f"**Error details:** {error_str}\n\n"
+                        f"If this persists, check your OpenRouter account settings at "
+                        f"https://openrouter.ai/settings/preferences"
+                    )
+                    error_type = "openrouter_error"
             else:
                 user_message = f"An unexpected error occurred: {error_str}"
         
@@ -534,6 +568,34 @@ class BaseAgent:
         state["messages"] = messages
         return state
     
+    def _clear_request_scoped_data(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Clear request-scoped data from shared_memory before checkpoint save
+        
+        Request-scoped data (like active_editor) should:
+        - Persist during a single request (for subgraph communication)
+        - Be cleared before checkpoint save (it's request-scoped, not conversation-scoped)
+        
+        This ensures:
+        - Subgraphs can access active_editor during the request
+        - active_editor doesn't persist in checkpoint (prevents stale data)
+        - Each request gets fresh editor state from the frontend
+        
+        Args:
+            state: Current LangGraph state
+            
+        Returns:
+            Updated state with request-scoped data cleared from shared_memory
+        """
+        shared_memory = state.get("shared_memory", {})
+        if shared_memory and "active_editor" in shared_memory:
+            # Create a copy to avoid mutating the original
+            shared_memory = shared_memory.copy()
+            del shared_memory["active_editor"]
+            logger.debug("🧹 Cleared request-scoped active_editor from shared_memory (before checkpoint save)")
+            state["shared_memory"] = shared_memory
+        return state
+    
     def _is_approval_response(self, query: str) -> bool:
         """
         Detect if user query is an approval/confirmation response.
@@ -637,6 +699,12 @@ class BaseAgent:
     
     def _build_messages(self, system_prompt: str, user_query: str, conversation_history: List[Dict[str, str]] = None) -> List[Any]:
         """
+        DEPRECATED: Use _build_conversational_agent_messages or _build_editing_agent_messages instead
+        
+        Legacy helper for backward compatibility. New implementations should use:
+        - _build_conversational_agent_messages() for Chat, Electronics, etc.
+        - _build_editing_agent_messages() for Rules, Outline, Style, Character, Fiction
+        
         Build message list for LLM with automatic datetime context
         
         All agents automatically receive current date/time context for proper grounding.
@@ -662,6 +730,213 @@ class BaseAgent:
         
         return messages
     
+    def _build_conversational_agent_messages(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        messages_list: List[Any],
+        look_back_limit: int = 10
+    ) -> List[Any]:
+        """
+        Build message list for non-editing conversational agents with conversation history
+        
+        STANDARDIZED METHOD FOR NON-EDITING AGENTS (Chat, Electronics, Reference, Help, 
+        Dictionary, Entertainment, Data Formatting, General Project)
+        
+        Message Structure:
+        1. SystemMessage: system_prompt
+        2. SystemMessage: datetime_context (automatic)
+        3. Conversation history as alternating HumanMessage/AIMessage objects
+        4. HumanMessage: user_prompt (contains query + all context embedded)
+        
+        Args:
+            system_prompt: System-level instructions for the agent
+            user_prompt: User's query with all context embedded in one string
+            messages_list: Conversation history from state.get("messages", [])
+            look_back_limit: Number of previous messages to include (default: 10)
+            
+        Returns:
+            List of LangChain message objects ready for LLM
+            
+        Example usage:
+            messages_list = state.get("messages", [])
+            prompt = f"USER QUERY: {query}\n\n**CONTEXT**:\n{context}..."
+            llm_messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                messages_list=messages_list,
+                look_back_limit=10
+            )
+        """
+        # Start with system messages
+        messages = [
+            SystemMessage(content=system_prompt),
+            SystemMessage(content=self._get_datetime_context())
+        ]
+        
+        # Add conversation history as proper message objects
+        if messages_list:
+            conversation_history = self._extract_conversation_history(
+                messages_list, 
+                limit=look_back_limit
+            )
+            
+            for msg in conversation_history:
+                if msg["role"] == "user":
+                    messages.append(HumanMessage(content=msg["content"]))
+                elif msg["role"] == "assistant":
+                    messages.append(AIMessage(content=msg["content"]))
+        
+        # Add current user prompt (all context embedded)
+        messages.append(HumanMessage(content=user_prompt))
+        
+        return messages
+    
+    def _build_editing_agent_messages(
+        self,
+        system_prompt: str,
+        context_parts: List[str],
+        current_request: str,
+        messages_list: List[Any],
+        look_back_limit: int = 6
+    ) -> List[Any]:
+        """
+        Build message list for editing agents with conversation history and separate context
+        
+        STANDARDIZED METHOD FOR EDITING AGENTS (Rules, Outline, Style, Character, Fiction)
+        
+        Message Structure:
+        1. SystemMessage: system_prompt
+        2. SystemMessage: datetime_context (automatic)
+        3. Conversation history as alternating HumanMessage/AIMessage objects
+        4. HumanMessage: file context (from context_parts - file content, references)
+        5. HumanMessage: current_request (user query + mode-specific instructions)
+        
+        Args:
+            system_prompt: System-level instructions for the agent
+            context_parts: List of context strings (file content, references, etc.)
+            current_request: User's request with mode-specific instructions
+            messages_list: Conversation history from state.get("messages", [])
+            look_back_limit: Number of previous messages to include (default: 6)
+            
+        Returns:
+            List of LangChain message objects ready for LLM
+            
+        Example usage:
+            context_parts = [
+                "=== FILE CONTEXT ===\n",
+                file_content,
+                "\n=== REFERENCES ===\n",
+                references
+            ]
+            request = f"USER REQUEST: {query}\n\n**INSTRUCTIONS**:..."
+            messages = self._build_editing_agent_messages(
+                system_prompt=system_prompt,
+                context_parts=context_parts,
+                current_request=request,
+                messages_list=state.get("messages", []),
+                look_back_limit=6
+            )
+        """
+        # Start with system messages
+        messages = [
+            SystemMessage(content=system_prompt),
+            SystemMessage(content=self._get_datetime_context())
+        ]
+        
+        # Add conversation history as proper message objects
+        if messages_list:
+            conversation_history = self._extract_conversation_history(
+                messages_list, 
+                limit=look_back_limit
+            )
+            
+            # Remove last message if it duplicates current_request
+            if conversation_history and len(conversation_history) > 0:
+                last_msg = conversation_history[-1]
+                if last_msg.get("content") == current_request:
+                    conversation_history = conversation_history[:-1]
+            
+            # Add as proper message objects
+            for msg in conversation_history:
+                if msg["role"] == "user":
+                    messages.append(HumanMessage(content=msg["content"]))
+                elif msg["role"] == "assistant":
+                    messages.append(AIMessage(content=msg["content"]))
+        
+        # Add file context as separate message
+        if context_parts:
+            messages.append(HumanMessage(content="".join(context_parts)))
+        
+        # Add current request with instructions as separate message
+        if current_request:
+            messages.append(HumanMessage(content=current_request))
+        
+        return messages
+    
+    def _handle_node_error(self, error: Exception, state: Dict[str, Any], error_context: str = "Node operation") -> Dict[str, Any]:
+        """
+        Handle errors in LangGraph nodes, transforming OpenRouter errors to user-friendly messages
+        
+        This method should be used in node exception handlers to ensure OpenRouter errors
+        are properly surfaced to users with helpful messages.
+        
+        Args:
+            error: The exception that was raised
+            state: Current LangGraph state (for preserving critical state keys)
+            error_context: Context string for logging (e.g., "LLM call", "Edit plan generation")
+            
+        Returns:
+            State update dict with error information, preserving critical state keys
+        """
+        # Check if this is already an OpenRouterError
+        if isinstance(error, OpenRouterError):
+            error_info = {
+                "error_message": error.user_message,
+                "error_type": error.error_type,
+                "original_error": error.original_error
+            }
+        # Check if it's an OpenRouter API error
+        elif isinstance(error, (NotFoundError, APIError, RateLimitError, AuthenticationError)):
+            error_info = self._handle_openrouter_error(error)
+            logger.error(f"❌ {error_context} failed: {error_info['error_type']} - {error_info['original_error']}")
+        # Check if error message contains OpenRouter-related content
+        else:
+            error_str = str(error)
+            # Check for OpenRouter errors in generic exceptions
+            if any(keyword in error_str.lower() for keyword in ["openrouter", "data policy", "free model training", "no endpoints found"]):
+                # Create a temporary exception to use the error handler
+                temp_error = NotFoundError(error_str) if "404" in error_str or "not found" in error_str.lower() else APIError(error_str)
+                error_info = self._handle_openrouter_error(temp_error)
+                logger.error(f"❌ {error_context} failed: {error_info['error_type']} - {error_info['original_error']}")
+            else:
+                # Generic error
+                error_info = {
+                    "error_message": f"An error occurred: {error_str}",
+                    "error_type": "generic_error",
+                    "original_error": error_str
+                }
+                logger.error(f"❌ {error_context} failed: {error_str}")
+        
+        # Return state update with error, preserving critical state keys
+        return {
+            "error": error_info["error_message"],
+            "task_status": "error",
+            "response": {
+                "task_status": "error",
+                "response": error_info["error_message"],
+                "error_message": error_info["error_message"],
+                "error_type": error_info["error_type"],
+                "timestamp": datetime.now().isoformat()
+            },
+            # Preserve critical state keys
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", "")
+        }
+    
     def _create_error_response(self, error_message: str, task_status: TaskStatus = TaskStatus.ERROR) -> Dict[str, Any]:
         """Create standardized error response"""
         # Check if this is an OpenRouterError with user-friendly message
@@ -673,6 +948,21 @@ class BaseAgent:
                 "error_type": error_message.error_type,
                 "timestamp": datetime.now().isoformat()
             }
+        # Check if it's a string that might contain OpenRouter error info
+        elif isinstance(error_message, str):
+            # Check for OpenRouter error patterns in the string
+            if any(keyword in error_message.lower() for keyword in ["openrouter", "data policy", "free model training", "no endpoints found"]):
+                # Try to extract and format as OpenRouter error
+                temp_error = NotFoundError(error_message) if "404" in error_message or "not found" in error_message.lower() else APIError(error_message)
+                error_info = self._handle_openrouter_error(temp_error)
+                return {
+                    "task_status": task_status.value,
+                    "response": error_info["error_message"],
+                    "error_message": error_info["error_message"],
+                    "error_type": error_info["error_type"],
+                    "timestamp": datetime.now().isoformat()
+                }
+        
         return {
             "task_status": task_status.value,
             "response": f"Error: {error_message}",

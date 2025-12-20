@@ -282,13 +282,13 @@ class ParallelDocumentProcessor:
                     if hasattr(job, 'user_id') and job.user_id:
                         # For user documents, set proper RLS context before update
                         from services.database_manager.database_helpers import execute
-                        await execute("SELECT set_config('app.current_user_id', $1, true)", job.user_id)
-                        await execute("SELECT set_config('app.current_user_role', 'user', true)")
+                        await execute("SELECT set_config('app.current_user_id', $1, false)", job.user_id)
+                        await execute("SELECT set_config('app.current_user_role', 'user', false)")
                     else:
                         # For global documents, set admin context
                         from services.database_manager.database_helpers import execute
-                        await execute("SELECT set_config('app.current_user_id', '', true)")
-                        await execute("SELECT set_config('app.current_user_role', 'admin', true)")
+                        await execute("SELECT set_config('app.current_user_id', '', false)")
+                        await execute("SELECT set_config('app.current_user_role', 'admin', false)")
                     
                     await self.document_repository.update_status(job.document_id, ProcessingStatus.PROCESSING)
                 except Exception as e:
@@ -315,12 +315,12 @@ class ParallelDocumentProcessor:
                     # ROOSEVELT FIX: Set proper RLS context before status update
                     if hasattr(job, 'user_id') and job.user_id:
                         from services.database_manager.database_helpers import execute
-                        await execute("SELECT set_config('app.current_user_id', $1, true)", job.user_id)
-                        await execute("SELECT set_config('app.current_user_role', 'user', true)")
+                        await execute("SELECT set_config('app.current_user_id', $1, false)", job.user_id)
+                        await execute("SELECT set_config('app.current_user_role', 'user', false)")
                     else:
                         from services.database_manager.database_helpers import execute
-                        await execute("SELECT set_config('app.current_user_id', '', true)")
-                        await execute("SELECT set_config('app.current_user_role', 'admin', true)")
+                        await execute("SELECT set_config('app.current_user_id', '', false)")
+                        await execute("SELECT set_config('app.current_user_role', 'admin', false)")
                         
                     await self.document_repository.update_status(job.document_id, ProcessingStatus.EMBEDDING)
                 except Exception as e:
@@ -370,12 +370,12 @@ class ParallelDocumentProcessor:
                     # ROOSEVELT FIX: Set proper RLS context before final status update
                     if hasattr(job, 'user_id') and job.user_id:
                         from services.database_manager.database_helpers import execute
-                        await execute("SELECT set_config('app.current_user_id', $1, true)", job.user_id)
-                        await execute("SELECT set_config('app.current_user_role', 'user', true)")
+                        await execute("SELECT set_config('app.current_user_id', $1, false)", job.user_id)
+                        await execute("SELECT set_config('app.current_user_role', 'user', false)")
                     else:
                         from services.database_manager.database_helpers import execute
-                        await execute("SELECT set_config('app.current_user_id', '', true)")
-                        await execute("SELECT set_config('app.current_user_role', 'admin', true)")
+                        await execute("SELECT set_config('app.current_user_id', '', false)")
+                        await execute("SELECT set_config('app.current_user_role', 'admin', false)")
                         
                     await self.document_repository.update_status(job.document_id, ProcessingStatus.COMPLETED)
                     
@@ -402,12 +402,12 @@ class ParallelDocumentProcessor:
                     # ROOSEVELT FIX: Set proper RLS context before failure status update
                     if hasattr(job, 'user_id') and job.user_id:
                         from services.database_manager.database_helpers import execute
-                        await execute("SELECT set_config('app.current_user_id', $1, true)", job.user_id)
-                        await execute("SELECT set_config('app.current_user_role', 'user', true)")
+                        await execute("SELECT set_config('app.current_user_id', $1, false)", job.user_id)
+                        await execute("SELECT set_config('app.current_user_role', 'user', false)")
                     else:
                         from services.database_manager.database_helpers import execute
-                        await execute("SELECT set_config('app.current_user_id', '', true)")
-                        await execute("SELECT set_config('app.current_user_role', 'admin', true)")
+                        await execute("SELECT set_config('app.current_user_id', '', false)")
+                        await execute("SELECT set_config('app.current_user_role', 'admin', false)")
                         
                     await self.document_repository.update_status(job.document_id, ProcessingStatus.FAILED)
                     

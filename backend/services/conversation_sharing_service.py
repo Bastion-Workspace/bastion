@@ -95,7 +95,7 @@ class ConversationSharingService:
             share_id = str(uuid.uuid4())
             pool = await self._get_db_pool()
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", shared_by_user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", shared_by_user_id)
                 
                 await conn.execute("""
                     INSERT INTO conversation_shares 
@@ -136,7 +136,7 @@ class ConversationSharingService:
             pool = await self._get_db_pool()
             async with pool.acquire() as conn:
                 # Set user context
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", target_user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", target_user_id)
                 
                 # Step 1: Replicate checkpoints
                 checkpoint_rows = await conn.fetch("""
@@ -215,7 +215,7 @@ class ConversationSharingService:
         try:
             pool = await self._get_db_pool()
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Verify user has permission to remove this share
                 share = await conn.fetchrow("""
@@ -264,7 +264,7 @@ class ConversationSharingService:
             
             pool = await self._get_db_pool()
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 rows = await conn.fetch("""
                     SELECT 
@@ -316,7 +316,7 @@ class ConversationSharingService:
         try:
             pool = await self._get_db_pool()
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 rows = await conn.fetch("""
                     SELECT 
@@ -390,7 +390,7 @@ class ConversationSharingService:
             
             pool = await self._get_db_pool()
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Get owner
                 owner = await conn.fetchrow("""
@@ -460,7 +460,7 @@ class ConversationSharingService:
             
             pool = await self._get_db_pool()
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 await conn.execute("""
                     UPDATE conversation_shares
@@ -484,7 +484,7 @@ class ConversationSharingService:
         try:
             pool = await self._get_db_pool()
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 row = await conn.fetchrow("""
                     SELECT user_id FROM conversations
@@ -511,7 +511,7 @@ class ConversationSharingService:
         try:
             pool = await self._get_db_pool()
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Check if owner
                 owner = await conn.fetchrow("""
@@ -555,7 +555,7 @@ class ConversationSharingService:
         try:
             pool = await self._get_db_pool()
             async with pool.acquire() as conn:
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", shared_by_user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", shared_by_user_id)
                 
                 row = await conn.fetchrow("""
                     SELECT share_id, share_type, expires_at

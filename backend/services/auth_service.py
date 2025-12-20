@@ -216,9 +216,14 @@ class AuthenticationService:
     async def _create_default_folders_for_user(self, conn, user_id: str):
         """Create default conversation folders for a user"""
         try:
-            # Set user context for RLS policies
-            await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
-            await conn.execute("SELECT set_config('app.current_user_role', 'admin', true)")
+            # Set user context for RLS policies (use false for session-level, not transaction-level)
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+            await conn.execute("SELECT set_config('app.current_user_role', 'admin', false)")
+            
+            # Verify the context was set
+            check_user_id = await conn.fetchval("SELECT current_setting('app.current_user_id', true)")
+            check_role = await conn.fetchval("SELECT current_setting('app.current_user_role', true)")
+            logger.info(f"✅ RLS context verified: user_id={check_user_id}, role={check_role}")
             
             default_folders = [
                 ('folder-general', 'General', 'General conversations and queries', '#2196F3', 1),
@@ -310,8 +315,8 @@ class AuthenticationService:
                     token_hash = hashlib.sha256(token.encode()).hexdigest()
                     
                     # Set user context for RLS policies
-                    await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_row["user_id"])
-                    await conn.execute("SELECT set_config('app.current_user_role', $1, true)", user_row["role"])
+                    await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_row["user_id"])
+                    await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_row["role"])
                     logger.info(f"🔍 Set user context: {user_row['user_id']} with role {user_row['role']}")
                     
                     logger.info(f"🔍 Creating session for user {user_row['user_id']}")
@@ -505,8 +510,8 @@ class AuthenticationService:
                 old_token_hash = hashlib.sha256(token.encode()).hexdigest()
                 
                 # Set user context for RLS policies
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_row["user_id"])
-                await conn.execute("SELECT set_config('app.current_user_role', $1, true)", user_row["role"])
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_row["user_id"])
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_row["role"])
                 
                 # Update existing session or create new one
                 await conn.execute("""

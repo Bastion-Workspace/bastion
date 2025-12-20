@@ -79,6 +79,7 @@ def infer_action_from_agent(agent_name: str) -> Optional[str]:
         "outline_editing_agent": "generation",
         "rules_editing_agent": "generation",
         "character_development_agent": "generation",
+        "style_editing_agent": "generation",
         "proofreading_agent": "modification",
         "org_inbox_agent": "management",
         "org_project_agent": "management",
@@ -117,13 +118,14 @@ def should_boost_continuity(
     follow_up_indicators = [
         "yes", "no", "ok", "okay", "sure", "please", "continue", "more",
         "that", "this", "it", "what about", "how about", "tell me more",
-        "show me", "save", "update", "change", "modify", "edit that"
+        "show me", "save", "update", "change", "modify", "edit that",
+        "search for more", "find more", "get more", "do more", "go ahead"
     ]
     
     message_lower = user_message.lower().strip()
     
     # Short responses are likely continuations
-    if len(message_lower.split()) <= 3:
+    if len(message_lower.split()) <= 5:  # Increased from 3 to catch "Yes, search for more"
         if any(indicator in message_lower for indicator in follow_up_indicators):
             return True
     
@@ -657,6 +659,7 @@ class IntentClassifier:
 			# Extract editor context from prepared_context
 			editor_context_data = prepared_context.get("editor_context", {})
 			editor_context = {}
+			editor_preference = editor_context_data.get("preference", "prefer")
 			if editor_context_data.get("should_use") and editor_context_data.get("type"):
 				editor_context = {'type': editor_context_data["type"]}
 			
@@ -686,20 +689,31 @@ class IntentClassifier:
 			else:
 				logger.info(f"🔄 AGENT ROUTING: No primary_agent (new conversation)")
 			
+			# Log editor preference for debugging
+			if editor_preference != 'prefer':
+				logger.info(f"📝 EDITOR PREFERENCE: '{editor_preference}' - editor-gated agents will be blocked")
+			
 			# Route using capability matching (with enhanced context)
 			target_agent, confidence = find_best_agent_match(
 				domain=domain,
 				action_intent=action_intent,
 				query=user_message,
 				editor_context=editor_context if editor_context.get('type') else None,
-				conversation_history=conversation_history
+				conversation_history=conversation_history,
+				editor_preference=editor_preference
 			)
 			
-			# Apply explicit continuity boost if needed
+			# Apply explicit continuity override for strong follow-up signals
 			if should_boost and primary_agent and target_agent != primary_agent:
-				# Re-check with continuity boost
-				# The capability matching already handles this, but we log it explicitly
-				logger.info(f"🔄 CONTINUITY CHECK: Query appears to be follow-up, but routed to {target_agent} instead of {primary_agent}")
+				# Strong follow-up detected - override routing to maintain continuity
+				logger.info(f"🔄 CONTINUITY OVERRIDE: Query is clear follow-up ('{user_message[:50]}...'), routing to {primary_agent} instead of {target_agent}")
+				target_agent = primary_agent
+				# Adjust confidence slightly lower since we're overriding
+				confidence = min(confidence + 0.1, 0.95)
+			elif should_boost and primary_agent and target_agent == primary_agent:
+				logger.info(f"✅ CONTINUITY: Follow-up query correctly routed to {primary_agent}")
+			elif should_boost and not primary_agent:
+				logger.warning(f"⚠️ CONTINUITY: Follow-up detected but no primary_agent available")
 			
 			logger.info(f"📊 STAGE 3 - ROUTING: {target_agent} (confidence: {confidence:.2f})")
 			
@@ -900,60 +914,40 @@ class IntentClassifier:
 
 **USER MESSAGE**: "{user_message}"{continuity_section}
 
-**ACTION INTENT OPTIONS** (choose ONE):
+**ACTION INTENT OPTIONS** (choose ONE based on semantic intent):
 
-1. **observation** - User wants to see/check/review/confirm existing content OR initiating conversation OR making conversational statements
-   - Examples: "Do you see...", "Show me...", "What's in...", "How is...", "Is there...", "Hello", "Hi", "Greetings", "Hey"
-   - Conversational statements: "I'm going to...", "I plan to...", "I want to...", "Let me...", "I should..."
-   - Intent: View/confirm what exists, OR conversational greetings/initiation/statements (NOT create/modify, NOT seeking external info)
-   - **CRITICAL**: 
-     - Greetings like "Hello", "Hi", "Greetings, friend!" → **observation** (conversational initiation, NOT query)
-     - Conversational statements about plans/actions without explicit creation verbs → **observation** (NOT generation)
-     - "Eat nothing but beans on Tuesday. Then visit an old-folks home." → **observation** (conversational statement, NOT generation)
+1. **observation** - User wants to view, check, review existing content, OR engage in conversation (greetings, acknowledgments, conversational statements)
+   - Examples: "Show me my documents", "How does this look?", "Hello!", "I'm thinking about X"
+   - Intent: View/confirm what exists OR conversational engagement (not seeking external information, not creating new content)
 
-2. **generation** - User wants to CREATE/WRITE/DRAFT NEW content with EXPLICIT creation verbs
-   - Examples: "Write...", "Create...", "Draft...", "Generate...", "Compose...", "Make a...", "Build a..."
-   - Intent: Create something new (document, code, content, etc.)
-   - **CRITICAL**: Must have explicit creation verbs. Conversational statements about plans are NOT generation.
+2. **generation** - User explicitly requests creation of new content
+   - Examples: "Write a story", "Create a document", "Draft an email", "Generate code"
+   - Intent: Create something new from scratch
 
-3. **modification** - User wants to CHANGE/EDIT/REVISE EXISTING content
-   - Examples: "Edit...", "Revise...", "Change...", "Improve...", "Update...", "Fix..."
-   - Intent: Alter existing content
+3. **modification** - User wants to change or edit existing content
+   - Examples: "Edit this paragraph", "Revise the intro", "Fix the formatting", "Update the date"
+   - Intent: Alter something that already exists
 
-4. **analysis** - User wants EXPLICIT CRITIQUE/FEEDBACK/ASSESSMENT/COMPARISON/SUMMARIZATION with analysis verbs
-   - Examples: "Analyze...", "Critique...", "Review...", "Compare...", "Summarize...", "Find differences...", "Assess...", "Evaluate..."
-   - Intent: Get feedback, assessment, or summary
-   - **CRITICAL**: Must have EXPLICIT analysis verbs (analyze, critique, review, assess, evaluate, examine)
-   - **NOT analysis**: Simple questions about content ("Why is this...?", "How about...?", "Does this follow...?") → **observation**
-   - Questions about style, content, or structure without explicit analysis verbs → **observation** (NOT analysis)
+4. **analysis** - User explicitly requests critique, assessment, or structured analysis
+   - Examples: "Analyze this code", "Critique the pacing", "Compare these options", "Summarize the key points"
+   - Intent: Get analytical feedback or structured evaluation (requires explicit analysis verbs)
 
-5. **query** - User seeks EXTERNAL INFORMATION or FACTS (NOT document analysis, NOT questions about current document)
-   - Examples: "Tell me about...", "What is...", "Explain...", "Research...", "Find information about..."
-   - Intent: Get information about general topics (NOT specific documents)
-   - **CRITICAL**: Questions about the CURRENT document (using "this", "the", referring to visible content) → **observation** (NOT query)
-   - Examples of document questions → observation: "Where is this coming from?", "What style is this?", "Why is this here?"
+5. **query** - User seeks information, facts, explanations, or wants to learn about something
+   - Examples: "What is X?", "Tell me about Y", "How does Z work?", "Explain the concept of...", "Is there a term for X?"
+   - Intent: Information-seeking about topics, concepts, facts (external knowledge)
+   - Note: Questions about current document content are **observation**, questions seeking general knowledge are **query**
 
-6. **management** - User wants to ORGANIZE/CONFIGURE/MANAGE system/tasks/project files
-   - Examples: "Add TODO...", "Save...", "Update project files...", "Mark as done...", "Crawl website..."
-   - Intent: System, task, or project file management
+6. **management** - User wants to organize, configure, or manage system resources
+   - Examples: "Add TODO", "Save project plan", "Crawl this website", "Update task status"
+   - Intent: System, project, or resource management operations
 
-**CRITICAL RULES**:
-- **Greetings and conversational initiation** (Hello, Hi, Greetings, Hey, etc.) → **observation** (NOT query)
-- **Conversational statements** about plans/actions without explicit creation verbs → **observation** (NOT generation, NOT query)
-  - Examples: "I'm going to...", "I plan to...", "Eat nothing but beans on Tuesday" → **observation**
-- **Explicit creation requests** with verbs like "Write", "Create", "Draft", "Generate" → **generation**
-- **Questions about CURRENT document** (using "this", "the", referring to visible/active content) → **observation** (NOT query, NOT analysis)
-  - Examples: "Where is this coming from?", "What style is this?", "Why is this here?", "Where is this abbreviate narrative style coming from?", "How about Chapter 2?", "Does this follow our style guide?" → **observation**
-  - These are asking about existing content in the active document, not seeking external information
-  - These are conversational questions, not explicit analysis requests
-- **Explicit analysis requests** (with analysis verbs) → **analysis**
-  - Examples: "Analyze Chapter 2", "Critique the pacing", "Review the structure", "Assess the themes" → **analysis**
-  - Must have explicit analysis verbs (analyze, critique, review, assess, evaluate, examine)
-- Document-specific queries without explicit analysis verbs (mentions specific files/documents) → **observation** (NOT analysis)
-- "How is X looking?" or "How is X going?" → **observation** (checking status)
-- "Save what we discussed" → **management** (project file operation)
-- Comparison/contrast queries → **analysis** (NOT query)
-- Seeking information about topics (not documents, not current content) → **query**
+**CLASSIFICATION GUIDANCE**:
+- Focus on the user's SEMANTIC INTENT, not just keywords or patterns
+- Consider conversation context - if continuing a topic, user likely wants same type of interaction
+- Questions seeking INFORMATION about topics/concepts → **query** (even if phrased as "Is there...")
+- Questions about CURRENT document/content → **observation** (reviewing what exists)
+- Creation requests need explicit verbs (write, create, generate, etc.) → **generation**
+- Analysis requests need explicit verbs (analyze, critique, assess, etc.) → **analysis**
 
 **OUTPUT FORMAT** (JSON ONLY):
 {{
@@ -1266,6 +1260,15 @@ Every query has a PRIMARY action intent that determines routing behavior:
 
 - **character_development_agent**
   - ACTION INTENTS: observation, generation, modification
+  - USE FOR: Create/develop character profiles, view character content
+  - TRIGGERS: "create character", "develop character", "do you see character", "expand character profile"
+  - AVOID: analysis requests (use content_analysis_agent)
+
+- **style_editing_agent**
+  - ACTION INTENTS: observation, generation, modification
+  - USE FOR: Create/refine narrative style guides, analyze narrative examples to generate style guides
+  - TRIGGERS: "create style guide", "analyze these examples", "generate style from", "refine style guide", "do you see style guide"
+  - AVOID: analysis requests (use content_analysis_agent)
   - USE FOR: Create/develop character profiles, view character content, backstory, motivations, arcs
   - TRIGGERS: "create character", "show me character", "develop protagonist", "character profile"
   - AVOID: analysis requests (use content_analysis_agent)
@@ -1433,7 +1436,7 @@ ROUTING HINTS FOR PROJECT CAPTURE:
 **STRICT OUTPUT FORMAT - JSON ONLY (NO MARKDOWN, NO EXPLANATION):**
 You MUST respond with a single JSON object matching this schema:
 {{
-  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|data_formatting_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_inbox_agent|org_project_agent|website_crawler_agent|podcast_script_agent|substack_agent|entertainment_agent|weather_agent|electronics_agent",
+  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|style_editing_agent|data_formatting_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_inbox_agent|org_project_agent|website_crawler_agent|podcast_script_agent|substack_agent|entertainment_agent|weather_agent|electronics_agent",
   "action_intent": "observation|generation|modification|analysis|query|management",
   "permission_required": false,
   "confidence": 0.0,
@@ -1574,17 +1577,18 @@ You MUST respond with a single JSON object matching this schema:
 								data['reasoning'] = f"Editor context (fiction) + analysis intent → story_analysis_agent"
 						else:
 							# Non-analysis fiction queries → fiction_editing_agent
-							if current_agent not in ['fiction_editing_agent', 'outline_editing_agent', 'character_development_agent', 'rules_editing_agent']:
+							if current_agent not in ['fiction_editing_agent', 'outline_editing_agent', 'character_development_agent', 'rules_editing_agent', 'style_editing_agent']:
 								logger.info(f"🔄 EDITOR OVERRIDE: {current_agent} → fiction_editing_agent (editor type: fiction, action: {action_intent})")
 								data['target_agent'] = 'fiction_editing_agent'
 								data['reasoning'] = f"Editor context (fiction) + {action_intent} intent → fiction_editing_agent"
 					
-					elif doc_type in ['outline', 'character', 'rules']:
+					elif doc_type in ['outline', 'character', 'rules', 'style']:
 						# Specialized fiction editors → their specific agents
 						editor_agent_map = {
 							'outline': 'outline_editing_agent',
 							'character': 'character_development_agent',
-							'rules': 'rules_editing_agent'
+							'rules': 'rules_editing_agent',
+							'style': 'style_editing_agent'
 						}
 						target_agent = editor_agent_map.get(doc_type)
 						if target_agent and current_agent != target_agent and action_intent != 'analysis':
@@ -1749,7 +1753,8 @@ You MUST respond with a single JSON object matching this schema:
 				action_intent=action_intent,
 				query=user_message,
 				editor_context=editor_context if editor_context.get('type') else None,
-				conversation_history=conversation_history
+				conversation_history=conversation_history,
+				editor_preference=editor_preference
 			)
 			
 			# Check if agent needs web search permission (same logic as main routing)

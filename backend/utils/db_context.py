@@ -49,11 +49,11 @@ class DatabaseContextManager:
         try:
             # Set user context for RLS policies
             await conn.execute(
-                "SELECT set_config('app.current_user_id', $1, true)",
+                "SELECT set_config('app.current_user_id', $1, false)",
                 user.user_id
             )
             await conn.execute(
-                "SELECT set_config('app.current_user_role', $1, true)",
+                "SELECT set_config('app.current_user_role', $1, false)",
                 user.role
             )
             
@@ -70,8 +70,8 @@ class DatabaseContextManager:
     async def _clear_rls_context(self, conn: asyncpg.Connection):
         """Clear PostgreSQL session variables"""
         try:
-            await conn.execute("SELECT set_config('app.current_user_id', '', true)")
-            await conn.execute("SELECT set_config('app.current_user_role', '', true)")
+            await conn.execute("SELECT set_config('app.current_user_id', '', false)")
+            await conn.execute("SELECT set_config('app.current_user_role', '', false)")
             await conn.execute("SELECT set_config('application_name', '', true)")
         except Exception as e:
             logger.debug(f"Failed to clear RLS context: {e}")

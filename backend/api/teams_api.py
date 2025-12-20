@@ -8,7 +8,7 @@ import re
 import uuid
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile
+from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
@@ -82,6 +82,75 @@ async def list_user_teams(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# =====================
+# UNREAD TRACKING ENDPOINTS (must be before /{team_id} route)
+# =====================
+
+@router.get("/unread-counts")
+async def get_unread_post_counts(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get unread post counts for all user's teams"""
+    try:
+        logger.info(f"📊 Getting unread counts for user {current_user.user_id}")
+        counts = await team_service.get_unread_post_counts(current_user.user_id)
+        logger.info(f"📊 Unread counts for user {current_user.user_id}: {counts}")
+        return counts
+    except Exception as e:
+        logger.error(f"Failed to get unread post counts: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================
+# USER SEARCH ENDPOINT (for invitations - must be before /{team_id} route)
+# =====================
+
+@router.get("/users/search")
+async def search_users_for_teams(
+    query: Optional[str] = Query(None, description="Search query for username, email, or display name"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum number of results"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Search for users to invite to teams (available to all authenticated users)"""
+    try:
+        from services.auth_service import auth_service
+        
+        # Get all users from auth service
+        users_response = await auth_service.get_users(skip=0, limit=limit)
+        
+        # Convert to list of dicts for filtering
+        users = [
+            {
+                "user_id": user.user_id,
+                "username": user.username,
+                "email": user.email,
+                "display_name": user.display_name,
+                "avatar_url": user.avatar_url,
+                "role": user.role,
+                "is_active": user.is_active
+            }
+            for user in users_response.users
+        ]
+        
+        # Filter by search query if provided
+        if query:
+            query_lower = query.lower()
+            users = [
+                user for user in users
+                if (query_lower in user.get("username", "").lower() or
+                    query_lower in user.get("email", "").lower() or
+                    (user.get("display_name") and query_lower in user.get("display_name").lower()))
+            ]
+        
+        logger.info(f"👥 User {current_user.username} searched for users, found {len(users)} results")
+        
+        return {"users": users, "total": len(users)}
+    
+    except Exception as e:
+        logger.error(f"Failed to search users: {e}")
+        raise HTTPException(status_code=500, detail="Failed to search users")
+
+
 @router.get("/{team_id}", response_model=TeamResponse)
 async def get_team(
     team_id: str,
@@ -131,9 +200,41 @@ async def delete_team(
 ):
     """Delete team (admin only)"""
     try:
+        # Get team members before deletion for WebSocket notification
+        members = await team_service.get_team_members(team_id, current_user.user_id)
+        
         success = await team_service.delete_team(team_id, current_user.user_id)
         if not success:
             raise HTTPException(status_code=404, detail="Team not found")
+        
+        # Broadcast team deletion to all team members via WebSocket
+        try:
+            from utils.websocket_manager import get_websocket_manager
+            
+            ws_manager = get_websocket_manager()
+            if ws_manager and members:
+                sent_count = 0
+                for member in members:
+                    member_id = member.get("user_id")
+                    if member_id:
+                        try:
+                            await ws_manager.send_to_session(
+                                {
+                                    "type": "team.deleted",
+                                    "team_id": team_id
+                                },
+                                session_id=member_id
+                            )
+                            sent_count += 1
+                        except Exception as ws_error:
+                            logger.debug(f"Failed to notify team member {member_id}: {ws_error}")
+                
+                if sent_count > 0:
+                    logger.info(f"📬 Team {team_id} deletion broadcast to {sent_count} team members")
+        except Exception as ws_error:
+            # Don't fail team deletion if WebSocket notification fails
+            logger.warning(f"⚠️ Failed to broadcast team deletion: {ws_error}")
+        
         return {"success": True}
     
     except PermissionError as e:
@@ -296,6 +397,42 @@ async def add_member(
         )
         if not success:
             raise HTTPException(status_code=400, detail="Failed to add member")
+        
+        # Broadcast member addition to all team members via WebSocket
+        try:
+            from utils.websocket_manager import get_websocket_manager
+            
+            # Get all team members
+            members = await team_service.get_team_members(team_id, current_user.user_id)
+            
+            # Get WebSocket manager
+            ws_manager = get_websocket_manager()
+            if ws_manager and members:
+                sent_count = 0
+                for member in members:
+                    member_id = member.get("user_id")
+                    if member_id:
+                        try:
+                            await ws_manager.send_to_session(
+                                {
+                                    "type": "team.member.joined",
+                                    "team_id": team_id,
+                                    "user_id": request.user_id,
+                                    "role": request.role,
+                                    "added_by": current_user.user_id
+                                },
+                                session_id=member_id
+                            )
+                            sent_count += 1
+                        except Exception as ws_error:
+                            logger.debug(f"Failed to notify team member {member_id}: {ws_error}")
+                
+                if sent_count > 0:
+                    logger.info(f"📬 Team member {request.user_id} addition broadcast to {sent_count} team members")
+        except Exception as ws_error:
+            # Don't fail member addition if WebSocket notification fails
+            logger.warning(f"⚠️ Failed to broadcast member addition: {ws_error}")
+        
         return {"success": True}
     
     except PermissionError as e:
@@ -318,6 +455,41 @@ async def remove_member(
         success = await team_service.remove_member(team_id, user_id, current_user.user_id)
         if not success:
             raise HTTPException(status_code=404, detail="Member not found")
+        
+        # Broadcast member removal to all team members via WebSocket
+        try:
+            from utils.websocket_manager import get_websocket_manager
+            
+            # Get all team members
+            members = await team_service.get_team_members(team_id, current_user.user_id)
+            
+            # Get WebSocket manager
+            ws_manager = get_websocket_manager()
+            if ws_manager and members:
+                sent_count = 0
+                for member in members:
+                    member_id = member.get("user_id")
+                    if member_id:
+                        try:
+                            await ws_manager.send_to_session(
+                                {
+                                    "type": "team.member.left",
+                                    "team_id": team_id,
+                                    "user_id": user_id,
+                                    "removed_by": current_user.user_id
+                                },
+                                session_id=member_id
+                            )
+                            sent_count += 1
+                        except Exception as ws_error:
+                            logger.debug(f"Failed to notify team member {member_id}: {ws_error}")
+                
+                if sent_count > 0:
+                    logger.info(f"📬 Team member {user_id} removal broadcast to {sent_count} team members")
+        except Exception as ws_error:
+            # Don't fail member removal if WebSocket notification fails
+            logger.warning(f"⚠️ Failed to broadcast member removal: {ws_error}")
+        
         return {"success": True}
     
     except PermissionError as e:
@@ -358,6 +530,58 @@ async def update_member_role(
         raise
     except Exception as e:
         logger.error(f"Failed to update member role: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================
+# UNREAD TRACKING ENDPOINTS
+# =====================
+
+@router.get("/unread-counts")
+async def get_unread_post_counts(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get unread post counts for all user's teams"""
+    try:
+        counts = await team_service.get_unread_post_counts(current_user.user_id)
+        return counts
+    except Exception as e:
+        logger.error(f"Failed to get unread post counts: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{team_id}/mark-read")
+async def mark_team_posts_as_read(
+    team_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Mark all posts in a team as read"""
+    try:
+        success = await team_service.mark_team_posts_as_read(team_id, current_user.user_id)
+        return {"success": success}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to mark team posts as read: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/{team_id}/mute")
+async def mute_team(
+    team_id: str,
+    muted: bool = Query(True, description="True to mute, False to unmute"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Mute or unmute a team"""
+    try:
+        logger.info(f"🔔 {'Muting' if muted else 'Unmuting'} team {team_id} for user {current_user.user_id}")
+        success = await team_service.mute_team(team_id, current_user.user_id, muted)
+        logger.info(f"✅ Team {team_id} {'muted' if muted else 'unmuted'} successfully: {success}")
+        return {"success": success, "muted": muted}
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to mute/unmute team: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -405,16 +629,20 @@ async def list_team_invitations(
         from utils.shared_db_pool import get_shared_db_pool
         db_pool = await get_shared_db_pool()
         async with db_pool.acquire() as conn:
-            await conn.execute("SELECT set_config('app.current_user_id', $1, true)", current_user.user_id)
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", current_user.user_id)
             rows = await conn.fetch("""
                 SELECT 
                     ti.*,
                     t.team_name,
                     u_inviter.username as inviter_username,
-                    u_inviter.display_name as inviter_display_name
+                    u_inviter.display_name as inviter_display_name,
+                    u_invited.username as invited_username,
+                    u_invited.display_name as invited_display_name,
+                    u_invited.avatar_url as invited_avatar_url
                 FROM team_invitations ti
                 INNER JOIN teams t ON t.team_id = ti.team_id
                 INNER JOIN users u_inviter ON u_inviter.user_id = ti.invited_by
+                INNER JOIN users u_invited ON u_invited.user_id = ti.invited_user_id
                 WHERE ti.team_id = $1
                 ORDER BY ti.created_at DESC
             """, team_id)
@@ -425,6 +653,9 @@ async def list_team_invitations(
                     "team_id": str(row["team_id"]),
                     "team_name": row["team_name"],
                     "invited_user_id": row["invited_user_id"],
+                    "invited_username": row["invited_username"],
+                    "invited_display_name": row["invited_display_name"],
+                    "invited_avatar_url": row["invited_avatar_url"],
                     "invited_by": row["invited_by"],
                     "inviter_name": row["inviter_display_name"] or row["inviter_username"],
                     "status": row["status"],
@@ -530,13 +761,36 @@ async def reject_invitation(
 async def get_post_attachment(
     team_id: str,
     filename: str,
-    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+    request: Request,
+    token: Optional[str] = Query(None, description="Optional authentication token (for direct image access)")
 ):
     """Serve team post attachment"""
+    # Support both Authorization header and token query parameter
+    from services.auth_service import auth_service
+    
+    # Try to get token from query parameter first, then from Authorization header
+    auth_token = token
+    if not auth_token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            auth_token = auth_header[7:]
+    
+    if not auth_token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    # Validate token and get user
+    try:
+        current_user = await auth_service.get_current_user(auth_token)
+        if not current_user:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+    except Exception as e:
+        logger.warning(f"Token validation failed: {e}")
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
     # Debug: print to stdout (always visible) - MUST appear if route is called
     import sys
     print(f"🔍 GET ATTACHMENT CALLED: team_id={team_id}, filename={filename}, user={current_user.user_id}", file=sys.stderr, flush=True)
-    logger.error(f"🔍 GET ATTACHMENT CALLED: team_id={team_id}, filename={filename}, user={current_user.user_id}")
+    logger.info(f"🔍 GET ATTACHMENT CALLED: team_id={team_id}, filename={filename}, user={current_user.user_id}")
     
     try:
         # Check team access
@@ -835,6 +1089,65 @@ async def create_post(
             post_type=request.post_type,
             attachments=request.attachments or []
         )
+        
+        # Broadcast post creation to all team members via WebSocket
+        try:
+            from utils.websocket_manager import get_websocket_manager
+            
+            # Get all team members
+            members = await team_service.get_team_members(team_id, current_user.user_id)
+            logger.info(f"📋 Team {team_id} has {len(members) if members else 0} members")
+            
+            # Get WebSocket manager
+            ws_manager = get_websocket_manager()
+            logger.info(f"📡 WebSocket manager available: {ws_manager is not None}")
+            
+            if ws_manager:
+                # Log active WebSocket connections
+                logger.info(f"📡 Active WebSocket sessions: {list(ws_manager.session_connections.keys())}")
+                logger.info(f"📡 Total active connections: {len(ws_manager.active_connections)}")
+            
+            if ws_manager and members:
+                # post is already a dict from post_service.create_post
+                post_dict = post if isinstance(post, dict) else dict(post) if post else {}
+                logger.info(f"📝 Broadcasting post {post_dict.get('post_id')} to team members (excluding author {current_user.user_id})")
+                
+                # Send to all team members except the author
+                sent_count = 0
+                for member in members:
+                    member_id = member.get("user_id")
+                    if member_id != current_user.user_id:
+                        # Check if member has an active WebSocket connection
+                        has_connection = member_id in ws_manager.session_connections
+                        logger.info(f"📤 Member {member_id} has WebSocket: {has_connection}")
+                        
+                        if not has_connection:
+                            logger.warning(f"⚠️ Member {member_id} has no active WebSocket connection")
+                            continue
+                        
+                        try:
+                            logger.info(f"📤 Sending WebSocket notification to member {member_id}")
+                            await ws_manager.send_to_session(
+                                {
+                                    "type": "team.post.created",
+                                    "team_id": team_id,
+                                    "post": post_dict
+                                },
+                                session_id=member_id
+                            )
+                            sent_count += 1
+                            logger.info(f"✅ Successfully sent to {member_id}")
+                        except Exception as ws_error:
+                            logger.error(f"❌ Failed to notify team member {member_id}: {ws_error}", exc_info=True)
+                
+                if sent_count > 0:
+                    logger.info(f"📬 Team post {post_dict.get('post_id')} broadcast to {sent_count} team members")
+                else:
+                    logger.warning(f"⚠️ No team members were notified (sent_count=0)")
+        except Exception as ws_error:
+            # Don't fail post creation if WebSocket notification fails
+            logger.error(f"⚠️ Failed to broadcast post creation: {ws_error}", exc_info=True)
+        
         return TeamPostResponse(**post)
     
     except PermissionError as e:
@@ -886,6 +1199,42 @@ async def add_reaction(
         )
         if not success:
             raise HTTPException(status_code=400, detail="Failed to add reaction")
+        
+        # Broadcast reaction addition to all team members via WebSocket (including sender)
+        try:
+            from utils.websocket_manager import get_websocket_manager
+            
+            # Get all team members
+            members = await team_service.get_team_members(team_id, current_user.user_id)
+            
+            # Get WebSocket manager
+            ws_manager = get_websocket_manager()
+            if ws_manager and members:
+                # Send to all team members (including the sender for immediate UI update)
+                sent_count = 0
+                for member in members:
+                    try:
+                        await ws_manager.send_to_session(
+                            {
+                                "type": "team.post.reaction",
+                                "team_id": team_id,
+                                "post_id": post_id,
+                                "reaction_type": request.reaction_type,
+                                "user_id": current_user.user_id,
+                                "action": "add"
+                            },
+                            session_id=member.get("user_id")
+                        )
+                        sent_count += 1
+                    except Exception as ws_error:
+                        logger.debug(f"Failed to notify team member {member.get('user_id')}: {ws_error}")
+                
+                if sent_count > 0:
+                    logger.info(f"📬 Reaction {request.reaction_type} on post {post_id} broadcast to {sent_count} team members")
+        except Exception as ws_error:
+            # Don't fail reaction addition if WebSocket notification fails
+            logger.warning(f"⚠️ Failed to broadcast reaction addition: {ws_error}")
+        
         return {"success": True}
     
     except (ValueError, PermissionError) as e:
@@ -913,6 +1262,42 @@ async def remove_reaction(
         )
         if not success:
             raise HTTPException(status_code=404, detail="Reaction not found")
+        
+        # Broadcast reaction removal to all team members via WebSocket (including sender)
+        try:
+            from utils.websocket_manager import get_websocket_manager
+            
+            # Get all team members
+            members = await team_service.get_team_members(team_id, current_user.user_id)
+            
+            # Get WebSocket manager
+            ws_manager = get_websocket_manager()
+            if ws_manager and members:
+                # Send to all team members (including the sender for immediate UI update)
+                sent_count = 0
+                for member in members:
+                    try:
+                        await ws_manager.send_to_session(
+                            {
+                                "type": "team.post.reaction",
+                                "team_id": team_id,
+                                "post_id": post_id,
+                                "reaction_type": reaction_type,
+                                "user_id": current_user.user_id,
+                                "action": "remove"
+                            },
+                            session_id=member.get("user_id")
+                        )
+                        sent_count += 1
+                    except Exception as ws_error:
+                        logger.debug(f"Failed to notify team member {member.get('user_id')}: {ws_error}")
+                
+                if sent_count > 0:
+                    logger.info(f"📬 Reaction {reaction_type} removal on post {post_id} broadcast to {sent_count} team members")
+        except Exception as ws_error:
+            # Don't fail reaction removal if WebSocket notification fails
+            logger.warning(f"⚠️ Failed to broadcast reaction removal: {ws_error}")
+        
         return {"success": True}
     
     except HTTPException:
@@ -941,6 +1326,42 @@ async def create_comment(
             author_id=current_user.user_id,
             content=request.content
         )
+        
+        # Broadcast comment creation to all team members via WebSocket
+        try:
+            from utils.websocket_manager import get_websocket_manager
+            
+            # Get all team members
+            members = await team_service.get_team_members(team_id, current_user.user_id)
+            
+            # Get WebSocket manager
+            ws_manager = get_websocket_manager()
+            if ws_manager and members:
+                comment_dict = comment if isinstance(comment, dict) else dict(comment) if comment else {}
+                
+                # Send to all team members (including the sender for immediate UI update)
+                sent_count = 0
+                for member in members:
+                    try:
+                        await ws_manager.send_to_session(
+                            {
+                                "type": "team.post.comment",
+                                "team_id": team_id,
+                                "post_id": post_id,
+                                "comment": comment_dict
+                            },
+                            session_id=member.get("user_id")
+                        )
+                        sent_count += 1
+                    except Exception as ws_error:
+                        logger.debug(f"Failed to notify team member {member.get('user_id')}: {ws_error}")
+                
+                if sent_count > 0:
+                    logger.info(f"📬 Comment on post {post_id} broadcast to {sent_count} team members")
+        except Exception as ws_error:
+            # Don't fail comment creation if WebSocket notification fails
+            logger.warning(f"⚠️ Failed to broadcast comment creation: {ws_error}")
+        
         return PostCommentResponse(**comment).dict()
     
     except (ValueError, PermissionError) as e:
@@ -960,7 +1381,7 @@ async def get_post_comments(
     """Get comments for a post"""
     try:
         from models.team_models import PostCommentResponse
-        comments = await post_service.get_post_comments(post_id, limit)
+        comments = await post_service.get_post_comments(post_id, current_user.user_id, limit)
         return PostCommentsListResponse(
             comments=[PostCommentResponse(**comment) for comment in comments],
             total=len(comments)

@@ -41,6 +41,7 @@ const TeamSettingsTab = ({ teamId }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [inviteDialogOpen, setInviteDialogOpen] = useState(false);
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
 
@@ -161,15 +162,24 @@ const TeamSettingsTab = ({ teamId }) => {
       <Box sx={{ mb: 4 }}>
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
           <Typography variant="h6">
-            Invite Members
+            Team Members
           </Typography>
-          <Button
-            variant="outlined"
-            startIcon={<PersonAdd />}
-            onClick={() => setInviteDialogOpen(true)}
-          >
-            Invite User
-          </Button>
+          <Box sx={{ display: 'flex', gap: 1 }}>
+            <Button
+              variant="outlined"
+              startIcon={<PersonAdd />}
+              onClick={() => setAddDialogOpen(true)}
+            >
+              Add User
+            </Button>
+            <Button
+              variant="outlined"
+              startIcon={<PersonAdd />}
+              onClick={() => setInviteDialogOpen(true)}
+            >
+              Invite User
+            </Button>
+          </Box>
         </Box>
       </Box>
 
@@ -197,6 +207,14 @@ const TeamSettingsTab = ({ teamId }) => {
         open={inviteDialogOpen}
         onClose={() => setInviteDialogOpen(false)}
         teamId={teamId}
+        mode="invite"
+      />
+
+      <TeamInviteDialog
+        open={addDialogOpen}
+        onClose={() => setAddDialogOpen(false)}
+        teamId={teamId}
+        mode="add"
       />
 
       <Dialog open={deleteDialogOpen} onClose={() => setDeleteDialogOpen(false)}>

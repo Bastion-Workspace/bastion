@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Card,
   CardContent,
@@ -11,7 +11,8 @@ import {
   Button,
   Collapse,
   TextField,
-  Divider
+  Divider,
+  Tooltip
 } from '@mui/material';
 import {
   ThumbUp,
@@ -36,16 +37,62 @@ const TeamPostCard = ({ post, teamId }) => {
     addReaction,
     removeReaction,
     createComment,
-    loadTeamPosts
+    loadTeamPosts,
+    newPostIds,
+    markPostAsViewed,
+    teamMembers
   } = useTeam();
   const [showComments, setShowComments] = useState(false);
   const [comments, setComments] = useState([]);
   const [commentContent, setCommentContent] = useState('');
   const [isSubmittingComment, setIsSubmittingComment] = useState(false);
   const [imageBlobUrls, setImageBlobUrls] = useState({});
+  const [newCommentHighlight, setNewCommentHighlight] = useState(false);
+  const [isHighlighted, setIsHighlighted] = useState(false);
+  const cardRef = useRef(null);
+  
+  const isNewPost = newPostIds.has(post.post_id);
 
   const isAuthor = post.author_id === user?.user_id;
   const userReaction = post.reactions?.find(r => r.users?.includes(user?.user_id));
+  
+  // Get team members for this team to map user IDs to names
+  const members = teamMembers[teamId] || [];
+  
+  // Helper function to get user name from user_id
+  const getUserName = (userId) => {
+    const member = members.find(m => m.user_id === userId);
+    if (member) {
+      return member.display_name || member.username || 'Unknown';
+    }
+    // Fallback: if it's the current user, use their info
+    if (userId === user?.user_id) {
+      return user?.display_name || user?.username || 'You';
+    }
+    return 'Unknown';
+  };
+  
+  // Helper function to format reaction tooltip text
+  const getReactionTooltip = (reaction) => {
+    if (!reaction.users || reaction.users.length === 0) {
+      return '';
+    }
+    
+    const userNames = reaction.users.map(userId => {
+      if (userId === user?.user_id) {
+        return 'You';
+      }
+      return getUserName(userId);
+    });
+    
+    if (userNames.length === 1) {
+      return userNames[0];
+    } else if (userNames.length <= 5) {
+      return userNames.join(', ');
+    } else {
+      return `${userNames.slice(0, 5).join(', ')} and ${userNames.length - 5} more`;
+    }
+  };
   
   // Load attachment images with auth token (create blob URLs)
   useEffect(() => {
@@ -89,6 +136,84 @@ const TeamPostCard = ({ post, teamId }) => {
       });
     };
   }, [post.attachments]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Set highlight state when post is marked as new
+  useEffect(() => {
+    if (isNewPost) {
+      setIsHighlighted(true);
+    }
+  }, [isNewPost]);
+
+  // Intersection Observer to detect when post comes into view and fade highlight
+  useEffect(() => {
+    if (!isHighlighted || !cardRef.current) return;
+
+    // Check if already in view immediately (for posts that appear at top while user is scrolled to top)
+    const checkIfInView = () => {
+      const rect = cardRef.current.getBoundingClientRect();
+      const isInView = rect.top < window.innerHeight && rect.bottom > 0;
+      if (isInView) {
+        // Post is already visible - fade out highlight after a brief delay
+        setTimeout(() => {
+          setIsHighlighted(false);
+          markPostAsViewed(post.post_id);
+        }, 500);
+        return true;
+      }
+      return false;
+    };
+
+    // Check immediately
+    if (checkIfInView()) {
+      return; // Already in view, no need for observer
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            // Post is now visible - fade out highlight after a brief delay
+            setTimeout(() => {
+              setIsHighlighted(false);
+              markPostAsViewed(post.post_id);
+            }, 500); // Small delay so user sees the highlight
+          }
+        });
+      },
+      { threshold: 0.1 } // Trigger when 10% of post is visible
+    );
+
+    observer.observe(cardRef.current);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [isHighlighted, post.post_id, markPostAsViewed]);
+
+  // Listen for new comments on this post
+  useEffect(() => {
+    const handleCommentAdded = (event) => {
+      if (event.detail?.post_id === post.post_id) {
+        const newComment = event.detail.comment;
+        // Add comment to list if comments are expanded
+        if (showComments) {
+          setComments(prev => {
+            // Check if comment already exists (avoid duplicates)
+            if (prev.some(c => c.comment_id === newComment.comment_id)) {
+              return prev;
+            }
+            return [...prev, newComment];
+          });
+          // Highlight the new comment briefly
+          setNewCommentHighlight(true);
+          setTimeout(() => setNewCommentHighlight(false), 2000);
+        }
+      }
+    };
+    
+    window.addEventListener('teamPostCommentAdded', handleCommentAdded);
+    return () => window.removeEventListener('teamPostCommentAdded', handleCommentAdded);
+  }, [post.post_id, showComments]);
 
   const handleReaction = async (reactionType) => {
     try {
@@ -148,7 +273,17 @@ const TeamPostCard = ({ post, teamId }) => {
   };
 
   return (
-    <Card>
+    <Card
+      ref={cardRef}
+      sx={{
+        transition: 'background-color 3s cubic-bezier(0.4, 0, 0.2, 1)',
+        backgroundColor: isHighlighted 
+          ? (theme) => theme.palette.mode === 'dark' 
+            ? 'rgba(255, 255, 255, 0.08)' 
+            : 'rgba(25, 118, 210, 0.08)'
+          : 'transparent'
+      }}
+    >
       <CardContent>
         <Box sx={{ display: 'flex', alignItems: 'start', mb: 2 }}>
           <Avatar
@@ -291,6 +426,13 @@ const TeamPostCard = ({ post, teamId }) => {
                 fileUrl = `/api/teams/${teamId}/posts/attachments/${att.filename || `attachment_${index}`}`;
               }
               
+              // Add token as query parameter for direct image access (e.g., when opening in new tab)
+              const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+              if (token && !fileUrl.includes('token=')) {
+                const separator = fileUrl.includes('?') ? '&' : '?';
+                fileUrl = `${fileUrl}${separator}token=${encodeURIComponent(token)}`;
+              }
+              
               console.log('Constructed fileUrl:', fileUrl, 'from file_path:', att.file_path, 'filename:', att.filename);
               
               return (
@@ -306,12 +448,44 @@ const TeamPostCard = ({ post, teamId }) => {
                         src={imageBlobUrls[att.file_path]}
                         alt={att.filename || 'Attachment'}
                         style={{ maxWidth: '100%', maxHeight: '400px', borderRadius: 4, cursor: 'pointer' }}
-                        onClick={() => {
-                          // Open original URL in new tab with auth
-                          const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
-                          if (token) {
-                            // For downloads, we might need a different approach
-                            window.open(fileUrl, '_blank');
+                        onClick={async () => {
+                          // Fetch image and open as blob URL in new tab to display (not download)
+                          try {
+                            const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+                            if (!token) {
+                              console.error('No auth token available');
+                              return;
+                            }
+                            
+                            const response = await fetch(fileUrl, {
+                              headers: { 'Authorization': `Bearer ${token}` }
+                            });
+                            
+                            if (response.ok) {
+                              const blob = await response.blob();
+                              const blobUrl = URL.createObjectURL(blob);
+                              
+                              // Open in new tab - blob URLs display images instead of downloading
+                              const newWindow = window.open(blobUrl, '_blank');
+                              
+                              // Clean up blob URL after a delay (window should have loaded it)
+                              setTimeout(() => {
+                                // Revoke after window opens (give it time to load)
+                                setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+                              }, 100);
+                              
+                              // If popup was blocked, clean up immediately
+                              if (!newWindow) {
+                                URL.revokeObjectURL(blobUrl);
+                                alert('Please allow popups to view images in a new tab.');
+                              }
+                            } else {
+                              console.error('Failed to load full-size image:', response.status);
+                              alert('Failed to load image. Please check your authentication.');
+                            }
+                          } catch (error) {
+                            console.error('Error opening image:', error);
+                            alert('Failed to open image. Please try again.');
                           }
                         }}
                         onError={(e) => {
@@ -354,15 +528,26 @@ const TeamPostCard = ({ post, teamId }) => {
         
         {post.reactions && post.reactions.length > 0 && (
           <Box sx={{ display: 'flex', gap: 1, mb: 2, flexWrap: 'wrap' }}>
-            {post.reactions.map((reaction) => (
-              <Chip
-                key={reaction.reaction_type}
-                label={`${reaction.reaction_type} ${reaction.count}`}
-                size="small"
-                onClick={() => handleReaction(reaction.reaction_type)}
-                color={userReaction?.reaction_type === reaction.reaction_type ? 'primary' : 'default'}
-              />
-            ))}
+            {post.reactions.map((reaction) => {
+              const tooltipText = getReactionTooltip(reaction);
+              const chip = (
+                <Chip
+                  key={reaction.reaction_type}
+                  label={`${reaction.reaction_type} ${reaction.count}`}
+                  size="small"
+                  onClick={() => handleReaction(reaction.reaction_type)}
+                  color={userReaction?.reaction_type === reaction.reaction_type ? 'primary' : 'default'}
+                />
+              );
+              
+              return tooltipText ? (
+                <Tooltip key={reaction.reaction_type} title={tooltipText} arrow>
+                  {chip}
+                </Tooltip>
+              ) : (
+                chip
+              );
+            })}
           </Box>
         )}
       </CardContent>
@@ -389,8 +574,21 @@ const TeamPostCard = ({ post, teamId }) => {
       
       <Collapse in={showComments}>
         <Box sx={{ p: 2 }}>
-          {comments.map((comment) => (
-            <Box key={comment.comment_id} sx={{ mb: 2 }}>
+          {comments.map((comment, index) => (
+            <Box 
+              key={comment.comment_id} 
+              sx={{ 
+                mb: 2,
+                ...(newCommentHighlight && index === comments.length - 1 ? {
+                  bgcolor: (theme) => theme.palette.mode === 'dark' 
+                    ? 'rgba(25, 118, 210, 0.1)' 
+                    : 'rgba(25, 118, 210, 0.05)',
+                  borderRadius: 1,
+                  p: 1,
+                  transition: 'background-color 0.3s ease'
+                } : {})
+              }}
+            >
               <Box sx={{ display: 'flex', alignItems: 'start' }}>
                 <Avatar sx={{ width: 32, height: 32, mr: 1 }}>
                   {comment.author_name?.[0]?.toUpperCase()}

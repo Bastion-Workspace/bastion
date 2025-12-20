@@ -15,6 +15,15 @@ import { createLiveEditDiffExtension } from './editor/extensions/liveEditDiffExt
 import { editorSuggestionService } from '../services/editor/EditorSuggestionService';
 
 const createMdTheme = (darkMode) => EditorView.baseTheme({
+  '&': {
+    backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+  },
+  '.cm-editor': {
+    backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+  },
+  '.cm-scroller': {
+    backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+  },
   '.cm-content': { 
     fontFamily: 'monospace', 
     fontSize: '14px', 
@@ -211,7 +220,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
         language: 'markdown',
         cursorOffset: position,
         frontmatter,
-        maxChars: 80,
+        maxChars: 300,
         signal
       });
       return suggestion || '';
@@ -369,6 +378,19 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
     const { data, lists } = parseFrontmatter(fullText);
     const mergedFrontmatter = { ...data, ...lists };
     
+    console.log('📝 MarkdownCMEditor MOUNT: Parsed frontmatter:', {
+      dataKeys: Object.keys(data),
+      listsKeys: Object.keys(lists),
+      dataType: data.type,
+      mergedType: mergedFrontmatter.type,
+      mergedKeys: Object.keys(mergedFrontmatter),
+      fullData: data,
+      fullMerged: mergedFrontmatter
+    });
+    
+    // CRITICAL FIX: Initialize window cache for typing handler to reuse
+    window.__last_editor_frontmatter = mergedFrontmatter;
+    
     // Set context state ONCE to indicate editor is open
     const payload = {
       isEditable: true,
@@ -387,6 +409,13 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
     
     // Also write to localStorage for chat to read on mount
     try {
+      console.log('📝 MarkdownCMEditor MOUNT: Writing editor_ctx_cache:', {
+        filename: payload.filename,
+        frontmatterKeys: Object.keys(payload.frontmatter || {}),
+        frontmatterType: payload.frontmatter?.type,
+        fullFrontmatter: payload.frontmatter,
+        contentLength: payload.contentLength
+      });
       localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
     } catch {}
     
@@ -408,6 +437,50 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
     // Only run on mount/unmount and when file changes, NOT on every keystroke
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filename, canonicalPath]);
+
+  // Watch for frontmatter changes in content and update cache
+  useEffect(() => {
+    const fullText = (value || '').replace(/\r\n/g, '\n');
+    const { data, lists } = parseFrontmatter(fullText);
+    const mergedFrontmatter = { ...data, ...lists };
+    
+    // Compare with cached frontmatter to detect changes
+    const cachedFrontmatter = window.__last_editor_frontmatter || {};
+    const frontmatterChanged = JSON.stringify(mergedFrontmatter) !== JSON.stringify(cachedFrontmatter);
+    
+    if (frontmatterChanged) {
+      // Update window cache
+      window.__last_editor_frontmatter = mergedFrontmatter;
+      
+      // Update React context
+      const payload = {
+        isEditable: true,
+        filename: filename || 'untitled.md',
+        language: 'markdown',
+        content: fullText,
+        contentLength: fullText.length,
+        frontmatter: mergedFrontmatter,
+        cursorOffset: -1,
+        selectionStart: -1,
+        selectionEnd: -1,
+        canonicalPath: canonicalPath || null,
+      };
+      
+      setEditorState(payload);
+      
+      // Update localStorage cache so ChatSidebar picks up changes immediately
+      try {
+        localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
+        console.log('✅ Frontmatter updated in cache:', {
+          oldType: cachedFrontmatter.type,
+          newType: mergedFrontmatter.type,
+          filename: payload.filename
+        });
+      } catch (e) {
+        console.error('Failed to update editor_ctx_cache:', e);
+      }
+    }
+  }, [value, filename, canonicalPath]);
 
   // Removed floating Accept listener; no longer needed
 
@@ -774,19 +847,12 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
             const selectionEnd = sel.to;
             const docText = update.state.doc.toString();
             
-            // **PERFORMANCE FIX**: Only parse frontmatter when document changes, not on cursor moves
+            // **CRITICAL FIX**: NEVER re-parse frontmatter after mount!
+            // The mount effect already parsed it correctly. Re-parsing during typing often fails
+            // because CodeMirror update events fire before document is fully initialized.
+            // Always use the cached frontmatter from mount.
             const needsContentUpdate = update.docChanged;
-            
-            let mergedFrontmatter = {};
-            if (needsContentUpdate) {
-              const { data, lists } = parseFrontmatter(docText);
-              mergedFrontmatter = { ...data, ...lists };
-              // Cache for reuse during cursor-only updates
-              window.__last_editor_frontmatter = mergedFrontmatter;
-            } else {
-              // Reuse cached frontmatter for cursor-only updates
-              mergedFrontmatter = window.__last_editor_frontmatter || {};
-            }
+            const mergedFrontmatter = window.__last_editor_frontmatter || {};
             
             const payload = {
               isEditable: true,
@@ -809,6 +875,16 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
             // Throttle localStorage writes for chat to read when sending messages
             if (!window.__editor_ctx_write_ts || Date.now() - window.__editor_ctx_write_ts > 500) {
               window.__editor_ctx_write_ts = Date.now();
+              
+              console.log('📝 MarkdownCMEditor TYPING: Writing editor_ctx_cache:', {
+                filename: payload.filename,
+                frontmatterKeys: Object.keys(payload.frontmatter || {}),
+                frontmatterType: payload.frontmatter?.type,
+                fullFrontmatter: payload.frontmatter,
+                contentLength: payload.contentLength,
+                needsContentUpdate: needsContentUpdate,
+                usingCachedFrontmatter: true
+              });
               localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
             }
           } catch {}

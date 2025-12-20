@@ -110,6 +110,8 @@ const FileTreeSidebar = ({
   const [uploadTags, setUploadTags] = useState([]);
   const [uploadTagInput, setUploadTagInput] = useState('');
   const [isDragging, setIsDragging] = useState(false);
+  const [draggedItem, setDraggedItem] = useState(null); // { type: 'file'|'folder', id: string, data: object }
+  const [dragOverFolderId, setDragOverFolderId] = useState(null);
   const [metadataPane, setMetadataPane] = useState({ open: false, document: null, position: { x: 0, y: 0 } });
   const [folderMetadataPane, setFolderMetadataPane] = useState({ open: false, folder: null, position: { x: 0, y: 0 } });
   const [categories, setCategories] = useState([]);
@@ -213,11 +215,20 @@ const FileTreeSidebar = ({
               apiService.getFolderContents(update.folder_id)
                 .then(contents => {
                   setFolderContents(prev => {
-                    const newContents = { ...prev, [update.folder_id]: contents };
+                    // Ensure documents have normalized status field (create new object to trigger re-render)
+                    const normalizedContents = {
+                      ...contents,
+                      documents: contents.documents?.map(doc => ({
+                        ...doc,
+                        status: doc.status || doc.processing_status || null,
+                        processing_status: doc.processing_status || doc.status || null
+                      })) || []
+                    };
+                    const newContents = { ...prev, [update.folder_id]: normalizedContents };
                     console.log(`✅ ROOSEVELT: Real-time folder contents updated!`, {
                       folderId: update.folder_id,
-                      documentCount: contents.documents?.length || 0,
-                      documents: contents.documents?.map(d => ({ 
+                      documentCount: normalizedContents.documents?.length || 0,
+                      documents: normalizedContents.documents?.map(d => ({ 
                         filename: d.filename, 
                         status: d.status || d.processing_status,
                         actual_status_field: d.status,
@@ -236,6 +247,63 @@ const FileTreeSidebar = ({
                 .catch(error => {
                   console.error(`❌ Failed to refresh folder ${update.folder_id}:`, error);
                 });
+            } else {
+              // Folder ID missing - try to find and update the document in loaded folder contents
+              console.log(`⚠️ Document status update received without folder_id, searching loaded folders...`);
+              
+              // Try to update in-place if document is in loaded folder contents (optimistic update)
+              setFolderContents(prev => {
+                const newContents = { ...prev };
+                let found = false;
+                
+                // Search through all loaded folder contents
+                for (const folderId in newContents) {
+                  const folder = newContents[folderId];
+                  if (folder?.documents) {
+                    const docIndex = folder.documents.findIndex(
+                      d => d.document_id === update.document_id
+                    );
+                    
+                    if (docIndex !== -1) {
+                      // Found the document - update its status
+                      found = true;
+                      const updatedDoc = {
+                        ...folder.documents[docIndex],
+                        status: update.status,
+                        processing_status: update.status
+                      };
+                      newContents[folderId] = {
+                        ...folder,
+                        documents: [
+                          ...folder.documents.slice(0, docIndex),
+                          updatedDoc,
+                          ...folder.documents.slice(docIndex + 1)
+                        ]
+                      };
+                      console.log(`✅ Updated document status in folder ${folderId} (found in loaded contents)`);
+                      break;
+                    }
+                  }
+                }
+                
+                // If not found, we'll invalidate queries below to ensure UI updates
+                if (!found) {
+                  console.log(`⚠️ Document not found in loaded contents, will invalidate queries...`);
+                }
+                
+                return newContents;
+              });
+              
+              // Always invalidate queries as a fallback to ensure UI updates
+              // This handles cases where the document isn't in loaded contents yet
+              // React Query will dedupe requests, so this is safe
+              queryClient.invalidateQueries(['folders', 'contents']);
+              
+              // Remove from processing files list if status is completed
+              if (update.status === 'completed' && update.filename) {
+                setProcessingFiles(prev => prev.filter(f => f.filename !== update.filename));
+                showToast(`✅ "${update.filename}" processing completed!`, 'success');
+              }
             }
           } else if (update.type === 'file_deleted') {
             console.log('🗑️ Received file deleted notification:', update);
@@ -291,16 +359,41 @@ const FileTreeSidebar = ({
                   is_virtual_source: false
                 };
                 
+                // Helper function to check if folder already exists in tree
+                // Check by ID or by name+parent (to catch optimistic temp folders)
+                const folderExists = (folders, targetId, name, parentId) => {
+                  for (const folder of folders) {
+                    // Check by ID
+                    if (folder.folder_id === targetId) {
+                      return true;
+                    }
+                    // Check by name+parent (catches temp folders with same name/parent)
+                    if (folder.name === name && folder.parent_folder_id === parentId) {
+                      return true;
+                    }
+                    if (folder.children && folder.children.length > 0) {
+                      if (folderExists(folder.children, targetId, name, parentId)) {
+                        return true;
+                      }
+                    }
+                  }
+                  return false;
+                };
+                
                 // Helper function to recursively add folder to the correct parent
                 const addFolderToTree = (folders) => {
                   return folders.map(folder => {
-                    // If this is the parent folder, add the new folder to its children
+                    // If this is the parent folder, add the new folder to its children (only if not already present)
                     if (folder.folder_id === update.folder.parent_folder_id) {
-                      return {
-                        ...folder,
-                        children: [...(folder.children || []), newFolder],
-                        subfolder_count: (folder.subfolder_count || 0) + 1
-                      };
+                      // Check if folder already exists anywhere in the tree (by ID or name+parent)
+                      if (!folderExists(oldData.folders, update.folder.folder_id, update.folder.name, update.folder.parent_folder_id)) {
+                        return {
+                          ...folder,
+                          children: [...(folder.children || []), newFolder],
+                          subfolder_count: (folder.subfolder_count || 0) + 1
+                        };
+                      }
+                      return folder; // Already exists, don't add again
                     }
                     // If this folder has children, recursively search them
                     else if (folder.children && folder.children.length > 0) {
@@ -314,10 +407,14 @@ const FileTreeSidebar = ({
                     else if (!update.folder.parent_folder_id) {
                       if ((folder.folder_id === 'my_documents_root' && update.folder?.collection_type === 'user') ||
                           (folder.folder_id === 'global_documents_root' && update.folder?.collection_type === 'global')) {
-                        return {
-                          ...folder,
-                          children: [...(folder.children || []), newFolder]
-                        };
+                        // Check if folder already exists anywhere in the tree (by ID or name+parent)
+                        if (!folderExists(oldData.folders, update.folder.folder_id, update.folder.name, update.folder.parent_folder_id)) {
+                          return {
+                            ...folder,
+                            children: [...(folder.children || []), newFolder]
+                          };
+                        }
+                        return folder; // Already exists, don't add again
                       }
                     }
                     return folder;
@@ -348,39 +445,73 @@ const FileTreeSidebar = ({
               const folderName = update.folder?.name || 'Folder';
               showToast(`🗑️ ${folderName} deleted`, 'success');
               
+              // Invalidate folder contents to ensure counts are updated
+              queryClient.invalidateQueries(['folderContents']);
+              
               // Optimistic update - remove folder from tree immediately
               queryClient.setQueryData(['folders', 'tree', user?.user_id, user?.role], (oldData) => {
                 if (!oldData) return oldData;
                 
                 // Helper function to recursively remove folder from tree
-                const removeFolderFromTree = (folders) => {
+                const removeFolderFromTree = (folders, targetId) => {
                   return folders
-                    .filter(folder => folder.folder_id !== update.folder.folder_id) // Remove if this is the deleted folder
+                    .filter(folder => folder.folder_id !== targetId) // Remove the target folder
                     .map(folder => {
-                      // If this folder has children, recursively clean them
+                      // Check if this folder had the deleted folder as a direct child (before filtering)
+                      const hadTargetChild = folder.children && folder.children.some(child => child.folder_id === targetId);
+                      
+                      // Recursively remove from children
                       if (folder.children && folder.children.length > 0) {
-                        const updatedChildren = removeFolderFromTree(folder.children);
+                        const originalChildCount = folder.children.length;
+                        const updatedChildren = removeFolderFromTree(folder.children, targetId);
+                        const newChildCount = updatedChildren.length;
+                        
                         // Update subfolder count if any children were removed
-                        if (updatedChildren.length !== folder.children.length) {
+                        if (newChildCount !== originalChildCount) {
                           return {
                             ...folder,
                             children: updatedChildren,
-                            subfolder_count: Math.max(0, (folder.subfolder_count || 0) - (folder.children.length - updatedChildren.length))
+                            subfolder_count: Math.max(0, (folder.subfolder_count || 0) - (originalChildCount - newChildCount))
                           };
-                        } else {
-                          return { ...folder, children: updatedChildren };
                         }
+                        return { ...folder, children: updatedChildren };
                       }
+                      
+                      // If this folder had the target as a direct child but has no children array,
+                      // we still need to decrement the subfolder_count
+                      if (hadTargetChild) {
+                        return {
+                          ...folder,
+                          subfolder_count: Math.max(0, (folder.subfolder_count || 0) - 1)
+                        };
+                      }
+                      
                       return folder;
                     });
                 };
                 
-                const updatedFolders = removeFolderFromTree(oldData.folders);
+                const updatedFolders = removeFolderFromTree(oldData.folders, update.folder.folder_id);
+                
+                // Count how many folders were removed (including descendants)
+                let removedCount = 0;
+                const countRemoved = (folders, targetId) => {
+                  folders.forEach(folder => {
+                    if (folder.folder_id === targetId) {
+                      removedCount++;
+                      if (folder.children && folder.children.length > 0) {
+                        folder.children.forEach(child => countRemoved([child], child.folder_id));
+                      }
+                    } else if (folder.children && folder.children.length > 0) {
+                      countRemoved(folder.children, targetId);
+                    }
+                  });
+                };
+                countRemoved(oldData.folders, update.folder.folder_id);
                 
                 return {
                   ...oldData,
                   folders: updatedFolders,
-                  total_folders: Math.max(0, oldData.total_folders - 1)
+                  total_folders: Math.max(0, oldData.total_folders - removedCount)
                 };
               });
               
@@ -989,6 +1120,7 @@ const FileTreeSidebar = ({
           parent_folder_id: newFolderData.parent_folder_id || null,
           user_id: user?.user_id,
           collection_type: newFolderData.collection_type || 'user',
+          team_id: newFolderData.team_id || null,
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           document_count: 0,
@@ -997,12 +1129,47 @@ const FileTreeSidebar = ({
           is_virtual_source: false
         };
         
+        // Helper function to recursively find and update a folder in the tree
+        const findAndUpdateFolder = (folders, targetId, updater) => {
+          return folders.map(folder => {
+            if (folder.folder_id === targetId) {
+              return updater(folder);
+            }
+            if (folder.children && folder.children.length > 0) {
+              return {
+                ...folder,
+                children: findAndUpdateFolder(folder.children, targetId, updater)
+              };
+            }
+            return folder;
+          });
+        };
+        
         // Optimistically update the folder tree
         queryClient.setQueryData(['folders', 'tree', user?.user_id, user?.role], (oldData) => {
           if (!oldData) return oldData;
           
+          // If folder has a parent, add it to parent's children
+          if (newFolderData.parent_folder_id) {
+            const updatedFolders = findAndUpdateFolder(oldData.folders, newFolderData.parent_folder_id, (parent) => ({
+              ...parent,
+              children: [...(parent.children || []), optimisticFolder],
+              subfolder_count: (parent.subfolder_count || 0) + 1
+            }));
+            
+            return {
+              ...oldData,
+              folders: updatedFolders,
+              total_folders: oldData.total_folders + 1
+            };
+          }
+          
+          // Root-level folder - add to appropriate root
           const updatedFolders = oldData.folders.map(virtualRoot => {
-            if (virtualRoot.folder_id === 'my_documents_root' && newFolderData.collection_type === 'user') {
+            const isUserFolder = newFolderData.collection_type === 'user' && virtualRoot.folder_id === 'my_documents_root';
+            const isTeamFolder = newFolderData.collection_type === 'team' && virtualRoot.folder_id !== 'my_documents_root' && virtualRoot.folder_id !== 'global_documents_root';
+            
+            if (isUserFolder || isTeamFolder) {
               return {
                 ...virtualRoot,
                 children: [...(virtualRoot.children || []), optimisticFolder]
@@ -1022,24 +1189,34 @@ const FileTreeSidebar = ({
         return { optimisticFolder, previousFolders };
       },
       onSuccess: (response, variables, context) => {
-        // Update the optimistic folder with the real data
+        // Replace the optimistic folder with the real response data
         if (context?.optimisticFolder) {
           queryClient.setQueryData(['folders', 'tree', user?.user_id, user?.role], (oldData) => {
             if (!oldData) return oldData;
             
-            const updatedFolders = oldData.folders.map(virtualRoot => {
-              if (virtualRoot.folder_id === 'my_documents_root') {
-                return {
-                  ...virtualRoot,
-                  children: virtualRoot.children.map(folder => 
-                    folder.folder_id === context.optimisticFolder.folder_id 
-                      ? { ...folder, folder_id: response.folder_id }
-                      : folder
-                  )
-                };
-              }
-              return virtualRoot;
-            });
+            // Helper function to recursively find and replace a folder in the tree
+            const findAndReplaceFolder = (folders, tempId, realFolder) => {
+              return folders.map(folder => {
+                if (folder.folder_id === tempId) {
+                  // Replace optimistic folder with real data
+                  return {
+                    ...realFolder,
+                    children: folder.children || [],
+                    document_count: folder.document_count || 0,
+                    subfolder_count: folder.subfolder_count || 0
+                  };
+                }
+                if (folder.children && folder.children.length > 0) {
+                  return {
+                    ...folder,
+                    children: findAndReplaceFolder(folder.children, tempId, realFolder)
+                  };
+                }
+                return folder;
+              });
+            };
+            
+            const updatedFolders = findAndReplaceFolder(oldData.folders, context.optimisticFolder.folder_id, response);
             
             return {
               ...oldData,
@@ -1060,11 +1237,14 @@ const FileTreeSidebar = ({
         }
         console.error('❌ Folder creation failed:', error);
         alert(`Failed to create folder: ${error.message || 'Unknown error'}`);
-      },
-      onSettled: () => {
-        // Always refetch to ensure consistency
-        queryClient.invalidateQueries(['folders', 'tree']);
+        // Close dialog and reset form even on error
+        setCreateFolderDialog(false);
+        setNewFolderName('');
+        setNewFolderParent(null);
+        setNewFolderCollectionType('user');
       }
+      // Removed onSettled invalidation to prevent duplicate folders
+      // The optimistic update + onSuccess replacement is sufficient
     }
   );
 
@@ -1084,37 +1264,89 @@ const FileTreeSidebar = ({
         // Cancel any outgoing refetches
         await queryClient.cancelQueries(['folders', 'tree']);
         
-        // Snapshot the previous value
-        const previousFolders = queryClient.getQueryData(['folders', 'tree']);
+        // Snapshot the previous value (use full query key with user info)
+        const previousFolders = queryClient.getQueryData(['folders', 'tree', user?.user_id, user?.role]);
+        
+        // Helper function to recursively remove a folder from the tree
+        const removeFolderFromTree = (folders, targetId) => {
+          return folders
+            .filter(folder => folder.folder_id !== targetId) // Remove the target folder
+            .map(folder => {
+              // Check if this folder had the deleted folder as a direct child (before filtering)
+              const hadTargetChild = folder.children && folder.children.some(child => child.folder_id === targetId);
+              
+              // Recursively remove from children
+              if (folder.children && folder.children.length > 0) {
+                const originalChildCount = folder.children.length;
+                const updatedChildren = removeFolderFromTree(folder.children, targetId);
+                const newChildCount = updatedChildren.length;
+                
+                // Update subfolder count if any children were removed
+                if (newChildCount !== originalChildCount) {
+                  return {
+                    ...folder,
+                    children: updatedChildren,
+                    subfolder_count: Math.max(0, (folder.subfolder_count || 0) - (originalChildCount - newChildCount))
+                  };
+                }
+                return { ...folder, children: updatedChildren };
+              }
+              
+              // If this folder had the target as a direct child but has no children array,
+              // we still need to decrement the subfolder_count
+              if (hadTargetChild) {
+                return {
+                  ...folder,
+                  subfolder_count: Math.max(0, (folder.subfolder_count || 0) - 1)
+                };
+              }
+              
+              return folder;
+            });
+        };
+        
+        // Count how many folders will be removed (for total_folders update)
+        let removedCount = 0;
+        const countRemovedFolders = (folders, targetId) => {
+          folders.forEach(folder => {
+            if (folder.folder_id === targetId) {
+              removedCount++;
+              // Count all descendants recursively
+              if (folder.children && folder.children.length > 0) {
+                folder.children.forEach(child => countRemovedFolders([child], child.folder_id));
+              }
+            } else if (folder.children && folder.children.length > 0) {
+              countRemovedFolders(folder.children, targetId);
+            }
+          });
+        };
+        countRemovedFolders(previousFolders?.folders || [], folderId);
         
         // Optimistically remove the folder from the tree
         queryClient.setQueryData(['folders', 'tree', user?.user_id, user?.role], (oldData) => {
           if (!oldData) return oldData;
           
-          const updatedFolders = oldData.folders.map(virtualRoot => {
-            if (virtualRoot.folder_id === 'my_documents_root') {
-              return {
-                ...virtualRoot,
-                children: (virtualRoot.children || []).filter(folder => 
-                  folder.folder_id !== folderId
-                )
-              };
-            }
-            return virtualRoot;
-          });
+          const updatedFolders = removeFolderFromTree(oldData.folders, folderId);
           
           return {
             ...oldData,
             folders: updatedFolders,
-            total_folders: Math.max(0, oldData.total_folders - 1)
+            total_folders: Math.max(0, oldData.total_folders - removedCount)
           };
         });
         
         // Return context with the previous data
         return { previousFolders };
       },
-      onSuccess: () => {
+      onSuccess: (response, variables) => {
         setContextMenu(null);
+        
+        // Invalidate folder contents queries to ensure counts are updated
+        // This is especially important for the parent folder's subfolder_count
+        queryClient.invalidateQueries(['folderContents']);
+        
+        // Don't invalidate the tree query - the optimistic update is sufficient
+        // The WebSocket notification will also update the tree if needed
       },
       onError: (error, variables, context) => {
         // Rollback on error
@@ -1122,12 +1354,19 @@ const FileTreeSidebar = ({
           queryClient.setQueryData(['folders', 'tree', user?.user_id, user?.role], context.previousFolders);
         }
         console.error('❌ Folder deletion failed:', error);
-        alert(`Failed to delete folder: ${error.message || 'Unknown error'}`);
-      },
-      onSettled: () => {
-        // Always refetch to ensure consistency
-        queryClient.invalidateQueries(['folders', 'tree']);
+        
+        // Show user-friendly error message
+        const errorMsg = error.response?.data?.detail || error.message || 'Unknown error';
+        const isPermissionError = errorMsg.toLowerCase().includes('permission') || error.response?.status === 403;
+        
+        if (isPermissionError) {
+          alert('⛔ Permission Denied\n\nYou do not have permission to delete this folder.\n\nOnly the folder creator or team admins can delete team folders.');
+        } else {
+          alert(`Failed to delete folder: ${errorMsg}`);
+        }
       }
+      // Removed onSettled invalidation to prevent refetch that might restore the folder
+      // The optimistic update + WebSocket notification is sufficient
     }
   );
 
@@ -1429,6 +1668,80 @@ const FileTreeSidebar = ({
     });
     setContextMenuTarget(target);
   }, []);
+
+  // Long-press handler for mobile touch devices
+  const createLongPressHandlers = useCallback((target) => {
+    let timeoutId = null;
+    let startPos = null;
+    let isLongPress = false;
+    const delay = 600;
+    const moveThreshold = 10;
+
+    const handleTouchStart = (e) => {
+      if (e.touches && e.touches.length > 0) {
+        const touch = e.touches[0];
+        startPos = { x: touch.clientX, y: touch.clientY };
+        isLongPress = false;
+
+        timeoutId = setTimeout(() => {
+          isLongPress = true;
+          const syntheticEvent = {
+            preventDefault: () => e.preventDefault(),
+            clientX: touch.clientX,
+            clientY: touch.clientY,
+            touches: e.touches,
+            target: e.target
+          };
+          handleContextMenu(syntheticEvent, target);
+        }, delay);
+      }
+    };
+
+    const handleTouchMove = (e) => {
+      if (!startPos || !e.touches || e.touches.length === 0) return;
+
+      const touch = e.touches[0];
+      const deltaX = Math.abs(touch.clientX - startPos.x);
+      const deltaY = Math.abs(touch.clientY - startPos.y);
+
+      if (deltaX > moveThreshold || deltaY > moveThreshold) {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        startPos = null;
+      }
+    };
+
+    const handleTouchEnd = (e) => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      if (isLongPress) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      startPos = null;
+      isLongPress = false;
+    };
+
+    const handleTouchCancel = () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      startPos = null;
+      isLongPress = false;
+    };
+
+    return {
+      onTouchStart: handleTouchStart,
+      onTouchMove: handleTouchMove,
+      onTouchEnd: handleTouchEnd,
+      onTouchCancel: handleTouchCancel
+    };
+  }, [handleContextMenu]);
 
   const handleContextMenuClose = useCallback(() => {
     setContextMenu(null);
@@ -1788,6 +2101,177 @@ const FileTreeSidebar = ({
     setIsDragging(false);
   }, []);
 
+  // Drag and drop handlers for moving files/folders
+  const handleDragStart = useCallback((event, item, type) => {
+    // Only allow drag on real files/folders, not virtual ones
+    if (type === 'folder') {
+      const isVirtualRoot = item.folder_id === 'my_documents_root' || item.folder_id === 'global_documents_root';
+      if (isVirtualRoot || item.is_virtual_source) {
+        event.preventDefault();
+        return;
+      }
+    }
+    
+    setDraggedItem({ type, id: type === 'file' ? item.document_id : item.folder_id, data: item });
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('application/json', JSON.stringify({
+      type,
+      id: type === 'file' ? item.document_id : item.folder_id
+    }));
+    // Set drag image to be semi-transparent
+    try {
+      const dragImage = event.target.cloneNode(true);
+      dragImage.style.opacity = '0.5';
+      dragImage.style.position = 'absolute';
+      dragImage.style.top = '-1000px';
+      document.body.appendChild(dragImage);
+      event.dataTransfer.setDragImage(dragImage, 0, 0);
+      setTimeout(() => {
+        if (document.body.contains(dragImage)) {
+          document.body.removeChild(dragImage);
+        }
+      }, 0);
+    } catch (e) {
+      // Fallback if drag image creation fails
+      console.warn('Failed to create drag image:', e);
+    }
+  }, []);
+
+  const handleDragEnd = useCallback((event) => {
+    setDraggedItem(null);
+    setDragOverFolderId(null);
+    setIsDragging(false);
+  }, []);
+
+  // Validation helpers
+  const isValidDropTarget = useCallback((targetFolderId, draggedItem) => {
+    if (!draggedItem || !targetFolderId) return false;
+    
+    // Don't allow dropping on virtual roots
+    if (targetFolderId === 'my_documents_root' || targetFolderId === 'global_documents_root') {
+      return false;
+    }
+    
+    // Find target folder in tree to check if it's virtual
+    const findFolder = (folders, folderId) => {
+      for (const folder of folders) {
+        if (folder.folder_id === folderId) {
+          return folder;
+        }
+        if (folder.children) {
+          const found = findFolder(folder.children, folderId);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+    
+    const targetFolder = findFolder(folderTree?.folders || [], targetFolderId);
+    if (!targetFolder || targetFolder.is_virtual_source) {
+      return false;
+    }
+    
+    // Don't allow dropping folder into itself
+    if (draggedItem.type === 'folder' && draggedItem.id === targetFolderId) {
+      return false;
+    }
+    
+    // Don't allow dropping folder into its own descendant
+    if (draggedItem.type === 'folder') {
+      const isDescendant = (folderId, ancestorId) => {
+        const folder = findFolder(folderTree?.folders || [], ancestorId);
+        if (!folder || !folder.children) return false;
+        for (const child of folder.children) {
+          if (child.folder_id === folderId) return true;
+          if (isDescendant(folderId, child.folder_id)) return true;
+        }
+        return false;
+      };
+      if (isDescendant(targetFolderId, draggedItem.id)) {
+        return false;
+      }
+    }
+    
+    // Don't allow dropping file/folder into same location (no-op)
+    if (draggedItem.type === 'file') {
+      const currentFolderId = draggedItem.data.folder_id;
+      if (currentFolderId === targetFolderId) {
+        return false;
+      }
+    } else if (draggedItem.type === 'folder') {
+      const currentParentId = draggedItem.data.parent_folder_id;
+      if (currentParentId === targetFolderId) {
+        return false;
+      }
+    }
+    
+    return true;
+  }, [folderTree]);
+
+  const handleDragOverInternal = useCallback((event, folderId) => {
+    event.preventDefault();
+    event.stopPropagation();
+    
+    if (draggedItem && isValidDropTarget(folderId, draggedItem)) {
+      event.dataTransfer.dropEffect = 'move';
+      setDragOverFolderId(folderId);
+    } else {
+      event.dataTransfer.dropEffect = 'none';
+      setDragOverFolderId(null);
+    }
+  }, [draggedItem, isValidDropTarget]);
+
+  const handleDragEnterInternal = useCallback((event, folderId) => {
+    event.preventDefault();
+    event.stopPropagation();
+    
+    if (draggedItem && isValidDropTarget(folderId, draggedItem)) {
+      setDragOverFolderId(folderId);
+    }
+  }, [draggedItem, isValidDropTarget]);
+
+  const handleDragLeaveInternal = useCallback((event, folderId) => {
+    event.preventDefault();
+    event.stopPropagation();
+    
+    // Only clear if we're actually leaving the folder (not entering a child)
+    const relatedTarget = event.relatedTarget;
+    if (relatedTarget && !relatedTarget.closest(`[data-folder-id="${folderId}"]`)) {
+      setDragOverFolderId(null);
+    }
+  }, []);
+
+  const handleDropInternal = useCallback(async (event, targetFolderId) => {
+    event.preventDefault();
+    event.stopPropagation();
+    
+    setDragOverFolderId(null);
+    setIsDragging(false);
+    
+    if (!draggedItem || !isValidDropTarget(targetFolderId, draggedItem)) {
+      return;
+    }
+    
+    try {
+      if (draggedItem.type === 'file') {
+        await apiService.moveDocument(draggedItem.id, targetFolderId, user?.user_id);
+        showToast(`📄 Moved "${draggedItem.data.filename}"`, 'success');
+      } else if (draggedItem.type === 'folder') {
+        // targetFolderId is the new parent folder ID (can be null for root)
+        await folderService.moveFolder(draggedItem.id, targetFolderId || null);
+        showToast(`📁 Moved "${draggedItem.data.name}"`, 'success');
+      }
+      
+      // WebSocket will handle UI updates, but we can also invalidate queries
+      queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]);
+    } catch (error) {
+      console.error('Move failed:', error);
+      showToast(`❌ Failed to move ${draggedItem.type}`, 'error');
+    } finally {
+      setDraggedItem(null);
+    }
+  }, [draggedItem, isValidDropTarget, user, queryClient, showToast]);
+
   // Render folder item
   const renderFolderItem = useCallback((folder, level = 0) => {
     const isExpanded = expandedFolders.has(folder.folder_id);
@@ -1805,23 +2289,57 @@ const FileTreeSidebar = ({
     // For RSS virtual directories, count RSS feeds as children for expand/collapse
     // For real folders, also show expand/collapse if they might have documents (even if not loaded yet)
     const isRealFolder = !isVirtualRoot && !folder.is_virtual_source && !isRSSVirtual;
-    const mightHaveDocuments = isRealFolder && (folder.document_count > 0 || folder.subfolder_count > 0);
+    
+    // **ROOSEVELT FIX**: Use accurate counts from loaded contents, not stale database fields
+    // If contents have been loaded, use the accurate total_subfolders and total_documents
+    // Otherwise, check if folder.children exists (from tree structure) to show expansion caret
+    const loadedContents = folderContents[folder.folder_id];
+    const hasLoadedSubfolders = loadedContents && loadedContents.total_subfolders > 0;
+    const hasLoadedDocuments = loadedContents && loadedContents.total_documents > 0;
+    
+    // Also check the folder's own count fields from the tree structure (before contents are loaded)
+    const treeDocCount = folder.document_count || 0;
+    const treeSubCount = folder.subfolder_count || 0;
+    const hasCounts = isRealFolder && (treeDocCount > 0 || treeSubCount > 0);
+    
+    const mightHaveDocuments = isRealFolder && (hasLoadedSubfolders || hasLoadedDocuments || hasCounts);
+    
     const hasChildren = hasSubfolders || hasDocuments || hasRSSFeeds || mightHaveDocuments;
+
+    // Long-press handler for mobile touch devices
+    const longPressHandlers = createLongPressHandlers(folder);
+
+    const isDragged = draggedItem?.type === 'folder' && draggedItem?.id === folder.folder_id;
+    const isDragOver = dragOverFolderId === folder.folder_id;
+    const canDrag = isRealFolder && !isVirtualRoot && !folder.is_virtual_source;
+    const canDrop = isRealFolder && !isVirtualRoot && !folder.is_virtual_source;
 
     return (
       <Box key={folder.folder_id}>
         <ListItem
           disablePadding
           data-folder-id={folder.folder_id}
+          draggable={canDrag}
+          onDragStart={(e) => canDrag && handleDragStart(e, folder, 'folder')}
+          onDragEnd={handleDragEnd}
           sx={{
             pl: level * 2,
-            backgroundColor: isSelected 
-              ? (theme.palette.mode === 'dark' 
-                  ? 'rgba(25, 118, 210, 0.4)' 
-                  : 'rgba(25, 118, 210, 0.12)')
-              : 'transparent',
+            backgroundColor: isDragOver
+              ? 'primary.main'
+              : isSelected 
+                ? (theme.palette.mode === 'dark' 
+                    ? 'rgba(25, 118, 210, 0.4)' 
+                    : 'rgba(25, 118, 210, 0.12)')
+                : 'transparent',
+            opacity: isDragged ? 0.5 : 1,
+            cursor: canDrag ? 'grab' : 'default',
+            '&:active': {
+              cursor: canDrag ? 'grabbing' : 'default',
+            },
             '&:hover': {
-              backgroundColor: 'action.hover',
+              backgroundColor: isDragOver 
+                ? 'primary.main' 
+                : 'action.hover',
             },
             ...(isVirtualRoot && {
               backgroundColor: theme.palette.mode === 'dark' 
@@ -1837,16 +2355,38 @@ const FileTreeSidebar = ({
             }),
           }}
           onContextMenu={(e) => handleContextMenu(e, folder)}
+          {...longPressHandlers}
           onDrop={(e) => {
-            // Don't allow dropping on virtual roots or virtual sources
-            if (folder.folder_id === 'global_documents_root' || folder.folder_id === 'my_documents_root' || folder.is_virtual_source) {
-              alert('Cannot drop files directly on root folders or virtual sources. Please drop on specific folders.');
-              return;
+            // Handle both file uploads and internal drag-and-drop
+            if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+              // File upload from OS
+              if (folder.folder_id === 'global_documents_root' || folder.folder_id === 'my_documents_root' || folder.is_virtual_source) {
+                alert('Cannot drop files directly on root folders or virtual sources. Please drop on specific folders.');
+                return;
+              }
+              handleFileDrop(e, folder.folder_id);
+            } else {
+              // Internal drag-and-drop for moving files/folders
+              handleDropInternal(e, folder.folder_id);
             }
-            handleFileDrop(e, folder.folder_id);
           }}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
+          onDragOver={(e) => {
+            if (canDrop) {
+              handleDragOverInternal(e, folder.folder_id);
+            } else {
+              e.preventDefault();
+            }
+          }}
+          onDragEnter={(e) => {
+            if (canDrop) {
+              handleDragEnterInternal(e, folder.folder_id);
+            }
+          }}
+          onDragLeave={(e) => {
+            if (canDrop) {
+              handleDragLeaveInternal(e, folder.folder_id);
+            }
+          }}
         >
           <ListItemButton
             onClick={() => handleFolderClick(folder.folder_id)}
@@ -1924,14 +2464,22 @@ const FileTreeSidebar = ({
                       sx={{ height: 16, fontSize: '0.7rem' }}
                     />
                   )}
-                  {(folder.document_count > 0 || folder.subfolder_count > 0) && (
-                    <Chip
-                      size="small"
-                      label={`${folder.document_count + folder.subfolder_count}`}
-                      variant="outlined"
-                      sx={{ height: 16, fontSize: '0.7rem' }}
-                    />
-                  )}
+                  {(() => {
+                    // **ROOSEVELT FIX**: Use accurate counts from loaded contents if available
+                    const contents = folderContents[folder.folder_id];
+                    const docCount = contents ? contents.total_documents : (folder.document_count || 0);
+                    const subCount = contents ? contents.total_subfolders : (folder.subfolder_count || 0);
+                    const totalCount = docCount + subCount;
+                    
+                    return totalCount > 0 && (
+                      <Chip
+                        size="small"
+                        label={`${totalCount}`}
+                        variant="outlined"
+                        sx={{ height: 16, fontSize: '0.7rem' }}
+                      />
+                    );
+                  })()}
                 </Box>
               }
             />
@@ -1966,6 +2514,7 @@ const FileTreeSidebar = ({
                           });
                           setContextMenuTarget({ ...feed, type: 'rss_feed' });
                         }}
+                        {...createLongPressHandlers({ ...feed, type: 'rss_feed' })}
                       >
                         <ListItemButton
                           onClick={() => handleRSSFeedClick(feed.feed_id, feed.feed_name)}
@@ -2027,6 +2576,14 @@ const FileTreeSidebar = ({
     handleFileDrop,
     handleDragOver,
     handleDragLeave,
+    handleDragStart,
+    handleDragEnd,
+    handleDragOverInternal,
+    handleDragEnterInternal,
+    handleDragLeaveInternal,
+    handleDropInternal,
+    draggedItem,
+    dragOverFolderId,
     folderContents,
     rssFeeds,
     rssUnreadCounts,
@@ -2130,10 +2687,18 @@ const FileTreeSidebar = ({
       }
     };
 
+    // Long-press handler for mobile touch devices
+    const longPressHandlers = createLongPressHandlers(file);
+    
+    const isDragged = draggedItem?.type === 'file' && draggedItem?.id === file.document_id;
+
     return (
       <ListItem
         key={file.document_id}
         disablePadding
+        draggable={true}
+        onDragStart={(e) => handleDragStart(e, file, 'file')}
+        onDragEnd={handleDragEnd}
         sx={{
           pl: level * 2 + 4, // ROOSEVELT: Files get extra indentation beyond their folder level
           backgroundColor: isSelected 
@@ -2141,11 +2706,17 @@ const FileTreeSidebar = ({
                 ? 'rgba(25, 118, 210, 0.4)' 
                 : 'rgba(25, 118, 210, 0.12)')
             : 'transparent',
+          opacity: isDragged ? 0.5 : 1,
+          cursor: 'grab',
+          '&:active': {
+            cursor: 'grabbing',
+          },
           '&:hover': {
             backgroundColor: 'action.hover',
           },
         }}
         onContextMenu={(e) => handleContextMenu(e, file)}
+        {...longPressHandlers}
       >
         <ListItemButton
           onClick={() => onFileSelect?.(file)}
@@ -2163,7 +2734,10 @@ const FileTreeSidebar = ({
                 </Typography>
                 {(() => {
                   const effective = getEffectiveFileExemption(file);
-                  return getStatusIcon(file.status || file.processing_status, effective.status === true);
+                  // Normalize status - handle both 'status' and 'processing_status' fields, and ensure it's a string
+                  const fileStatus = file.status || file.processing_status || null;
+                  const normalizedStatus = fileStatus ? String(fileStatus).toLowerCase() : null;
+                  return getStatusIcon(normalizedStatus, effective.status === true);
                 })()}
               </Box>
             }
@@ -2171,7 +2745,7 @@ const FileTreeSidebar = ({
         </ListItemButton>
       </ListItem>
     );
-  }, [getEffectiveFileExemption, handleContextMenu, onFileSelect, theme]);
+  }, [getEffectiveFileExemption, handleContextMenu, onFileSelect, theme, handleDragStart, handleDragEnd, draggedItem]);
 
   // Render destination item for Move dialog
   const renderDestinationItem = useCallback((folder, level = 0) => {
@@ -2256,7 +2830,7 @@ const FileTreeSidebar = ({
       }}
     >
       {/* Header */}
-      <Box sx={{ p: 2, borderBottom: 1, borderColor: 'divider' }}>
+      <Box sx={{ py: 0.75, px: 1.5, height: 44, borderBottom: 1, borderColor: 'divider', backgroundColor: 'background.paper' }}>
         <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
           <Typography variant="h6" sx={{ fontWeight: 600, fontSize: 'var(--font-size-lg)' }}>
             Documents
@@ -2315,18 +2889,9 @@ const FileTreeSidebar = ({
       </Box>
 
       {/* Folder Tree */}
-      <Box sx={{ flexGrow: 1, overflow: 'auto' }}>
+      <Box sx={{ flexGrow: 1, overflow: 'auto', backgroundColor: 'background.default' }}>
         {folderTree?.folders?.length > 0 ? (
           <List dense>
-            {/* Inject a virtual News node at the top */}
-            <ListItem disablePadding onContextMenu={(e) => e.preventDefault()}>
-              <ListItemButton onClick={() => handleFolderClick('news_virtual')} sx={{ minHeight: 32 }}>
-                <ListItemIcon sx={{ minWidth: 24 }}>
-                  <Newspaper color="primary" />
-                </ListItemIcon>
-                <ListItemText primary={<Typography variant="body2" noWrap>News</Typography>} />
-              </ListItemButton>
-            </ListItem>
             <AnimatePresence>
               {folderTree.folders.map(folder => (
                 <motion.div
@@ -2365,7 +2930,7 @@ const FileTreeSidebar = ({
         {/* ROOSEVELT'S ORG TOOLS SECTION */}
         {hasOrgFiles && (
           <>
-            <Divider sx={{ my: 2 }} />
+            <Divider sx={{ my: 0.5 }} />
             <Box sx={{ px: 2 }}>
               <Box 
                 sx={{ 
@@ -2508,6 +3073,26 @@ const FileTreeSidebar = ({
             window.tabbedContentManagerRef.openDataWorkspace(workspace.workspace_id);
           }
         }} />
+
+        {/* NEWS SECTION */}
+        <Divider sx={{ my: 0.5 }} />
+        <Box sx={{ px: 2, pb: 0.5 }}>
+          <ListItem disablePadding onContextMenu={(e) => e.preventDefault()}>
+            <ListItemButton 
+              onClick={() => handleFolderClick('news_virtual')} 
+              sx={{ 
+                minHeight: 32,
+                borderRadius: 1,
+                '&:hover': { backgroundColor: 'action.hover' }
+              }}
+            >
+              <ListItemIcon sx={{ minWidth: 32 }}>
+                <Newspaper color="primary" />
+              </ListItemIcon>
+              <ListItemText primary={<Typography variant="body2">News</Typography>} />
+            </ListItemButton>
+          </ListItem>
+        </Box>
 
       </Box>
 

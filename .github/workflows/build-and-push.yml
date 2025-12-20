@@ -165,6 +165,20 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build and push crawl4ai-service
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./crawl4ai-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-crawl4ai-service:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-crawl4ai-service:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-crawl4ai-service:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-crawl4ai-service:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
       - name: Summary
         run: |
           echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
@@ -181,4 +195,5 @@ jobs:
           echo "- llm-orchestrator" >> $GITHUB_STEP_SUMMARY
           echo "- vector-service" >> $GITHUB_STEP_SUMMARY
           echo "- data-service" >> $GITHUB_STEP_SUMMARY
+          echo "- crawl4ai-service" >> $GITHUB_STEP_SUMMARY
 

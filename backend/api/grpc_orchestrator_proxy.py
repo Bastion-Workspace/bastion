@@ -42,7 +42,7 @@ def format_sse_message(data: Dict[str, Any]) -> str:
     Returns:
         SSE-formatted message with proper JSON
     """
-    json_str = json.dumps(data)
+    json_str = json.dumps(data, ensure_ascii=False)
     return f"data: {json_str}\n\n"
 
 
@@ -127,6 +127,9 @@ async def stream_from_grpc_orchestrator(
             
             logger.info(f"Forwarding to gRPC orchestrator: {query[:100]}")
             
+            # Initialize title_updated flag before try block to avoid UnboundLocalError
+            title_updated = False
+            
             # Save user message to conversation BEFORE processing
             # This will also trigger title generation if it's the first message
             try:
@@ -155,6 +158,8 @@ async def stream_from_grpc_orchestrator(
             chunk_count = 0
             agent_name_used = None  # Track which agent was used
             accumulated_response = ""  # Accumulate full response content
+            editor_operations_received = None  # Track editor operations for metadata
+            manuscript_edit_received = None  # Track manuscript edit for metadata
             
             async for chunk in stub.StreamChat(grpc_request):
                 chunk_count += 1
@@ -200,14 +205,52 @@ async def stream_from_grpc_orchestrator(
                 elif chunk.type == "editor_operations":
                     # Parse JSON from message field and forward as editor_operations type
                     try:
+                        logger.info(f"📥 PROXY: Received editor_operations chunk from gRPC orchestrator (message length: {len(chunk.message)})")
                         editor_ops_data = json.loads(chunk.message)
-                        yield format_sse_message({
-                            'type': 'editor_operations',
-                            'operations': editor_ops_data.get('operations', []),
-                            'manuscript_edit': editor_ops_data.get('manuscript_edit')
-                        })
+                        operations = editor_ops_data.get('operations', [])
+                        manuscript_edit = editor_ops_data.get('manuscript_edit')
+                        
+                        # Store for saving to message metadata
+                        editor_operations_received = operations
+                        manuscript_edit_received = manuscript_edit
+                        
+                        logger.info(f"📥 PROXY: Parsed {len(operations)} operation(s) from editor_operations chunk")
+                        
+                        # **CRITICAL**: SSE messages have size limits (~16-64KB depending on proxy/browser)
+                        # If operations are large (e.g., full chapter generation), send them one at a time
+                        # to avoid message truncation
+                        
+                        # Calculate total size
+                        total_size = len(json.dumps(editor_ops_data))
+                        MAX_SSE_SIZE = 50000  # 50KB safety limit
+                        
+                        if total_size > MAX_SSE_SIZE and len(operations) > 0:
+                            # Send operations individually to avoid SSE size limits
+                            logger.info(f"📦 Editor operations are large ({total_size} bytes) - chunking into {len(operations)} separate messages")
+                            for idx, op in enumerate(operations):
+                                yield format_sse_message({
+                                    'type': 'editor_operations_chunk',
+                                    'chunk_index': idx,
+                                    'total_chunks': len(operations),
+                                    'operation': op,
+                                    'manuscript_edit': manuscript_edit if idx == len(operations) - 1 else None  # Include metadata on last chunk only
+                                })
+                                logger.info(f"📦 Sent chunk {idx + 1}/{len(operations)} (op_type={op.get('op_type')}, text_length={len(op.get('text', ''))})")
+                        else:
+                            # Small enough to send as single message
+                            logger.info(f"✅ PROXY: Sending {len(operations)} editor operation(s) as single SSE message (size: {total_size} bytes)")
+                            yield format_sse_message({
+                                'type': 'editor_operations',
+                                'operations': operations,
+                                'manuscript_edit': manuscript_edit
+                            })
+                            logger.info(f"✅ PROXY: Sent editor_operations SSE message to frontend")
                     except json.JSONDecodeError as e:
                         logger.warning(f"Failed to parse editor_operations JSON: {e}")
+                    except Exception as e:
+                        logger.error(f"❌ PROXY: Error processing editor_operations chunk: {e}")
+                        import traceback
+                        logger.error(f"Traceback: {traceback.format_exc()}")
                 
                 elif chunk.type == "title":
                     # Forward title chunks immediately so frontend can update UI right away
@@ -232,19 +275,43 @@ async def stream_from_grpc_orchestrator(
                     conversation_service = ConversationService()
                     conversation_service.set_current_user(user_id)
                     
+                    # Build metadata with editor operations if they were received
+                    metadata = {
+                        "orchestrator_system": True,
+                        "streaming": True,
+                        "delegated_agent": agent_name_used or "unknown",
+                        "chunk_count": chunk_count
+                    }
+                    
+                    # Add editor_operations and manuscript_edit to metadata for persistence
+                    if editor_operations_received:
+                        metadata["editor_operations"] = editor_operations_received
+                        logger.info(f"💾 PROXY: Including {len(editor_operations_received)} editor_operations in message metadata")
+                    if manuscript_edit_received:
+                        metadata["manuscript_edit"] = manuscript_edit_received
+                    
                     assistant_message_result = await conversation_service.add_message(
                         conversation_id=conversation_id,
                         user_id=user_id,
                         role="assistant",
                         content=accumulated_response,
-                        metadata={
-                            "orchestrator_system": True,
-                            "streaming": True,
-                            "delegated_agent": agent_name_used or "unknown",
-                            "chunk_count": chunk_count
-                        }
+                        metadata=metadata
                     )
                     logger.info(f"✅ Saved assistant response to conversation {conversation_id} (agent: {agent_name_used or 'unknown'})")
+                    
+                    # Save agent routing metadata to backend DB (source of truth)
+                    if agent_name_used:
+                        try:
+                            await conversation_service.update_agent_metadata(
+                                conversation_id=conversation_id,
+                                user_id=user_id,
+                                primary_agent_selected=agent_name_used,
+                                last_agent=agent_name_used
+                            )
+                            logger.info(f"✅ Saved agent metadata to backend DB: {agent_name_used}")
+                        except Exception as agent_save_error:
+                            logger.warning(f"⚠️ Failed to save agent metadata: {agent_save_error}")
+                    
                 except Exception as save_error:
                     logger.warning(f"⚠️ Failed to save assistant response: {save_error}")
                     # Continue even if message save fails

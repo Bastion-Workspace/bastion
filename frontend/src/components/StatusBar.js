@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Box, Typography } from '@mui/material';
+import { Box, Typography, Tooltip } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import { useQuery } from 'react-query';
 import statusBarService from '../services/statusBarService';
@@ -86,8 +86,16 @@ const StatusBar = () => {
 
     const { location, temperature, conditions, moon_phase } = statusData.weather;
     const moonIcon = moon_phase?.phase_icon || '🌙';
+    const moonPhaseName = moon_phase?.phase_name || 'Moon';
     
-    return `${location}, ${temperature}°F, ${conditions} ${moonIcon}`;
+    return (
+      <>
+        {location}, {temperature}°F, {conditions}{' '}
+        <Tooltip title={moonPhaseName} arrow>
+          <span style={{ cursor: 'help' }}>{moonIcon}</span>
+        </Tooltip>
+      </>
+    );
   };
 
   return (

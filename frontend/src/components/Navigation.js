@@ -48,7 +48,7 @@ const Navigation = () => {
   const { darkMode, toggleDarkMode } = useTheme();
   const { isAdmin, has } = useCapabilities();
   const { toggleDrawer, totalUnreadCount } = useMessaging();
-  const { pendingInvitations } = useTeam();
+  const { pendingInvitations, unreadCounts } = useTeam();
   const [anchorEl, setAnchorEl] = useState(null);
   const [logoError, setLogoError] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -65,9 +65,13 @@ const Navigation = () => {
 
   const hasMediaConfig = mediaSources?.sources && mediaSources.sources.length > 0;
 
+  // Calculate total unread count (pending invitations + unread posts)
+  const totalUnreadPosts = unreadCounts ? Object.values(unreadCounts).reduce((sum, count) => sum + count, 0) : 0;
+  const totalTeamNotifications = (pendingInvitations?.length || 0) + totalUnreadPosts;
+
   const navItems = [
       { label: 'Documents', path: '/documents', icon: <Description /> },
-      { label: 'Teams', path: '/teams', icon: <Group />, badge: pendingInvitations?.length || 0 },
+      { label: 'Teams', path: '/teams', icon: <Group />, badge: totalTeamNotifications },
       ...(isAdmin || has('feature.news.view') ? [{ label: 'News', path: '/news', icon: <Description /> }] : []),
       ...(hasMediaConfig ? [{ label: 'Media', path: '/media', icon: <MusicNote /> }] : []),
   ];
@@ -106,11 +110,11 @@ const Navigation = () => {
         paddingTop: 'env(safe-area-inset-top)',
         backgroundColor: darkMode ? '#121212' : 'primary.main',
         '& .MuiToolbar-root': {
-          minHeight: 64, // Force standard height
+          minHeight: 59, // Force standard height (reduced by 5px)
         }
       }}
     >
-      <Toolbar sx={{ minHeight: 64, py: 0.5 }}>
+      <Toolbar sx={{ minHeight: 59, py: 0.5 }}>
         <Box
           onClick={() => navigate('/documents')}
           sx={{ mr: 2, display: 'flex', alignItems: 'center', cursor: 'pointer' }}

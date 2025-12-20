@@ -25,41 +25,41 @@ class AgentType(str, Enum):
     CHAT_AGENT = "chat_agent"
     # CODING_AGENT removed - not fully fleshed out
     REPORT_AGENT = "report_agent"
-    DATA_FORMATTING_AGENT = "data_formatting_agent"  # ROOSEVELT'S TABLE SPECIALIST
-    WEATHER_AGENT = "weather_agent"
+    # DATA_FORMATTING_AGENT removed - migrated to llm-orchestrator gRPC service
+    # WEATHER_AGENT removed - migrated to llm-orchestrator gRPC service
     CALCULATE_AGENT = "calculate_agent"  # ROOSEVELT'S COMPUTATION SPECIALIST
     RSS_BACKGROUND_AGENT = "rss_background_agent"
     RSS_AGENT = "rss_agent"
-    ORG_INBOX_AGENT = "org_inbox_agent"
-    ORG_PROJECT_AGENT = "org_project_agent"
-    IMAGE_GENERATION_AGENT = "image_generation_agent"
+    # ORG_INBOX_AGENT removed - migrated to llm-orchestrator gRPC service
+    # ORG_PROJECT_AGENT removed - migrated to llm-orchestrator gRPC service
+    # IMAGE_GENERATION_AGENT removed - migrated to llm-orchestrator gRPC service
     # WARGAMING_AGENT removed - not fully fleshed out
-    PROOFREADING_AGENT = "proofreading_agent"
-    WEBSITE_CRAWLER_AGENT = "website_crawler_agent"  # ROOSEVELT'S WEBSITE CAVALRY!
+    # PROOFREADING_AGENT removed - migrated to llm-orchestrator gRPC service
+    # WEBSITE_CRAWLER_AGENT removed - migrated to llm-orchestrator gRPC service
     # Content and Writing Agents
     FICTION_EDITING_AGENT = "fiction_editing_agent"
     OUTLINE_EDITING_AGENT = "outline_editing_agent"
-    CHARACTER_DEVELOPMENT_AGENT = "character_development_agent"
-    RULES_EDITING_AGENT = "rules_editing_agent"
+    # CHARACTER_DEVELOPMENT_AGENT removed - migrated to llm-orchestrator gRPC service
+    # RULES_EDITING_AGENT removed - migrated to llm-orchestrator gRPC service
+    STYLE_EDITING_AGENT = "style_editing_agent"
     # SYSML_AGENT removed - not fully fleshed out
-    STORY_ANALYSIS_AGENT = "story_analysis_agent"
-    CONTENT_ANALYSIS_AGENT = "content_analysis_agent"
+    # STORY_ANALYSIS_AGENT removed - migrated to llm-orchestrator gRPC service
+    # CONTENT_ANALYSIS_AGENT removed - migrated to llm-orchestrator gRPC service
     # FACT_CHECKING_AGENT removed - not actively used
-    SITE_CRAWL_AGENT = "site_crawl_agent"
+    # SITE_CRAWL_AGENT removed - migrated to llm-orchestrator gRPC service
     # Intent and Intelligence Agents
     # DEPRECATED: SIMPLE_INTENT_AGENT removed - intent classification now in llm-orchestrator
     # SIMPLE_INTENT_AGENT = "simple_intent_agent"
-    PERMISSION_INTELLIGENCE_AGENT = "permission_intelligence_agent"
+    # PERMISSION_INTELLIGENCE_AGENT removed - not used, functionality handled elsewhere
     # Pipeline Agent
     PIPELINE_AGENT = "pipeline_agent"
     # Template Agent
     TEMPLATE_AGENT = "template_agent"
-    # Email Agent
-    EMAIL_AGENT = "email_agent"
-    PODCAST_SCRIPT_AGENT = "podcast_script_agent"
-    SUBSTACK_AGENT = "substack_agent"
+    # EMAIL_AGENT removed - not used, functionality not migrated
+    # PODCAST_SCRIPT_AGENT removed - migrated to llm-orchestrator gRPC service
+    # SUBSTACK_AGENT removed - migrated to llm-orchestrator gRPC service
     MESSAGING_AGENT = "messaging_agent"  # ROOSEVELT'S MESSAGING CAVALRY!
-    ENTERTAINMENT_AGENT = "entertainment_agent"  # ROOSEVELT'S ENTERTAINMENT CAVALRY!
+    # ENTERTAINMENT_AGENT removed - migrated to llm-orchestrator gRPC service
 
 
 
@@ -114,7 +114,6 @@ class CentralizedToolRegistry:
             await self._register_search_tools()
             await self._register_document_tools()
             await self._register_web_tools()
-            await self._register_website_crawler_tools()
             await self._register_analysis_tools()
             await self._register_math_tools()
             await self._register_weather_tools()
@@ -184,8 +183,12 @@ class CentralizedToolRegistry:
     
     async def _register_web_tools(self):
         """Register web search and crawling tools"""
+        # Import from correct locations
         from services.langgraph_tools.web_content_tools import (
-            search_web, analyze_and_ingest_url, search_and_crawl, crawl_web_content
+            search_web
+        )
+        from services.langgraph_tools.crawl4ai_web_tools import (
+            crawl_web_content
         )
         
         self._tools["search_web"] = ToolDefinition(
@@ -200,17 +203,6 @@ class CentralizedToolRegistry:
             timeout_seconds=60
         )
         
-        self._tools["analyze_and_ingest"] = ToolDefinition(
-            name="analyze_and_ingest",
-            function=analyze_and_ingest_url,
-            description="Analyze and ingest content from URLs",
-            access_level=ToolAccessLevel.WEB_ACCESS,
-            parameters={
-                "urls": {"type": "array", "items": {"type": "string"}, "required": True}
-            },
-            timeout_seconds=90
-        )
-        
         self._tools["crawl_web_content"] = ToolDefinition(
             name="crawl_web_content",
             function=crawl_web_content,
@@ -221,36 +213,6 @@ class CentralizedToolRegistry:
                 "urls": {"type": "array", "items": {"type": "string"}, "required": False, "description": "List of URLs to crawl"}
             },
             timeout_seconds=90
-        )
-        
-        self._tools["search_and_crawl"] = ToolDefinition(
-            name="search_and_crawl",
-            function=search_and_crawl,
-            description="Combined search and crawl operation",
-            access_level=ToolAccessLevel.WEB_ACCESS,
-            parameters={
-                "query": {"type": "string", "required": True},
-                "max_results": {"type": "integer", "default": 15}
-            },
-            timeout_seconds=120
-        )
-    
-    async def _register_website_crawler_tools(self):
-        """Register recursive website crawler tools"""
-        from services.langgraph_tools.website_crawler_tools import crawl_website_recursive
-        
-        self._tools["crawl_website_recursive"] = ToolDefinition(
-            name="crawl_website_recursive",
-            function=crawl_website_recursive,
-            description="Recursively crawl entire website, extracting and vectorizing all pages",
-            access_level=ToolAccessLevel.WEB_ACCESS,
-            parameters={
-                "start_url": {"type": "string", "required": True, "description": "Starting URL for the crawl"},
-                "max_pages": {"type": "integer", "default": 500, "description": "Maximum pages to crawl"},
-                "max_depth": {"type": "integer", "default": 10, "description": "Maximum depth to traverse"},
-                "user_id": {"type": "string", "required": False, "description": "User ID for document storage"}
-            },
-            timeout_seconds=1800  # 30 minutes for large crawls
         )
     
     async def _register_document_tools(self):
@@ -282,33 +244,8 @@ class CentralizedToolRegistry:
     
     async def _register_analysis_tools(self):
         """Register analysis and processing tools"""
-        from services.langgraph_agents.data_formatting_agent import DataFormattingAgent
-        
-        # Create a wrapper for data formatting agent as a tool
-        async def format_data(data_content: str, format_type: str = "auto") -> str:
-            """Format data using the Data Formatting Agent"""
-            try:
-                agent = DataFormattingAgent()
-                # Create minimal state for formatting
-                format_state = {
-                    "messages": [{"role": "user", "content": f"Format this data as {format_type}: {data_content}"}],
-                    "shared_memory": {"formatting_context": {"source": "tool_call", "format_type": format_type}}
-                }
-                result = await agent._process_request(format_state)
-                return result.get("latest_response", "Formatting failed")
-            except Exception as e:
-                return f"Data formatting error: {str(e)}"
-        
-        self._tools["format_data"] = ToolDefinition(
-            name="format_data",
-            function=format_data,
-            description="Format data into tables, lists, or structured formats",
-            access_level=ToolAccessLevel.READ_ONLY,
-            parameters={
-                "data_content": {"type": "string", "required": True},
-                "format_type": {"type": "string", "default": "auto"}
-            }
-        )
+        # format_data tool removed - DataFormattingAgent migrated to llm-orchestrator gRPC service
+        pass
     
     async def _register_math_tools(self):
         """Register mathematical computation tools"""
@@ -791,12 +728,10 @@ class CentralizedToolRegistry:
             "search_local": ToolAccessLevel.READ_ONLY,
             "get_document": ToolAccessLevel.READ_ONLY,
             "search_web": ToolAccessLevel.WEB_ACCESS,  # RESTORED: Needed for fact-checking agent
-            "analyze_and_ingest": ToolAccessLevel.WEB_ACCESS,
             "crawl_web_content": ToolAccessLevel.WEB_ACCESS,
-            "search_and_crawl": ToolAccessLevel.WEB_ACCESS,  # PRIMARY WEB TOOL
             "summarize_content": ToolAccessLevel.READ_ONLY,
             "analyze_documents": ToolAccessLevel.READ_ONLY,
-            "format_data": ToolAccessLevel.READ_ONLY,  # Allow auto-formatting
+            # format_data removed - DataFormattingAgent migrated to llm-orchestrator gRPC service
             "get_aws_service_pricing": ToolAccessLevel.WEB_ACCESS,  # AWS pricing research
             "compare_aws_regions": ToolAccessLevel.WEB_ACCESS,  # Regional cost analysis
             "estimate_aws_costs": ToolAccessLevel.WEB_ACCESS,  # Cost estimation research
@@ -816,7 +751,7 @@ class CentralizedToolRegistry:
             "search_conversation_cache": ToolAccessLevel.READ_ONLY,  # ROOSEVELT'S UNIVERSAL CACHE
             "calculate": ToolAccessLevel.READ_ONLY,
             "convert_units": ToolAccessLevel.READ_ONLY,
-            "format_data": ToolAccessLevel.READ_ONLY,  # Allow auto-formatting for better responses
+            # format_data removed - DataFormattingAgent migrated to llm-orchestrator gRPC service
             "get_aws_service_pricing": ToolAccessLevel.WEB_ACCESS,  # Basic AWS pricing queries
             "estimate_aws_costs": ToolAccessLevel.WEB_ACCESS,  # Simple cost estimates
             # **BULLY!** Quick org-mode TODO queries for casual questions
@@ -831,21 +766,8 @@ class CentralizedToolRegistry:
             "analyze_documents": ToolAccessLevel.READ_ONLY
         }
         
-        # Data Formatting Agent: Conversation cache + formatting tools
-        self._agent_permissions[AgentType.DATA_FORMATTING_AGENT] = {
-            "search_conversation_cache": ToolAccessLevel.READ_ONLY,  # ROOSEVELT'S UNIVERSAL CACHE
-            # ROOSEVELT'S TABLE SPECIALIST: Uses conversation context for data extraction
-            # Future: Add chart/graph generation tools here when implemented
-        }
-        
-        # Weather Agent: Weather-specific tools + data formatting + cache access
-        self._agent_permissions[AgentType.WEATHER_AGENT] = {
-            "search_conversation_cache": ToolAccessLevel.READ_ONLY,  # ROOSEVELT'S UNIVERSAL CACHE
-            "weather_conditions": ToolAccessLevel.WEB_ACCESS,
-            "weather_forecast": ToolAccessLevel.WEB_ACCESS,
-            "search_local": ToolAccessLevel.READ_ONLY,
-            "format_data": ToolAccessLevel.READ_ONLY  # Allow auto-formatting
-        }
+        # DATA_FORMATTING_AGENT removed - migrated to llm-orchestrator gRPC service
+        # WEATHER_AGENT removed - migrated to llm-orchestrator gRPC service
         
         # Calculate Agent: Mathematical operations and unit conversions - ROOSEVELT'S COMPUTATION SPECIALIST
         self._agent_permissions[AgentType.CALCULATE_AGENT] = {
@@ -877,59 +799,18 @@ class CentralizedToolRegistry:
             "rss_delete_feed": ToolAccessLevel.WEB_ACCESS,
             "rss_poll_feeds": ToolAccessLevel.WEB_ACCESS
         }
-        self._agent_permissions[AgentType.ORG_INBOX_AGENT] = {
-            "org_inbox_path": ToolAccessLevel.READ_ONLY,
-            "org_inbox_list_items": ToolAccessLevel.READ_ONLY,
-            "org_inbox_add_item": ToolAccessLevel.READ_WRITE,
-            "org_inbox_toggle_done": ToolAccessLevel.READ_WRITE,
-            "org_inbox_update_line": ToolAccessLevel.READ_WRITE,
-            "org_inbox_append_text": ToolAccessLevel.READ_WRITE,
-            "org_inbox_append_block": ToolAccessLevel.READ_WRITE,
-            "org_inbox_index_tags": ToolAccessLevel.READ_ONLY,
-            "org_inbox_apply_tags": ToolAccessLevel.READ_WRITE,
-            "org_inbox_set_state": ToolAccessLevel.READ_WRITE,
-            "org_inbox_promote_state": ToolAccessLevel.READ_WRITE,
-            "org_inbox_demote_state": ToolAccessLevel.READ_WRITE,
-            "org_inbox_set_schedule_and_repeater": ToolAccessLevel.READ_WRITE,
-        }
+        # ORG_INBOX_AGENT removed - migrated to llm-orchestrator gRPC service
 
-        # Org Project Agent: same toolbox as Org Inbox
-        self._agent_permissions[AgentType.ORG_PROJECT_AGENT] = {
-            "org_inbox_path": ToolAccessLevel.READ_ONLY,
-            "org_inbox_list_items": ToolAccessLevel.READ_ONLY,
-            "org_inbox_add_item": ToolAccessLevel.READ_WRITE,
-            "org_inbox_toggle_done": ToolAccessLevel.READ_WRITE,
-            "org_inbox_update_line": ToolAccessLevel.READ_WRITE,
-            "org_inbox_append_text": ToolAccessLevel.READ_WRITE,
-            "org_inbox_append_block": ToolAccessLevel.READ_WRITE,
-            "org_inbox_index_tags": ToolAccessLevel.READ_ONLY,
-            "org_inbox_apply_tags": ToolAccessLevel.READ_WRITE,
-            "org_inbox_set_state": ToolAccessLevel.READ_WRITE,
-            "org_inbox_promote_state": ToolAccessLevel.READ_WRITE,
-            "org_inbox_demote_state": ToolAccessLevel.READ_WRITE,
-            "org_inbox_set_schedule_and_repeater": ToolAccessLevel.READ_WRITE,
-        }
+        # ORG_PROJECT_AGENT removed - migrated to llm-orchestrator gRPC service
 
-        # Image Generation Agent: image generation tool only
-        self._agent_permissions[AgentType.IMAGE_GENERATION_AGENT] = {
-            "generate_image": ToolAccessLevel.WEB_ACCESS,
-        }
+        # IMAGE_GENERATION_AGENT removed - migrated to llm-orchestrator gRPC service
 
         # WargamingAgent removed - not fully fleshed out
         # Removed agent permissions
 
-        # Proofreading Agent: local-only content utilities; no web tools by default
-        self._agent_permissions[AgentType.PROOFREADING_AGENT] = {
-            "summarize_content": ToolAccessLevel.READ_ONLY,
-            "analyze_documents": ToolAccessLevel.READ_ONLY,
-            # Optionally allow search_conversation_cache for context
-            "search_conversation_cache": ToolAccessLevel.READ_ONLY,
-        }
+        # PROOFREADING_AGENT removed - migrated to llm-orchestrator gRPC service
         
-        # Website Crawler Agent: ROOSEVELT'S WEBSITE CAVALRY - recursive crawling and ingestion
-        self._agent_permissions[AgentType.WEBSITE_CRAWLER_AGENT] = {
-            "crawl_website_recursive": ToolAccessLevel.WEB_ACCESS,
-        }
+        # WEBSITE_CRAWLER_AGENT removed - migrated to llm-orchestrator gRPC service
         
         # Content and Writing Agents - Editor-interactive agents (no external tools needed)
         self._agent_permissions[AgentType.FICTION_EDITING_AGENT] = {
@@ -940,45 +821,26 @@ class CentralizedToolRegistry:
             # Editor-interactive: Works with active editor content, no external tools
         }
         
-        self._agent_permissions[AgentType.CHARACTER_DEVELOPMENT_AGENT] = {
-            # Editor-interactive: Works with active editor content, no external tools
+        # CHARACTER_DEVELOPMENT_AGENT removed - migrated to llm-orchestrator gRPC service
+        
+        self._agent_permissions[AgentType.STYLE_EDITING_AGENT] = {
+            "can_use_document_tools": True,
+            "can_use_reference_tools": True,
+            "can_use_web_tools": False,
         }
         
-        self._agent_permissions[AgentType.RULES_EDITING_AGENT] = {
-            # Editor-interactive: Works with active editor content, no external tools
-        }
+        # RULES_EDITING_AGENT removed - migrated to llm-orchestrator gRPC service
         
-        # Podcast Script Agent: optional web access to fetch source content when user provides URLs
-        self._agent_permissions[AgentType.PODCAST_SCRIPT_AGENT] = {
-            "crawl_web_content": ToolAccessLevel.WEB_ACCESS,
-            "search_web": ToolAccessLevel.WEB_ACCESS,
-            # Keep minimal; podcast agent should only fetch when explicitly asked (URL present + permission)
-        }
+        # PODCAST_SCRIPT_AGENT removed - migrated to llm-orchestrator gRPC service
         
         # Analysis Agents - May need local search for reference material
-        self._agent_permissions[AgentType.STORY_ANALYSIS_AGENT] = {
-            "search_local": ToolAccessLevel.READ_ONLY,
-            "get_document": ToolAccessLevel.READ_ONLY,
-            "search_conversation_cache": ToolAccessLevel.READ_ONLY,
-        }
-        
-        self._agent_permissions[AgentType.CONTENT_ANALYSIS_AGENT] = {
-            "search_local": ToolAccessLevel.READ_ONLY,
-            "get_document": ToolAccessLevel.READ_ONLY,
-            "search_conversation_cache": ToolAccessLevel.READ_ONLY,
-        }
+        # STORY_ANALYSIS_AGENT removed - migrated to llm-orchestrator gRPC service
+        # CONTENT_ANALYSIS_AGENT removed - migrated to llm-orchestrator gRPC service
         
         # FactCheckingAgent removed - not actively used
         # Removed agent permissions
         
-        # Site Crawl Agent - Query-driven research with web tools
-        self._agent_permissions[AgentType.SITE_CRAWL_AGENT] = {
-            "search_local": ToolAccessLevel.READ_ONLY,
-            "search_web": ToolAccessLevel.WEB_ACCESS,
-            "crawl_web_content": ToolAccessLevel.WEB_ACCESS,
-            "search_and_crawl": ToolAccessLevel.WEB_ACCESS,
-            "search_conversation_cache": ToolAccessLevel.READ_ONLY,
-        }
+        # SITE_CRAWL_AGENT removed - migrated to llm-orchestrator gRPC service
         
         # Intent and Intelligence Agents - Pure LLM-based (no external tools)
         # DEPRECATED: SIMPLE_INTENT_AGENT removed - intent classification now in llm-orchestrator
@@ -986,9 +848,7 @@ class CentralizedToolRegistry:
         #     # Pure LLM-based intent classification
         # }
         
-        self._agent_permissions[AgentType.PERMISSION_INTELLIGENCE_AGENT] = {
-            # Pure LLM-based permission analysis
-        }
+        # PERMISSION_INTELLIGENCE_AGENT removed - not used, functionality handled elsewhere
         
         # Pipeline Agent - Design agent (no external tools)
         self._agent_permissions[AgentType.PIPELINE_AGENT] = {
@@ -1298,7 +1158,7 @@ class CentralizedToolRegistry:
         # Map category to tool names
         category_to_tools = {
             "search_local": ["search_local", "search_conversation_cache"],
-            "search_web": ["search_web", "search_and_crawl", "crawl_web_content"],
+            "search_web": ["search_web", "crawl_web_content"],
             "document_ops": ["get_document"],
             "analysis": ["analyze_documents"],
             "math": ["calculate"],

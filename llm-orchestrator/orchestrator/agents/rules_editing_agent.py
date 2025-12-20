@@ -135,6 +135,7 @@ class RulesEditingState(TypedDict):
     style_body: Optional[str]
     characters_bodies: List[str]
     current_request: str
+    request_type: str  # "question" or "edit_request"
     system_prompt: str
     llm_response: str
     structured_edit: Optional[Dict[str, Any]]
@@ -169,6 +170,7 @@ class RulesEditingAgent(BaseAgent):
         # Add nodes
         workflow.add_node("prepare_context", self._prepare_context_node)
         workflow.add_node("load_references", self._load_references_node)
+        workflow.add_node("detect_request_type", self._detect_request_type_node)
         workflow.add_node("generate_edit_plan", self._generate_edit_plan_node)
         workflow.add_node("resolve_operations", self._resolve_operations_node)
         workflow.add_node("format_response", self._format_response_node)
@@ -176,9 +178,10 @@ class RulesEditingAgent(BaseAgent):
         # Entry point
         workflow.set_entry_point("prepare_context")
         
-        # Flow: prepare_context -> load_references -> generate_edit_plan -> resolve_operations -> format_response -> END
+        # Flow: prepare_context -> load_references -> detect_request_type -> generate_edit_plan -> resolve_operations -> format_response -> END
         workflow.add_edge("prepare_context", "load_references")
-        workflow.add_edge("load_references", "generate_edit_plan")
+        workflow.add_edge("load_references", "detect_request_type")
+        workflow.add_edge("detect_request_type", "generate_edit_plan")
         workflow.add_edge("generate_edit_plan", "resolve_operations")
         workflow.add_edge("resolve_operations", "format_response")
         workflow.add_edge("format_response", END)
@@ -190,6 +193,20 @@ class RulesEditingAgent(BaseAgent):
         return (
             "You are a MASTER UNIVERSE ARCHITECT for RULES documents (worldbuilding, series continuity). "
             "Persona disabled. Adhere strictly to frontmatter, project Rules, and Style.\n\n"
+            "**CRITICAL: WORK WITH AVAILABLE INFORMATION FIRST**\n"
+            "Always start by working with what you know from the request, existing rules content, and references:\n"
+            "- Make edits based on available information - don't wait for clarification\n"
+            "- Use context from style guide and character profiles to inform your work\n"
+            "- Add or revise content based on reasonable inferences from the request\n"
+            "- Only ask questions when critical information is missing that prevents you from making meaningful progress\n"
+            "\n"
+            "**WHEN TO ASK QUESTIONS (Rarely - Only When Truly Necessary)**:\n"
+            "- Only when the request is so vague that you cannot make ANY reasonable edits (e.g., 'improve rules' with no existing content)\n"
+            "- Only when there's a critical conflict that requires user decision (e.g., existing rule directly contradicts new request)\n"
+            "- When asking, provide operations for what you CAN do, then ask questions in the summary about what you need\n"
+            "\n"
+            "**HOW TO ASK QUESTIONS**: Include operations for work you CAN do, then add questions/suggestions in the summary field.\n"
+            "DO NOT return empty operations array - always provide edits based on available information.\n\n"
             "STRUCTURED OUTPUT REQUIRED: Return ONLY raw JSON (no prose, no markdown, no code fences) matching this schema:\n"
             "{\n"
             '  "type": "ManuscriptEdit",\n'
@@ -203,7 +220,9 @@ class RulesEditingAgent(BaseAgent):
             "OUTPUT RULES:\n"
             "- Output MUST be a single JSON object only.\n"
             "- Do NOT include triple backticks or language tags.\n"
-            "- Do NOT include explanatory text before or after the JSON.\n\n"
+            "- Do NOT include explanatory text before or after the JSON.\n"
+            "- If asking questions/seeking clarification: Return empty operations array and put questions in summary field\n"
+            "- If making edits: Return operations array with edits and brief description in summary field\n\n"
             "FORMATTING CONTRACT (RULES DOCUMENTS):\n"
             "- Never emit YAML frontmatter in operations[].text. Preserve existing frontmatter as-is.\n"
             "- Use Markdown headings and lists for the body.\n"
@@ -225,45 +244,104 @@ class RulesEditingAgent(BaseAgent):
             "  ### Book 2\n"
             "  ... (as needed)\n"
             "  ## Character References\n"
-            "  ### Cast Integration & Constraints\n"
-            "  ## Change Log (Rule Evolution)\n\n"
+            "  ### Cast Integration & Constraints\n\n"
             "RULES FOR EDITS:\n"
+            "0) **WORK FIRST, ASK LATER**: Always make edits based on available information. Use context from the request, existing rules content, style guide, and character profiles to inform your work. Only ask questions in the summary if critical information is missing that prevents meaningful progress. Never return empty operations unless the request is completely impossible.\n"
             "1) Make focused, surgical edits near the cursor/selection unless the user requests re-organization.\n"
             "2) Maintain the scaffold above; if missing, create only the minimal sections the user asked for.\n"
             "3) Prefer paragraph/sentence-level replacements; avoid large-span rewrites unless asked.\n"
-            "4) Enforce consistency: cross-check constraints against Series Synopsis and Characters.\n\n"
+            "4) Enforce consistency: cross-check constraints against Series Synopsis and Characters.\n"
+            "5) **CREATIVE EXPANSION REQUIRED** - When the user provides concepts or ideas, you MUST:\n"
+            "   - Expand creatively on the user's concepts - do NOT simply repeat them verbatim\n"
+            "   - Add logical implications, consequences, and edge cases\n"
+            "   - Elaborate on how concepts interact with existing rules and systems\n"
+            "   - Provide examples, specific scenarios, and detailed explanations\n"
+            "   - Think through the full implications of the concepts (what does this mean for other systems?)\n"
+            "   - Add depth and nuance that makes the rules comprehensive and useful\n"
+            "   - Example: User says 'Magic requires components' → Expand to: 'Magic requires physical components that are consumed during casting. Components must be gathered or purchased. Different spells require different components. Components degrade over time if not properly stored. Rare components are expensive and difficult to obtain.'\n"
+            "   - Example: User says 'Time period is medieval' → Expand to: 'Time period is medieval (approximately 1000-1500 CE equivalent). Technology level includes basic metallurgy, agriculture, and simple mechanical devices. No gunpowder or advanced machinery. Social structure is feudal with nobility, clergy, and commoners. Transportation is primarily by horse, cart, or foot.'\n"
+            "   - The goal is to create rich, detailed rules that go beyond the user's initial concept\n\n"
+            "6) **CRITICAL: ORGANIZE AND CONSOLIDATE RULES** - Before adding rules, you MUST:\n"
+            "   - **Check for DUPLICATES**: Scan the ENTIRE document to see if this rule already exists somewhere\n"
+            "   - **Identify the BEST LOCATION**: Determine which section is most appropriate for each rule\n"
+            "   - **CONSOLIDATE duplicates**: If a rule exists in multiple places, keep it in the MOST appropriate section and DELETE it from others\n"
+            "   - **MOVE misplaced rules**: If a rule is in the wrong section, DELETE it from the wrong place and ADD it to the right place\n"
+            "   - **Avoid redundancy**: Do NOT add the same rule to multiple sections unless there's a specific reason for cross-referencing\n"
+            "   - Example: If 'Magic requires components' exists under Systems AND Universe Constraints, keep it in Systems (more specific) and delete from Universe Constraints\n"
+            "   - Example: If adding a geography rule but it's already in Background section, MOVE it to Geography section (delete_range from Background, insert_after_heading in Geography)\n"
+            "   - Example: If the same timeline event is in both Timeline AND Series Synopsis, consolidate - keep detailed version in Timeline, brief reference in Series Synopsis\n\n"
+            "7) **CRITICAL: CROSS-REFERENCE RELATED RULES** - When adding or updating a concept, you MUST:\n"
+            "   - Scan the ENTIRE document for related rules that should be updated together\n"
+            "   - Identify ALL sections that reference or relate to the concept being added/updated\n"
+            "   - Generate MULTIPLE operations if a single concept addition requires updates to multiple related rules\n"
+            "   - Example: If adding a magic system rule, check Systems, Universe Constraints, Timeline, and Series Synopsis sections\n"
+            "   - Example: If updating a character constraint, check Character References, Series Synopsis, and Continuity Rules\n"
+            "   - Example: If adding a timeline event, check Chronology, Continuity Rules, and Series Synopsis for consistency\n"
+            "   - NEVER update only one rule when related rules exist that should be updated together\n"
+            "   - The operations array can contain MULTIPLE operations - use it to update all related sections in one pass\n\n"
             "ANCHOR REQUIREMENTS (CRITICAL):\n"
             "For EVERY operation, you MUST provide precise anchors:\n\n"
             "REVISE/DELETE Operations:\n"
             "- ALWAYS include 'original_text' with EXACT, VERBATIM text from the file\n"
             "- Minimum 10-20 words, include complete sentences with natural boundaries\n"
             "- Copy and paste directly - do NOT retype or modify\n"
-            "- ⚠️ NEVER include header lines (###, ##, #) in original_text!\n"
+            "- NEVER include header lines (###, ##, #) in original_text!\n"
             "- OR provide both 'left_context' and 'right_context' (exact surrounding text)\n\n"
-            "INSERT Operations (PREFERRED for adding content below headers!):\n"
-            "- **PRIMARY METHOD**: Use op_type='insert_after_heading' with anchor_text='## Section' when adding content below ANY header\n"
-            "- Provide 'anchor_text' with EXACT, COMPLETE header line to insert after (verbatim from file)\n"
-            "- This is the SAFEST method - it NEVER deletes headers, always inserts AFTER them\n"
-            "- Use this for adding rules, constraints, systems, or any worldbuilding content below headers\n"
-            "- ALTERNATIVE: Provide 'original_text' with text to insert after\n"
-            "- FALLBACK: Provide 'left_context' with text before insertion point (minimum 10-20 words)\n\n"
+            "INSERT Operations (ONLY for truly empty sections!):\n"
+            "- **insert_after_heading**: Use ONLY when section is completely empty below the header\n"
+            "  * op_type='insert_after_heading' with anchor_text='## Section' (exact header line)\n"
+            "  * Example: Adding rules after '## Magic System' header when section is completely empty\n"
+            "  * ⚠️ CRITICAL WARNING: Before using insert_after_heading, you MUST verify the section is COMPLETELY EMPTY!\n"
+            "  * ⚠️ If there is ANY text below the header (even a single line), use replace_range instead!\n"
+            "  * ⚠️ Using insert_after_heading when content exists will INSERT BETWEEN the header and existing text, splitting the section!\n"
+            "  * ⚠️ This creates duplicate content and breaks the section structure - NEVER do this!\n"
+            "  * Example of WRONG behavior: '## Magic\\n[INSERT HERE splits section]\\n- Existing rule' ← WRONG! Use replace_range on existing content!\n"
+            "  * Example of CORRECT usage: '## Magic\\n[empty - no text below]' ← OK to use insert_after_heading\n"
+            "  * This is the SAFEST method - it NEVER deletes headers, always inserts AFTER them - BUT ONLY FOR EMPTY SECTIONS\n\n"
+            "- **insert_after**: Use when continuing text mid-paragraph, mid-sentence, or after specific text\n"
+            "  * op_type='insert_after' with anchor_text='last few words before insertion point'\n"
+            "  * Example: Continuing a sentence or adding to an existing paragraph\n\n"
+            "- **REPLACE Operations (PREFERRED for updating existing content!):\n"
+            "- **replace_range**: Use when section exists but needs improvement, completion, or revision\n"
+            "  * If section has ANY content (even incomplete or placeholder), use replace_range to update it\n"
+            "  * Example: Section has '- Magic requires physical components' but needs more detail → replace_range with original_text='- Magic requires physical components' and expanded text\n"
+            "  * Example: Section has '[To be developed]' → replace_range with original_text='[To be developed]' and actual content\n"
+            "  * This ensures existing content is replaced/updated, not duplicated\n\n"
             "Additional Options:\n"
             "- 'occurrence_index' if text appears multiple times (0-based, default 0)\n"
             "- Start/end indices are approximate; anchors take precedence\n\n"
             "=== DECISION TREE FOR OPERATION TYPE ===\n"
-            "1. Section is COMPLETELY EMPTY? → insert_after_heading with anchor_text=\"## Section\"\n"
-            "2. Section has PLACEHOLDER or existing rules to replace? → replace_range (NO headers in original_text!)\n"
-            "3. Deleting SPECIFIC content? → delete_range with original_text (NO headers!)\n\n"
-            "⚠️ CRITICAL: When replacing placeholder content, use 'replace_range' on ONLY the placeholder!\n"
-            "⚠️ NEVER include headers in 'original_text' for replace_range - headers will be deleted!\n"
-            "✅ Correct: {\"op_type\": \"replace_range\", \"original_text\": \"[Placeholder rules]\", \"text\": \"- Rule 1\\n- Rule 2\"}\n"
-            "❌ Wrong: {\"op_type\": \"insert_after_heading\"} when placeholder text exists - it will keep the placeholder!\n\n"
+            "**STEP 1: Read the section content carefully!**\n"
+            "- Look at what exists below the header\n"
+            "- Is there ANY text at all? Even a single line?\n"
+            "\n"
+            "**STEP 2: Choose operation based on what exists:**\n"
+            "1. Section is COMPLETELY EMPTY below header (no text at all)? → insert_after_heading with anchor_text=\"## Section\"\n"
+            "2. Section has ANY content (even incomplete/placeholder/single line)? → replace_range to update it (NO headers in original_text!)\n"
+            "3. Adding to existing list/paragraph? → replace_range with original_text matching existing content\n"
+            "4. Deleting SPECIFIC content? → delete_range with original_text (NO headers!)\n"
+            "5. Continuing mid-sentence? → insert_after\n"
+            "6. Rule exists in wrong section? → Two operations: delete_range from wrong section, then insert/replace in correct section\n"
+            "7. Same rule exists in multiple sections? → Keep in most appropriate section, delete_range from others\n\n"
+            "CRITICAL: When updating existing content (even if incomplete), use 'replace_range' on the existing content!\n"
+            "NEVER include headers in 'original_text' for replace_range - headers will be deleted!\n"
+            "⚠️ NEVER use insert_after_heading when content exists - it will SPLIT the section and create duplicates!\n"
+            "\n"
+            "**CORRECT EXAMPLES**:\n"
+            "- Updating existing content: {\"op_type\": \"replace_range\", \"original_text\": \"- Magic requires physical components\", \"text\": \"- Magic requires physical components\\n- Components must be consumed during casting\"}\n"
+            "- Moving rule to better section: [{\"op_type\": \"delete_range\", \"original_text\": \"- Magic uses verbal components\"}, {\"op_type\": \"insert_after_heading\", \"anchor_text\": \"## Magic Systems\", \"text\": \"- Magic uses verbal components\\n- Verbal components must be spoken clearly\"}]\n"
+            "- Consolidating duplicates: [{\"op_type\": \"delete_range\", \"original_text\": \"- Dragons are rare creatures\" (from Background)}, {\"op_type\": \"replace_range\", \"original_text\": \"- Dragons exist\", \"text\": \"- Dragons are rare creatures found in mountain regions\" (in Geography)}]\n"
+            "\n"
+            "**WRONG EXAMPLES**:\n"
+            "- ❌ {\"op_type\": \"insert_after_heading\"} when section has content - will split section!\n"
+            "- ❌ Adding same rule to multiple sections without consolidating - creates duplicates!\n"
+            "- ❌ Not checking if rule already exists elsewhere - creates redundancy!\n\n"
             "=== SPACING RULES (CRITICAL - READ CAREFULLY!) ===\n"
             "YOUR TEXT MUST END IMMEDIATELY AFTER THE LAST CHARACTER!\n\n"
-            '✅ CORRECT: "- Rule 1\\n- Rule 2\\n- Rule 3"  ← Ends after "3" with NO \\n\n'
-            '❌ WRONG: "- Rule 1\\n- Rule 2\\n"  ← Extra \\n after last line creates blank line!\n'
-            '❌ WRONG: "- Rule 1\\n- Rule 2\\n\\n"  ← \\n\\n creates 2 blank lines!\n'
-            '❌ WRONG: "- Rule 1\\n\\n- Rule 2"  ← Double \\n\\n between items creates blank line!\n\n'
+            'CORRECT: "- Rule 1\\n- Rule 2\\n- Rule 3"  ← Ends after "3" with NO \\n\n'
+            'WRONG: "- Rule 1\\n- Rule 2\\n"  ← Extra \\n after last line creates blank line!\n'
+            'WRONG: "- Rule 1\\n- Rule 2\\n\\n"  ← \\n\\n creates 2 blank lines!\n'
+            'WRONG: "- Rule 1\\n\\n- Rule 2"  ← Double \\n\\n between items creates blank line!\n\n'
             "IRON-CLAD RULE: After last line = ZERO \\n (nothing!)\n"
             "5) Headings must be clear; do not duplicate sections. If an equivalent heading exists, update it in place.\n"
             "6) When adding Timeline & Continuity entries, keep a chronological order and explicit constraints (MUST/MUST NOT).\n"
@@ -299,7 +377,13 @@ class RulesEditingAgent(BaseAgent):
                         "response": "Active editor is not a Rules document; rules agent skipping.",
                         "task_status": "error",
                         "agent_type": "rules_editing_agent"
-                    }
+                    },
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             # Extract user request
@@ -331,14 +415,26 @@ class RulesEditingAgent(BaseAgent):
                 "body_only": body_only,
                 "para_start": para_start,
                 "para_end": para_end,
-                "current_request": current_request.strip()
+                "current_request": current_request.strip(),
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
             logger.error(f"Failed to prepare context: {e}")
             return {
                 "error": str(e),
-                "task_status": "error"
+                "task_status": "error",
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _load_references_node(self, state: RulesEditingState) -> Dict[str, Any]:
@@ -385,7 +481,13 @@ class RulesEditingAgent(BaseAgent):
             
             return {
                 "style_body": style_body,
-                "characters_bodies": characters_bodies
+                "characters_bodies": characters_bodies,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -395,7 +497,111 @@ class RulesEditingAgent(BaseAgent):
             return {
                 "style_body": None,
                 "characters_bodies": [],
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
+    
+    def _route_from_request_type(self, state: RulesEditingState) -> str:
+        """Route based on detected request type"""
+        request_type = state.get("request_type", "edit_request")
+        return request_type if request_type in ("question", "edit_request") else "edit_request"
+    
+    async def _detect_request_type_node(self, state: RulesEditingState) -> Dict[str, Any]:
+        """Detect if request is a question or edit request"""
+        try:
+            logger.info("Detecting request type...")
+            
+            current_request = state.get("current_request", "")
+            body_only = state.get("body_only", "")
+            style_body = state.get("style_body")
+            characters_bodies = state.get("characters_bodies", [])
+            
+            # Build simple prompt for LLM to determine intent
+            prompt = f"""Analyze the user's request and determine if it's a QUESTION or an EDIT REQUEST.
+
+**USER REQUEST**: {current_request}
+
+**CONTEXT**:
+- Current rules: {body_only[:500] if body_only else "Empty rules"}
+- Has style reference: {bool(style_body)}
+- Has {len(characters_bodies)} character reference(s)
+
+**INTENT DETECTION**:
+- QUESTIONS (including pure questions and conditional edits): User is asking a question - may or may not want edits
+  - Pure questions: "What rules are defined?", "Do we have a rule about magic?", "Show me the worldbuilding rules", "What's our time period setting?"
+  - Conditional edits: "Do we have magic rules? Add them if not", "What rules? Suggest additions if needed"
+  - Questions often start with: "Do you", "What", "Can you", "Are there", "How many", "Show me", "Is", "Does", "Are we", "Suggest"
+  - **Key insight**: Questions can be answered, and IF edits are needed based on the answer, they can be made
+  - Route ALL questions to edit path - LLM can decide if edits are needed
+  
+- EDIT REQUESTS: User wants to create, modify, or generate content - NO question asked
+  - Examples: "Add magic system rules", "Create worldbuilding rules", "Update the time period section", "Revise the geography rules"
+  - Edit requests are action-oriented: "add", "create", "update", "generate", "change", "replace", "revise"
+  - Edit requests specify what content to create or modify
+  - **Key indicator**: Action verbs present, no question asked
+
+**OUTPUT**: Return ONLY valid JSON:
+{{
+  "request_type": "question" | "edit_request",
+  "confidence": 0.0-1.0,
+  "reasoning": "Brief explanation of why this classification"
+}}
+
+**CRITICAL**: 
+- If request contains a question (even with action verbs) → "question" (will route to edit path, LLM decides if edits needed)
+- If request is ONLY action verbs with NO question → "edit_request"
+- Trust your semantic understanding - questions go to edit path where LLM can analyze and optionally edit"""
+            
+            # Call LLM with structured output
+            llm = self._get_llm(temperature=0.1, state=state)
+            from langchain_core.messages import HumanMessage
+            response = await llm.ainvoke([HumanMessage(content=prompt)])
+            
+            content = response.content if hasattr(response, 'content') else str(response)
+            content = _unwrap_json_response(content)
+            
+            # Parse response
+            try:
+                result = json.loads(content)
+                request_type = result.get("request_type", "edit_request")
+                confidence = result.get("confidence", 0.5)
+                reasoning = result.get("reasoning", "")
+                
+                logger.info(f"Request type detected: {request_type} (confidence: {confidence:.2f}) - {reasoning}")
+                
+                return {
+                    "request_type": request_type,
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
+                }
+            except Exception as e:
+                logger.warning(f"Failed to parse request type detection: {e}, defaulting to edit_request")
+                return {
+                    "request_type": "edit_request",
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
+                }
+            
+        except Exception as e:
+            logger.error(f"Failed to detect request type: {e}")
+            return {
+                "request_type": "edit_request",
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _generate_edit_plan_node(self, state: RulesEditingState) -> Dict[str, Any]:
@@ -407,6 +613,8 @@ class RulesEditingAgent(BaseAgent):
             filename = state.get("filename", "rules.md")
             body_only = state.get("body_only", "")
             current_request = state.get("current_request", "")
+            request_type = state.get("request_type", "edit_request")
+            is_question = request_type == "question"
             
             style_body = state.get("style_body")
             characters_bodies = state.get("characters_bodies", [])
@@ -431,23 +639,156 @@ class RulesEditingAgent(BaseAgent):
             if characters_bodies:
                 context_parts.append("".join([f"=== CHARACTER DOC ===\n{b}\n\n" for b in characters_bodies]))
             
-            context_parts.append("Provide a ManuscriptEdit JSON plan for the rules document.")
+            # Add mode-specific instructions
+            if is_question:
+                context_parts.append(
+                    "\n=== QUESTION REQUEST: ANALYZE AND OPTIONALLY EDIT ===\n"
+                    "The user has asked a question about the rules document.\n\n"
+                    "**YOUR TASK**:\n"
+                    "1. **ANALYZE FIRST**: Answer the user's question by evaluating the current content\n"
+                    "   - Pure questions: 'What rules are defined?' → Report current rules\n"
+                    "   - Verification questions: 'Do we have a rule about magic?' → Check for rule, report findings\n"
+                    "   - Suggestion questions: 'Suggest additions to the rules' → Analyze current content, then suggest additions\n"
+                    "   - Conditional questions: 'Do we have magic rules? Add them if not' → Check, then edit if needed\n"
+                    "2. **THEN EDIT IF NEEDED**: Based on your analysis, make edits if necessary\n"
+                    "   - If question implies a desired state ('Add them if not') → Provide editor operations\n"
+                    "   - If question asks for suggestions ('Suggest additions') → Provide editor operations with suggested additions\n"
+                    "   - If question is pure information ('What rules?') → No edits needed, just answer\n"
+                    "   - Include your analysis in the 'summary' field of your response\n\n"
+                    "**RESPONSE FORMAT**:\n"
+                    "- In the 'summary' field: Answer the question clearly and explain your analysis\n"
+                    "- In the 'operations' array: Provide editor operations ONLY if edits are needed\n"
+                    "- If no edits needed: Return empty operations array, but answer the question in summary\n"
+                    "- If edits needed: Provide operations AND explain what you found in summary\n\n"
+                )
+            else:
+                # Edit request mode - add "WORK FIRST" guidance (like character agent)
+                context_parts.append(
+                    "\n=== EDIT REQUEST: WORK WITH AVAILABLE INFORMATION ===\n"
+                    "The user wants you to add or revise rules content.\n\n"
+                    "**YOUR APPROACH**:\n"
+                    "1. **WORK FIRST**: Make edits based on the request and available context (rules file, style guide, characters)\n"
+                    "2. **USE INFERENCE**: Make reasonable inferences from the request - don't wait for clarification\n"
+                    "3. **ASK ALONG THE WAY**: If you need specific details, include questions in the summary AFTER describing the work you've done\n"
+                    "4. **NEVER EMPTY OPERATIONS**: Always provide operations based on what you can determine from the request and context\n\n"
+                )
+                context_parts.append("Provide a ManuscriptEdit JSON plan for the rules document.")
             
-            datetime_context = self._get_datetime_context()
-            messages = [
-                SystemMessage(content=system_prompt),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content="".join(context_parts))
-            ]
-            
+            # Build request with mode-specific instructions
+            request_with_instructions = ""
             if current_request:
-                messages.append(HumanMessage(content=(
-                    f"USER REQUEST: {current_request}\n\n"
-                    "ANCHORING: For replace/delete, include 'original_text' or both 'left_context' and 'right_context' (<=60 chars each)."
-                )))
+                if is_question:
+                    request_with_instructions = (
+                        f"USER REQUEST: {current_request}\n\n"
+                        "**QUESTION MODE**: Answer the question first, then provide edits if needed.\n\n"
+                        "CRITICAL: CREATIVE EXPANSION AND ELABORATION (if edits are needed)\n"
+                        "When the user provides concepts or ideas, you MUST expand creatively:\n"
+                        "- Do NOT simply repeat the user's words verbatim - expand on their concepts\n"
+                        "- Add logical implications, consequences, and edge cases\n"
+                        "- Elaborate on how concepts interact with existing rules and systems\n"
+                        "- Provide examples, specific scenarios, and detailed explanations\n"
+                        "- Think through the full implications: What does this mean for other systems? How does this affect the world?\n"
+                        "- Add depth and nuance that makes the rules comprehensive and useful\n"
+                        "- Transform brief concepts into rich, detailed rules that go beyond the initial idea\n"
+                        "\n"
+                        "CRITICAL: ORGANIZE AND CONSOLIDATE RULES FIRST (if edits are needed)\n"
+                        "Before adding ANY new content, you MUST:\n"
+                        "1. **CHECK FOR DUPLICATES** - Does this rule already exist somewhere in the document?\n"
+                        "2. **IDENTIFY BEST LOCATION** - Which section is most appropriate for this rule?\n"
+                        "3. **CONSOLIDATE IF NEEDED** - If rule exists in multiple places, keep it in the MOST appropriate section and DELETE from others\n"
+                        "4. **MOVE MISPLACED RULES** - If rule is in wrong section, DELETE from wrong place and ADD to right place\n"
+                        "\n"
+                        "CRITICAL: CROSS-REFERENCE RELATED RULES (if edits are needed)\n"
+                        "After organizing, identify related rules:\n"
+                        "1. **SCAN THE ENTIRE DOCUMENT** - Read through ALL sections to identify related rules\n"
+                        "2. **IDENTIFY ALL AFFECTED SECTIONS** - When adding/updating a concept, find ALL places it should appear\n"
+                        "3. **GENERATE MULTIPLE OPERATIONS** - If a concept affects multiple rules, create operations for EACH affected section\n"
+                        "4. **ENSURE CONSISTENCY** - Related rules must be updated together to maintain document coherence\n"
+                        "\n"
+                        "CRITICAL ANCHORING INSTRUCTIONS (if edits are needed):\n"
+                        "- **BEFORE using insert_after_heading**: Verify the section is COMPLETELY EMPTY (no text below header)\n"
+                        "- **If section has ANY content**: Use replace_range to update it, NOT insert_after_heading\n"
+                        "- **insert_after_heading will SPLIT sections**: If you use it when content exists, it inserts BETWEEN header and existing text!\n"
+                        "- **UPDATING EXISTING CONTENT**: If a section exists but needs improvement/completion, use 'replace_range' with 'original_text' matching the EXISTING content\n"
+                        "  * Example: Section has '- Magic requires physical components' but needs more → replace_range with original_text='- Magic requires physical components' and expanded text\n"
+                        "  * Example: Section has placeholder '[To be developed]' → replace_range with original_text='[To be developed]' and actual content\n"
+                        "- **ADDING TO EMPTY SECTIONS**: Only use 'insert_after_heading' when section is completely empty below the header\n"
+                        "- For REVISE/DELETE: Provide 'original_text' with EXACT, VERBATIM text from file (10-20+ words, complete sentences)\n"
+                        "- For INSERT: Use 'insert_after_heading' with 'anchor_text' ONLY for completely empty sections, or 'insert_after' for mid-paragraph\n"
+                        "- NEVER include header lines in original_text for replace_range operations\n"
+                        "- Copy text directly from the file - do NOT retype or paraphrase\n"
+                        "- Without precise anchors, the operation WILL FAIL\n"
+                        "- **KEY RULE**: If content exists (even if incomplete), use replace_range to update it. Only use insert_after_heading for truly empty sections.\n"
+                        "- You can return MULTIPLE operations in the operations array - for organizing/consolidating AND for updating related sections"
+                    )
+                else:
+                    request_with_instructions = (
+                        f"USER REQUEST: {current_request}\n\n"
+                        "**WORK FIRST**: Make edits based on the request and available context. Use reasonable inferences - don't wait for clarification. Only ask questions in the summary if critical information is truly missing.\n\n"
+                        "CRITICAL: CREATIVE EXPANSION AND ELABORATION\n"
+                        "When the user provides concepts or ideas, you MUST expand creatively:\n"
+                        "- Do NOT simply repeat the user's words verbatim - expand on their concepts\n"
+                        "- Add logical implications, consequences, and edge cases\n"
+                        "- Elaborate on how concepts interact with existing rules and systems\n"
+                        "- Provide examples, specific scenarios, and detailed explanations\n"
+                        "- Think through the full implications: What does this mean for other systems? How does this affect the world?\n"
+                        "- Add depth and nuance that makes the rules comprehensive and useful\n"
+                        "- Transform brief concepts into rich, detailed rules that go beyond the initial idea\n"
+                        "\n"
+                        "Examples of creative expansion:\n"
+                        "- User: 'Magic requires components' → You: 'Magic requires physical components that are consumed during casting. Components must be gathered from the environment or purchased from specialized merchants. Different spell types require different component categories (organic, mineral, elemental). Components degrade over time if not properly stored in enchanted containers. Rare components are expensive and difficult to obtain, limiting access to powerful magic. Component quality affects spell effectiveness - using inferior components may cause spell failure or reduced potency.'\n"
+                        "- User: 'Time period is medieval' → You: 'Time period is medieval (approximately 1000-1500 CE equivalent). Technology level includes basic metallurgy, agriculture, and simple mechanical devices. No gunpowder or advanced machinery exists. Social structure is feudal with clear hierarchies: nobility (landowners and rulers), clergy (religious authorities), and commoners (peasants, craftsmen, merchants). Transportation is primarily by horse, cart, or foot. Communication is slow and relies on messengers or word-of-mouth. Most people are illiterate, with education limited to the upper classes and clergy.'\n"
+                        "\n"
+                        "CRITICAL: ORGANIZE AND CONSOLIDATE RULES FIRST\n"
+                        "Before adding ANY new content, you MUST:\n"
+                        "1. **CHECK FOR DUPLICATES** - Does this rule already exist somewhere in the document?\n"
+                        "2. **IDENTIFY BEST LOCATION** - Which section is most appropriate for this rule?\n"
+                        "3. **CONSOLIDATE IF NEEDED** - If rule exists in multiple places, keep it in the MOST appropriate section and DELETE from others\n"
+                        "4. **MOVE MISPLACED RULES** - If rule is in wrong section, DELETE from wrong place and ADD to right place\n"
+                        "\n"
+                        "Examples of organization operations:\n"
+                        "- User adds 'Magic requires components' but it already exists in Background → DELETE from Background, ADD expanded version to Magic Systems section\n"
+                        "- Same timeline event in Timeline AND Series Synopsis → Keep detailed version in Timeline, brief reference in Series Synopsis\n"
+                        "- Geography rule in Background section → MOVE to Geography section (delete from Background, insert in Geography)\n"
+                        "\n"
+                        "CRITICAL: CROSS-REFERENCE RELATED RULES\n"
+                        "After organizing, identify related rules:\n"
+                        "1. **SCAN THE ENTIRE DOCUMENT** - Read through ALL sections to identify related rules\n"
+                        "2. **IDENTIFY ALL AFFECTED SECTIONS** - When adding/updating a concept, find ALL places it should appear\n"
+                        "3. **GENERATE MULTIPLE OPERATIONS** - If a concept affects multiple rules, create operations for EACH affected section\n"
+                        "4. **ENSURE CONSISTENCY** - Related rules must be updated together to maintain document coherence\n"
+                        "\n"
+                        "Examples of when to generate multiple operations:\n"
+                        "- Adding magic system → Update 'Magic Systems' section AND 'Universe Constraints' section if they reference each other\n"
+                        "- Adding character constraint → Update 'Character References' AND 'Series Synopsis' if character appears there\n"
+                        "- Adding timeline event → Update 'Chronology' AND 'Continuity Rules' AND 'Series Synopsis' if event affects plot\n"
+                        "- Updating a concept → If concept appears in multiple sections, update ALL occurrences, not just one\n"
+                        "\n"
+                        "CRITICAL ANCHORING INSTRUCTIONS:\n"
+                        "- **BEFORE using insert_after_heading**: Verify the section is COMPLETELY EMPTY (no text below header)\n"
+                        "- **If section has ANY content**: Use replace_range to update it, NOT insert_after_heading\n"
+                        "- **insert_after_heading will SPLIT sections**: If you use it when content exists, it inserts BETWEEN header and existing text!\n"
+                        "- For REVISE/DELETE: Provide 'original_text' with EXACT, VERBATIM text from file (10-20+ words, complete sentences)\n"
+                        "- For INSERT: Use 'insert_after_heading' with 'anchor_text' ONLY for completely empty sections, or 'insert_after' for mid-paragraph\n"
+                        "- NEVER include header lines in original_text for replace_range operations\n"
+                        "- Copy text directly from the file - do NOT retype or paraphrase\n"
+                        "- Without precise anchors, the operation WILL FAIL\n"
+                        "- For granular revisions, use replace_range with exact original_text matching the text to change\n"
+                        "- You can return MULTIPLE operations in the operations array - one for organizing/consolidating, others for updates"
+                    )
             
-            # Call LLM
-            llm = self._get_llm(temperature=0.3, state=state)
+            # Use standardized helper for message construction with conversation history
+            messages_list = state.get("messages", [])
+            messages = self._build_editing_agent_messages(
+                system_prompt=system_prompt,
+                context_parts=context_parts,
+                current_request=request_with_instructions,
+                messages_list=messages_list,
+                look_back_limit=6
+            )
+            
+            # Call LLM (higher temperature for creative expansion)
+            llm = self._get_llm(temperature=0.5, state=state)
             start_time = datetime.now()
             response = await llm.ainvoke(messages)
             
@@ -470,7 +811,7 @@ class RulesEditingAgent(BaseAgent):
                         if not isinstance(op, dict):
                             continue
                         op_type = op.get("op_type")
-                        if op_type not in ("replace_range", "delete_range", "insert_after_heading"):
+                        if op_type not in ("replace_range", "delete_range", "insert_after_heading", "insert_after"):
                             op_type = "replace_range"
                         
                         ops.append({
@@ -528,12 +869,8 @@ class RulesEditingAgent(BaseAgent):
             logger.error(f"Failed to generate edit plan: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
-            return {
-                "llm_response": "",
-                "structured_edit": None,
-                "error": str(e),
-                "task_status": "error"
-            }
+            # Use base agent's error handler to surface OpenRouter errors properly
+            return self._handle_node_error(e, state, "Edit plan generation")
     
     async def _resolve_operations_node(self, state: RulesEditingState) -> Dict[str, Any]:
         """Resolve editor operations with progressive search"""
@@ -686,6 +1023,7 @@ class RulesEditingAgent(BaseAgent):
             structured_edit = state.get("structured_edit")
             editor_operations = state.get("editor_operations", [])
             current_request = state.get("current_request", "")
+            request_type = state.get("request_type", "edit_request")
             
             if not structured_edit:
                 error = state.get("error", "Unknown error")
@@ -698,9 +1036,31 @@ class RulesEditingAgent(BaseAgent):
                     "task_status": "error"
                 }
             
-            # Build preview text
+            # Build preview text from operations (for logging purposes)
             preview = "\n\n".join([op.get("text", "").strip() for op in editor_operations if op.get("text", "").strip()])
-            response_text = preview if preview else (structured_edit.get("summary") or "Edit plan ready.")
+            
+            # Handle questions - prioritize summary (answer/analysis) over operation text
+            if request_type == "question":
+                summary = structured_edit.get("summary", "") if structured_edit else ""
+                if summary and len(summary.strip()) > 20:
+                    # Question with answer - use summary as response text (conversational feedback)
+                    logger.info(f"Question request with {len(editor_operations)} operations - using summary as conversational response")
+                    response_text = summary
+                elif editor_operations:
+                    # Question with operations but no summary - create fallback
+                    logger.warning("Question request with operations but no summary - using fallback")
+                    response_text = f"Analysis complete. Made {len(editor_operations)} edit(s) based on your question."
+                else:
+                    # Pure question with no operations - use summary or fallback
+                    response_text = summary if summary else "Analysis complete."
+            else:
+                # Edit request - use summary if available, otherwise operation preview
+                summary = structured_edit.get("summary", "") if structured_edit else ""
+                if summary and len(summary.strip()) > 20:
+                    response_text = summary
+                else:
+                    # Use preview text from operations
+                    response_text = preview if preview else "Edit plan ready."
             
             logger.info(f"Response formatting: {len(editor_operations)} operation(s), preview length: {len(preview)}, response_text: {response_text[:200]}...")
             
@@ -792,6 +1152,7 @@ class RulesEditingAgent(BaseAgent):
                 "style_body": None,
                 "characters_bodies": [],
                 "current_request": "",
+                "request_type": "edit_request",
                 "system_prompt": "",
                 "llm_response": "",
                 "structured_edit": None,
@@ -857,11 +1218,10 @@ class RulesEditingAgent(BaseAgent):
             logger.error(f"Rules Editing Agent failed: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
-            return {
-                "response": f"Rules editing failed: {str(e)}",
-                "task_status": "error",
-                "agent_type": "rules_editing_agent"
-            }
+            # Use base agent's error response creator to surface OpenRouter errors properly
+            error_response = self._create_error_response(str(e))
+            error_response["agent_type"] = "rules_editing_agent"
+            return error_response
 
 
 # Singleton instance

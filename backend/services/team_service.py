@@ -5,7 +5,7 @@ Team Service - Handles team management, members, and permissions
 import logging
 import uuid
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 import asyncpg
 
@@ -87,8 +87,15 @@ class TeamService:
         
         try:
             async with self.db_pool.acquire() as conn:
-                # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", creator_id)
+                # Get creator's role for RLS context and folder creation
+                creator_role_row = await conn.fetchrow("""
+                    SELECT role FROM users WHERE user_id = $1
+                """, creator_id)
+                creator_role = creator_role_row["role"] if creator_role_row else "user"
+                
+                # Set user context for RLS (both user_id and role)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", creator_id)
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", creator_role)
                 
                 # Create team
                 await conn.execute("""
@@ -103,12 +110,6 @@ class TeamService:
                 """, team_id, creator_id, "admin")
                 
                 logger.info(f"Created team {team_id} by user {creator_id}")
-                
-                # Get creator's role for folder creation
-                creator_role_row = await conn.fetchrow("""
-                    SELECT role FROM users WHERE user_id = $1
-                """, creator_id)
-                creator_role = creator_role_row["role"] if creator_role_row else "user"
                 
                 # Create team folder
                 try:
@@ -204,7 +205,7 @@ class TeamService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Get team with member count and user's role
                 row = await conn.fetchrow("""
@@ -263,19 +264,27 @@ class TeamService:
         
         try:
             async with self.db_pool.acquire() as conn:
-                # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                # Get user's role for RLS context
+                user_role_row = await conn.fetchrow("""
+                    SELECT role FROM users WHERE user_id = $1
+                """, user_id)
+                user_role = user_role_row["role"] if user_role_row else "user"
+                
+                # Set user context for RLS (both user_id and role)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_role)
                 
                 rows = await conn.fetch("""
                     SELECT 
                         t.*,
                         COUNT(DISTINCT tm.user_id) as member_count,
                         tm_user.role as user_role,
+                        tm_user.muted,
                         t.updated_at as last_activity
                     FROM teams t
                     INNER JOIN team_members tm_user ON tm_user.team_id = t.team_id AND tm_user.user_id = $1
                     LEFT JOIN team_members tm ON tm.team_id = t.team_id
-                    GROUP BY t.team_id, tm_user.role
+                    GROUP BY t.team_id, tm_user.role, tm_user.muted
                     ORDER BY last_activity DESC
                 """, user_id)
                 
@@ -301,7 +310,8 @@ class TeamService:
                         "avatar_url": row["avatar_url"],
                         "settings": settings,
                         "member_count": row["member_count"] or 0,
-                        "user_role": row["user_role"]
+                        "user_role": row["user_role"],
+                        "muted": row.get("muted", False)
                     })
                 
                 return teams
@@ -337,7 +347,7 @@ class TeamService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Build update query
                 update_fields = []
@@ -410,7 +420,7 @@ class TeamService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Find and delete team folder(s) before deleting team
                 try:
@@ -501,7 +511,7 @@ class TeamService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", added_by)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", added_by)
                 
                 # Check if already member
                 existing = await conn.fetchval("""
@@ -569,7 +579,7 @@ class TeamService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", removed_by)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", removed_by)
                 
                 # Remove member
                 result = await conn.execute("""
@@ -637,7 +647,7 @@ class TeamService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", updated_by)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", updated_by)
                 
                 # Update role
                 result = await conn.execute("""
@@ -679,7 +689,7 @@ class TeamService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Get members with user info and presence
                 rows = await conn.fetch("""
@@ -737,7 +747,7 @@ class TeamService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 role = await conn.fetchval("""
                     SELECT role FROM team_members
@@ -785,4 +795,135 @@ class TeamService:
             "can_manage_members": is_admin,
             "can_manage_team": is_admin
         }
+    
+    async def get_unread_post_counts(self, user_id: str) -> Dict[str, int]:
+        """
+        Get unread post counts for all user's teams (excluding muted teams)
+        
+        Args:
+            user_id: User ID
+        
+        Returns:
+            Dict mapping team_id to unread count
+        """
+        await self._ensure_initialized()
+        
+        try:
+            async with self.db_pool.acquire() as conn:
+                # Set user context for RLS
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                
+                logger.info(f"📊 Fetching unread counts for user {user_id}")
+                rows = await conn.fetch("""
+                    SELECT 
+                        tm.team_id,
+                        tm.muted,
+                        tm.last_read_at,
+                        tm.joined_at,
+                        COUNT(tp.post_id) as unread_count,
+                        COUNT(CASE WHEN tp.created_at > COALESCE(tm.last_read_at, tm.joined_at) THEN 1 END) as posts_after_last_read
+                    FROM team_members tm
+                    LEFT JOIN team_posts tp ON tp.team_id = tm.team_id
+                        AND tp.author_id != $1
+                        AND tp.deleted_at IS NULL
+                    WHERE tm.user_id = $1
+                    GROUP BY tm.team_id, tm.muted, tm.last_read_at, tm.joined_at
+                """, user_id)
+                
+                # Build result and log details
+                result = {}
+                for row in rows:
+                    team_id = str(row['team_id'])
+                    is_muted = row.get('muted', False)
+                    unread_count = row['posts_after_last_read'] if not is_muted else 0
+                    
+                    logger.info(f"  Team {team_id}: muted={is_muted}, posts_after_last_read={row['posts_after_last_read']}, will show={unread_count}")
+                    
+                    if unread_count > 0:
+                        result[team_id] = unread_count
+                
+                logger.info(f"📊 Final unread counts for user {user_id}: {result}")
+                return result
+        
+        except Exception as e:
+            logger.error(f"Failed to get unread post counts: {e}", exc_info=True)
+            return {}
+    
+    async def mark_team_posts_as_read(self, team_id: str, user_id: str) -> bool:
+        """
+        Mark all posts in a team as read for a user
+        
+        Args:
+            team_id: Team ID
+            user_id: User ID
+        
+        Returns:
+            True if updated
+        """
+        await self._ensure_initialized()
+        
+        # Check access
+        role = await self.check_team_access(team_id, user_id)
+        if not role:
+            raise PermissionError("Not a team member")
+        
+        try:
+            async with self.db_pool.acquire() as conn:
+                # Set user context for RLS
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                
+                await conn.execute("""
+                    UPDATE team_members
+                    SET last_read_at = CURRENT_TIMESTAMP
+                    WHERE team_id = $1 AND user_id = $2
+                """, team_id, user_id)
+                
+                logger.info(f"Marked team {team_id} posts as read for user {user_id}")
+                return True
+        
+        except PermissionError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to mark team posts as read: {e}")
+            raise
+    
+    async def mute_team(self, team_id: str, user_id: str, muted: bool = True) -> bool:
+        """
+        Mute or unmute a team for a user
+        
+        Args:
+            team_id: Team ID
+            user_id: User ID
+            muted: True to mute, False to unmute
+        
+        Returns:
+            True if updated
+        """
+        await self._ensure_initialized()
+        
+        # Check access
+        role = await self.check_team_access(team_id, user_id)
+        if not role:
+            raise PermissionError("Not a team member")
+        
+        try:
+            async with self.db_pool.acquire() as conn:
+                # Set user context for RLS
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                
+                await conn.execute("""
+                    UPDATE team_members
+                    SET muted = $1
+                    WHERE team_id = $2 AND user_id = $3
+                """, muted, team_id, user_id)
+                
+                action = "muted" if muted else "unmuted"
+                logger.info(f"Team {team_id} {action} for user {user_id}")
+                return True
+        
+        except PermissionError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to mute/unmute team: {e}")
+            raise
 

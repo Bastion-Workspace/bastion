@@ -32,12 +32,30 @@ const TeamDetailPage = () => {
     error
   } = useTeam();
   const [activeTab, setActiveTab] = useState(0);
+  const [hasAttemptedLoad, setHasAttemptedLoad] = useState(false);
 
   useEffect(() => {
     if (teamId) {
+      setHasAttemptedLoad(true);
       selectTeam(teamId);
+    } else {
+      setHasAttemptedLoad(false);
     }
   }, [teamId, selectTeam]);
+
+  // Navigate away if team was deleted (currentTeam becomes null while we have a teamId)
+  // Only navigate if we've actually tried to load and it failed (not just initial load)
+  useEffect(() => {
+    if (teamId && hasAttemptedLoad && !isLoading && !currentTeam && error) {
+      // Only navigate if there's an actual error after attempting to load
+      const timer = setTimeout(() => {
+        if (!currentTeam && !isLoading && error) {
+          navigate('/teams');
+        }
+      }, 500); // Give a bit more time for error to resolve
+      return () => clearTimeout(timer);
+    }
+  }, [teamId, currentTeam, isLoading, error, navigate, hasAttemptedLoad]);
 
   if (isLoading && !currentTeam) {
     return (
@@ -60,9 +78,9 @@ const TeamDetailPage = () => {
   }
 
   return (
-    <Container maxWidth="lg" sx={{ mt: 2, mb: 4 }}>
+    <Container maxWidth="lg" sx={{ mt: 1, mb: 4 }}>
       {/* Header */}
-      <Box sx={{ display: 'flex', alignItems: 'center', mb: 3 }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
         <IconButton onClick={() => navigate('/teams')} sx={{ mr: 2 }}>
           <ArrowBack />
         </IconButton>

@@ -1175,14 +1175,14 @@ Return ONLY valid JSON:
 - Be conversational and helpful
 - Structure your response as natural language (not JSON)"""
             
-            # Extract conversation history for context
-            conversation_history = []
+            # Build messages with conversation history using standardized helper
             state_messages = state.get("messages", [])
-            if state_messages:
-                conversation_history = self._extract_conversation_history(state_messages, limit=10)
-            
-            # Build messages with conversation history
-            llm_messages = self._build_messages(system_prompt, user_prompt, conversation_history)
+            llm_messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                messages_list=state_messages,
+                look_back_limit=10
+            )
             
             logger.info("Calling LLM for general project response")
             
@@ -1264,27 +1264,6 @@ Return ONLY valid JSON:
 - Be proactive in suggesting concrete actions
 - Structure responses naturally and conversationally"""
 
-    def _build_messages(self, system_prompt: str, user_prompt: str, conversation_history: List[Dict[str, str]] = None) -> List[Any]:
-        """Build messages for LLM with conversation history and datetime context"""
-        from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-        messages = [SystemMessage(content=system_prompt)]
-        
-        # Add datetime context for grounding (CRITICAL for all agents)
-        datetime_context = self._get_datetime_context()
-        messages.append(SystemMessage(content=datetime_context))
-        
-        # Add conversation history if provided
-        if conversation_history:
-            for msg in conversation_history:
-                if msg["role"] == "user":
-                    messages.append(HumanMessage(content=msg["content"]))
-                else:
-                    messages.append(AIMessage(content=msg["content"]))
-        
-        # Add current query
-        messages.append(HumanMessage(content=user_prompt))
-        
-        return messages
     
     def _extract_json_from_response(self, content: str) -> Optional[Dict[str, Any]]:
         """Extract JSON from LLM response"""

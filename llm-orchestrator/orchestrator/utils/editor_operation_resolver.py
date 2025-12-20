@@ -169,6 +169,13 @@ def resolve_editor_operation(
     
     # Strategy 3: Anchor text for insert_after_heading or insert_after
     if anchor_text and op_type in ("insert_after_heading", "insert_after"):
+        # Check if file is empty (only frontmatter) - if so, insert after frontmatter without requiring anchor
+        body_only = content[frontmatter_end:].strip()
+        if not body_only:
+            # Empty file - insert after frontmatter without requiring anchor_text
+            logger.info("Empty file detected - inserting after frontmatter without anchor")
+            return frontmatter_end, frontmatter_end, text, 0.8
+        
         # For outline editing, we need maximum flexibility - search the ENTIRE document
         # This allows edits anywhere: Chapter 4 edits can impact synopsis, cursor position doesn't matter
         # Always find the LAST occurrence to ensure consistent behavior (new chapters at end, edits to most recent section)
@@ -249,6 +256,18 @@ def resolve_editor_operation(
             return start, end, text, 0.8
     
     # Strategy 5: Fallback for operations without original_text (e.g., insert operations without anchor)
+    # Special handling for insert_after_heading without anchor_text (empty files)
+    if op_type == "insert_after_heading" and not anchor_text:
+        # Empty file case - insert after frontmatter
+        body_only = content[frontmatter_end:].strip()
+        if not body_only:
+            logger.info("insert_after_heading without anchor_text on empty file - inserting after frontmatter")
+            return frontmatter_end, frontmatter_end, text, 0.8
+        else:
+            # File has content but no anchor - use frontmatter end as fallback
+            logger.warning("insert_after_heading without anchor_text on non-empty file - using frontmatter end")
+            return frontmatter_end, frontmatter_end, text, 0.5
+    
     # If we have original_text and got here, it's an error - should have been caught above
     if not original_text or op_type not in ("replace_range", "delete_range"):
         start = op_dict.get("start", 0)

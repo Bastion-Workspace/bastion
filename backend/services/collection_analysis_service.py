@@ -537,10 +537,15 @@ class CollectionAnalysisService:
             ])
             
             # Import datetime context utility
-            from utils.system_prompt_utils import add_datetime_context_to_system_prompt
+            from utils.system_prompt_utils import add_datetime_context_to_system_prompt_for_user
             
-            # Create meta-summary prompt
-            system_prompt = add_datetime_context_to_system_prompt(
+            # Get user_id from chat_service if available
+            user_id = None
+            if self.chat_service and hasattr(self.chat_service, 'current_user_id'):
+                user_id = self.chat_service.current_user_id
+            
+            # Create meta-summary prompt with user's timezone
+            system_prompt = await add_datetime_context_to_system_prompt_for_user(
                 """You are Alex, an AI assistant specialized in analyzing large document collections. You are creating a comprehensive overview of a document collection based on individual document summaries.
 
 Your task is to:
@@ -550,7 +555,8 @@ Your task is to:
 4. Provide a coherent narrative that ties the collection together
 5. Mention the scope and scale of the collection
 
-Create a well-structured, comprehensive summary that gives someone a complete understanding of what this document collection contains and its key insights."""
+Create a well-structured, comprehensive summary that gives someone a complete understanding of what this document collection contains and its key insights.""",
+                user_id=user_id
             )
 
             user_prompt = f"""Based on the following individual document summaries, please create a comprehensive overview of this document collection:
@@ -623,9 +629,14 @@ Structure your response with clear sections and use markdown formatting for read
             temporal_data = self._prepare_temporal_data_for_analysis(documents_data, temporal_insights)
             
             # Import datetime context utility
-            from utils.system_prompt_utils import add_datetime_context_to_system_prompt
+            from utils.system_prompt_utils import add_datetime_context_to_system_prompt_for_user
             
-            system_prompt = add_datetime_context_to_system_prompt(
+            # Get user_id from chat_service if available
+            user_id = None
+            if self.chat_service and hasattr(self.chat_service, 'current_user_id'):
+                user_id = self.chat_service.current_user_id
+            
+            system_prompt = await add_datetime_context_to_system_prompt_for_user(
                 """You are Alex, an AI assistant specialized in temporal analysis of document collections. You excel at identifying patterns, trends, and insights across time periods.
 
 Your task is to analyze a collection of documents with temporal information and provide comprehensive insights about:
@@ -635,7 +646,8 @@ Your task is to analyze a collection of documents with temporal information and 
 4. Notable peaks, gaps, or changes in activity
 5. Relationships between timing and content themes
 
-Provide a detailed, insightful analysis that helps understand the temporal dynamics of this document collection."""
+Provide a detailed, insightful analysis that helps understand the temporal dynamics of this document collection.""",
+                user_id=user_id
             )
 
             user_prompt = f"""Please analyze this temporal document collection:

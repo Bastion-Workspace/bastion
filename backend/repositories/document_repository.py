@@ -86,20 +86,20 @@ class DocumentRepository:
             if user_id:
                 # Set user context for user documents
                 await execute(
-                    "SELECT set_config('app.current_user_id', $1, true)",
+                    "SELECT set_config('app.current_user_id', $1, false)",
                     user_id
                 )
                 await execute(
-                    "SELECT set_config('app.current_user_role', 'user', true)"
+                    "SELECT set_config('app.current_user_role', 'user', false)"
                 )
                 logger.info(f"🔧 DEBUG: Set user context for document creation")
             elif collection_type == "global":
                 # Set admin context for global documents
                 await execute(
-                    "SELECT set_config('app.current_user_id', '', true)"
+                    "SELECT set_config('app.current_user_id', '', false)"
                 )
                 await execute(
-                    "SELECT set_config('app.current_user_role', 'admin', true)"
+                    "SELECT set_config('app.current_user_role', 'admin', false)"
                 )
                 logger.info(f"🔧 DEBUG: Set admin context for document creation")
                 
@@ -113,7 +113,7 @@ class DocumentRepository:
             # If inheriting and folder is exempt, set explicit TRUE to prevent processing
             if exempt_from_vectorization is None and folder_id:
                 try:
-                    folder_exempt = await self.is_folder_exempt(folder_id)
+                    folder_exempt = await self.is_folder_exempt(folder_id, user_id)
                     if folder_exempt:
                         exempt_from_vectorization = True
                         logger.info(f"🚫 Document {doc_info.document_id} inherits exemption from folder {folder_id} → setting TRUE at creation")
@@ -172,10 +172,9 @@ class DocumentRepository:
         try:
             from services.database_manager.database_helpers import execute
             
-            # ROOSEVELT FIX: RLS is disabled on document_metadata (like document_folders)
-            # No need for RLS context - consistent architecture across all tables
+            # Set RLS context for document creation
             user_id = getattr(doc_info, 'user_id', None)
-            logger.info(f"🔧 DEBUG: Creating document with RLS disabled - user will be: {user_id}")
+            logger.info(f"🔧 DEBUG: Creating document with user_id: {user_id}")
             
             # Extract title from filename (remove extension)
             from pathlib import Path
@@ -188,7 +187,7 @@ class DocumentRepository:
             # If inheriting and folder is exempt, set explicit TRUE to prevent processing
             if exempt_from_vectorization is None and folder_id:
                 try:
-                    folder_exempt = await self.is_folder_exempt(folder_id)
+                    folder_exempt = await self.is_folder_exempt(folder_id, user_id)
                     if folder_exempt:
                         exempt_from_vectorization = True
                         logger.info(f"🚫 Document {doc_info.document_id} inherits exemption from folder {folder_id} → setting TRUE at creation")
@@ -200,6 +199,22 @@ class DocumentRepository:
                 logger.info(f"📝 Document {doc_info.document_id} created with explicit exemption: {exempt_from_vectorization}")
             else:
                 logger.info(f"📝 Document {doc_info.document_id} will inherit vectorization setting from folder")
+            
+            # Build RLS context for document creation
+            collection_type = getattr(doc_info, 'collection_type', 'user')
+            if user_id:
+                rls_user_id = user_id
+                rls_role = 'user'
+            else:
+                # Global documents - use admin context
+                rls_user_id = ''
+                rls_role = 'admin'
+            
+            # Use rls_context to ensure all operations use the same connection with proper RLS
+            rls_context = {
+                'user_id': rls_user_id,
+                'user_role': rls_role
+            }
             
             await execute(
                 """
@@ -225,7 +240,8 @@ class DocumentRepository:
                 user_id,
                 getattr(doc_info, 'collection_type', 'user'),  # Default to 'user' if not specified
                 folder_id,  # Include folder_id in the initial insert for atomic operation
-                exempt_from_vectorization  # Include exemption status
+                exempt_from_vectorization,  # Include exemption status
+                rls_context=rls_context  # Pass RLS context to ensure proper permission check
             )
             
             logger.info(f"📝 Created document record: {doc_info.document_id} for user: {user_id} with collection_type: {getattr(doc_info, 'collection_type', 'user')}")
@@ -244,21 +260,15 @@ class DocumentRepository:
     async def get_by_id(self, document_id: str) -> Optional[DocumentInfo]:
         """Get a document by ID"""
         try:
-            from services.database_manager.database_helpers import execute, fetch_one
+            from services.database_manager.database_helpers import fetch_one
             
-            # Set admin context to access all documents
-            await execute(
-                "SELECT set_config('app.current_user_id', '', true)"
-            )
-            await execute(
-                "SELECT set_config('app.current_user_role', 'admin', true)"
-            )
-            
+            # Use rls_context parameter to set admin context within the same connection
+            # This ensures RLS policies allow access to all documents
             logger.info(f"🔍 DEBUG: Looking for document {document_id} with admin context")
             
             row = await fetch_one("""
                 SELECT * FROM document_metadata WHERE document_id = $1
-            """, document_id)
+            """, document_id, rls_context={'user_id': '', 'user_role': 'admin'})
             
             if row:
                 logger.info(f"🔍 DEBUG: Found document {document_id} - user_id: {row.get('user_id')}, collection_type: {row.get('collection_type')}")
@@ -271,7 +281,7 @@ class DocumentRepository:
             logger.error(f"❌ Failed to get document {document_id}: {e}")
             return None
     
-    async def update(self, document_id: str, **updates) -> bool:
+    async def update(self, document_id: str, user_id: str = None, **updates) -> bool:
         """Update document fields"""
         try:
             if not updates:
@@ -330,30 +340,30 @@ class DocumentRepository:
             
             from services.database_manager.database_helpers import execute, fetch_one
             
-            # ROOSEVELT FIX: Check document ownership first to set correct RLS context
-            try:
-                # First, check document ownership with admin context
-                await execute("SELECT set_config('app.current_user_id', '', true)")
-                await execute("SELECT set_config('app.current_user_role', 'admin', true)")
-                
-                doc_check = await fetch_one("SELECT user_id FROM document_metadata WHERE document_id = $1", document_id)
-                
-                if doc_check and doc_check['user_id']:
-                    # User document - set user context for the update
-                    await execute("SELECT set_config('app.current_user_id', $1, true)", doc_check['user_id'])
-                    await execute("SELECT set_config('app.current_user_role', 'user', true)")
-                    logger.debug(f"🔍 Using user context for document update: {doc_check['user_id']}")
-                else:
-                    # Global document - keep admin context
-                    logger.debug(f"🔍 Using admin context for global document update")
-                    
-            except Exception as e:
-                logger.warning(f"⚠️ Could not determine document ownership for {document_id}, using admin context: {e}")
-                # Fallback to admin context
-                await execute("SELECT set_config('app.current_user_id', '', true)")
-                await execute("SELECT set_config('app.current_user_role', 'admin', true)")
-            
-            result = await execute(query, *values)
+            # Determine RLS context for the update
+            if user_id:
+                # User provided user_id - use user context
+                rls_context = {'user_id': user_id, 'user_role': 'user'}
+                logger.debug(f"🔍 Using provided user context for document update: {user_id}")
+            else:
+                # Auto-detect ownership (fallback for backward compatibility)
+                try:
+                    # Check with admin context first
+                    doc_check = await fetch_one("SELECT user_id FROM document_metadata WHERE document_id = $1", document_id, rls_context={'user_id': '', 'user_role': 'admin'})
+
+                    if doc_check and doc_check['user_id']:
+                        # User document - use user context
+                        rls_context = {'user_id': doc_check['user_id'], 'user_role': 'user'}
+                        logger.debug(f"🔍 Using auto-detected user context for document update: {doc_check['user_id']}")
+                    else:
+                        # Global document - use admin context
+                        rls_context = {'user_id': '', 'user_role': 'admin'}
+                        logger.debug(f"🔍 Using admin context for global document update")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not determine document ownership for {document_id}, using admin context: {e}")
+                    rls_context = {'user_id': '', 'user_role': 'admin'}
+
+            result = await execute(query, *values, rls_context=rls_context)
             
             # Check if any rows were updated
             rows_updated = int(result.split()[-1])
@@ -368,16 +378,31 @@ class DocumentRepository:
             logger.error(f"❌ Failed to update document {document_id}: {e}")
             return False
     
-    async def delete(self, document_id: str) -> bool:
-        """Delete a document record"""
+    async def delete(self, document_id: str, user_id: str = None) -> bool:
+        """Delete a document record
+        
+        Args:
+            document_id: The document ID to delete
+            user_id: The user ID who owns the document (for RLS context)
+                    If None, uses admin context (for system deletions)
+        """
         try:
-            # Use shared DB helper to ensure proper connection context (avoids None pool)
+            # Use shared DB helper with proper RLS context
             from services.database_manager.database_helpers import execute
+            
+            if user_id:
+                # Use user context for RLS - proper permission-based deletion
+                rls_context = {'user_id': user_id, 'user_role': 'user'}
+            else:
+                # Admin context for system operations (e.g., cleanup tasks)
+                rls_context = {'user_id': '', 'user_role': 'admin'}
+            
             result = await execute(
                 """
                 DELETE FROM document_metadata WHERE document_id = $1
                 """,
-                document_id
+                document_id,
+                rls_context=rls_context
             )
             rows_deleted = int(result.split()[-1])
             if rows_deleted > 0:
@@ -854,17 +879,17 @@ class DocumentRepository:
             logger.error(f"❌ Failed to get duplicate documents: {e}")
             return {}
     
-    async def update_status(self, document_id: str, status: ProcessingStatus) -> bool:
+    async def update_status(self, document_id: str, status: ProcessingStatus, user_id: str = None) -> bool:
         """Update document status"""
-        return await self.update(document_id, status=status)
+        return await self.update(document_id, user_id=user_id, status=status)
     
-    async def update_file_size(self, document_id: str, file_size: int) -> bool:
+    async def update_file_size(self, document_id: str, file_size: int, user_id: str = None) -> bool:
         """Update document file size"""
-        return await self.update(document_id, file_size=file_size)
+        return await self.update(document_id, user_id=user_id, file_size=file_size)
     
-    async def update_quality_metrics(self, document_id: str, quality_metrics: QualityMetrics) -> bool:
+    async def update_quality_metrics(self, document_id: str, quality_metrics: QualityMetrics, user_id: str = None) -> bool:
         """Update document quality metrics"""
-        return await self.update(document_id, quality_metrics=quality_metrics)
+        return await self.update(document_id, user_id=user_id, quality_metrics=quality_metrics)
     
     async def update_metadata(self, document_id: str, update_request) -> bool:
         """Update document metadata from update request"""
@@ -1004,14 +1029,22 @@ class DocumentRepository:
             logger.error(f"❌ Failed to execute query: {e}")
             raise
     
-    async def get_document_by_id(self, document_id: str) -> Optional[Dict[str, Any]]:
+    async def get_document_by_id(self, document_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get document as dictionary (for compatibility with PDF segmentation service)"""
         try:
             from services.database_manager.database_helpers import fetch_one
             
-            row = await fetch_one("""
-                SELECT * FROM document_metadata WHERE document_id = $1
-            """, document_id)
+            # Build RLS context if user_id provided
+            rls_context = None
+            if user_id:
+                rls_context = {'user_id': user_id, 'user_role': 'user'}
+                logger.debug(f"🔍 Using RLS context for get_document_by_id: user_id={user_id}")
+            
+            row = await fetch_one(
+                "SELECT * FROM document_metadata WHERE document_id = $1",
+                document_id,
+                rls_context=rls_context
+            )
             
             return row
                 
@@ -1037,11 +1070,11 @@ class DocumentRepository:
             # Set RLS context manually if user_id is provided
             if user_id:
                 await execute(
-                    "SELECT set_config('app.current_user_id', $1, true)",
+                    "SELECT set_config('app.current_user_id', $1, false)",
                     user_id
                 )
                 await execute(
-                    "SELECT set_config('app.current_user_role', 'user', true)"
+                    "SELECT set_config('app.current_user_role', 'user', false)"
                 )
             
             await execute("""
@@ -1351,14 +1384,35 @@ class DocumentRepository:
             collection_type = folder_data.get("collection_type", "user")
             folder_name = folder_data.get("name")
             parent_id = folder_data.get("parent_folder_id")
+            admin_user_id = folder_data.get("admin_user_id")  # Creator's user_id for RLS context
+            created_by = folder_data.get("created_by")  # User who created this folder (for ownership tracking)
             
             logger.info(f"📁 Repository: Create or get folder '{folder_name}' (parent: {parent_id}, user: {user_id}, team: {team_id}, collection: {collection_type})")
+            
+            # Set RLS context for folder creation
+            if user_id:
+                rls_context = {'user_id': user_id, 'user_role': 'user'}
+            elif collection_type == 'global':
+                rls_context = {'user_id': '', 'user_role': 'admin'}
+            elif collection_type == 'team' and admin_user_id:
+                # For team folders, use creator's user_id for RLS context to check team membership
+                # Get creator's role for proper RLS context
+                from services.database_manager.database_helpers import fetch_one
+                try:
+                    user_row = await fetch_one("SELECT role FROM users WHERE user_id = $1", admin_user_id)
+                    creator_role = user_row.get('role', 'user') if user_row else 'user'
+                except Exception:
+                    creator_role = 'user'
+                rls_context = {'user_id': admin_user_id, 'user_role': creator_role}
+            else:
+                rls_context = {'user_id': '', 'user_role': 'admin'}
             
             # Check if parent folder is exempt - new folders should inherit exemption
             exempt_from_vectorization = folder_data.get("exempt_from_vectorization")  # Allow explicit override
             if exempt_from_vectorization is None and parent_id:
                 try:
-                    parent_exempt = await self.is_folder_exempt(parent_id)
+                    user_id = folder_data.get("user_id")
+                    parent_exempt = await self.is_folder_exempt(parent_id, user_id)
                     if parent_exempt:
                         exempt_from_vectorization = True
                         logger.info(f"🚫 Folder '{folder_name}' inherits exemption from parent {parent_id} → setting TRUE at creation")
@@ -1375,18 +1429,19 @@ class DocumentRepository:
                     # TEAM root folder - includes team_id in conflict constraint
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                         ON CONFLICT (team_id, name, collection_type) 
                         WHERE parent_folder_id IS NULL AND team_id IS NOT NULL
                         DO UPDATE SET 
                             updated_at = EXCLUDED.updated_at,
+                            created_by = COALESCE(document_folders.created_by, EXCLUDED.created_by),
                             exempt_from_vectorization = CASE 
                                 WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
                                 THEN TRUE 
                                 ELSE document_folders.exempt_from_vectorization 
                             END
-                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
                     """, 
                         folder_data["folder_id"],
                         folder_name,
@@ -1396,24 +1451,27 @@ class DocumentRepository:
                         collection_type,
                         exempt_from_vectorization,
                         folder_data["created_at"],
-                        folder_data["updated_at"]
+                        folder_data["updated_at"],
+                        created_by,
+                        rls_context=rls_context
                     )
                 elif user_id is not None:
                     # USER root folder - includes user_id in conflict constraint
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                         ON CONFLICT (user_id, name, collection_type) 
                         WHERE parent_folder_id IS NULL AND user_id IS NOT NULL
                         DO UPDATE SET 
                             updated_at = EXCLUDED.updated_at,
+                            created_by = COALESCE(document_folders.created_by, EXCLUDED.created_by),
                             exempt_from_vectorization = CASE 
                                 WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
                                 THEN TRUE 
                                 ELSE document_folders.exempt_from_vectorization 
                             END
-                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
                     """, 
                         folder_data["folder_id"],
                         folder_name,
@@ -1423,24 +1481,27 @@ class DocumentRepository:
                         collection_type,
                         exempt_from_vectorization,
                         folder_data["created_at"],
-                        folder_data["updated_at"]
+                        folder_data["updated_at"],
+                        created_by,
+                        rls_context=rls_context
                     )
                 else:
                     # GLOBAL root folder - user_id is NULL, constraint doesn't include user_id
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                         ON CONFLICT (name, collection_type) 
                         WHERE parent_folder_id IS NULL AND user_id IS NULL
                         DO UPDATE SET 
                             updated_at = EXCLUDED.updated_at,
+                            created_by = COALESCE(document_folders.created_by, EXCLUDED.created_by),
                             exempt_from_vectorization = CASE 
                                 WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
                                 THEN TRUE 
                                 ELSE document_folders.exempt_from_vectorization 
                             END
-                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
                     """, 
                         folder_data["folder_id"],
                         folder_name,
@@ -1450,7 +1511,9 @@ class DocumentRepository:
                         collection_type,
                         exempt_from_vectorization,
                         folder_data["created_at"],
-                        folder_data["updated_at"]
+                        folder_data["updated_at"],
+                        created_by,
+                        rls_context=rls_context
                     )
             else:
                 # Non-root folder - different UPSERT for user vs global vs team folders
@@ -1458,18 +1521,19 @@ class DocumentRepository:
                     # TEAM non-root folder - includes team_id in conflict constraint
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                         ON CONFLICT (team_id, name, parent_folder_id, collection_type)
                         WHERE parent_folder_id IS NOT NULL AND team_id IS NOT NULL
                         DO UPDATE SET 
                             updated_at = EXCLUDED.updated_at,
+                            created_by = COALESCE(document_folders.created_by, EXCLUDED.created_by),
                             exempt_from_vectorization = CASE 
                                 WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
                                 THEN TRUE 
                                 ELSE document_folders.exempt_from_vectorization 
                             END
-                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
                     """, 
                         folder_data["folder_id"],
                         folder_name,
@@ -1479,24 +1543,27 @@ class DocumentRepository:
                         collection_type,
                         exempt_from_vectorization,
                         folder_data["created_at"],
-                        folder_data["updated_at"]
+                        folder_data["updated_at"],
+                        created_by,
+                        rls_context=rls_context
                     )
                 elif user_id is not None:
                     # USER non-root folder - includes user_id in conflict constraint
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                         ON CONFLICT (user_id, name, parent_folder_id, collection_type)
                         WHERE parent_folder_id IS NOT NULL AND user_id IS NOT NULL
                         DO UPDATE SET 
                             updated_at = EXCLUDED.updated_at,
+                            created_by = COALESCE(document_folders.created_by, EXCLUDED.created_by),
                             exempt_from_vectorization = CASE 
                                 WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
                                 THEN TRUE 
                                 ELSE document_folders.exempt_from_vectorization 
                             END
-                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
                     """, 
                         folder_data["folder_id"],
                         folder_name,
@@ -1506,24 +1573,27 @@ class DocumentRepository:
                         collection_type,
                         exempt_from_vectorization,
                         folder_data["created_at"],
-                        folder_data["updated_at"]
+                        folder_data["updated_at"],
+                        created_by,
+                        rls_context=rls_context
                     )
                 else:
                     # GLOBAL non-root folder - user_id is NULL, constraint doesn't include user_id
                     row = await fetch_one("""
                         INSERT INTO document_folders (
-                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
-                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                            folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
+                        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                         ON CONFLICT (name, parent_folder_id, collection_type)
                         WHERE parent_folder_id IS NOT NULL AND user_id IS NULL
                         DO UPDATE SET 
                             updated_at = EXCLUDED.updated_at,
+                            created_by = COALESCE(document_folders.created_by, EXCLUDED.created_by),
                             exempt_from_vectorization = CASE 
                                 WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
                                 THEN TRUE 
                                 ELSE document_folders.exempt_from_vectorization 
                             END
-                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                        RETURNING folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
                     """, 
                         folder_data["folder_id"],
                         folder_name,
@@ -1533,7 +1603,9 @@ class DocumentRepository:
                         collection_type,
                         exempt_from_vectorization,
                         folder_data["created_at"],
-                        folder_data["updated_at"]
+                        folder_data["updated_at"],
+                        created_by,
+                        rls_context=rls_context
                     )
             
             if not row:
@@ -1598,15 +1670,21 @@ class DocumentRepository:
             logger.error(f"❌ Repository: Folder data was: {folder_data}")
             return False
     
-    async def get_folder(self, folder_id: str) -> Optional[Dict[str, Any]]:
+    async def get_folder(self, folder_id: str, user_id: str = None, user_role: str = "user") -> Optional[Dict[str, Any]]:
         """Get folder by ID"""
         try:
             from services.database_manager.database_helpers import fetch_one
             
+            # Build RLS context for the query
+            rls_context = {
+                'user_id': user_id if user_id else '',
+                'user_role': user_role
+            }
+            
             row = await fetch_one("""
-                SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
+                SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at, created_by
                 FROM document_folders WHERE folder_id = $1
-            """, folder_id)
+            """, folder_id, rls_context=rls_context)
             
             if row:
                 # Convert UUID to string for team_id (asyncpg returns UUID objects)
@@ -1626,20 +1704,26 @@ class DocumentRepository:
             logger.debug(f"📁 Getting folders for user_id: {user_id}, collection_type: {collection_type}")
             from services.database_manager.database_helpers import fetch_all
             
+            # Build RLS context for the query
+            rls_context = {
+                'user_id': user_id if user_id else '',
+                'user_role': 'user'
+            }
+            
             if user_id:
                 rows = await fetch_all("""
                     SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
                     FROM document_folders 
                     WHERE user_id = $1 AND collection_type = $2
                     ORDER BY name
-                """, user_id, collection_type)
+                """, user_id, collection_type, rls_context=rls_context)
             else:
                 rows = await fetch_all("""
                     SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, exempt_from_vectorization, created_at, updated_at
                     FROM document_folders 
                     WHERE collection_type = $1
                     ORDER BY name
-                """, collection_type)
+                """, collection_type, rls_context=rls_context)
             
             # Convert UUID to string for team_id (asyncpg returns UUID objects)
             result = []
@@ -1654,21 +1738,37 @@ class DocumentRepository:
             logger.error(f"❌ Failed to get folders for user {user_id}: {e}")
             return []
     
-    async def get_folders_by_teams(self, team_ids: List[str]) -> List[Dict[str, Any]]:
+    async def get_folders_by_teams(self, team_ids: List[str], user_id: str = None) -> List[Dict[str, Any]]:
         """Get all folders for a list of teams"""
         try:
             if not team_ids:
                 return []
             
             logger.debug(f"📁 Getting folders for teams: {team_ids}")
-            from services.database_manager.database_helpers import fetch_all
+            from services.database_manager.database_helpers import fetch_all, fetch_one
+            
+            # Get user's actual role for RLS context
+            user_role = 'user'
+            if user_id:
+                try:
+                    user_row = await fetch_one("SELECT role FROM users WHERE user_id = $1", user_id)
+                    if user_row:
+                        user_role = user_row.get('role', 'user')
+                except Exception as e:
+                    logger.warning(f"Failed to get user role for {user_id}: {e}")
+            
+            # Build RLS context for the query
+            rls_context = {
+                'user_id': user_id if user_id else '',
+                'user_role': user_role
+            }
             
             rows = await fetch_all("""
                 SELECT folder_id, name, parent_folder_id, user_id, team_id, collection_type, created_at, updated_at
                 FROM document_folders 
                 WHERE team_id = ANY($1) AND collection_type = 'team'
                 ORDER BY name
-            """, team_ids)
+            """, team_ids, rls_context=rls_context)
             
             # Convert UUID to string for team_id (asyncpg returns UUID objects)
             result = []
@@ -1683,17 +1783,23 @@ class DocumentRepository:
             logger.error(f"❌ Failed to get folders for teams: {e}")
             return []
     
-    async def get_subfolders(self, parent_folder_id: str) -> List[Dict[str, Any]]:
+    async def get_subfolders(self, parent_folder_id: str, user_id: str = None, user_role: str = 'user') -> List[Dict[str, Any]]:
         """Get subfolders of a folder"""
         try:
             from services.database_manager.database_helpers import fetch_all
+            
+            # Set RLS context
+            if user_id:
+                rls_context = {'user_id': user_id, 'user_role': user_role}
+            else:
+                rls_context = {'user_id': '', 'user_role': 'admin'}
             
             rows = await fetch_all("""
                 SELECT folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
                 FROM document_folders 
                 WHERE parent_folder_id = $1
                 ORDER BY name
-            """, parent_folder_id)
+            """, parent_folder_id, rls_context=rls_context)
             
             return rows
         except Exception as e:
@@ -1799,27 +1905,39 @@ class DocumentRepository:
             traceback.print_exc()
             return []
     
-    async def get_document_count_in_folder(self, folder_id: str) -> int:
+    async def get_document_count_in_folder(self, folder_id: str, user_id: str = None, user_role: str = 'user') -> int:
         """Get count of documents in a folder"""
         try:
             from services.database_manager.database_helpers import fetch_one
             
+            # Set RLS context for accurate counting
+            if user_id:
+                rls_context = {'user_id': user_id, 'user_role': user_role}
+            else:
+                rls_context = {'user_id': '', 'user_role': 'admin'}
+            
             result = await fetch_one("""
                 SELECT COUNT(*) FROM document_metadata WHERE folder_id = $1
-            """, folder_id)
+            """, folder_id, rls_context=rls_context)
             return result.get('count', 0) if result else 0
         except Exception as e:
             logger.error(f"❌ Failed to get document count for folder {folder_id}: {e}")
             return 0
     
-    async def get_subfolder_count(self, folder_id: str) -> int:
+    async def get_subfolder_count(self, folder_id: str, user_id: str = None, user_role: str = 'user') -> int:
         """Get count of subfolders in a folder"""
         try:
             from services.database_manager.database_helpers import fetch_one
             
+            # Set RLS context for accurate counting
+            if user_id:
+                rls_context = {'user_id': user_id, 'user_role': user_role}
+            else:
+                rls_context = {'user_id': '', 'user_role': 'admin'}
+            
             result = await fetch_one("""
                 SELECT COUNT(*) FROM document_folders WHERE parent_folder_id = $1
-            """, folder_id)
+            """, folder_id, rls_context=rls_context)
             return result.get('count', 0) if result else 0
         except Exception as e:
             logger.error(f"❌ Failed to get subfolder count for folder {folder_id}: {e}")
@@ -1969,36 +2087,77 @@ class DocumentRepository:
             logger.error(f"❌ Failed to get all categories: {e}")
             return []
     
-    async def delete_folder(self, folder_id: str) -> bool:
-        """Delete a folder"""
+    async def delete_folder(self, folder_id: str, user_id: str = None, user_role: str = "user") -> bool:
+        """Delete a folder with proper RLS context"""
         try:
-            from services.database_manager.database_helpers import execute
+            from services.database_manager.database_helpers import execute, fetch_one
             
-            await execute("DELETE FROM document_folders WHERE folder_id = $1", folder_id)
-            logger.info(f"✅ Repository: Deleted folder {folder_id}")
+            # Set up RLS context for deletion
+            rls_context = {'user_id': user_id or '', 'user_role': user_role}
+            
+            # Execute DELETE and check the row count affected
+            # PostgreSQL execute returns a string like "DELETE 1" or "DELETE 0"
+            result = await execute(
+                "DELETE FROM document_folders WHERE folder_id = $1",
+                folder_id,
+                rls_context=rls_context
+            )
+            
+            # Parse the result to get row count (format: "DELETE N")
+            rows_affected = 0
+            if result and isinstance(result, str) and result.startswith('DELETE '):
+                try:
+                    rows_affected = int(result.split()[1])
+                except (IndexError, ValueError):
+                    logger.warning(f"⚠️ Could not parse DELETE result: {result}")
+            
+            # If 0 rows were deleted, RLS policy blocked the deletion
+            if rows_affected == 0:
+                logger.error(f"❌ Repository: Failed to delete folder {folder_id} - RLS policy blocked deletion (user_id={user_id}, role={user_role})")
+                return False
+            
+            logger.info(f"✅ Repository: Deleted folder {folder_id} - {rows_affected} row(s) affected (user_id={user_id}, role={user_role})")
             return True
         except Exception as e:
             logger.error(f"❌ Failed to delete folder {folder_id}: {e}")
             return False
     
-    async def update_document_exemption_status(self, document_id: str, exempt_status: bool = None) -> bool:
+    async def update_document_exemption_status(self, document_id: str, exempt_status: bool = None, user_id: str = None) -> bool:
         """
         Update document exemption from vectorization status.
-        
+
         Args:
             document_id: Document ID
             exempt_status: True=exempt, False=not exempt (override), None=inherit from folder
-        
+            user_id: Optional user ID for RLS context
+
         Returns:
             True if update successful
         """
         try:
             from services.database_manager.database_helpers import execute
+
+            # Determine RLS context
+            if user_id:
+                rls_context = {'user_id': user_id, 'user_role': 'user'}
+            else:
+                # Auto-detect ownership for backward compatibility
+                try:
+                    from services.database_manager.database_helpers import fetch_one
+                    doc_check = await fetch_one("SELECT user_id FROM document_metadata WHERE document_id = $1", document_id, rls_context={'user_id': '', 'user_role': 'admin'})
+                    if doc_check and doc_check['user_id']:
+                        rls_context = {'user_id': doc_check['user_id'], 'user_role': 'user'}
+                    else:
+                        rls_context = {'user_id': '', 'user_role': 'admin'}
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not determine document ownership for {document_id}, using admin context: {e}")
+                    rls_context = {'user_id': '', 'user_role': 'admin'}
+
             await execute("""
-                UPDATE document_metadata 
+                UPDATE document_metadata
                 SET exempt_from_vectorization = $1, updated_at = CURRENT_TIMESTAMP
                 WHERE document_id = $2
-            """, exempt_status, document_id)
+            """, exempt_status, document_id, rls_context=rls_context)
             status_str = "inherit from folder" if exempt_status is None else ("exempt" if exempt_status else "not exempt (override)")
             logger.info(f"Updated exemption status for document {document_id}: {status_str}")
             return True
@@ -2031,41 +2190,57 @@ class DocumentRepository:
             logger.error(f"Failed to update exemption status for folder {folder_id}: {e}")
             return False
     
-    async def get_folder_descendants(self, folder_id: str) -> Tuple[List[str], List[str]]:
-        """Get all descendant folder IDs and document IDs for a folder (recursive)"""
+    async def get_folder_descendants(self, folder_id: str, user_id: str = None) -> Tuple[List[str], List[str]]:
+        """Get all descendant folder IDs and document IDs for a folder (recursive)
+
+        Args:
+            folder_id: Folder ID to get descendants for
+            user_id: Optional user ID for RLS context (if None, will use admin context)
+        """
         try:
             from services.database_manager.database_helpers import fetch_all
-            
+
+            # Set RLS context like get_documents_by_folder does
+            if user_id:
+                rls_context = {'user_id': user_id, 'user_role': 'user'}
+                logger.debug(f"🔍 Using user context for get_folder_descendants: {user_id}")
+            else:
+                rls_context = {'user_id': '', 'user_role': 'admin'}
+                logger.debug(f"🔍 Using admin context for get_folder_descendants")
+
             # Get all descendant folders recursively
             folder_rows = await fetch_all("""
                 WITH RECURSIVE folder_tree AS (
                     SELECT folder_id FROM document_folders WHERE folder_id = $1
                     UNION ALL
-                    SELECT f.folder_id 
+                    SELECT f.folder_id
                     FROM document_folders f
                     INNER JOIN folder_tree ft ON f.parent_folder_id = ft.folder_id
                 )
                 SELECT folder_id FROM folder_tree WHERE folder_id != $1
-            """, folder_id)
-            
+            """, folder_id, rls_context=rls_context)
+
             descendant_folder_ids = [row['folder_id'] for row in folder_rows]
-            
+
             # Get all documents in this folder and all descendant folders
             all_folder_ids = [folder_id] + descendant_folder_ids
+            logger.debug(f"🔍 DEBUG: Querying documents for folder_ids: {all_folder_ids}")
             doc_rows = await fetch_all("""
-                SELECT document_id 
-                FROM document_metadata 
+                SELECT document_id
+                FROM document_metadata
                 WHERE folder_id = ANY($1)
-            """, all_folder_ids)
-            
+            """, all_folder_ids, rls_context=rls_context)
+
             descendant_document_ids = [row['document_id'] for row in doc_rows]
-            
+
+            logger.debug(f"🔍 Found {len(descendant_folder_ids)} descendant folders and {len(descendant_document_ids)} documents for folder {folder_id}")
+
             return descendant_folder_ids, descendant_document_ids
         except Exception as e:
             logger.error(f"Failed to get folder descendants for {folder_id}: {e}")
             return [], []
     
-    async def is_folder_exempt(self, folder_id: str) -> bool:
+    async def is_folder_exempt(self, folder_id: str, user_id: str = None) -> bool:
         """
         Check if folder is exempt from vectorization.
         
@@ -2083,6 +2258,14 @@ class DocumentRepository:
             
             from services.database_manager.database_helpers import fetch_one
             
+            # Build RLS context if user_id provided
+            rls_context = None
+            if user_id:
+                rls_context = {'user_id': user_id, 'user_role': 'user'}
+                logger.debug(f"🔍 Using user context for folder exemption check: {user_id}")
+            else:
+                logger.debug(f"🔍 Using default context for folder exemption check")
+
             # Recursively check folder hierarchy
             # Stop at first explicit exemption (TRUE) or explicit override (FALSE)
             folder_row = await fetch_one("""
@@ -2097,11 +2280,11 @@ class DocumentRepository:
                     INNER JOIN folder_path fp ON f.folder_id = fp.parent_folder_id
                 )
                 SELECT exempt_from_vectorization, depth
-                FROM folder_path 
+                FROM folder_path
                 WHERE exempt_from_vectorization IS NOT NULL  -- Stop at first explicit setting (TRUE or FALSE)
                 ORDER BY depth ASC  -- Check from target folder up to root
                 LIMIT 1
-            """, folder_id)
+            """, folder_id, rls_context=rls_context)
             
             if folder_row is None:
                 # No explicit exemption found in hierarchy - not exempt
@@ -2120,7 +2303,7 @@ class DocumentRepository:
             logger.error(f"❌ Failed to check folder exemption status for {folder_id}: {e}")
             return False
     
-    async def is_document_exempt(self, document_id: str) -> bool:
+    async def is_document_exempt(self, document_id: str, user_id: str = None) -> bool:
         """
         Check if document is exempt from vectorization.
         
@@ -2131,16 +2314,41 @@ class DocumentRepository:
         
         Returns True if document is explicitly exempt (TRUE) or inherits exemption from folder.
         Returns False if document is explicitly not exempt (FALSE) or folder is not exempt.
+        
+        Args:
+            document_id: Document ID to check
+            user_id: Optional user ID for RLS context (if None, will auto-detect from document)
         """
         try:
             from services.database_manager.database_helpers import fetch_one
-            
+
+            # Determine RLS context
+            if user_id:
+                rls_context = {'user_id': user_id, 'user_role': 'user'}
+                logger.debug(f"🔍 Using provided user context for exemption check: {user_id}")
+            else:
+                # Auto-detect ownership for backward compatibility
+                try:
+                    doc_owner_check = await fetch_one("SELECT user_id FROM document_metadata WHERE document_id = $1", document_id, rls_context={'user_id': '', 'user_role': 'admin'})
+                    if not doc_owner_check:
+                        logger.warning(f"⚠️ Document {document_id} not found in database for exemption check")
+                        return False
+                    elif doc_owner_check['user_id']:
+                        rls_context = {'user_id': doc_owner_check['user_id'], 'user_role': 'user'}
+                        logger.debug(f"🔍 Using document owner context for exemption check: {doc_owner_check['user_id']}")
+                    else:
+                        rls_context = {'user_id': '', 'user_role': 'admin'}
+                        logger.debug(f"🔍 Using admin context for global document exemption check")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not determine document ownership for {document_id}, using admin context: {e}")
+                    rls_context = {'user_id': '', 'user_role': 'admin'}
+
             # First check the document itself
             doc_row = await fetch_one("""
                 SELECT exempt_from_vectorization, folder_id
-                FROM document_metadata 
+                FROM document_metadata
                 WHERE document_id = $1
-            """, document_id)
+            """, document_id, rls_context=rls_context)
             
             if not doc_row:
                 logger.warning(f"⚠️ Document {document_id} not found in database for exemption check")
@@ -2165,7 +2373,7 @@ class DocumentRepository:
                     return False
                 
                 # Use helper method to check folder exemption
-                is_exempt = await self.is_folder_exempt(folder_id)
+                is_exempt = await self.is_folder_exempt(folder_id, rls_context.get('user_id') if rls_context else None)
                 if is_exempt:
                     logger.info(f"🚫 Document {document_id} inherits exemption from folder {folder_id} (or ancestor)")
                 else:
@@ -2214,7 +2422,7 @@ class DocumentRepository:
             # Determine new exemption status based on new folder
             if folder_id:
                 # Check if new folder is exempt
-                folder_exempt = await self.is_folder_exempt(folder_id)
+                folder_exempt = await self.is_folder_exempt(folder_id, user_id)
                 exempt_from_vectorization = folder_exempt
                 if folder_exempt:
                     logger.info(f"🚫 Document {document_id} inheriting exemption from new folder {folder_id}")

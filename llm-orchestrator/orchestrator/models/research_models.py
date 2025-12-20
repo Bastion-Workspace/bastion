@@ -42,6 +42,10 @@ class ResearchGapAnalysis(BaseModel):
         default=False,
         description="Whether web search would likely help fill the gaps"
     )
+    needs_local_search: Optional[bool] = Field(
+        default=None,
+        description="Whether local/document search would likely help fill the gaps"
+    )
     gap_severity: Literal["minor", "moderate", "severe"] = Field(
         default="moderate",
         description="How significant the gaps are for answering the query"
@@ -49,6 +53,10 @@ class ResearchGapAnalysis(BaseModel):
     reasoning: str = Field(
         default="",
         description="Explanation of why these gaps exist and how to fill them"
+    )
+    confidence: Optional[float] = Field(
+        default=None,
+        description="Confidence in the gap analysis (0.0-1.0)"
     )
 
 

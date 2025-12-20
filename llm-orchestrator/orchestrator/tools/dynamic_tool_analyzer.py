@@ -30,7 +30,6 @@ TOOL_CATEGORY_MAP = {
     "search_web_structured": OrchestratorToolCategory.SEARCH_WEB,
     "crawl_web_content_tool": OrchestratorToolCategory.SEARCH_WEB,
     "search_and_crawl_tool": OrchestratorToolCategory.SEARCH_WEB,
-    "crawl_site_tool": OrchestratorToolCategory.SEARCH_WEB,
     "expand_query_tool": OrchestratorToolCategory.EXPANSION,
     "search_conversation_cache_tool": OrchestratorToolCategory.CACHE,
     "search_segments_across_documents_tool": OrchestratorToolCategory.SEGMENT_SEARCH,

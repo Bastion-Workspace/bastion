@@ -458,8 +458,15 @@ You MUST respond with valid JSON matching this exact schema:
             # Build system prompt
             system_prompt = self._build_entertainment_prompt()
             
-            # Build messages
-            messages = self._build_messages(system_prompt, prompt)
+            # Extract conversation history for proper message structure
+            # Build messages with conversation history using standardized helper
+            messages_list = state.get("messages", [])
+            messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                messages_list=messages_list,
+                look_back_limit=6
+            )
             
             logger.info(f"🤖 Calling LLM for entertainment response")
             

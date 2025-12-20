@@ -38,7 +38,9 @@ class ReferenceAgentState(TypedDict):
     document_type: str  # Type of reference (journal, food_log, etc.)
     
     # Analysis tracking
-    query_complexity: str  # "simple_qa", "pattern_analysis", "insights"
+    query_complexity: str  # "simple_qa", "pattern_analysis", "insights", "unrelated_query"
+    query_relevance: float  # 0.0-1.0 score of how relevant query is to document
+    is_unrelated: bool  # True if query is unrelated to document content
     analysis_results: Dict[str, Any]
     patterns_found: List[Dict[str, Any]]
     
@@ -77,6 +79,7 @@ class ReferenceAgent(BaseAgent):
         # Add nodes
         workflow.add_node("load_reference_context", self._load_reference_context_node)
         workflow.add_node("analyze_query_complexity", self._analyze_query_complexity_node)
+        workflow.add_node("handle_unrelated_query", self._handle_unrelated_query_node)
         workflow.add_node("process_simple_qa", self._process_simple_qa_node)
         workflow.add_node("process_pattern_analysis", self._process_pattern_analysis_node)
         workflow.add_node("process_insights", self._process_insights_node)
@@ -91,16 +94,20 @@ class ReferenceAgent(BaseAgent):
         # Edges
         workflow.add_edge("load_reference_context", "analyze_query_complexity")
         
-        # Route based on query complexity
+        # Route based on query complexity and relevance
         workflow.add_conditional_edges(
             "analyze_query_complexity",
             self._route_from_complexity,
             {
+                "unrelated_query": "handle_unrelated_query",
                 "simple_qa": "process_simple_qa",
                 "pattern_analysis": "process_pattern_analysis",
                 "insights": "process_insights"
             }
         )
+        
+        # Unrelated query goes directly to formatting
+        workflow.add_edge("handle_unrelated_query", "format_response")
         
         # All analysis nodes check if calculations or research are needed
         workflow.add_conditional_edges(
@@ -155,7 +162,10 @@ class ReferenceAgent(BaseAgent):
         return workflow.compile(checkpointer=checkpointer)
     
     def _route_from_complexity(self, state: ReferenceAgentState) -> str:
-        """Route based on query complexity"""
+        """Route based on query complexity and relevance"""
+        # Check if query is unrelated first
+        if state.get("is_unrelated", False):
+            return "unrelated_query"
         complexity = state.get("query_complexity", "simple_qa")
         return complexity
     
@@ -263,21 +273,38 @@ class ReferenceAgent(BaseAgent):
             fast_model = self._get_fast_model(state)
             llm = self._get_llm(temperature=0.1, model=fast_model, state=state)
             
-            # Build prompt for complexity analysis
+            # Build prompt for complexity analysis with relevance checking
+            # Sample document content for relevance assessment (first 1000 chars)
+            content_sample = reference_content[:1000] if reference_content else ""
+            
             prompt = f"""Analyze this query about a {document_type} reference document and determine the complexity level needed.
 
 **QUERY**: {query}
 
 **DOCUMENT TYPE**: {document_type}
 
-**ANALYSIS NEEDED**:
-1. **complexity_level**: "simple_qa" (factual questions like "What did I write on X date?"), "pattern_analysis" (trends/frequencies like "Show me days I ate pizza"), or "insights" (deep analysis like "What patterns do you notice?")
-2. **needs_calculations**: Does this query require mathematical calculations (e.g., "calculate BTU", "how much", "total", "compute")?
-3. **calculation_type**: If calculations needed, what type? "formula" (BTU, electrical formulas), "expression" (simple math), or "conversion" (unit conversion)
-4. **needs_external_info**: Does this query require external information (e.g., nutritional data, definitions, research)?
-5. **research_query**: If external info is needed, what should be researched? (e.g., "nutritional content of pizza")
+**DOCUMENT CONTENT SAMPLE** (for relevance assessment):
+{content_sample}
 
-**EXAMPLES**:
+**ANALYSIS NEEDED**:
+1. **query_relevance**: Score from 0.0 to 1.0 indicating how relevant the query is to the document content. 
+   - 0.9-1.0: Highly relevant (query directly asks about document content)
+   - 0.5-0.89: Moderately relevant (query might relate to document themes/topics)
+   - 0.0-0.49: Low relevance (query appears unrelated to document content)
+2. **is_unrelated**: true if query_relevance < 0.3 (query is clearly unrelated to document)
+3. **complexity_level**: "simple_qa" (factual questions like "What did I write on X date?"), "pattern_analysis" (trends/frequencies like "Show me days I ate pizza"), or "insights" (deep analysis like "What patterns do you notice?")
+4. **needs_calculations**: Does this query require mathematical calculations (e.g., "calculate BTU", "how much", "total", "compute")?
+5. **calculation_type**: If calculations needed, what type? "formula" (BTU, electrical formulas), "expression" (simple math), or "conversion" (unit conversion)
+6. **needs_external_info**: Does this query require external information (e.g., nutritional data, definitions, research)?
+7. **research_query**: If external info is needed, what should be researched? (e.g., "nutritional content of pizza")
+
+**RELEVANCE EXAMPLES**:
+- "What did I write in my journal on December 5th?" → relevance: 0.95 (directly about document)
+- "What's the weather today?" → relevance: 0.1 (completely unrelated to journal)
+- "Tell me about quantum physics" → relevance: 0.05 (unrelated to personal reference document)
+- "Show me all days I mentioned feeling anxious" → relevance: 0.9 (directly about document patterns)
+
+**COMPLEXITY EXAMPLES**:
 - "What did I write in my journal on December 5th?" → simple_qa, no calculations, no external info
 - "Show me all days I mentioned feeling anxious" → pattern_analysis, no calculations, no external info
 - "What BTU requirements do I need for these rooms?" → simple_qa, needs calculations (formula: btu_hvac), no external info
@@ -286,6 +313,8 @@ class ReferenceAgent(BaseAgent):
 
 Return ONLY valid JSON:
 {{
+  "query_relevance": 0.95,
+  "is_unrelated": false,
   "complexity_level": "simple_qa",
   "needs_calculations": false,
   "calculation_type": null,
@@ -294,11 +323,23 @@ Return ONLY valid JSON:
   "reasoning": "Brief explanation"
 }}"""
             
+            # Build messages with conversation history using standardized helper
+            messages_list = state.get("messages", [])
+            system_prompt = "You are a query analysis assistant. Analyze queries to determine their relevance to reference documents and complexity level."
+            llm_messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                messages_list=messages_list,
+                look_back_limit=4
+            )
+            
             try:
                 # Try structured output
                 schema = {
                     "type": "object",
                     "properties": {
+                        "query_relevance": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                        "is_unrelated": {"type": "boolean"},
                         "complexity_level": {"type": "string"},
                         "needs_calculations": {"type": "boolean"},
                         "calculation_type": {"type": ["string", "null"]},
@@ -306,16 +347,22 @@ Return ONLY valid JSON:
                         "research_query": {"type": ["string", "null"]},
                         "reasoning": {"type": "string"}
                     },
-                    "required": ["complexity_level", "needs_calculations", "needs_external_info"]
+                    "required": ["query_relevance", "is_unrelated", "complexity_level", "needs_calculations", "needs_external_info"]
                 }
                 structured_llm = llm.with_structured_output(schema)
-                result = await structured_llm.ainvoke([{"role": "user", "content": prompt}])
+                result = await structured_llm.ainvoke(llm_messages)
                 result_dict = result if isinstance(result, dict) else result.dict() if hasattr(result, 'dict') else result.model_dump()
             except Exception:
                 # Fallback to manual parsing
-                response = await llm.ainvoke([{"role": "user", "content": prompt}])
+                response = await llm.ainvoke(llm_messages)
                 content = response.content if hasattr(response, 'content') else str(response)
                 result_dict = self._parse_json_response(content) or {}
+            
+            query_relevance = result_dict.get("query_relevance", 1.0)
+            is_unrelated = result_dict.get("is_unrelated", False)
+            # Override is_unrelated if relevance is below threshold
+            if query_relevance < 0.3:
+                is_unrelated = True
             
             complexity = result_dict.get("complexity_level", "simple_qa")
             needs_calculations = result_dict.get("needs_calculations", False)
@@ -323,9 +370,11 @@ Return ONLY valid JSON:
             needs_external = result_dict.get("needs_external_info", False)
             research_query = result_dict.get("research_query")
             
-            logger.info(f"📚 Query complexity: {complexity}, needs calculations: {needs_calculations}, needs external info: {needs_external}")
+            logger.info(f"📚 Query relevance: {query_relevance:.2f}, is_unrelated: {is_unrelated}, complexity: {complexity}, needs calculations: {needs_calculations}, needs external info: {needs_external}")
             
             return {
+                "query_relevance": query_relevance,
+                "is_unrelated": is_unrelated,
                 "query_complexity": complexity,
                 "needs_calculations": needs_calculations,
                 "calculation_type": calculation_type,
@@ -337,7 +386,65 @@ Return ONLY valid JSON:
             logger.error(f"❌ Complexity analysis failed: {e}")
             return {
                 "query_complexity": "simple_qa",
+                "query_relevance": 1.0,
+                "is_unrelated": False,
                 "needs_external_info": False
+            }
+    
+    async def _handle_unrelated_query_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
+        """Handle queries that are unrelated to the reference document"""
+        try:
+            query = state.get("query", "")
+            document_type = state.get("document_type", "reference")
+            query_relevance = state.get("query_relevance", 0.0)
+            
+            # Build helpful response explaining the situation
+            response_text = f"""I notice your question doesn't seem related to the {document_type} document you have open.
+
+**Your question**: "{query}"
+
+**Why this happened**: The question appears to be about a general topic rather than the content of your reference document (relevance score: {query_relevance:.1%}).
+
+**What you can do**:
+1. **Ask about the document**: Try questions like:
+   - "What did I write about [topic]?"
+   - "Show me patterns in my logs"
+   - "What trends do you notice?"
+   - "When did I mention [keyword]?"
+
+2. **Ask as a general question**: To ask this as a general question:
+   - Close the reference document, or
+   - Uncheck "Prefer Editor" in the chat sidebar
+
+3. **If you meant to ask about the document**: Try rephrasing to reference specific content, dates, or patterns from your document.
+
+Would you like to rephrase your question about the document, or would you prefer to ask this as a general question instead?"""
+            
+            logger.info(f"📚 Detected unrelated query (relevance: {query_relevance:.2f}) - providing helpful response")
+            
+            return {
+                "analysis_results": {
+                    "response": response_text,
+                    "complexity_level": "unrelated_query",
+                    "query_relevance": query_relevance
+                },
+                "response": {
+                    "response": response_text,
+                    "task_status": "complete",
+                    "complexity_level": "unrelated_query",
+                    "query_relevance": query_relevance,
+                    "is_unrelated": True
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Unrelated query handling failed: {e}")
+            return {
+                "analysis_results": {
+                    "response": f"I couldn't process your query. Error: {str(e)}",
+                    "complexity_level": "unrelated_query"
+                },
+                "error": str(e)
             }
     
     async def _process_simple_qa_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
@@ -364,7 +471,6 @@ Return ONLY valid JSON:
             
             # Build prompt
             system_prompt = self._build_reference_prompt()
-            conversation_history = self._format_conversation_history_for_prompt(messages, look_back_limit=6)
             
             prompt = f"""Answer this factual question about the reference document:
 
@@ -378,13 +484,17 @@ Return ONLY valid JSON:
 - Be factual and precise
 - If the information is not in the document, say so clearly
 - Keep your response concise and direct
-
-{conversation_history}
+- Use conversation history to understand follow-up questions and maintain context
 
 Return your response as natural language text (not JSON)."""
             
             llm = self._get_llm(temperature=0.3, state=state)
-            llm_messages = self._build_messages(system_prompt, prompt)
+            llm_messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                messages_list=messages,
+                look_back_limit=6
+            )
             response = await llm.ainvoke(llm_messages)
             
             content = response.content if hasattr(response, 'content') else str(response)
@@ -429,7 +539,6 @@ Return your response as natural language text (not JSON)."""
             
             # Build prompt for pattern analysis
             system_prompt = self._build_reference_prompt()
-            conversation_history = self._format_conversation_history_for_prompt(messages, look_back_limit=6)
             
             prompt = f"""Analyze this reference document for patterns, trends, and frequencies:
 
@@ -443,6 +552,7 @@ Return your response as natural language text (not JSON)."""
 - Identify temporal patterns (daily, weekly, monthly)
 - Find correlations and recurring items
 - Extract specific examples with dates/context
+- Use conversation history to understand follow-up questions and build on previous analysis
 
 **OUTPUT FORMAT**: Return valid JSON matching this schema:
 {{
@@ -461,12 +571,15 @@ Return your response as natural language text (not JSON)."""
   "summary": "Summary of all patterns found"
 }}
 
-{conversation_history}
-
 Return ONLY the JSON object, no markdown, no code blocks."""
             
             llm = self._get_llm(temperature=0.3, state=state)
-            llm_messages = self._build_messages(system_prompt, prompt)
+            llm_messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                messages_list=messages,
+                look_back_limit=6
+            )
             response = await llm.ainvoke(llm_messages)
             
             content = response.content if hasattr(response, 'content') else str(response)
@@ -524,7 +637,6 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             
             # Build prompt for insights
             system_prompt = self._build_reference_prompt()
-            conversation_history = self._format_conversation_history_for_prompt(messages, look_back_limit=6)
             
             prompt = f"""Provide deep insights and analysis about this reference document:
 
@@ -539,6 +651,7 @@ Return ONLY the JSON object, no markdown, no code blocks."""
 - Provide observations and insights
 - Generate actionable recommendations (if appropriate)
 - Support insights with specific evidence from the document
+- Use conversation history to understand follow-up questions and build on previous insights
 
 **OUTPUT FORMAT**: Return valid JSON matching this schema:
 {{
@@ -557,12 +670,15 @@ Return ONLY the JSON object, no markdown, no code blocks."""
   "summary": "Overall summary of insights"
 }}
 
-{conversation_history}
-
 Return ONLY the JSON object, no markdown, no code blocks."""
             
             llm = self._get_llm(temperature=0.4, state=state)  # Slightly higher temp for creative insights
-            llm_messages = self._build_messages(system_prompt, prompt)
+            llm_messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                messages_list=messages,
+                look_back_limit=6
+            )
             response = await llm.ainvoke(llm_messages)
             
             content = response.content if hasattr(response, 'content') else str(response)
@@ -622,12 +738,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
 
 **INSTRUCTIONS**:
 1. Extract all numerical values from the document (measurements, dimensions, etc.)
-2. Identify the calculation type:
+2. Use conversation history to understand follow-up questions and previous calculations
+3. Identify the calculation type:
    - If BTU/HVAC related: use formula "btu_hvac"
    - If electrical (voltage, current, resistance): use appropriate "ohms_law_*" formula
    - If simple math: use "expression" type
    - If unit conversion: use "conversion" type
-3. Structure the calculation request as JSON
+4. Structure the calculation request as JSON
 
 **OUTPUT FORMAT**: Return ONLY valid JSON:
 {{
@@ -645,6 +762,15 @@ Return ONLY the JSON object, no markdown, no code blocks."""
 
 Return ONLY the JSON object, no markdown, no code blocks."""
             
+            # Build messages with conversation history using standardized helper
+            system_prompt = "You are a calculation extraction assistant. Extract numerical data and structure calculation requests from queries and documents."
+            llm_messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                messages_list=messages,
+                look_back_limit=4
+            )
+            
             try:
                 schema = {
                     "type": "object",
@@ -660,11 +786,11 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     "required": ["tool"]
                 }
                 structured_llm = llm.with_structured_output(schema)
-                result = await structured_llm.ainvoke([{"role": "user", "content": prompt}])
+                result = await structured_llm.ainvoke(llm_messages)
                 calc_request = result if isinstance(result, dict) else result.dict() if hasattr(result, 'dict') else result.model_dump()
             except Exception:
                 # Fallback to manual parsing
-                response = await llm.ainvoke([{"role": "user", "content": prompt}])
+                response = await llm.ainvoke(llm_messages)
                 content = response.content if hasattr(response, 'content') else str(response)
                 calc_request = self._parse_json_response(content) or {}
             
@@ -743,20 +869,52 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             
             # Prepare metadata for research agent
             metadata = state.get("metadata", {})
+            
+            # Extract reference document context to provide to research agent
+            reference_content = state.get("reference_content", "")
+            referenced_files_content = state.get("referenced_files_content", {})
+            
+            # Build handoff context using shared_memory (clean inter-agent data passing)
+            handoff_shared_memory = {
+                "context_note": "Research for reference document analysis",
+                "user_chat_model": metadata.get("user_chat_model"),
+                "handoff_context": {
+                    "source_agent": "reference_agent",
+                    "handoff_type": "research_delegation",
+                    "reference_document": {
+                        "content": reference_content,
+                        "type": state.get("reference_type", "reference"),
+                        "filename": state.get("shared_memory", {}).get("active_editor", {}).get("filename", "unknown"),
+                        "has_content": bool(reference_content)
+                    },
+                    "referenced_files": referenced_files_content,
+                    "analysis_context": {
+                        "needs_calculations": state.get("needs_calculations", False),
+                        "calculation_results": state.get("calculation_results"),
+                        "complexity": state.get("complexity", "unknown")
+                    }
+                }
+            }
+            
             research_metadata = {
                 "user_id": state.get("user_id"),
                 "conversation_id": metadata.get("conversation_id"),
                 "persona": metadata.get("persona"),
-                "user_chat_model": metadata.get("user_chat_model"),  # Pass user's selected model preference
-                "shared_memory": {
-                    "context_note": "Research for reference document analysis",
-                    "user_chat_model": metadata.get("user_chat_model")  # Also put in shared_memory for research agent nodes
-                }
+                "user_chat_model": metadata.get("user_chat_model"),
+                "shared_memory": handoff_shared_memory
             }
+            
+            # Augment query to inform research agent about available context
+            augmented_query = research_query
+            if reference_content:
+                # Brief note in query - full data is in shared_memory
+                augmented_query = f"""{research_query}
+
+[Context: User has reference document available in shared_memory with relevant data. You can reference this document when providing supplemental information.]"""
             
             # Call research agent's process method
             research_result = await research_agent.process(
-                query=research_query,
+                query=augmented_query,
                 metadata=research_metadata,
                 messages=state.get("messages", [])
             )
@@ -860,10 +1018,15 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             if response_text:
                 state = self._add_assistant_response_to_messages(state, str(response_text))
             
+            # Clear request-scoped data (active_editor) before checkpoint save
+            # This ensures it's available during the request (for subgraphs) but doesn't persist
+            state = self._clear_request_scoped_data(state)
+            
             return {
                 "response": response,
                 "task_status": response.get("task_status", "complete"),
-                "messages": state.get("messages", [])
+                "messages": state.get("messages", []),
+                "shared_memory": state.get("shared_memory", {})
             }
             
         except Exception as e:
