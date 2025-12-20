@@ -118,7 +118,7 @@ async function createMainWindow(config) {
       contextIsolation: true,
       webSecurity: true
     },
-    icon: path.join(__dirname, 'assets', 'icon.png')
+    icon: path.join(__dirname, 'assets', 'icon.ico')
   });
 
   // Load the hosted frontend URL
@@ -175,7 +175,7 @@ function createConfigWindow() {
     },
     parent: mainWindow,
     modal: true,
-    icon: path.join(__dirname, 'assets', 'icon.png')
+    icon: path.join(__dirname, 'assets', 'icon.ico')
   });
 
   configWindow.loadFile(path.join(__dirname, 'renderer', 'config.html'));
