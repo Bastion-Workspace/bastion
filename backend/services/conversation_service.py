@@ -81,7 +81,7 @@ class ConversationLifecycleManager:
         pool = await self._get_db_pool()
         async with pool.acquire() as conn:
             # Set user context for RLS policies
-            await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
             
             # Generate default title if none provided
             default_title = "New Conversation"
@@ -207,7 +207,7 @@ class ConversationLifecycleManager:
         pool = await self._get_db_pool()
         async with pool.acquire() as conn:
             # Set user context for RLS policies
-            await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
             
             # Ensure conversation exists (safe auto-creation if needed) - using same connection
             conversation_exists = await self._ensure_conversation_exists_in_connection(
@@ -342,7 +342,7 @@ class ConversationLifecycleManager:
             
             # Set user context for RLS policies
             user_id = conversation['user_id']
-            await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
             
             # Parse existing metadata
             conv_metadata = json.loads(conversation['metadata_json'] or "{}")
@@ -377,7 +377,7 @@ class ConversationLifecycleManager:
         async with pool.acquire() as conn:
             # Set user context for RLS policies if provided
             if user_id:
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
             
             conversation = await conn.fetchrow(
                 "SELECT * FROM conversations WHERE conversation_id = $1",
@@ -389,7 +389,7 @@ class ConversationLifecycleManager:
             # If user_id wasn't provided, get it from conversation and set context
             if not user_id:
                 user_id = conversation['user_id']
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
             
             conv_metadata = json.loads(conversation['metadata_json'] or "{}")
             
@@ -428,7 +428,7 @@ class ConversationLifecycleManager:
         pool = await self._get_db_pool()
         async with pool.acquire() as conn:
             # Set user context for RLS policies
-            await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
             
             conversations = await conn.fetch(
                 """
@@ -572,7 +572,7 @@ class ConversationService:
         """Get conversation messages with lifecycle verification"""
         try:
             # First verify conversation ownership and get lifecycle info
-            lifecycle_info = await self.lifecycle_manager.get_conversation_lifecycle(conversation_id)
+            lifecycle_info = await self.lifecycle_manager.get_conversation_lifecycle(conversation_id, user_id)
             if not lifecycle_info:
                 return {"messages": [], "has_more": False}
             
@@ -584,7 +584,7 @@ class ConversationService:
             pool = await self.lifecycle_manager._get_db_pool()
             async with pool.acquire() as conn:
                 # Set user context for RLS policies
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 logger.info(f"🔍 Set user context for conversation messages: {user_id}")
                 
                 # Verify RLS context was set
@@ -694,7 +694,7 @@ class ConversationService:
         """Update conversation metadata with lifecycle preservation"""
         try:
             # Verify ownership first
-            lifecycle_info = await self.lifecycle_manager.get_conversation_lifecycle(conversation_id)
+            lifecycle_info = await self.lifecycle_manager.get_conversation_lifecycle(conversation_id, user_id)
             if not lifecycle_info or lifecycle_info.get("user_context", {}).get("user_id") != user_id:
                 return False
             
@@ -706,7 +706,7 @@ class ConversationService:
     async def get_conversation_analytics(self, conversation_id: str, user_id: str) -> Dict[str, Any]:
         """Get comprehensive analytics for a conversation"""
         try:
-            lifecycle_info = await self.lifecycle_manager.get_conversation_lifecycle(conversation_id)
+            lifecycle_info = await self.lifecycle_manager.get_conversation_lifecycle(conversation_id, user_id)
             if not lifecycle_info or lifecycle_info.get("user_context", {}).get("user_id") != user_id:
                 return None
             
@@ -770,7 +770,7 @@ class ConversationService:
             pool = await self.lifecycle_manager._get_db_pool()
             async with pool.acquire() as conn:
                 # Set user context for RLS policies
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", current_user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", current_user_id)
                 
                 async with conn.transaction():
                     # Delete all messages first
@@ -798,3 +798,110 @@ class ConversationService:
         except Exception as e:
             logger.error(f"❌ Failed to delete conversation {conversation_id}: {e}")
             return False
+    
+    async def update_agent_metadata(
+        self, 
+        conversation_id: str, 
+        user_id: str, 
+        primary_agent_selected: str,
+        last_agent: Optional[str] = None
+    ) -> bool:
+        """
+        Update agent routing metadata in conversation
+        
+        This stores which agent is currently handling the conversation,
+        enabling proper agent continuity across requests.
+        
+        Args:
+            conversation_id: The conversation to update
+            user_id: The user ID (for RLS)
+            primary_agent_selected: The agent handling this conversation
+            last_agent: The most recent agent that processed a request
+            
+        Returns:
+            bool: True if update succeeded, False otherwise
+        """
+        try:
+            pool = await self.lifecycle_manager._get_db_pool()
+            async with pool.acquire() as conn:
+                # Set user context for RLS
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                
+                # Get current metadata
+                row = await conn.fetchrow(
+                    "SELECT metadata_json FROM conversations WHERE conversation_id = $1",
+                    conversation_id
+                )
+                
+                if not row:
+                    logger.warning(f"⚠️ Conversation {conversation_id} not found for agent metadata update")
+                    return False
+                
+                # Parse existing metadata
+                metadata = json.loads(row['metadata_json'] or "{}")
+                
+                # Update agent routing metadata
+                metadata["primary_agent_selected"] = primary_agent_selected
+                if last_agent:
+                    metadata["last_agent"] = last_agent
+                metadata["agent_updated_at"] = datetime.now(timezone.utc).isoformat()
+                
+                # Save back to database
+                await conn.execute(
+                    "UPDATE conversations SET metadata_json = $1, updated_at = NOW() WHERE conversation_id = $2",
+                    json.dumps(metadata),
+                    conversation_id
+                )
+                
+                logger.info(f"✅ Updated agent metadata for conversation {conversation_id}: primary_agent={primary_agent_selected}, last_agent={last_agent}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to update agent metadata for conversation {conversation_id}: {e}")
+            return False
+    
+    async def get_agent_metadata(self, conversation_id: str, user_id: str) -> Dict[str, Any]:
+        """
+        Get agent routing metadata from conversation
+        
+        Returns agent continuity information needed for proper routing.
+        
+        Args:
+            conversation_id: The conversation ID
+            user_id: The user ID (for RLS)
+            
+        Returns:
+            Dict with primary_agent_selected and last_agent, or empty dict
+        """
+        try:
+            pool = await self.lifecycle_manager._get_db_pool()
+            async with pool.acquire() as conn:
+                # Set user context for RLS
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                
+                # Get metadata
+                row = await conn.fetchrow(
+                    "SELECT metadata_json FROM conversations WHERE conversation_id = $1",
+                    conversation_id
+                )
+                
+                if not row:
+                    return {}
+                
+                metadata = json.loads(row['metadata_json'] or "{}")
+                
+                # Extract agent routing info
+                agent_metadata = {}
+                if "primary_agent_selected" in metadata:
+                    agent_metadata["primary_agent_selected"] = metadata["primary_agent_selected"]
+                if "last_agent" in metadata:
+                    agent_metadata["last_agent"] = metadata["last_agent"]
+                
+                if agent_metadata:
+                    logger.debug(f"📚 Loaded agent metadata for conversation {conversation_id}: {agent_metadata}")
+                
+                return agent_metadata
+                
+        except Exception as e:
+            logger.debug(f"⚠️ Failed to get agent metadata for conversation {conversation_id}: {e}")
+            return {}

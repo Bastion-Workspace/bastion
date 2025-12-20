@@ -420,10 +420,16 @@ class DocumentSummarizationTool:
         )
         
         # Import datetime context utility
-        from utils.system_prompt_utils import add_datetime_context_to_system_prompt
+        from utils.system_prompt_utils import add_datetime_context_to_system_prompt_for_user
         
-        system_prompt = add_datetime_context_to_system_prompt(
-            "You are an expert document summarizer. Create clear, comprehensive summaries that capture key information and insights."
+        # Try to get user_id from document_repository if available
+        user_id = None
+        if self.document_repository and hasattr(self.document_repository, 'current_user_id'):
+            user_id = self.document_repository.current_user_id
+        
+        system_prompt = await add_datetime_context_to_system_prompt_for_user(
+            "You are an expert document summarizer. Create clear, comprehensive summaries that capture key information and insights.",
+            user_id=user_id
         )
         
         response = await client.chat.completions.create(
@@ -483,10 +489,16 @@ class DocumentSummarizationTool:
         current_model = await settings_service.get_llm_model()
         
         # Import datetime context utility
-        from utils.system_prompt_utils import add_datetime_context_to_system_prompt
+        from utils.system_prompt_utils import add_datetime_context_to_system_prompt_for_user
         
-        system_prompt = add_datetime_context_to_system_prompt(
-            "You are an expert at synthesizing multiple document summaries into coherent overviews."
+        # Try to get user_id from document_repository if available
+        user_id = None
+        if self.document_repository and hasattr(self.document_repository, 'current_user_id'):
+            user_id = self.document_repository.current_user_id
+        
+        system_prompt = await add_datetime_context_to_system_prompt_for_user(
+            "You are an expert at synthesizing multiple document summaries into coherent overviews.",
+            user_id=user_id
         )
         
         response = await client.chat.completions.create(
@@ -540,10 +552,16 @@ Provide a {summary_type.value} summary that captures the key information and ins
         current_model = await settings_service.get_llm_model()
         
         # Import datetime context utility
-        from utils.system_prompt_utils import add_datetime_context_to_system_prompt
+        from utils.system_prompt_utils import add_datetime_context_to_system_prompt_for_user
         
-        system_prompt = add_datetime_context_to_system_prompt(
-            "You are an expert document summarizer."
+        # Try to get user_id from document_repository if available
+        user_id = None
+        if self.document_repository and hasattr(self.document_repository, 'current_user_id'):
+            user_id = self.document_repository.current_user_id
+        
+        system_prompt = await add_datetime_context_to_system_prompt_for_user(
+            "You are an expert document summarizer.",
+            user_id=user_id
         )
         
         response = await client.chat.completions.create(

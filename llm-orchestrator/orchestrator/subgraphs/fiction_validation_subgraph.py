@@ -118,7 +118,21 @@ async def detect_outline_changes_node(state: Dict[str, Any], llm_factory, get_da
         if not outline_current_chapter_text or len(current_chapter_text.strip()) < 100:
             return {
                 "outline_sync_analysis": None,
-                "outline_needs_sync": False
+                "outline_needs_sync": False,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
             }
         
         # Outline sync is OPT-IN only
@@ -133,7 +147,21 @@ async def detect_outline_changes_node(state: Dict[str, Any], llm_factory, get_da
             logger.info("No explicit outline sync request - skipping outline sync detection")
             return {
                 "outline_sync_analysis": None,
-                "outline_needs_sync": False
+                "outline_needs_sync": False,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
             }
         
         logger.info("User requested outline sync - checking alignment")
@@ -201,7 +229,21 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 logger.error(f"Failed to parse outline sync analysis: {parse_error}")
                 return {
                     "outline_sync_analysis": None,
-                    "outline_needs_sync": False
+                    "outline_needs_sync": False,
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "manuscript": state.get("manuscript", ""),
+                    "filename": state.get("filename", ""),
+                    "current_chapter_text": state.get("current_chapter_text", ""),
+                    "current_chapter_number": state.get("current_chapter_number"),
+                    "chapter_ranges": state.get("chapter_ranges", []),
+                    "current_request": state.get("current_request", ""),
+                    "active_editor": state.get("active_editor", {}),
+                    "frontmatter": state.get("frontmatter", {}),
+                    "structured_edit": state.get("structured_edit"),
                 }
         
         needs_sync = sync_analysis.get("needs_sync", False)
@@ -214,7 +256,21 @@ Return ONLY the JSON object, no markdown, no code blocks."""
         
         return {
             "outline_sync_analysis": sync_analysis,
-            "outline_needs_sync": needs_sync
+            "outline_needs_sync": needs_sync,
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
         }
         
     except Exception as e:
@@ -223,7 +279,21 @@ Return ONLY the JSON object, no markdown, no code blocks."""
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {
             "outline_sync_analysis": None,
-            "outline_needs_sync": False
+            "outline_needs_sync": False,
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
         }
 
 
@@ -238,12 +308,34 @@ async def load_continuity_node(state: Dict[str, Any], continuity_tracker: Fictio
             logger.info("⚡ Simple request - skipping continuity loading")
             return {
                 "continuity_state": None,
-                "continuity_document_id": None
+                "continuity_document_id": None,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
             }
         
         frontmatter = state.get("frontmatter", {})
         active_editor = state.get("active_editor", {})
+        # Get user_id from state, with fallback to metadata
         user_id = state.get("user_id", "system")
+        metadata = state.get("metadata", {})
+        # If user_id is "system" (fallback), try to get it from metadata
+        if user_id == "system" and metadata:
+            user_id = metadata.get("user_id", "system")
+        # Log warning if still "system" when creating user document
+        if user_id == "system":
+            logger.warning("⚠️ user_id is 'system' when creating continuity document - RLS may not work correctly")
         filename = state.get("filename", "")
         # Support both manuscript_content and manuscript
         manuscript = state.get("manuscript_content") or state.get("manuscript", "")
@@ -271,7 +363,21 @@ async def load_continuity_node(state: Dict[str, Any], continuity_tracker: Fictio
                     
                     return {
                         "continuity_state": continuity_state.dict(),
-                        "continuity_document_id": continuity_doc.get("document_id")
+                        "continuity_document_id": continuity_doc.get("document_id"),
+                        "metadata": state.get("metadata", {}),
+                        "user_id": state.get("user_id", "system"),
+                        "shared_memory": state.get("shared_memory", {}),
+                        "messages": state.get("messages", []),
+                        "query": state.get("query", ""),
+                        "manuscript": state.get("manuscript", ""),
+                        "filename": state.get("filename", ""),
+                        "current_chapter_text": state.get("current_chapter_text", ""),
+                        "current_chapter_number": state.get("current_chapter_number"),
+                        "chapter_ranges": state.get("chapter_ranges", []),
+                        "current_request": state.get("current_request", ""),
+                        "active_editor": state.get("active_editor", {}),
+                        "frontmatter": state.get("frontmatter", {}),
+                        "structured_edit": state.get("structured_edit"),
                     }
                 except Exception as e:
                     logger.error(f"Failed to parse continuity state: {e}")
@@ -299,7 +405,21 @@ async def load_continuity_node(state: Dict[str, Any], continuity_tracker: Fictio
                     
                     return {
                         "continuity_state": continuity_state.dict(),
-                        "continuity_document_id": continuity_doc.get("document_id")
+                        "continuity_document_id": continuity_doc.get("document_id"),
+                        "metadata": state.get("metadata", {}),
+                        "user_id": state.get("user_id", "system"),
+                        "shared_memory": state.get("shared_memory", {}),
+                        "messages": state.get("messages", []),
+                        "query": state.get("query", ""),
+                        "manuscript": state.get("manuscript", ""),
+                        "filename": state.get("filename", ""),
+                        "current_chapter_text": state.get("current_chapter_text", ""),
+                        "current_chapter_number": state.get("current_chapter_number"),
+                        "chapter_ranges": state.get("chapter_ranges", []),
+                        "current_request": state.get("current_request", ""),
+                        "active_editor": state.get("active_editor", {}),
+                        "frontmatter": state.get("frontmatter", {}),
+                        "structured_edit": state.get("structured_edit"),
                     }
                 except Exception as e:
                     logger.error(f"Failed to parse continuity state from auto-discovered file: {e}")
@@ -349,7 +469,21 @@ async def load_continuity_node(state: Dict[str, Any], continuity_tracker: Fictio
             return {
                 "continuity_state": continuity_state.dict(),
                 "continuity_document_id": None,
-                "task_status": "complete"
+                "task_status": "complete",
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
             }
         
         continuity_json = json.dumps(continuity_state.dict(), indent=2)
@@ -390,13 +524,41 @@ async def load_continuity_node(state: Dict[str, Any], continuity_tracker: Fictio
             
             return {
                 "continuity_state": continuity_state.dict(),
-                "continuity_document_id": continuity_doc_id
+                "continuity_document_id": continuity_doc_id,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
             }
         else:
             logger.error(f"Failed to create continuity file: {create_result.get('error')}")
             return {
                 "continuity_state": continuity_state.dict(),
-                "continuity_document_id": None
+                "continuity_document_id": None,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
             }
         
     except Exception as e:
@@ -405,7 +567,21 @@ async def load_continuity_node(state: Dict[str, Any], continuity_tracker: Fictio
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {
             "continuity_state": None,
-            "continuity_document_id": None
+            "continuity_document_id": None,
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
         }
 
 
@@ -416,16 +592,70 @@ async def validate_consistency_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         structured_edit = _get_structured_edit(state)
         if not structured_edit:
-            return {"consistency_warnings": []}
+            return {
+                "consistency_warnings": [],
+                "continuity_state": state.get("continuity_state"),
+                "continuity_document_id": state.get("continuity_document_id"),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+            }
         
         operations = structured_edit.operations
         if not operations:
-            return {"consistency_warnings": []}
+            return {
+                "consistency_warnings": [],
+                "continuity_state": state.get("continuity_state"),
+                "continuity_document_id": state.get("continuity_document_id"),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+            }
         
         # Extract generated text
         generated_texts = [op.text for op in operations if op.text]
         if not generated_texts:
-            return {"consistency_warnings": []}
+            return {
+                "consistency_warnings": [],
+                "continuity_state": state.get("continuity_state"),
+                "continuity_document_id": state.get("continuity_document_id"),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+            }
         
         combined_text = "\n\n".join(generated_texts)
         
@@ -464,11 +694,47 @@ async def validate_consistency_node(state: Dict[str, Any]) -> Dict[str, Any]:
             ):
                 warnings.append("⚠️ Possible universe rule violation: Magic use detected but rules forbid it")
         
-        return {"consistency_warnings": warnings}
+        return {
+            "consistency_warnings": warnings,
+            "continuity_state": state.get("continuity_state"),
+            "continuity_document_id": state.get("continuity_document_id"),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+        }
         
     except Exception as e:
         logger.error(f"Consistency validation failed: {e}")
-        return {"consistency_warnings": []}
+        return {
+            "consistency_warnings": [],
+            "continuity_state": state.get("continuity_state"),
+            "continuity_document_id": state.get("continuity_document_id"),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+        }
 
 
 async def validate_continuity_node(state: Dict[str, Any], continuity_tracker: FictionContinuityTracker) -> Dict[str, Any]:
@@ -479,26 +745,120 @@ async def validate_continuity_node(state: Dict[str, Any], continuity_tracker: Fi
         continuity_state = _get_continuity_state(state)
         if not continuity_state:
             logger.info("No continuity state - skipping validation")
-            return {"continuity_violations": []}
+            return {
+                "continuity_violations": [],
+                "continuity_state": state.get("continuity_state"),
+                "continuity_document_id": state.get("continuity_document_id"),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+            }
         
         structured_edit = _get_structured_edit(state)
         if not structured_edit:
             logger.info("No structured_edit - skipping continuity validation")
-            return {"continuity_violations": []}
+            return {
+                "continuity_violations": [],
+                "continuity_state": state.get("continuity_state"),
+                "continuity_document_id": state.get("continuity_document_id"),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+            }
         
         operations = structured_edit.operations
         if not operations:
             logger.info("No operations - skipping continuity validation")
-            return {"continuity_violations": []}
+            return {
+                "continuity_violations": [],
+                "continuity_state": state.get("continuity_state"),
+                "continuity_document_id": state.get("continuity_document_id"),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+            }
         
         # Combine generated text
         new_content = "\n\n".join([op.text for op in operations if op.text])
         # Support both chapter_number and current_chapter_number
         target_chapter = state.get("chapter_number") or state.get("current_chapter_number")
         
+        if not new_content or not new_content.strip():
+            logger.info("No new content to validate - skipping continuity validation")
+            return {
+                "continuity_violations": [],
+                "continuity_state": state.get("continuity_state"),
+                "continuity_document_id": state.get("continuity_document_id"),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+            }
+        
         if target_chapter is None:
             logger.warning("Cannot validate continuity - chapter number not available")
-            return {"continuity_violations": []}
+            return {
+                "continuity_violations": [],
+                "continuity_state": state.get("continuity_state"),
+                "continuity_document_id": state.get("continuity_document_id"),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+            }
         
         # Validate
         validation_result = await continuity_tracker.validate_new_content(
@@ -516,14 +876,48 @@ async def validate_continuity_node(state: Dict[str, Any], continuity_tracker: Fi
                 logger.warning(f"  - {violation.severity.upper()}: {violation.description}")
         
         return {
-            "continuity_violations": [v.dict() for v in validation_result.violations]
+            "continuity_violations": [v.dict() for v in validation_result.violations],
+            "continuity_state": state.get("continuity_state"),
+            "continuity_document_id": state.get("continuity_document_id"),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
         }
         
     except Exception as e:
         logger.error(f"Failed to validate continuity: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
-        return {"continuity_violations": []}
+        return {
+            "continuity_violations": [],
+            "continuity_state": state.get("continuity_state"),
+            "continuity_document_id": state.get("continuity_document_id"),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+        }
 
 
 async def update_continuity_node(state: Dict[str, Any], continuity_tracker: FictionContinuityTracker) -> Dict[str, Any]:
@@ -535,11 +929,41 @@ async def update_continuity_node(state: Dict[str, Any], continuity_tracker: Fict
         is_simple = state.get("is_simple_request", False)
         if is_simple:
             logger.info("⚡ Simple request - skipping continuity update")
-            return {}
+            return {
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+            }
         
         task_status = state.get("task_status", "")
         if task_status == "error":
-            return {}
+            return {
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+            }
         
         current_chapter_text = state.get("current_chapter_text", "")
         # Support both chapter_number and current_chapter_number
@@ -547,11 +971,41 @@ async def update_continuity_node(state: Dict[str, Any], continuity_tracker: Fict
         continuity_doc_id = state.get("continuity_document_id")
         
         if not current_chapter_text or not current_chapter_number:
-            return {}
+            return {
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+            }
         
         if not continuity_doc_id:
             logger.warning("No continuity document ID - cannot update")
-            return {}
+            return {
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "active_editor": state.get("active_editor", {}),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit"),
+            }
         
         # Load existing state
         existing_state = _get_continuity_state(state)
@@ -590,14 +1044,43 @@ async def update_continuity_node(state: Dict[str, Any], continuity_tracker: Fict
         
         return {
             "updated_continuity": updated_state.dict(),
-            "continuity_state": updated_state.dict()
+            "continuity_state": updated_state.dict(),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
         }
         
     except Exception as e:
         logger.error(f"Failed to update continuity: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
-        return {}
+        return {
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "active_editor": state.get("active_editor", {}),
+            "frontmatter": state.get("frontmatter", {}),
+            "structured_edit": state.get("structured_edit"),
+        }
 
 
 # ============================================

@@ -4,180 +4,22 @@ Background processing for the "Big Stick" Orchestrator
 """
 
 import logging
-import asyncio
 from datetime import datetime
-from typing import Dict, Any, Optional
-import json
+from typing import Dict, Any
 
-from celery import current_task
-from services.celery_app import celery_app, update_task_progress, TaskStatus
+from services.celery_app import celery_app
 from services.celery_utils import (
     safe_serialize_error, 
-    safe_update_task_state, 
-    clean_result_for_storage,
-    create_progress_meta,
-    safe_task_wrapper
+    clean_result_for_storage
 )
-# DEPRECATED: Backend orchestrator removed
-# from services.langgraph_official_orchestrator import get_official_orchestrator
-from services.conversation_service import ConversationService
-from services.prompt_service import PromptService
 
 logger = logging.getLogger(__name__)
 
 
-async def _store_task_result_in_redis(task_id: str, result: Dict[str, Any]):
-    """Store task result manually in Redis to avoid Celery serialization issues"""
-    try:
-        import redis.asyncio as redis
-        import os
-        
-        redis_url = os.getenv("REDIS_URL", "redis://redis:6379/0")
-        redis_client = redis.from_url(redis_url)
-        
-        # Store with expiration (1 hour)
-        await redis_client.setex(
-            f"orchestrator_result:{task_id}",
-            3600,  # 1 hour
-            json.dumps(result)
-        )
-        
-        await redis_client.close()
-        logger.info(f"✅ Stored task result in Redis: {task_id}")
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to store task result in Redis: {e}")
-
-
-@celery_app.task(bind=True, name="orchestrator.process_query")
-def process_orchestrator_query(
-    self,
-    user_id: str,
-    conversation_id: str,
-    query: str,
-    persona: Optional[Dict[str, Any]] = None,
-    base_checkpoint_id: Optional[str] = None
-) -> Dict[str, Any]:
-    """
-    Background task for processing orchestrator queries
-    This is the main async entry point for the "Big Stick" system
-    """
-    try:
-        logger.info(f"🎯 ASYNC ORCHESTRATOR: Starting background processing for user {user_id}")
-        
-        # Update progress - Initialization
-        update_task_progress(self, 1, 5, "Initializing orchestrator system...")
-        
-        # Run the async orchestrator processing
-        result = asyncio.run(_async_process_orchestrator_query(
-            self, user_id, conversation_id, query, persona, base_checkpoint_id
-        ))
-        
-        logger.info(f"✅ ASYNC ORCHESTRATOR: Completed successfully")
-        
-        # Store result manually in Redis to avoid Celery serialization issues
-        cleaned_result = clean_result_for_storage(result)
-        asyncio.run(_store_task_result_in_redis(self.request.id, cleaned_result))
-        
-        # Return minimal result to avoid Celery backend issues
-        return {
-            "success": True,
-            "task_id": self.request.id,
-            "timestamp": datetime.now().isoformat(),
-            "stored_in_redis": True
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ ASYNC ORCHESTRATOR ERROR: {e}")
-        
-        # Safe error serialization
-        error_data = safe_serialize_error(e, "Orchestrator processing")
-        
-        # Update task state safely
-        safe_update_task_state(
-            self,
-            TaskStatus.FAILURE,
-            {
-                "error": error_data["error_message"],
-                "error_type": error_data["error_type"],
-                "message": "Orchestrator processing failed",
-                "timestamp": error_data["timestamp"]
-            }
-        )
-        
-        return clean_result_for_storage({
-            "success": False,
-            "error": error_data["error_message"],
-            "error_type": error_data["error_type"],
-            "message": "Background orchestrator processing failed",
-            "timestamp": error_data["timestamp"]
-        })
-
-
-async def _async_process_orchestrator_query(
-    task,
-    user_id: str,
-    conversation_id: str, 
-    query: str,
-    persona: Optional[Dict[str, Any]] = None,
-    base_checkpoint_id: Optional[str] = None
-) -> Dict[str, Any]:
-    """Internal async function for orchestrator processing"""
-    # Update progress - Loading context
-    update_task_progress(task, 2, 5, "Loading conversation context and user settings...")
-    
-    # Get user settings for persona if not provided
-    if not persona:
-        try:
-            user_settings = await PromptService.get_user_settings_for_service(user_id)
-            persona = {
-                "ai_name": user_settings.ai_name if user_settings else "Kodex",
-                "persona_style": user_settings.persona_style.value if user_settings else "professional",
-                "political_bias": user_settings.political_bias.value if user_settings else "neutral"
-            } if user_settings else None
-        except Exception as e:
-            logger.warning(f"⚠️ Could not load user settings: {e}")
-            persona = None
-    
-    # Store user message in conversation BEFORE processing
-    conversation_service = ConversationService()
-    conversation_service.set_current_user(user_id)
-    
-    user_message_result = await conversation_service.add_message(
-        conversation_id=conversation_id,
-        user_id=user_id,
-        role="user",
-        content=query,
-        metadata={
-            "async_orchestrator": True,
-            "task_id": task.request.id,
-            "background_processing": True
-        }
-    )
-    
-    # Update progress - Processing with orchestrator
-    update_task_progress(task, 3, 5, "Orchestrator analyzing request and delegating to agents...")
-    
-    # DEPRECATED: Backend orchestrator removed
-    # Celery tasks should use gRPC orchestrator instead
-    logger.warning("⚠️ DEPRECATED: Backend orchestrator removed. Celery task cannot process query.")
-    
-    safe_update_task_state(
-        task,
-        TaskStatus.FAILURE,
-        {
-            "error": "Backend orchestrator removed. Use gRPC orchestrator instead.",
-            "message": "This task type is no longer supported",
-            "timestamp": datetime.now().isoformat()
-        }
-    )
-    
-    return clean_result_for_storage({
-        "status": "error",
-        "error": "Backend orchestrator removed. Use gRPC orchestrator instead.",
-        "response": "This task type is no longer supported.",
-        "timestamp": datetime.now().isoformat()
-    })
+# Deprecated functions removed:
+# - _store_task_result_in_redis - only used by deprecated process_orchestrator_query
+# - process_orchestrator_query - deprecated task that immediately returns error
+# - _async_process_orchestrator_query - only used by deprecated process_orchestrator_query
 
 
 @celery_app.task(bind=True, name="orchestrator.get_task_status")

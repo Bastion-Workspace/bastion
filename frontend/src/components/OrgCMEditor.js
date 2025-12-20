@@ -91,6 +91,15 @@ const orgDecorationsPlugin = ViewPlugin.fromClass(class {
 }, { decorations: v => v.decorations });
 
 const createBaseTheme = (darkMode) => EditorView.baseTheme({
+  '&': {
+    backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+  },
+  '.cm-editor': {
+    backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+  },
+  '.cm-scroller': {
+    backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+  },
   '.cm-content': { 
     fontFamily: 'monospace', 
     fontSize: '14px', 

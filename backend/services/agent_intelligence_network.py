@@ -174,46 +174,8 @@ class AgentIntelligenceNetwork:
             collaboration_permission=CollaborationPermission.SUGGEST_ONLY  # RSS requires user approval
         )
 
-        # Org Inbox Agent
-        self._agent_registry["org_inbox_agent"] = AgentInfo(
-            agent_type="org_inbox_agent",
-            display_name="Org Inbox Agent",
-            description="Adds, lists, and adjusts tasks in inbox.org",
-            capabilities=[AgentCapability.ORG_INBOX_MANAGEMENT],
-            specialties=[
-                "Capture tasks to inbox.org",
-                "List inbox items",
-                "Toggle DONE/checkbox state",
-                "Edit task text"
-            ],
-            handoff_triggers=[
-                "dates and appointments",
-                "todos and reminders",
-                "schedule-related capture",
-                "task capture"
-            ],
-            collaboration_permission=CollaborationPermission.SUGGEST_ONLY
-        )
-
-        # Org Project Agent
-        self._agent_registry["org_project_agent"] = AgentInfo(
-            agent_type="org_project_agent",
-            display_name="Org Project Agent",
-            description="Captures projects into inbox.org with preview-and-confirm",
-            capabilities=[AgentCapability.ORG_INBOX_MANAGEMENT],
-            specialties=[
-                "Project capture",
-                "Org-mode project formatting",
-                "Preview and confirmation flow"
-            ],
-            handoff_triggers=[
-                "project",
-                "initiative",
-                "campaign",
-                "launch"
-            ],
-            collaboration_permission=CollaborationPermission.SUGGEST_ONLY
-        )
+        # ORG_INBOX_AGENT removed - migrated to llm-orchestrator gRPC service
+        # ORG_PROJECT_AGENT removed - migrated to llm-orchestrator gRPC service
 
         # Pipeline Designer Agent
         self._agent_registry["pipeline_agent"] = AgentInfo(
@@ -231,26 +193,26 @@ class AgentIntelligenceNetwork:
             collaboration_permission=CollaborationPermission.SUGGEST_ONLY
         )
 
-        # Email Agent
-        self._agent_registry["email_agent"] = AgentInfo(
-            agent_type="email_agent",
-            display_name="Email Agent",
-            description="Drafts and sends emails with user approval and conversation context",
-            capabilities=[AgentCapability.EMAIL_SENDING],
-            specialties=[
-                "Email drafting",
-                "Context-aware email composition",
-                "Professional email formatting",
-                "Email sending with approval"
-            ],
-            handoff_triggers=[
-                "send email",
-                "email to",
-                "compose email",
-                "draft email"
-            ],
-            collaboration_permission=CollaborationPermission.SUGGEST_ONLY
-        )
+        # EMAIL_AGENT removed - not used, functionality not migrated
+        # self._agent_registry["email_agent"] = AgentInfo(
+        #     agent_type="email_agent",
+        #     display_name="Email Agent",
+        #     description="Drafts and sends emails with user approval and conversation context",
+        #     capabilities=[AgentCapability.EMAIL_SENDING],
+        #     specialties=[
+        #         "Email drafting",
+        #         "Context-aware email composition",
+        #         "Professional email formatting",
+        #         "Email sending with approval"
+        #     ],
+        #     handoff_triggers=[
+        #         "send email",
+        #         "email to",
+        #         "compose email",
+        #         "draft email"
+        #     ],
+        #     collaboration_permission=CollaborationPermission.SUGGEST_ONLY
+        # )
         
         # Initialize collaboration patterns
         self._initialize_collaboration_patterns()

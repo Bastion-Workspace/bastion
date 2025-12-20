@@ -46,15 +46,16 @@ async def place_file(
 @router.post("/move-file", response_model=FileMoveResponse)
 async def move_file(
     request: FileMoveRequest,
-    current_user: Optional[str] = Depends(get_current_user)
+    current_user = Depends(get_current_user)
 ):
     """Move a file to a different folder"""
     try:
         file_manager = await get_file_manager()
         
-        # Set user_id from current user if not provided
+        # Set user_id and role from current user if not provided
         if not request.user_id and current_user:
-            request.user_id = current_user
+            request.user_id = current_user.user_id if hasattr(current_user, 'user_id') else current_user
+            request.current_user_role = current_user.role if hasattr(current_user, 'role') else 'user'
         
         response = await file_manager.move_file(request)
         logger.info(f"✅ File moved via API: {response.document_id}")

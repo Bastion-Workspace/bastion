@@ -221,9 +221,6 @@ class DictionaryAgent(BaseAgent):
             # Extract first entry (most common)
             entry = api_response[0]
             
-            # Get conversation history for context-aware responses
-            conversation_history = self._extract_conversation_history(messages, limit=5)
-            
             # Build system prompt for LLM to format the response
             system_prompt = f"""You are a helpful dictionary assistant. Your role is to present word definitions in a clear, engaging way.
 
@@ -255,11 +252,13 @@ Present the information in a natural, readable way. Use markdown formatting for 
 
 IMPORTANT: If the user is asking follow-up questions about the word (like "What's the origin?" or "Give me synonyms"), focus your response on those specific aspects while still providing the core definition."""
 
-            # Build messages for LLM
-            llm_messages = self._build_messages(
+            # Build messages for LLM using standardized helper
+            user_query = state.get("query", f"define: {word}")
+            llm_messages = self._build_conversational_agent_messages(
                 system_prompt=system_prompt,
-                user_query=state.get("query", f"define: {word}"),
-                conversation_history=conversation_history
+                user_prompt=user_query,
+                messages_list=messages,
+                look_back_limit=5
             )
             
             # Get LLM response

@@ -1,7 +1,7 @@
 import ApiServiceBase from '../base/ApiServiceBase';
 
 class EditorSuggestionService extends ApiServiceBase {
-  async suggest({ prefix, suffix, filename, language = 'markdown', cursorOffset = -1, frontmatter = null, maxChars = 80, signal }) {
+  async suggest({ prefix, suffix, filename, language = 'markdown', cursorOffset = -1, frontmatter = null, maxChars = 300, signal }) {
     const body = {
       prefix: String(prefix || ''),
       suffix: String(suffix || ''),

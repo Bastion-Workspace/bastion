@@ -181,7 +181,8 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
     try {
       this.view = view;
       this.operations = new Map(); // operationId -> {from, to, original, proposed, opType, messageId, start, end}
-      this.maxOperations = 10; // Limit concurrent diffs
+      this.maxOperations = 50; // Limit concurrent diffs (increased to prevent blocking)
+      this.currentMessageId = null; // Track current message ID to clear old operations
       this.decorations = Decoration.none;
       this.pendingUpdate = false; // Track if decoration update is queued
       this.updateTimeout = null; // Track pending timeout
@@ -238,6 +239,8 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
           });
         }
         if (Array.isArray(operations) && operations.length > 0) {
+          // Clearing of old operations now happens in addOperations() before maxOperations check
+          // This ensures new operations always have room and aren't blocked by old ones
           console.log('🔍 Calling addOperations with', operations.length, 'operations');
           this.addOperations(operations, messageId);
         } else {
@@ -257,29 +260,44 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
   }
   
   update(update) {
-    // Handle document changes - remove operations with invalid positions
+    // Handle document changes - adjust operation positions instead of removing
+    // Only remove operations that are clearly invalid (negative, reversed, or way out of bounds)
     if (update.docChanged && this.operations.size > 0) {
       const docLength = update.state.doc.length;
       const toRemove = [];
+      let needsUpdate = false;
       
       this.operations.forEach((op, id) => {
         const from = op.from !== undefined ? op.from : (op.start !== undefined ? op.start : 0);
         const to = op.to !== undefined ? op.to : (op.end !== undefined ? op.end : from);
         
-        // Remove operations that are now out of range
-        if (from < 0 || to < from || from > docLength || to > docLength) {
+        // Only remove operations that are clearly invalid (negative, reversed, or way out of bounds)
+        // Operations that are slightly out of bounds will be clamped in applyDecorationUpdate
+        if (from < 0 || to < from || from > docLength + 100 || to > docLength + 100) {
           toRemove.push(id);
+        } else {
+          // Update stored positions to match current document (clamp to valid range)
+          const clampedFrom = Math.max(0, Math.min(docLength, from));
+          const clampedTo = Math.max(clampedFrom, Math.min(docLength, to));
+          if (clampedFrom !== from || clampedTo !== to) {
+            op.from = clampedFrom;
+            op.to = clampedTo;
+            op.start = clampedFrom;
+            op.end = clampedTo;
+            needsUpdate = true;
+          }
         }
       });
       
-      // Remove invalid operations
+      // Remove clearly invalid operations
       toRemove.forEach(id => {
         console.warn('Removing operation with invalid positions:', id);
         this.operations.delete(id);
+        needsUpdate = true;
       });
       
-      // Update decorations if any operations were removed
-      if (toRemove.length > 0) {
+      // Update decorations if any operations were adjusted or removed
+      if (needsUpdate) {
         this.scheduleDecorationUpdate();
       }
     }
@@ -317,9 +335,35 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
   }
   
   addOperations(operations, messageId) {
-    // Limit to maxOperations
+    // CRITICAL FIX: Clear operations from previous messages FIRST to ensure we have room
+    // This must happen before the maxOperations check
+    if (messageId && messageId !== this.currentMessageId) {
+      const previousMessageId = this.currentMessageId;
+      this.currentMessageId = messageId;
+      
+      // Remove all operations from previous messages
+      const toRemove = [];
+      this.operations.forEach((op, id) => {
+        if (op.messageId && op.messageId !== messageId) {
+          toRemove.push(id);
+        }
+      });
+      
+      if (toRemove.length > 0) {
+        console.log(`🧹 Clearing ${toRemove.length} operations from previous message (${previousMessageId})`);
+        toRemove.forEach(id => this.operations.delete(id));
+      }
+    } else if (!this.currentMessageId && messageId) {
+      this.currentMessageId = messageId;
+    }
+    
+    // Now check maxOperations limit AFTER clearing old operations
     const currentCount = this.operations.size;
     const toAdd = operations.slice(0, Math.max(0, this.maxOperations - currentCount));
+    
+    if (toAdd.length < operations.length) {
+      console.warn(`⚠️ Limiting operations: ${operations.length} requested, ${toAdd.length} will be added (${currentCount}/${this.maxOperations} already active)`);
+    }
     
     // Get frontmatter boundary
     const docText = this.view.state.doc.toString();
@@ -372,11 +416,24 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
         console.log('🔍 Processing operation:', { operationId, start, end, opType, proposedLength: proposed.length });
       }
       
-      // Validate range
-      if (start < 0 || end < start || end > this.view.state.doc.length) {
-        console.warn('Invalid operation range:', { start, end, docLength: this.view.state.doc.length });
+      // Validate range - be more lenient for operations that might be slightly out of bounds
+      // This can happen when document changes between operation creation and display
+      const docLength = this.view.state.doc.length;
+      if (start < 0 || end < start) {
+        console.warn('Invalid operation range (negative or reversed):', { start, end, docLength });
         return;
       }
+      
+      // Allow operations that extend slightly beyond document (will be clamped in decoration)
+      // Only reject if way out of bounds (more than 100 chars beyond)
+      if (start > docLength + 100 || end > docLength + 100) {
+        console.warn('Operation range way out of bounds:', { start, end, docLength });
+        return;
+      }
+      
+      // Clamp positions to valid range for storage
+      start = Math.max(0, Math.min(docLength, start));
+      end = Math.max(start, Math.min(docLength, end));
       
       // For replace_range, verify original text matches
       if (opType === 'replace_range' && original) {
@@ -534,6 +591,46 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
           console.warn('Error creating decoration for operation:', id, e);
         }
       });
+      
+      // CRITICAL: CodeMirror requires decorations to be sorted by `from` position and `startSide`
+      // Sort decorations by their start position (from) before creating the set
+      // CodeMirror Range objects have `from`, `to`, and `value` properties
+      
+      // Debug: log decoration positions BEFORE sorting
+      if (decos.length > 0) {
+        console.log('🔍 Decorations BEFORE sorting:', decos.map(d => ({
+          from: d.from,
+          to: d.to,
+          valueSide: d.value?.side,
+          valueWidget: d.value?.widget?.constructor?.name,
+          allKeys: Object.keys(d)
+        })));
+      }
+      
+      decos.sort((a, b) => {
+        // Extract `from` position from Range object
+        const aFrom = a.from !== undefined ? a.from : 0;
+        const bFrom = b.from !== undefined ? b.from : 0;
+        
+        if (aFrom !== bFrom) {
+          return aFrom - bFrom;
+        }
+        
+        // If same position, sort by side
+        // Widget decorations store `side` in value.side, default to 0 for marks
+        const aSide = (a.value && a.value.side !== undefined) ? a.value.side : 0;
+        const bSide = (b.value && b.value.side !== undefined) ? b.value.side : 0;
+        
+        return aSide - bSide;
+      });
+      
+      // Debug: log decoration positions AFTER sorting
+      if (decos.length > 0) {
+        console.log('🔍 Decorations AFTER sorting:', decos.map(d => ({
+          from: d.from,
+          valueSide: d.value?.side
+        })));
+      }
       
       // Update decorations via state effect
       const decorationSet = Decoration.set(decos);

@@ -146,7 +146,7 @@ def run_server(app, host="0.0.0.0", port=8001):
     logger.info(f"🚀 Starting WebDAV server on {host}:{port}")
     logger.info(f"📱 Mobile clients can connect to: http://{host}:{port}/")
     logger.info(f"📂 Serving: uploads/ directory with actual file/folder structure")
-    logger.info(f"🔐 Authentication required using Plato user credentials")
+    logger.info(f"🔐 Authentication required using Bastion user credentials")
     
     # Create Cheroot WSGI server
     app = KeepAliveHeadersMiddleware(app)

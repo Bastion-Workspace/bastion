@@ -865,18 +865,13 @@ Please create a detailed summary that captures all the important information, th
     async def _generate_response(self, query: str, context: str, conversation_history: List[Dict]) -> str:
         """Generate response using LLM with retrieved context"""
         try:
-            # Build the system prompt with current date context
-            from datetime import datetime
-            current_time = datetime.now()
-            current_date = current_time.strftime("%A, %B %d, %Y")
-            current_year = current_time.year
+            # Build the system prompt with current date context using user's timezone
+            from utils.system_prompt_utils import get_current_datetime_context_for_user
+            datetime_context = await get_current_datetime_context_for_user(self.current_user_id)
             
             system_prompt = f"""You are Plato, a knowledgeable AI assistant that helps people understand their documents. You provide clear, helpful answers in a professional yet approachable way.
 
-**Current Context:**
-- Today's date: {current_date}
-- Current year: {current_year}
-- When users refer to "today", "yesterday", "this week", "this month", or "this year", use this date context to understand what they mean.
+{datetime_context}
 
 Keep your responses:
 - Clear and informative, but not overly formal or structured

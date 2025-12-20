@@ -752,132 +752,7 @@ export const ChatSidebarProvider = ({ children }) => {
   };
 
   // Poll task status for async orchestrator
-  const pollTaskStatus = async (taskId, conversationId) => {
-    const pollInterval = 2000; // Poll every 2 seconds
-    const maxAttempts = 150; // 5 minutes maximum (150 * 2s)
-    let attempts = 0;
-
-    const poll = async () => {
-      try {
-        attempts++;
-        const statusResponse = await apiService.get(`/api/async/orchestrator/status/${taskId}`);
-        
-        console.log(`🔍 Task ${taskId} status:`, statusResponse.status);
-        
-        // Update progress in messages
-        setMessages(prev => prev.map(msg => {
-          if (msg.taskId === taskId && msg.isPending) {
-            return {
-              ...msg,
-              progress: statusResponse.progress || msg.progress,
-              content: statusResponse.progress?.message || msg.content
-            };
-          }
-          return msg;
-        }));
-
-        if (statusResponse.status === 'SUCCESS') {
-          // Task completed successfully
-          const result = statusResponse.result;
-          console.log('✅ Async task completed:', result);
-          
-          // Flash tab if tab is hidden when async response completes
-          if (result.response && result.response.trim().length > 0) {
-            tabNotificationManager.startFlashing('New message');
-          }
-          
-          // Replace pending message with final result
-          setMessages(prev => prev.map(msg => {
-            if (msg.taskId === taskId && msg.isPending) {
-              return {
-                ...msg,
-                isPending: false,
-                content: result.response || 'Task completed successfully',
-                timestamp: new Date().toISOString(),
-                metadata: {
-                  ...msg.metadata,
-                  async_completed: true,
-                  delegated_agent: result.delegated_agent,
-                  orchestrator_decision: result.orchestrator_decision
-                }
-              };
-            }
-            return msg;
-          }));
-          
-          // Remove from active tasks
-          setActiveTasks(prev => {
-            const newMap = new Map(prev);
-            newMap.delete(taskId);
-            return newMap;
-          });
-          
-          // Refresh conversations
-          queryClient.invalidateQueries(['conversations']);
-          
-        } else if (statusResponse.status === 'FAILURE') {
-          // Task failed
-          console.error('❌ Async task failed:', statusResponse.error);
-          
-          setMessages(prev => prev.map(msg => {
-            if (msg.taskId === taskId && msg.isPending) {
-              return {
-                ...msg,
-                isPending: false,
-                content: `Error: ${statusResponse.error || 'Task failed'}`,
-                isError: true,
-                timestamp: new Date().toISOString()
-              };
-            }
-            return msg;
-          }));
-          
-          // Remove from active tasks
-          setActiveTasks(prev => {
-            const newMap = new Map(prev);
-            newMap.delete(taskId);
-            return newMap;
-          });
-          
-        } else if (attempts < maxAttempts) {
-          // Continue polling
-          setTimeout(poll, pollInterval);
-        } else {
-          // Max attempts reached
-          console.warn('⚠️ Max polling attempts reached for task:', taskId);
-          setMessages(prev => prev.map(msg => {
-            if (msg.taskId === taskId && msg.isPending) {
-              return {
-                ...msg,
-                isPending: false,
-                content: 'Task is taking longer than expected. Please check back later.',
-                isWarning: true,
-                timestamp: new Date().toISOString()
-              };
-            }
-            return msg;
-          }));
-        }
-        
-      } catch (error) {
-        console.error('❌ Error polling task status:', error);
-        if (attempts < maxAttempts) {
-          setTimeout(poll, pollInterval * 2); // Slower retry on error
-        }
-      }
-    };
-
-    // Start polling
-    setTimeout(poll, pollInterval);
-    
-    // Track active task
-    setActiveTasks(prev => new Map(prev).set(taskId, {
-      taskId,
-      conversationId,
-      startedAt: new Date(),
-      attempts: 0
-    }));
-  };
+  // pollTaskStatus removed - no longer needed since we removed async fallback
 
   const sendMessage = async (executionMode = 'auto', overrideQuery = null) => {
     // ROOSEVELT'S HITL SUPPORT: Allow override query for direct API calls without state dependency
@@ -1014,62 +889,8 @@ export const ChatSidebarProvider = ({ children }) => {
         // 🌊 STREAMING-FIRST POLICY: Stream everything for optimal UX!
         console.log('🌊 Using streaming for ALL queries');
         
-        try {
-          // Use streaming endpoint for ALL real-time responses
-          await handleStreamingResponse(currentQuery, conversationId, sessionId);
-        } catch (streamingError) {
-          console.log('🔄 Streaming failed, falling back to async:', streamingError.message);
-          // Fallback to async orchestrator only if streaming fails
-          const result = await apiService.post('/api/async/orchestrator/start', {
-            query: currentQuery,
-            conversation_id: conversationId,
-            session_id: sessionId,
-            priority: 'normal'
-          });
-        
-          if (result.success) {
-          const taskId = result.task_id;
-          console.log('🔍 Async orchestrator task started:', {
-            taskId,
-            status: result.status,
-            conversationId: result.conversation_id,
-            estimatedCompletion: result.estimated_completion
-          });
-          
-          // ROOSEVELT'S CANCEL BUTTON FIX: Set currentJobId for cancel button functionality
-          setCurrentJobId(taskId);
-          
-          // Add pending message to indicate task is processing
-          const pendingMessage = {
-            id: Date.now() + 1,
-            role: 'assistant',
-            type: 'assistant',
-            content: '🔄 Processing your request in the background...',
-            timestamp: new Date().toISOString(),
-            isPending: true,
-            taskId: taskId,
-            progress: { percentage: 0, message: 'Task queued and starting...' },
-            metadata: {
-              async_task: true,
-              task_id: taskId,
-              estimated_completion: result.estimated_completion
-            }
-          };
-          
-          setMessages(prev => [...prev, pendingMessage]);
-          
-          // Start polling for task status
-          pollTaskStatus(taskId, conversationId);
-          
-          // Invalidate conversations to refresh the list
-          queryClient.invalidateQueries(['conversations']);
-          queryClient.invalidateQueries(['conversation', conversationId]);
-          
-            console.log('✅ LangGraph message processed successfully');
-          } else {
-            throw new Error(result.error || 'Failed to process LangGraph message');
-          }
-        }
+        // Use streaming endpoint for ALL real-time responses
+        await handleStreamingResponse(currentQuery, conversationId, sessionId);
         
       } catch (error) {
         console.error('❌ LangGraph failed:', error);
@@ -1130,6 +951,24 @@ export const ChatSidebarProvider = ({ children }) => {
         // Get editor state from localStorage (updated by DocumentViewer when editor is open)
         const editorCtx = JSON.parse(localStorage.getItem('editor_ctx_cache') || 'null');
         
+        // DEBUG: Log what we got from localStorage
+        console.log('🔍 EDITOR_CTX_CACHE DEBUG:', {
+          exists: !!editorCtx,
+          isEditable: editorCtx?.isEditable,
+          filename: editorCtx?.filename,
+          hasContent: !!(editorCtx?.content && editorCtx.content.trim().length > 0),
+          contentLength: editorCtx?.content?.length || 0,
+          frontmatterType: editorCtx?.frontmatter?.type,
+          frontmatterKeys: editorCtx?.frontmatter ? Object.keys(editorCtx.frontmatter) : [],
+          fullFrontmatter: editorCtx?.frontmatter,
+          canonicalPath: editorCtx?.canonicalPath,
+          documentId: editorCtx?.documentId,
+          rawEditorCtxKeys: editorCtx ? Object.keys(editorCtx) : []
+        });
+        
+        // DEBUG: Log the raw cache value
+        console.log('🔍 RAW EDITOR_CTX_CACHE:', localStorage.getItem('editor_ctx_cache'));
+        
         // STRICT VALIDATION: Must have ALL of these conditions met:
         // 1. editorCtx exists
         // 2. isEditable is EXACTLY true (not truthy, not undefined)
@@ -1142,6 +981,14 @@ export const ChatSidebarProvider = ({ children }) => {
                                     editorCtx.filename.toLowerCase().endsWith('.md') &&
                                     editorCtx.content &&
                                     editorCtx.content.trim().length > 0;
+        
+        console.log('🔍 EDITOR STATE VALIDATION:', {
+          hasValidEditorState,
+          passedCheck1_editorCtxExists: !!editorCtx,
+          passedCheck2_isEditableTrue: editorCtx?.isEditable === true,
+          passedCheck3_filenameEndsMd: editorCtx?.filename?.toLowerCase().endsWith('.md'),
+          passedCheck4_hasContent: !!(editorCtx?.content && editorCtx.content.trim().length > 0)
+        });
         
         if (hasValidEditorState) {
           // All validation passed - editor is actually open and editable
@@ -1204,10 +1051,6 @@ export const ChatSidebarProvider = ({ children }) => {
       });
 
       if (!response.ok) {
-        if (response.status === 401) {
-          console.log('🔒 Authentication failed for streaming, falling back to async');
-          throw new Error('Authentication failed - falling back to async');
-        }
         throw new Error(`HTTP error! status: ${response.status}`);
       }
 
@@ -1348,18 +1191,42 @@ export const ChatSidebarProvider = ({ children }) => {
                   ));
                 } else if (data.type === 'editor_operations') {
                   // ROOSEVELT'S HITL EDIT PREVIEW: Capture editor operations payload
+                  console.log('📥 ChatSidebarContext: Received editor_operations SSE message', {
+                    dataType: data.type,
+                    operationsCount: Array.isArray(data.operations) ? data.operations.length : 0,
+                    hasManuscriptEdit: !!data.manuscript_edit,
+                    streamingMessageId: streamingMessage.id
+                  });
+                  
                   const ops = Array.isArray(data.operations) ? data.operations : [];
                   const mEdit = data.manuscript_edit || null;
-                  setMessages(prev => prev.map(msg => 
-                    msg.id === streamingMessage.id 
-                      ? { 
-                          ...msg, 
-                          editor_operations: ops,
-                          manuscript_edit: mEdit,
-                          hasEditorOps: ops.length > 0
-                        }
-                      : msg
-                  ));
+                  
+                  console.log('📥 ChatSidebarContext: Processing editor_operations', {
+                    opsLength: ops.length,
+                    streamingMessageId: streamingMessage.id
+                  });
+                  
+                  setMessages(prev => {
+                    const updated = prev.map(msg => 
+                      msg.id === streamingMessage.id 
+                        ? { 
+                            ...msg, 
+                            editor_operations: ops,
+                            manuscript_edit: mEdit,
+                            hasEditorOps: ops.length > 0
+                          }
+                        : msg
+                    );
+                    
+                    const foundMessage = updated.find(msg => msg.id === streamingMessage.id);
+                    console.log('📥 ChatSidebarContext: Updated messages', {
+                      foundMessage: !!foundMessage,
+                      messageHasOps: foundMessage?.editor_operations?.length || 0,
+                      totalMessages: updated.length
+                    });
+                    
+                    return updated;
+                  });
                   
                   // Emit event for live diff display in editor
                   if (ops.length > 0) {
@@ -1386,6 +1253,46 @@ export const ChatSidebarProvider = ({ children }) => {
                     console.log('✅ ChatSidebarContext: editorOperationsLive event dispatched');
                   } else {
                     console.warn('⚠️ ChatSidebarContext: No operations to emit (ops.length = 0)');
+                  }
+                } else if (data.type === 'editor_operations_chunk') {
+                  // **CHUNKED OPERATIONS**: Reassemble large editor operations sent in chunks
+                  console.log(`📦 Received editor operation chunk ${data.chunk_index + 1}/${data.total_chunks}`);
+                  
+                  // Initialize accumulator if this is the first chunk
+                  if (data.chunk_index === 0) {
+                    window.__editor_ops_accumulator = {
+                      operations: [],
+                      manuscript_edit: null,
+                      total_chunks: data.total_chunks
+                    };
+                  }
+                  
+                  // Add this operation to accumulator
+                  if (window.__editor_ops_accumulator) {
+                    window.__editor_ops_accumulator.operations.push(data.operation);
+                    
+                    // If this is the last chunk, include manuscript_edit and dispatch event
+                    if (data.chunk_index === data.total_chunks - 1) {
+                      window.__editor_ops_accumulator.manuscript_edit = data.manuscript_edit;
+                      
+                      const ops = window.__editor_ops_accumulator.operations;
+                      const mEdit = window.__editor_ops_accumulator.manuscript_edit;
+                      
+                      console.log('✅ All chunks received - dispatching editorOperationsLive event with', ops.length, 'operations');
+                      
+                      // Dispatch the event
+                      const event = new CustomEvent('editorOperationsLive', {
+                        detail: { 
+                          operations: ops,
+                          manuscriptEdit: mEdit,
+                          messageId: streamingMessage.id
+                        }
+                      });
+                      window.dispatchEvent(event);
+                      
+                      // Clean up accumulator
+                      delete window.__editor_ops_accumulator;
+                    }
                   }
                 } else if (data.type === 'citations') {
                   // **ROOSEVELT'S CITATION CAVALRY**: Capture citations from research agent!
@@ -1478,6 +1385,11 @@ export const ChatSidebarProvider = ({ children }) => {
                   queryClient.invalidateQueries(['conversations']);
                   queryClient.invalidateQueries(['conversation', conversationId]);
                   
+                  // CRITICAL: Also invalidate and refetch messages to ensure the saved message appears
+                  // This fixes the issue where messages don't appear until page refresh
+                  queryClient.invalidateQueries(['conversationMessages', conversationId]);
+                  queryClient.refetchQueries(['conversationMessages', conversationId]);
+                  
                   // Also refetch the conversation list to ensure title updates are visible
                   queryClient.refetchQueries(['conversations']);
                   break;
@@ -1490,6 +1402,11 @@ export const ChatSidebarProvider = ({ children }) => {
                     queryClient.invalidateQueries(['conversation', conversationId]);
                     queryClient.refetchQueries(['conversations']);
                   }
+                  
+                  // CRITICAL: Always invalidate and refetch messages when streaming is done
+                  // This ensures the saved message appears even if the 'complete' event was missed
+                  queryClient.invalidateQueries(['conversationMessages', conversationId]);
+                  queryClient.refetchQueries(['conversationMessages', conversationId]);
                   break;
                 } else if (data.type === 'error') {
                   throw new Error(data.message || 'Streaming error');
@@ -1507,84 +1424,19 @@ export const ChatSidebarProvider = ({ children }) => {
     } catch (error) {
       console.error('❌ Streaming failed:', error);
       
-      // If streaming failed due to auth or other issues, fall back to async
-      if (error.message.includes('Authentication failed') || error.message.includes('401')) {
-        console.log('🔄 Falling back to async orchestrator due to streaming failure');
-        
-        // Remove the streaming message
-        setMessages(prev => prev.filter(msg => !msg.isStreaming));
-        
-        // Call async orchestrator as fallback
-        try {
-          const result = await apiService.post('/api/async/orchestrator/start', {
-            query: query,
-            conversation_id: conversationId,
-            session_id: sessionId,
-            priority: 'normal'
-          });
-          
-          if (result.success) {
-            const taskId = result.task_id;
-            console.log('🔄 Fallback async task started:', taskId);
-            
-            // ROOSEVELT'S CANCEL BUTTON FIX: Set currentJobId for cancel button functionality
-            setCurrentJobId(taskId);
-            
-            // Add pending message for async processing
-            const pendingMessage = {
-              id: Date.now() + 1,
-              role: 'assistant',
-              type: 'assistant',
-              content: '🔄 Processing your request in the background...',
-              timestamp: new Date().toISOString(),
-              isPending: true,
-              taskId: taskId,
-              progress: { percentage: 0, message: 'Streaming failed, using async processing...' },
-              metadata: {
-                async_task: true,
-                task_id: taskId,
-                fallback: true
-              }
-            };
-            
-            setMessages(prev => [...prev, pendingMessage]);
-            
-            // Start polling for task status
-            pollTaskStatus(taskId, conversationId);
-            
-            // Refresh conversations
-            queryClient.invalidateQueries(['conversations']);
-            queryClient.invalidateQueries(['conversation', conversationId]);
-          }
-        } catch (asyncError) {
-          console.error('❌ Async fallback also failed:', asyncError);
-          // ROOSEVELT'S CANCEL BUTTON FIX: Clear job ID on complete failure
-          setCurrentJobId(null);
-          setMessages(prev => [...prev, {
-            id: Date.now(),
-            role: 'system',
-            type: 'system',
-            content: `❌ Both streaming and async processing failed: ${asyncError.message}`,
-            timestamp: new Date().toISOString(),
-            isError: true,
-          }]);
-        }
-      } else {
-        // Update message to show error for non-auth issues
-        // ROOSEVELT'S CANCEL BUTTON FIX: Clear job ID on streaming failure
-        setCurrentJobId(null);
-        setMessages(prev => prev.map(msg => 
-          msg.isStreaming 
-            ? { 
-                ...msg, 
-                content: `❌ Streaming failed: ${error.message}`,
-                isStreaming: false,
-                isError: true,
-                timestamp: new Date().toISOString()
-              }
-            : msg
-        ));
-      }
+      // Update message to show error
+      setCurrentJobId(null);
+      setMessages(prev => prev.map(msg => 
+        msg.isStreaming 
+          ? { 
+              ...msg, 
+              content: `❌ Streaming failed: ${error.message}`,
+              isStreaming: false,
+              isError: true,
+              timestamp: new Date().toISOString()
+            }
+          : msg
+      ));
     }
   };
 
@@ -1618,37 +1470,10 @@ export const ChatSidebarProvider = ({ children }) => {
     }
   };
 
-  // Cancel async orchestrator task
+  // Stub for cancelAsyncTask - kept for compatibility but async tasks are no longer used
   const cancelAsyncTask = async (taskId) => {
-    try {
-      console.log('🛑 Attempting to cancel async task:', taskId);
-      await apiService.post(`/api/async/orchestrator/cancel/${taskId}`);
-      
-      // Update message to show cancellation
-      setMessages(prev => prev.map(msg => {
-        if (msg.taskId === taskId && msg.isPending) {
-          return {
-            ...msg,
-            isPending: false,
-            content: '❌ **Task cancelled by user**',
-            isCancelled: true,
-            timestamp: new Date().toISOString()
-          };
-        }
-        return msg;
-      }));
-      
-      // Remove from active tasks
-      setActiveTasks(prev => {
-        const newMap = new Map(prev);
-        newMap.delete(taskId);
-        return newMap;
-      });
-      
-      console.log('✅ Async task cancellation requested');
-    } catch (error) {
-      console.error('❌ Failed to cancel async task:', error);
-    }
+    console.warn('⚠️ cancelAsyncTask called but async tasks are no longer supported');
+    // No-op since async tasks are removed
   };
 
   const value = {
@@ -1682,7 +1507,7 @@ export const ChatSidebarProvider = ({ children }) => {
     clearChat,
 
     cancelCurrentJob, // Add cancellation function
-    cancelAsyncTask, // Add async task cancellation
+    cancelAsyncTask, // Stub for compatibility (async tasks removed)
     
     // **ROOSEVELT**: Editor preference (active = sent to backend, user = checkbox state)
     editorPreference, // Active preference sent to backend (context-aware)

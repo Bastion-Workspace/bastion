@@ -4,7 +4,7 @@ Team Invitation Service - Handles team invitations and messaging integration
 
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 import asyncpg
 
@@ -79,12 +79,12 @@ class TeamInvitationService:
         
         # Check for existing pending invitation
         invitation_id = str(uuid.uuid4())
-        expires_at = datetime.utcnow() + timedelta(days=7)
+        expires_at = datetime.now(timezone.utc) + timedelta(days=7)
         
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", invited_by)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", invited_by)
                 
                 # Check for existing pending invitation
                 existing = await conn.fetchrow("""
@@ -185,7 +185,7 @@ class TeamInvitationService:
                     "inviter_name": inviter_row["display_name"] or inviter_row["username"],
                     "status": "pending",
                     "message_id": message_id,
-                    "created_at": datetime.utcnow().isoformat(),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                     "expires_at": expires_at.isoformat()
                 }
         
@@ -210,7 +210,7 @@ class TeamInvitationService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Get pending invitations
                 rows = await conn.fetch("""
@@ -265,7 +265,7 @@ class TeamInvitationService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Get invitation
                 inv_row = await conn.fetchrow("""
@@ -279,7 +279,7 @@ class TeamInvitationService:
                 if inv_row["status"] != "pending":
                     raise ValueError("Invitation already responded to")
                 
-                if inv_row["expires_at"] < datetime.utcnow():
+                if inv_row["expires_at"] < datetime.now(timezone.utc):
                     # Mark as expired
                     await conn.execute("""
                         UPDATE team_invitations
@@ -351,7 +351,7 @@ class TeamInvitationService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Get invitation
                 inv_row = await conn.fetchrow("""
@@ -415,7 +415,7 @@ class TeamInvitationService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", cancelled_by)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", cancelled_by)
                 
                 # Get invitation and check admin permission
                 inv_row = await conn.fetchrow("""

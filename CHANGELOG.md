@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+- Refactor: Established standard agent handoff pattern using shared_memory for clean inter-agent data passing
+- Update: Simplified intent classification to trust LLM semantic understanding over pattern matching
+- Fix: Research agent now receives reference document context when delegated by reference agent
 - Fix: Added 'reference' to allowed editor types in frontend for proper reference agent routing
 - Fix: Backend now accepts reference documents even if not editable for reference_agent analysis
 - Refactor: Removed unnecessary short-circuit routing hack, using normal intent classification
@@ -23,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix: Resolved FictionEditingState NameError by using forward references for type-safe state access helpers
 - Fix: Improved type safety in fiction editing agent with Pydantic model conversion for structured_edit and continuity_state
 - Fix: Enhanced operation resolution in fiction editing agent with better anchor text matching and error handling
+- Fix: Active editor frontmatter now persists correctly during typing - removed re-parsing that was overwriting cached frontmatter with empty data
 
 ### Bug Fixes
 - Fix: Resolved KeyError in electronics agent when user approves pending save operations

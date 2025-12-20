@@ -150,7 +150,7 @@ class DocumentProcessor:
             # ROOSEVELT DOCTRINE: Org Mode files use structured mechanisms, not vectorization!
             if doc_type == 'org':
                 logger.info(f"⏭️  BULLY! Skipping vectorization for Org Mode file (structured data, not prose)")
-                logger.info(f"📋 Org file will be handled by OrgInboxAgent and OrgProjectAgent")
+                logger.info(f"📋 Org file will be handled by llm-orchestrator (OrgInboxAgent and OrgProjectAgent migrated)")
                 
                 # Return empty processing result - file is stored but not vectorized
                 result = ProcessingResult(

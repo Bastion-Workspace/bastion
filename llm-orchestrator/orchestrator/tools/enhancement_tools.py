@@ -3,7 +3,7 @@ Enhancement Tools - Query expansion and conversation caching
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from orchestrator.backend_tool_client import get_backend_tool_client
 
@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 
 async def expand_query_tool(
     query: str,
-    num_variations: int = 3
+    num_variations: int = 3,
+    conversation_context: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Expand query with semantic variations
@@ -20,6 +21,7 @@ async def expand_query_tool(
     Args:
         query: Original query
         num_variations: Number of variations to generate
+        conversation_context: Optional conversation context (last 2 messages) to help resolve vague references
         
     Returns:
         Dict with expanded queries and entities
@@ -28,7 +30,11 @@ async def expand_query_tool(
         logger.info(f"Expanding query: {query[:100]}")
         
         client = await get_backend_tool_client()
-        result = await client.expand_query(query=query, num_variations=num_variations)
+        result = await client.expand_query(
+            query=query, 
+            num_variations=num_variations,
+            conversation_context=conversation_context
+        )
         
         logger.info(f"Generated {result['expansion_count']} query variations")
         return result

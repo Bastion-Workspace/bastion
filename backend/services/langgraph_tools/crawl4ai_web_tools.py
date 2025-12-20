@@ -1,6 +1,6 @@
 """
 Crawl4AI Web Tools Module
-Advanced web scraping and content extraction using Crawl4AI for LangGraph agents
+Advanced web scraping and content extraction using Crawl4AI Service via gRPC for LangGraph agents
 """
 
 import logging
@@ -9,60 +9,36 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from urllib.parse import urlparse, quote_plus
 
+from clients.crawl_service_client import get_crawl_service_client
+
 logger = logging.getLogger(__name__)
 
 
 class Crawl4AIWebTools:
-    """Advanced web content tools using Crawl4AI for superior content extraction"""
+    """Advanced web content tools using Crawl4AI Service for superior content extraction"""
     
     def __init__(self):
-        self._crawler = None
+        self._crawl_client = None
         self.rate_limit = 2.0  # seconds between requests
         self.last_request_time = 0
-        logger.info("🕷️ Crawl4AI Web Tools initialized")
+        logger.info("🕷️ Crawl4AI Web Tools initialized (using gRPC service)")
     
-    async def _get_crawler(self):
-        """Get Crawl4AI crawler with lazy initialization"""
-        if self._crawler is None:
+    async def _get_crawl_client(self):
+        """Get Crawl4AI service client with lazy initialization"""
+        if self._crawl_client is None:
             try:
-                from crawl4ai import AsyncWebCrawler
-                
-                # Configure crawler for optimal content extraction
-                self._crawler = AsyncWebCrawler(
-                    headless=True,
-                    browser_type="chromium",
-                    verbose=False,
-                    always_by_pass_cache=False,
-                    base_directory="/tmp/crawl4ai",
-                    # Anti-detection settings
-                    user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    headers={
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.5",
-                        "Accept-Encoding": "gzip, deflate",
-                        "Connection": "keep-alive",
-                        "Upgrade-Insecure-Requests": "1",
-                    }
-                )
-                
-                # Start the crawler
-                await self._crawler.start()
-                logger.info("✅ Crawl4AI crawler initialized and started")
-                
-            except ImportError:
-                logger.error("❌ Crawl4AI not installed. Run: pip install crawl4ai")
-                raise
+                self._crawl_client = await get_crawl_service_client()
+                logger.info("✅ Crawl4AI service client initialized")
             except Exception as e:
-                logger.error(f"❌ Failed to initialize Crawl4AI crawler: {e}")
+                logger.error(f"❌ Failed to initialize Crawl4AI service client: {e}")
                 raise
                 
-        return self._crawler
+        return self._crawl_client
     
     def get_tools(self) -> Dict[str, Any]:
         """Get all Crawl4AI web tools"""
         return {
             "crawl_web_content": self.crawl_web_content,
-            "search_and_crawl": self.search_and_crawl,
             "crawl_site": self.crawl_site,
         }
     
@@ -84,9 +60,9 @@ class Crawl4AIWebTools:
                             },
                             "extraction_strategy": {
                                 "type": "string",
-                                "enum": ["NoExtractionStrategy", "LLMExtractionStrategy", "CosineStrategy"],
-                                "default": "LLMExtractionStrategy",
-                                "description": "Content extraction strategy to use"
+                                "enum": ["markdown", "NoExtractionStrategy", "CosineStrategy"],
+                                "default": "markdown",
+                                "description": "Content extraction strategy (always markdown - we don't configure Crawl4AI with LLM)"
                             },
                             "chunking_strategy": {
                                 "type": "string", 
@@ -107,156 +83,115 @@ class Crawl4AIWebTools:
                         "required": ["urls"]
                     }
                 }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "search_and_crawl",
-                    "description": "Search the web using SearXNG and then crawl selected results with Crawl4AI for full content",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Search query"
-                            },
-                            "max_results": {
-                                "type": "integer",
-                                "default": 5,
-                                "description": "Maximum number of search results to crawl"
-                            },
-                            "crawl_top_results": {
-                                "type": "integer",
-                                "default": 3,
-                                "description": "Number of top results to crawl with Crawl4AI"
-                            }
-                        },
-                        "required": ["query"]
-                    }
-                }
             }
         ]
     
     async def crawl_web_content(
         self, 
         urls: List[str], 
-        extraction_strategy: str = "LLMExtractionStrategy",
+        extraction_strategy: str = "markdown",  # Always use markdown - we don't configure Crawl4AI with LLM
         chunking_strategy: str = "NlpSentenceChunking",
         css_selector: Optional[str] = None,
         word_count_threshold: int = 10,
         user_id: str = None
     ) -> Dict[str, Any]:
-        """Extract full content from web URLs using Crawl4AI"""
+        """Extract full content from web URLs using Crawl4AI Service via gRPC
+        
+        Note: Always uses markdown extraction. We don't configure Crawl4AI with an LLM
+        since we have our own LLM infrastructure (OpenRouter, etc.) for processing content.
+        """
         try:
-            logger.info(f"🕷️ Crawling {len(urls)} URLs with Crawl4AI extraction strategy: {extraction_strategy}")
+            logger.info(f"🕷️ Crawling {len(urls)} URLs with Crawl4AI (markdown extraction)")
             
-            crawler = await self._get_crawler()
+            crawl_client = await self._get_crawl_client()
+            
+            # Limit to 5 URLs to prevent abuse
+            urls_to_crawl = urls[:5]
+            
+            # Always use markdown extraction - we don't configure Crawl4AI with LLM
+            # Our LLM processing happens separately in the research agent
+            mapped_strategy = "markdown"
+            
+            # Use parallel crawling via gRPC
+            response = await crawl_client.crawl_many(
+                urls=urls_to_crawl,
+                extraction_strategy=mapped_strategy,
+                chunking_strategy=chunking_strategy,
+                max_concurrent=5,
+                rate_limit_seconds=self.rate_limit,
+                css_selector=css_selector,
+                max_content_length=1000000,
+                include_links=True,
+                include_metadata=True,
+                timeout_seconds=60,
+                use_fit_markdown=True,  # Use fit markdown for LLM optimization
+                user_id=user_id
+            )
+            
+            if not response.get("success"):
+                return {
+                    "success": False,
+                    "error": response.get("error", "Unknown error"),
+                    "results": [],
+                    "urls_crawled": 0,
+                    "successful_crawls": 0
+                }
+            
+            # Convert gRPC response to expected format
             results = []
-            
-            for url in urls[:5]:  # Limit to 5 URLs to prevent abuse
-                try:
-                    await self._rate_limit()
+            for result in response.get("results", []):
+                if result.get("success"):
+                    metadata = result.get("metadata", {})
+                    content = result.get("content", "")
+                    markdown = result.get("markdown", "")
                     
-                    logger.info(f"🕷️ Crawling URL: {url}")
+                    # Parse extracted content if available
+                    content_blocks = []
+                    extracted_content = result.get("extracted_content")
+                    if extracted_content:
+                        try:
+                            import json
+                            extracted_data = json.loads(extracted_content)
+                            if isinstance(extracted_data, list):
+                                content_blocks = extracted_data
+                            elif isinstance(extracted_data, dict):
+                                content_blocks = [extracted_data]
+                        except:
+                            content_blocks = [{"content": extracted_content, "type": "text"}]
                     
-                    # Configure extraction strategy
-                    extraction_config = await self._get_extraction_strategy(
-                        extraction_strategy, 
-                        chunking_strategy,
-                        word_count_threshold
-                    )
-                    
-                    # Crawl the page
-                    kwargs = {
-                        "url": url,
-                        "css_selector": css_selector,
-                        "bypass_cache": False,
-                        "js_code": None,  # Can add custom JS if needed
-                        "wait_for": None,  # Can wait for specific elements
+                    # Build metadata
+                    full_metadata = {
+                        "url": result.get("url", ""),
+                        "title": metadata.get("title", "") or result.get("title", ""),
+                        "description": metadata.get("description", ""),
+                        "keywords": metadata.get("keywords", ""),
+                        "author": metadata.get("author", ""),
+                        "language": metadata.get("language", ""),
+                        "published_time": metadata.get("published_time", ""),
+                        "modified_time": metadata.get("modified_time", ""),
+                        "crawl_timestamp": datetime.now().isoformat(),
+                        "word_count": len(content.split()),
+                        "extraction_strategy": extraction_strategy,
+                        "domain": urlparse(result.get("url", "")).netloc
                     }
                     
-                    # Only add extraction_strategy if it's not None
-                    if extraction_config is not None:
-                        kwargs["extraction_strategy"] = extraction_config
-                    
-                    crawl_result = await crawler.arun(**kwargs)
-                    
-                    if crawl_result.success:
-                        # Extract metadata safely
-                        metadata_dict = getattr(crawl_result, 'metadata', {}) or {}
-                        if not isinstance(metadata_dict, dict):
-                            metadata_dict = {}
-                            
-                        metadata = {
-                            "url": url,
-                            "title": metadata_dict.get("title", "") if isinstance(metadata_dict.get("title"), str) else "",
-                            "description": metadata_dict.get("description", "") if isinstance(metadata_dict.get("description"), str) else "",
-                            "keywords": metadata_dict.get("keywords", "") if isinstance(metadata_dict.get("keywords"), str) else "",
-                            "author": metadata_dict.get("author", "") if isinstance(metadata_dict.get("author"), str) else "",
-                            "language": metadata_dict.get("language", "") if isinstance(metadata_dict.get("language"), str) else "",
-                            "published_time": metadata_dict.get("published_time", "") if isinstance(metadata_dict.get("published_time"), str) else "",
-                            "modified_time": metadata_dict.get("modified_time", "") if isinstance(metadata_dict.get("modified_time"), str) else "",
-                            "crawl_timestamp": datetime.now().isoformat(),
-                            "word_count": len(str(crawl_result.cleaned_html).split()) if crawl_result.cleaned_html else 0,
-                            "extraction_strategy": extraction_strategy,
-                            "domain": urlparse(url).netloc
-                        }
-                        
-                        # Extract structured content
-                        content_blocks = []
-                        if crawl_result.extracted_content:
-                            # Parse extracted content (JSON format from LLM extraction)
-                            try:
-                                import json
-                                extracted_data = json.loads(crawl_result.extracted_content)
-                                if isinstance(extracted_data, list):
-                                    content_blocks = extracted_data
-                                elif isinstance(extracted_data, dict):
-                                    content_blocks = [extracted_data]
-                            except:
-                                # Fallback to plain text
-                                content_blocks = [{"content": crawl_result.extracted_content, "type": "text"}]
-                        
-                        # Include full cleaned HTML as fallback
-                        full_content = crawl_result.cleaned_html or crawl_result.html or ""
-                        
-                        results.append({
-                            "url": url,
-                            "success": True,
-                            "metadata": metadata,
-                            "content_blocks": content_blocks,
-                            "full_content": full_content[:50000],  # Limit content size
-                            "links": list(crawl_result.links)[:20] if crawl_result.links and hasattr(crawl_result.links, '__iter__') else [],  # Include outbound links
-                            "images": list(crawl_result.media.get("images", []))[:10] if crawl_result.media and isinstance(crawl_result.media.get("images", []), (list, tuple)) else [],
-                            "fetch_time": getattr(crawl_result, "response_headers", {}).get("crawl-time", "unknown"),
-                            "citations": self._generate_citations(metadata, content_blocks)
-                        })
-                        
-                        logger.info(f"✅ Successfully crawled {url}: {len(full_content)} chars, {len(content_blocks)} blocks")
-                        
-                    else:
-                        logger.warning(f"⚠️ Crawl failed for {url}: {crawl_result.error_message}")
-                        results.append({
-                            "url": url,
-                            "success": False,
-                            "error": crawl_result.error_message or "Unknown crawl error",
-                            "citations": []
-                        })
-                        
-                except Exception as e:
-                    error_msg = str(e)
-                    if "unhashable type" in error_msg:
-                        logger.error(f"❌ Data structure error crawling {url}: {error_msg}")
-                        logger.error(f"🔍 Crawl result type: {type(crawl_result)}")
-                        if hasattr(crawl_result, 'metadata'):
-                            logger.error(f"🔍 Metadata type: {type(getattr(crawl_result, 'metadata', None))}")
-                    else:
-                        logger.error(f"❌ Error crawling {url}: {error_msg}")
-                    
                     results.append({
-                        "url": url,
+                        "url": result.get("url", ""),
+                        "success": True,
+                        "metadata": full_metadata,
+                        "content_blocks": content_blocks,
+                        "full_content": content[:50000],  # Limit content size
+                        "html": result.get("html", ""),  # Include HTML content
+                        "links": result.get("links", [])[:20],
+                        "images": result.get("images", [])[:10],
+                        "fetch_time": f"{result.get('fetch_time_seconds', 0):.2f}s",
+                        "citations": self._generate_citations(full_metadata, content_blocks)
+                    })
+                else:
+                    results.append({
+                        "url": result.get("url", ""),
                         "success": False,
-                        "error": error_msg,
+                        "error": result.get("error", "Unknown crawl error"),
                         "citations": []
                     })
             
@@ -265,7 +200,7 @@ class Crawl4AIWebTools:
             return {
                 "success": True,
                 "results": results,
-                "urls_crawled": len(urls),
+                "urls_crawled": len(urls_to_crawl),
                 "successful_crawls": len(successful_crawls),
                 "total_content_length": sum(len(r.get("full_content", "")) for r in successful_crawls),
                 "total_citations": sum(len(r.get("citations", [])) for r in results)
@@ -321,7 +256,7 @@ class Crawl4AIWebTools:
                 except Exception:
                     return u
 
-            crawler = await self._get_crawler()
+            crawl_client = await self._get_crawl_client()
             results: List[Dict[str, Any]] = []
             considered = 0
 
@@ -361,31 +296,52 @@ class Crawl4AIWebTools:
 
                 try:
                     await self._rate_limit()
-                    extraction_config = await self._get_extraction_strategy(
-                        "LLMExtractionStrategy",
-                        "NlpSentenceChunking",
-                        10
+                    
+                    # Use gRPC client for individual page crawl
+                    crawl_response = await crawl_client.crawl(
+                        url=url,
+                        extraction_strategy="llm_extraction",
+                        chunking_strategy="RegexChunking",
+                        include_links=True,
+                        include_metadata=True,
+                        timeout_seconds=60,
+                        use_fit_markdown=True,
+                        user_id=user_id
                     )
-
-                    kwargs = {
-                        "url": url,
-                        "bypass_cache": False,
-                        # Improve link availability on dynamic pages
-                        "wait_for": "a",
-                    }
-                    if extraction_config is not None:
-                        kwargs["extraction_strategy"] = extraction_config
-
-                    crawl_result = await crawler.arun(**kwargs)
-
-                    page_success = getattr(crawl_result, "success", False)
-                    page_links = list(getattr(crawl_result, "links", []) or [])
-                    # Fallback: extract anchors from HTML if crawler.links is sparse
+                    
+                    if not crawl_response.get("success"):
+                        logger.warning(f"⚠️ Crawl failed for {url}: {crawl_response.get('error', 'Unknown error')}")
+                        continue
+                    
+                    # Convert gRPC response to expected format
+                    page_success = True
+                    page_links = crawl_response.get("links", [])
+                    page_content = crawl_response.get("content", "")
+                    page_markdown = crawl_response.get("markdown", "")
+                    page_html = crawl_response.get("html", "")
+                    
+                    # Create a mock crawl_result object for compatibility
+                    class MockCrawlResult:
+                        def __init__(self, response):
+                            self.success = response.get("success", False)
+                            self.links = response.get("links", [])
+                            self.markdown = response.get("markdown", "")
+                            self.html = response.get("html", "")
+                            self.text = response.get("content", "")
+                            self.metadata = response.get("metadata", {})
+                    
+                    # Extract data from gRPC response
+                    page_success = crawl_response.get("success", False)
+                    page_links = list(crawl_response.get("links", []) or [])
+                    page_html = crawl_response.get("html", "")
+                    page_markdown = crawl_response.get("markdown", "")
+                    page_metadata = crawl_response.get("metadata", {}) or {}
+                    
+                    # Fallback: extract anchors from HTML if links are sparse
                     try:
-                        html_for_links = crawl_result.html or crawl_result.cleaned_html or ""
-                        if html_for_links:
+                        if page_html:
                             from bs4 import BeautifulSoup
-                            soup = BeautifulSoup(html_for_links, "lxml")
+                            soup = BeautifulSoup(page_html, "lxml")
                             # Prefer explicit rel=next if present
                             try:
                                 next_a = soup.find("a", attrs={"rel": lambda v: v and "next" in str(v).lower()})
@@ -399,12 +355,12 @@ class Crawl4AIWebTools:
                                     page_links.append(href)
                     except Exception:
                         pass
-                    # Prefer raw HTML then cleaned for text extraction
-                    html_raw = crawl_result.html or crawl_result.cleaned_html or ""
+                    
+                    # Prefer raw HTML then markdown for text extraction
+                    html_raw = page_html or page_markdown or ""
 
                     if page_success:
-                        meta = getattr(crawl_result, 'metadata', {}) or {}
-                        title = meta.get("title") if isinstance(meta, dict) else None
+                        title = page_metadata.get("title", "") if isinstance(page_metadata, dict) else ""
 
                         # Extract main text using robust fallback chain
                         main_text = ""
@@ -472,7 +428,7 @@ class Crawl4AIWebTools:
                         results.append({
                             "url": url,
                             "success": False,
-                            "error": getattr(crawl_result, 'error_message', 'Unknown crawl error')
+                            "error": crawl_response.get("error", "Unknown crawl error")
                         })
 
                 except Exception as e:
@@ -495,130 +451,18 @@ class Crawl4AIWebTools:
             logger.error(f"❌ crawl_site failed: {e}")
             return {"success": False, "error": str(e)}
     
-    async def search_and_crawl(
-        self, 
-        query: str, 
-        max_results: int = 5, 
-        crawl_top_results: int = 3,
-        user_id: str = None
-    ) -> Dict[str, Any]:
-        """Search the web and crawl top results with Crawl4AI"""
-        try:
-            logger.info(f"🔍🕷️ Search and crawl: {query} (crawling top {crawl_top_results} of {max_results} results)")
-            
-            # First, perform web search using SearXNG
-            search_results = await self._search_searxng(query, max_results)
-            
-            if not search_results:
-                return {
-                    "success": False,
-                    "error": "No search results found",
-                    "search_results": [],
-                    "crawled_results": []
-                }
-            
-            # Extract URLs from top search results
-            top_urls = [result["url"] for result in search_results[:crawl_top_results]]
-            
-            # Crawl the top URLs with Crawl4AI
-            crawl_response = await self.crawl_web_content(
-                urls=top_urls,
-                extraction_strategy="LLMExtractionStrategy",
-                user_id=user_id
-            )
-            
-            # Combine search and crawl results
-            combined_results = []
-            for i, search_result in enumerate(search_results):
-                combined_result = {
-                    "search_rank": i + 1,
-                    "title": search_result["title"],
-                    "url": search_result["url"],
-                    "snippet": search_result["snippet"],
-                    "source": search_result["source"],
-                    "relevance_score": search_result["relevance_score"],
-                    "crawled": False,
-                    "full_content": None,
-                    "content_blocks": [],
-                    "citations": []
-                }
-                
-                # Add crawled content if available
-                if i < crawl_top_results and crawl_response["success"]:
-                    crawled_result = next(
-                        (r for r in crawl_response["results"] if r["url"] == search_result["url"]), 
-                        None
-                    )
-                    if crawled_result and crawled_result["success"]:
-                        combined_result.update({
-                            "crawled": True,
-                            "full_content": crawled_result["full_content"],
-                            "content_blocks": crawled_result["content_blocks"],
-                            "metadata": crawled_result["metadata"],
-                            "citations": crawled_result["citations"],
-                            "links": crawled_result.get("links", []),
-                            "images": crawled_result.get("images", [])
-                        })
-                
-                combined_results.append(combined_result)
-            
-            crawled_count = sum(1 for r in combined_results if r["crawled"])
-            total_citations = sum(len(r.get("citations", [])) for r in combined_results)
-            
-            return {
-                "success": True,
-                "query": query,
-                "search_results_count": len(search_results),
-                "crawled_results_count": crawled_count,
-                "total_citations": total_citations,
-                "results": combined_results,
-                "summary": f"Found {len(search_results)} search results, crawled {crawled_count} with full content extraction"
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Search and crawl failed: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-                "search_results": [],
-                "crawled_results": []
-            }
-    
     async def _get_extraction_strategy(self, strategy_name: str, chunking_strategy: str, word_count_threshold: int):
-        """Get configured extraction strategy"""
-        try:
-            from crawl4ai import LLMExtractionStrategy, CosineStrategy, RegexChunking, LLMConfig
-            
-            # Configure chunking strategy
-            if chunking_strategy == "RegexChunking":
-                chunking = RegexChunking()
-            else:  # Default to RegexChunking for now (other strategies need different imports)
-                chunking = RegexChunking()
-            
-            # Configure extraction strategy
-            if strategy_name == "LLMExtractionStrategy":
-                return LLMExtractionStrategy(
-                    llm_config=LLMConfig(provider="openai"),  # Use new LLMConfig approach
-                    instruction="Extract the main content, key points, and important information from this web page. Focus on factual content, quotes, data, and key insights. Format as structured JSON with content blocks.",
-                    extraction_type="block",
-                    apply_chunking=True,
-                    chunking_strategy=chunking,
-                    word_count_threshold=word_count_threshold
-                )
-            elif strategy_name == "CosineStrategy":
-                return CosineStrategy(
-                    semantic_filter="Extract main content and key information",
-                    word_count_threshold=word_count_threshold,
-                    apply_chunking=True,
-                    chunking_strategy=chunking
-                )
-            else:  # Basic extraction - return None to use default
-                return None
-                
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to configure extraction strategy: {e}, using basic extraction")
-            # Return a simple extraction config that doesn't require complex imports
-            return None
+        """
+        Get configured extraction strategy
+        
+        NOTE: This method is deprecated - extraction strategies are now handled
+        by the Crawl4AI service via gRPC. This is kept for backward compatibility
+        but should not be used for new code.
+        """
+        # No longer needed - extraction strategies are configured in the gRPC service
+        # This method is kept for compatibility but returns None
+        logger.debug(f"⚠️ _get_extraction_strategy called but extraction is handled by Crawl4AI service")
+        return None
     
     def _generate_citations(self, metadata: Dict[str, Any], content_blocks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Generate proper citations for crawled content"""
@@ -730,3 +574,79 @@ class Crawl4AIWebTools:
                 logger.info("✅ Crawl4AI crawler closed")
             except Exception as e:
                 logger.warning(f"⚠️ Error closing Crawl4AI crawler: {e}")
+
+
+# Module-level wrapper functions for tool registry
+_crawl4ai_instance = None
+
+async def get_crawl4ai_instance():
+    """Get or create singleton Crawl4AI tools instance"""
+    global _crawl4ai_instance
+    if _crawl4ai_instance is None:
+        _crawl4ai_instance = Crawl4AIWebTools()
+    return _crawl4ai_instance
+
+async def crawl_web_content(
+    url: Optional[str] = None,
+    urls: Optional[List[str]] = None,
+    extraction_strategy: str = "markdown",  # Always markdown - we don't configure Crawl4AI with LLM
+    chunking_strategy: str = "NlpSentenceChunking",
+    css_selector: Optional[str] = None,
+    word_count_threshold: int = 10,
+    user_id: str = None
+) -> Dict[str, Any]:
+    """
+    Module-level wrapper for crawl_web_content tool
+    
+    Accepts either single URL or multiple URLs for backward compatibility.
+    
+    Note: Always uses markdown extraction. We don't configure Crawl4AI with an LLM
+    since we have our own LLM infrastructure for processing content.
+    """
+    instance = await get_crawl4ai_instance()
+    
+    # Handle both single URL and multiple URLs
+    if url and not urls:
+        urls_list = [url]
+    elif urls and not url:
+        urls_list = urls
+    elif url and urls:
+        urls_list = urls + [url]
+    else:
+        return {
+            "success": False,
+            "error": "Must provide either 'url' or 'urls' parameter",
+            "results": [],
+            "urls_crawled": 0,
+            "successful_crawls": 0
+        }
+    
+    return await instance.crawl_web_content(
+        urls=urls_list,
+        extraction_strategy=extraction_strategy,
+        chunking_strategy=chunking_strategy,
+        css_selector=css_selector,
+        word_count_threshold=word_count_threshold,
+        user_id=user_id
+    )
+
+async def crawl_site(
+    seed_url: str,
+    query_criteria: str,
+    max_pages: int = 50,
+    max_depth: int = 2,
+    allowed_path_prefix: Optional[str] = None,
+    include_pdfs: bool = False,
+    user_id: str = None
+) -> Dict[str, Any]:
+    """Module-level wrapper for crawl_site tool"""
+    instance = await get_crawl4ai_instance()
+    return await instance.crawl_site(
+        seed_url=seed_url,
+        query_criteria=query_criteria,
+        max_pages=max_pages,
+        max_depth=max_depth,
+        allowed_path_prefix=allowed_path_prefix,
+        include_pdfs=include_pdfs,
+        user_id=user_id
+    )

@@ -19,24 +19,12 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js for Crawl4AI browser dependencies
-RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
-    && apt-get install -y nodejs
-
-# Install Playwright browsers for Crawl4AI - ROOSEVELT'S MINIMAL INSTALL
-RUN pip install playwright \
-    && playwright install chromium
-
 # Set working directory
 WORKDIR /app
 
 # Copy requirements and install Python dependencies
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Install Crawl4AI and run setup
-RUN pip install crawl4ai>=0.7.2 \
-    && crawl4ai-setup
 
 # Copy verification script first
 COPY backend/verify_spacy.py .
@@ -60,7 +48,8 @@ RUN python -m grpc_tools.protoc \
     /app/protos/tool_service.proto \
     /app/protos/orchestrator.proto \
     /app/protos/vector_service.proto \
-    /app/protos/data_service.proto
+    /app/protos/data_service.proto \
+    /app/protos/crawl_service.proto
 
 # Make startup script executable
 RUN chmod +x docker-entrypoint.sh

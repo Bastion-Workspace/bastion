@@ -15,7 +15,7 @@ class SimpleIntentResult(BaseModel):
     **BULLY!** Keep it lean - agent, permission, confidence (reasoning optional).
     """
     # Required routing target
-    target_agent: str = Field(description="Agent to route to (research_agent, chat_agent, rules_editing_agent, etc.)")
+    target_agent: str = Field(description="Agent to route to (research_agent, chat_agent, etc.) Note: Editing agents migrated to llm-orchestrator gRPC service")
 
     # Semantic action type for intelligent routing
     action_intent: str = Field(

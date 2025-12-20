@@ -219,8 +219,23 @@ class GRPCContextGatherer:
                 )
                 logger.info(f"✅ CONTEXT: Added persona (ai_name={user_settings.ai_name})")
             
-            # Add model preferences from settings service
+            # Add user preferred name and AI context
             from services.settings_service import settings_service
+            try:
+                preferred_name = await settings_service.get_user_preferred_name(user_id)
+                ai_context = await settings_service.get_user_ai_context(user_id)
+                
+                if preferred_name:
+                    grpc_request.metadata["user_preferred_name"] = preferred_name
+                    logger.info(f"✅ CONTEXT: Added preferred name: {preferred_name}")
+                
+                if ai_context:
+                    grpc_request.metadata["user_ai_context"] = ai_context
+                    logger.info(f"✅ CONTEXT: Added AI context ({len(ai_context)} chars)")
+            except Exception as e:
+                logger.warning(f"⚠️ CONTEXT: Failed to add user context: {e}")
+            
+            # Add model preferences from settings service
             try:
                 chat_model = await settings_service.get_llm_model()
                 fast_model = await settings_service.get_classification_model()
@@ -253,9 +268,15 @@ class GRPCContextGatherer:
             
             logger.info(f"🔍 EDITOR CONTEXT CHECK: request_context keys={list(request_context.keys())}, active_editor={active_editor is not None}, editor_preference={editor_preference}")
             
-            # Skip if user said to ignore editor
+            # CRITICAL: Always send editor_preference in metadata, even when active_editor is not sent
+            # This ensures the orchestrator can block editor-gated agents when preference is 'ignore'
+            if editor_preference:
+                grpc_request.metadata["editor_preference"] = editor_preference
+                logger.info(f"📝 EDITOR PREFERENCE: Added to metadata = '{editor_preference}'")
+            
+            # Skip if user said to ignore editor (don't send active_editor, but editor_preference is already in metadata)
             if editor_preference == "ignore":
-                logger.info(f"⚠️ EDITOR CONTEXT: Skipping - editor_preference is 'ignore'")
+                logger.info(f"⚠️ EDITOR CONTEXT: Skipping active_editor - editor_preference is 'ignore' (but editor_preference sent in metadata)")
                 return
             
             # Skip if no editor context
@@ -337,7 +358,7 @@ class GRPCContextGatherer:
             
             grpc_request.active_editor.CopyFrom(
                 orchestrator_pb2.ActiveEditor(
-                    is_editable=True,
+                    is_editable=is_editable if is_editable is not None else True,
                     filename=filename,
                     language=active_editor.get("language", "markdown"),
                     content=active_editor.get("content", ""),
@@ -510,29 +531,39 @@ class GRPCContextGatherer:
         state: Optional[Dict[str, Any]]
     ) -> None:
         """
-        DEPRECATED: This method is no longer needed.
+        Load agent routing metadata from backend conversation database
         
-        The llm-orchestrator loads primary_agent_selected directly from LangGraph 
-        checkpoint in StreamChat handler, so backend doesn't need to pass it.
-        
-        Keeping this method for backward compatibility but it's a no-op.
+        This provides agent continuity information (primary_agent_selected, last_agent)
+        to the orchestrator for proper routing decisions. Backend database is the
+        source of truth for conversation-level agent metadata.
         """
         try:
-            if not state:
-                # Expected case - orchestrator loads checkpoint directly
-                logger.debug(f"📋 CONTEXT: No state from backend (expected - orchestrator loads checkpoint)")
-                return
+            # Load agent metadata from backend database
+            from services.conversation_service import ConversationService
+            conversation_service = ConversationService()
             
-            # If state is provided (shouldn't happen anymore), still handle it
-            shared_memory = state.get("shared_memory", {}) or {}
-            primary_agent = shared_memory.get("primary_agent_selected")
-            last_agent = shared_memory.get("last_agent")
+            agent_metadata = await conversation_service.get_agent_metadata(
+                conversation_id=grpc_request.conversation_id,
+                user_id=grpc_request.user_id
+            )
             
-            if primary_agent or last_agent:
-                logger.debug(f"📋 CONTEXT: Backend provided agent continuity (primary={primary_agent}, last={last_agent}) - orchestrator will override from checkpoint")
+            if agent_metadata:
+                # Add to metadata for orchestrator
+                primary_agent = agent_metadata.get("primary_agent_selected")
+                last_agent = agent_metadata.get("last_agent")
+                
+                if primary_agent:
+                    grpc_request.metadata["primary_agent_selected"] = primary_agent
+                    logger.info(f"📋 CONTEXT: Loaded primary_agent_selected from backend DB: {primary_agent}")
+                
+                if last_agent:
+                    grpc_request.metadata["last_agent"] = last_agent
+                    logger.debug(f"📋 CONTEXT: Loaded last_agent from backend DB: {last_agent}")
+            else:
+                logger.debug(f"📋 CONTEXT: No agent metadata in backend DB (new conversation or first request)")
             
         except Exception as e:
-            logger.debug(f"Context gatherer agent continuity check: {e}")
+            logger.warning(f"⚠️ Failed to load agent metadata from backend: {e}")
     
     def _log_context_summary(self, grpc_request: orchestrator_pb2.ChatRequest) -> None:
         """Log summary of what context was included"""

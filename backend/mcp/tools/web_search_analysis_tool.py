@@ -215,7 +215,7 @@ class WebSearchAnalysisTool:
         guidance += "• Potential bias or perspective\n\n"
         guidance += "Select 1-3 of the most valuable sources for ingestion into the knowledge base. "
         guidance += "Focus on high-quality, relevant content that adds unique value. "
-        guidance += "CRITICAL: You must follow this analysis with web_ingest_selected_results to actually store the chosen content using Crawl4AI for superior content extraction."
+        guidance += "CRITICAL: You must follow this analysis with web_ingest_selected_results to actually store the chosen content."
         
         return guidance
     
@@ -224,7 +224,7 @@ class WebSearchAnalysisTool:
         steps = [
             "Review each result for relevance and quality",
             "Select the most valuable sources for ingestion (typically 1-3 best sources)",
-            "IMMEDIATELY use 'web_ingest_selected_results' to ingest chosen sources using Crawl4AI for superior content extraction",
+            "IMMEDIATELY use 'web_ingest_selected_results' to ingest chosen sources",
             "Use the ingested content in your final response with proper citations",
             "Consider searching for additional perspectives if critical information is still missing"
         ]

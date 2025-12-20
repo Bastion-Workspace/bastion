@@ -86,7 +86,7 @@ class TeamPostService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", author_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", author_id)
                 
                 # Create post
                 await conn.execute("""
@@ -165,7 +165,7 @@ class TeamPostService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Build query with pagination
                 query = """
@@ -228,7 +228,7 @@ class TeamPostService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Get post
                 post_row = await conn.fetchrow("""
@@ -316,7 +316,14 @@ class TeamPostService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                
+                # Get user role for RLS
+                user_role_row = await conn.fetchrow("""
+                    SELECT role FROM users WHERE user_id = $1
+                """, user_id)
+                user_role = user_role_row["role"] if user_role_row else "user"
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_role)
                 
                 # Check post exists and user has access
                 post_row = await conn.fetchrow("""
@@ -370,7 +377,14 @@ class TeamPostService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                
+                # Get user role for RLS
+                user_role_row = await conn.fetchrow("""
+                    SELECT role FROM users WHERE user_id = $1
+                """, user_id)
+                user_role = user_role_row["role"] if user_role_row else "user"
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_role)
                 
                 # Remove reaction
                 result = await conn.execute("""
@@ -388,12 +402,13 @@ class TeamPostService:
             logger.error(f"Failed to remove reaction: {e}")
             raise
     
-    async def get_post_reactions(self, post_id: str) -> List[Dict[str, Any]]:
+    async def get_post_reactions(self, post_id: str, user_id: str) -> List[Dict[str, Any]]:
         """
         Get reactions for a post grouped by type
         
         Args:
             post_id: Post ID
+            user_id: User ID requesting (for RLS context)
         
         Returns:
             List of reaction dicts with counts
@@ -402,6 +417,16 @@ class TeamPostService:
         
         try:
             async with self.db_pool.acquire() as conn:
+                # Set user context for RLS
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                
+                # Get user role for RLS
+                user_role_row = await conn.fetchrow("""
+                    SELECT role FROM users WHERE user_id = $1
+                """, user_id)
+                user_role = user_role_row["role"] if user_role_row else "user"
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_role)
+                
                 # Get reactions grouped by type
                 rows = await conn.fetch("""
                     SELECT 
@@ -446,7 +471,7 @@ class TeamPostService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", author_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", author_id)
                 
                 # Check post exists and user has access
                 post_row = await conn.fetchrow("""
@@ -504,12 +529,13 @@ class TeamPostService:
             logger.error(f"Failed to create comment: {e}")
             raise
     
-    async def get_post_comments(self, post_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    async def get_post_comments(self, post_id: str, user_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         """
         Get comments for a post
         
         Args:
             post_id: Post ID
+            user_id: User ID requesting (for RLS context)
             limit: Maximum comments to return
         
         Returns:
@@ -519,6 +545,16 @@ class TeamPostService:
         
         try:
             async with self.db_pool.acquire() as conn:
+                # Set user context for RLS
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                
+                # Get user role for RLS
+                user_role_row = await conn.fetchrow("""
+                    SELECT role FROM users WHERE user_id = $1
+                """, user_id)
+                user_role = user_role_row["role"] if user_role_row else "user"
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_role)
+                
                 rows = await conn.fetch("""
                     SELECT 
                         pc.*,
@@ -566,7 +602,7 @@ class TeamPostService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Get comment with post team
                 comment_row = await conn.fetchrow("""
@@ -625,10 +661,20 @@ class TeamPostService:
         """Convert post row to dict with reactions and comments"""
         post_id = str(row["post_id"])
         
-        # Get reactions
-        reactions = await self.get_post_reactions(post_id)
+        # Get reactions (with RLS context)
+        reactions = await self.get_post_reactions(post_id, user_id)
         
-        # Get comment count
+        # Get comment count (with RLS context - need to set it in this connection)
+        # Set user context for RLS
+        await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+        
+        # Get user role for RLS
+        user_role_row = await conn.fetchrow("""
+            SELECT role FROM users WHERE user_id = $1
+        """, user_id)
+        user_role = user_role_row["role"] if user_role_row else "user"
+        await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_role)
+        
         comment_count = await conn.fetchval("""
             SELECT COUNT(*) FROM post_comments
             WHERE post_id = $1 AND deleted_at IS NULL

@@ -316,6 +316,71 @@ class DocumentFileHandler(FileSystemEventHandler):
             traceback.print_exc()
             return None
     
+    async def _resolve_deepest_folder_id_for_team(self, folder_parts: tuple, team_id: str, team_creator_id: str) -> Optional[str]:
+        """
+        Resolve folder hierarchy for team folders from path parts to find the deepest folder_id
+        
+        Args:
+            folder_parts: Tuple of folder names from path (e.g., ('Team Documents', 'SubFolder'))
+            team_id: Team ID
+            team_creator_id: User ID of the team creator (for RLS context)
+            
+        Returns:
+            folder_id of the deepest folder, or None if not found
+        """
+        try:
+            if not folder_parts:
+                return None
+            
+            # Get team folders from database using database helper
+            from services.database_manager.database_helpers import fetch_all
+            
+            # Use team creator's context for RLS (they have admin rights to see all team folders)
+            folders_data = await fetch_all(
+                "SELECT folder_id, name, parent_folder_id FROM document_folders WHERE team_id = $1",
+                team_id,
+                rls_context={'user_id': team_creator_id, 'user_role': 'admin'}
+            )
+            
+            logger.info(f"🔍 RESOLVE TEAM: Got {len(folders_data)} team folders from database for team {team_id}")
+            logger.info(f"🔍 RESOLVE TEAM: Looking for path: {folder_parts}")
+            
+            # Build a lookup map: (name, parent_folder_id) -> folder_id
+            folder_map = {}
+            for f in folders_data:
+                name = f.get('name')
+                parent_id = f.get('parent_folder_id')
+                folder_id = f.get('folder_id')
+                folder_map[(name, parent_id)] = folder_id
+            
+            logger.info(f"🔍 RESOLVE TEAM: Built folder map with {len(folder_map)} entries")
+            
+            # Walk the folder hierarchy from root to deepest
+            parent_folder_id = None
+            current_folder_id = None
+            
+            for folder_name in folder_parts:
+                # Look for folder with this name and current parent
+                key = (folder_name, parent_folder_id)
+                logger.info(f"🔍 RESOLVE TEAM: Looking for folder '{folder_name}' with parent {parent_folder_id}")
+                
+                if key in folder_map:
+                    current_folder_id = folder_map[key]
+                    parent_folder_id = current_folder_id  # Next level uses this as parent
+                    logger.info(f"✅ RESOLVE TEAM: Found folder '{folder_name}' → {current_folder_id}")
+                else:
+                    # Folder doesn't exist in hierarchy - return None
+                    logger.info(f"❌ RESOLVE TEAM: Folder '{folder_name}' NOT found under parent {parent_folder_id}")
+                    return None
+            
+            return current_folder_id
+            
+        except Exception as e:
+            logger.error(f"❌ Error resolving team folder hierarchy: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+    
     def on_modified(self, event: FileSystemEvent):
         """Handle file modification"""
         if event.is_directory or self._should_ignore_path(event.src_path, event.is_directory):
@@ -436,7 +501,7 @@ class DocumentFileHandler(FileSystemEventHandler):
                 if chunks:
                     logger.info(f"✅ Re-processed {len(chunks)} chunks (no embedding) for org document {document_id}")
             # Check if document is exempt from vectorization
-            elif await self.document_service.document_repository.is_document_exempt(document_id):
+            elif await self.document_service.document_repository.is_document_exempt(document_id, user_id):
                 logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping embedding and KG extraction")
             elif chunks:
                 # **ROOSEVELT'S COMPLETE CLEANUP!** Delete old vectors AND knowledge graph entities
@@ -529,7 +594,10 @@ class DocumentFileHandler(FileSystemEventHandler):
     async def _handle_file_deleted(self, file_path: str):
         """Process file deletion
         
-        **ROOSEVELT'S DELETION CAVALRY CHARGE!** 🗑️
+        Handles file deletions detected by the file system watcher.
+        This may be called when:
+        1. File is deleted externally (outside the API) - need to clean up DB record
+        2. File is deleted by API - document may already be deleted, so check first
         """
         try:
             logger.info(f"🗑️ Processing deleted file: {file_path}")
@@ -545,9 +613,16 @@ class DocumentFileHandler(FileSystemEventHandler):
             user_id = doc_info['user_id']
             folder_id = doc_info['folder_id']
             
+            # Verify document still exists in database before attempting deletion
+            # This handles the case where the API already deleted it
+            existing_doc = await self.document_service.document_repository.get_by_id(document_id)
+            if not existing_doc:
+                logger.info(f"📄 Document {document_id} already deleted from database (likely by API) - skipping")
+                return
+            
             logger.info(f"🗑️ Deleting document record for {document_id} (file was deleted)")
             
-            # **BULLY!** Emit WebSocket notification BEFORE deletion so we can include folder_id!
+            # Emit WebSocket notification BEFORE deletion so we can include folder_id
             try:
                 from services.file_manager.websocket_notifier import WebSocketNotifier
                 from utils.websocket_manager import get_websocket_manager
@@ -566,12 +641,17 @@ class DocumentFileHandler(FileSystemEventHandler):
                 logger.error(f"❌ Failed to send deletion notification: {e}")
             
             # Delete from vector store
-            await self.document_service.embedding_manager.delete_document_chunks(document_id, user_id)
+            try:
+                await self.document_service.embedding_manager.delete_document_chunks(document_id, user_id)
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to delete embeddings for {document_id}: {e}")
             
-            # Delete from database
-            await self.document_service.document_repository.delete(document_id)
-            
-            logger.info(f"✅ Document deleted from system: {document_id}")
+            # Delete from database with proper user context
+            success = await self.document_service.document_repository.delete(document_id, user_id)
+            if success:
+                logger.info(f"✅ Document deleted from system: {document_id}")
+            else:
+                logger.warning(f"⚠️ Document {document_id} may have already been deleted")
             
         except Exception as e:
             logger.error(f"❌ Error handling file deletion: {e}")
@@ -649,6 +729,55 @@ class DocumentFileHandler(FileSystemEventHandler):
                 else:
                     logger.warning(f"⚠️ Root global folder deleted - skipping")
                     return
+            
+            elif collection_dir == 'Teams' and uploads_idx + 2 < len(parts):
+                # Team folder: uploads/Teams/{team_id}/documents/{folders...}
+                collection_type = 'team'
+                team_id = parts[uploads_idx + 2]
+                
+                # Get the team creator directly from database for RLS context
+                try:
+                    from services.database_manager.database_helpers import fetch_one
+                    team = await fetch_one(
+                        "SELECT team_id, created_by FROM teams WHERE team_id = $1",
+                        team_id,
+                        rls_context={'user_id': '', 'user_role': 'admin'}  # Admin context to bypass RLS for team lookup
+                    )
+                    if not team:
+                        logger.warning(f"⚠️ Team not found for deletion: {team_id}")
+                        return
+                    # Use team creator as user_id for RLS context (they have admin rights)
+                    user_id = team.get('created_by')
+                    if not user_id:
+                        logger.warning(f"⚠️ Team {team_id} has no creator recorded")
+                        return
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not find team creator for {team_id}: {e}")
+                    return
+                
+                # Skip if this is just the team_id directory or documents directory
+                if uploads_idx + 3 >= len(parts):
+                    logger.info(f"📁 Team root directory - no folder record to delete")
+                    return
+                
+                documents_dir = parts[uploads_idx + 3]
+                if documents_dir != 'documents':
+                    logger.warning(f"⚠️ Unexpected team folder structure: {folder_path}")
+                    return
+                
+                # Get folder path parts (everything after documents/)
+                folder_start_idx = uploads_idx + 4
+                folder_parts = parts[folder_start_idx:]
+                
+                if not folder_parts:
+                    logger.info(f"📁 Team documents root - no folder record to delete")
+                    return
+                
+                logger.info(f"📁 Deleted team folder path: {' -> '.join(folder_parts)}")
+                
+                # Resolve to folder_id using team_id and creator
+                folder_id = await self._resolve_deepest_folder_id_for_team(tuple(folder_parts), team_id, user_id)
+            
             else:
                 logger.warning(f"⚠️ Unknown collection directory: {collection_dir}")
                 return
@@ -772,6 +901,13 @@ class DocumentFileHandler(FileSystemEventHandler):
                 
                 folder_start_idx = uploads_idx + 2
                 folder_parts = parts[folder_start_idx:]
+            
+            elif collection_dir == 'Teams':
+                # Team folders are managed by the application (team_service, folder_service)
+                # File watcher just observes them - no need to recreate in database
+                logger.info(f"📁 Team folder created: {folder_path} (managed by application)")
+                return
+            
             else:
                 logger.warning(f"⚠️ Unknown collection directory: {collection_dir}")
                 return
@@ -862,9 +998,33 @@ class DocumentFileHandler(FileSystemEventHandler):
                 document_id, new_filename
             )
             
-            # Emit WebSocket update
+            # Get actual document ownership from database to determine correct collection
+            # This ensures we update the right collection (team > user > global)
+            try:
+                actual_doc = await self.document_service.document_repository.get_by_id(document_id)
+                if actual_doc:
+                    # Get actual ownership info from document record
+                    actual_user_id = getattr(actual_doc, 'user_id', None)
+                    actual_team_id = getattr(actual_doc, 'team_id', None)
+                    
+                    # Update embedding metadata to reflect new filename
+                    # Use actual document ownership, not path-derived user_id
+                    await self.document_service._update_qdrant_metadata(
+                        document_id=document_id,
+                        document_filename=new_filename,
+                        user_id=actual_user_id,
+                        team_id=actual_team_id
+                    )
+                    logger.info(f"✅ Updated embedding metadata for moved file: {document_id} (team={actual_team_id}, user={actual_user_id})")
+                else:
+                    logger.warning(f"⚠️ Could not fetch document record for {document_id} - skipping vector update")
+            except Exception as vector_error:
+                # Non-critical: database update succeeded, vector update is optional
+                logger.warning(f"⚠️ Failed to update vector metadata for moved file (non-critical): {vector_error}")
+            
+            # Emit WebSocket update (use path-derived user_id for notification routing)
             await self.document_service._emit_document_status_update(
-                document_id, "updated", doc_info['user_id']
+                document_id, "updated", doc_info.get('user_id')
             )
             
             logger.info(f"✅ Document filename updated: {document_id}")

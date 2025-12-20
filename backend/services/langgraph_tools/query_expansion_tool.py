@@ -29,7 +29,7 @@ class QueryExpansionResult(BaseModel):
     expansion_count: int = Field(..., description="Number of expansions generated")
 
 
-async def expand_query(original_query: str, num_expansions: int = 2, expansion_type: str = "semantic") -> str:
+async def expand_query(original_query: str, num_expansions: int = 2, expansion_type: str = "semantic", conversation_context: Optional[str] = None, user_id: Optional[str] = None) -> str:
     """
     Generate alternative search queries for better recall across local and web searches.
     
@@ -40,6 +40,7 @@ async def expand_query(original_query: str, num_expansions: int = 2, expansion_t
         original_query: The query to expand
         num_expansions: Number of alternative queries (1-5)
         expansion_type: Type of expansion (currently informational only)
+        conversation_context: Optional conversation context (last 2 messages) to help resolve vague references
         
     Returns:
         JSON string with original query, expanded queries, and combined list
@@ -53,7 +54,9 @@ async def expand_query(original_query: str, num_expansions: int = 2, expansion_t
         service = await get_query_expansion_service()
         expanded_queries = await service.expand_query(
             query_text=original_query,
-            num_expansions=num_expansions
+            num_expansions=num_expansions,
+            conversation_context=conversation_context,
+            user_id=user_id
         )
         
         # Create comprehensive result
@@ -91,6 +94,6 @@ async def expand_query_universal(original_query: str, num_expansions: int = 2, e
     Universal query expansion function for tool registry
     
     This is the entry point called by the centralized tool registry.
-    The user_id parameter is provided by the registry but not used for expansion.
+    The user_id parameter is used for timezone-aware date/time context.
     """
-    return await expand_query(original_query, num_expansions, expansion_type)
+    return await expand_query(original_query, num_expansions, expansion_type, user_id=user_id)

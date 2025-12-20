@@ -528,7 +528,9 @@ RESEARCH PRIVACY GUIDANCE:
         user_settings: Optional[UserPromptSettings] = None,
         conversation_history: Optional[List[Dict]] = None,
         timezone_str: str = "UTC",
-        additional_context: Optional[str] = None
+        additional_context: Optional[str] = None,
+        preferred_name: Optional[str] = None,
+        user_context: Optional[str] = None
     ) -> AssembledPrompt:
         """Assemble a complete prompt from components based on settings and context"""
         
@@ -565,6 +567,14 @@ RESEARCH PRIVACY GUIDANCE:
         persona_components = [c for c in sorted_components if c.component_type == "persona"]
         if persona_components:
             prompt_sections.append(persona_components[0].content)
+        
+        # Add user preferred name if provided
+        if preferred_name and preferred_name.strip():
+            prompt_sections.append(f"USER PREFERENCE:\nThe user prefers to be addressed as: {preferred_name.strip()}")
+        
+        # Add user context if provided
+        if user_context and user_context.strip():
+            prompt_sections.append(f"USER CONTEXT:\n{user_context.strip()}")
         
         # Add tools description
         if tools_description:

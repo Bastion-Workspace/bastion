@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     VECTOR_SERVICE_URL: str = "vector-service:50053"
     DATA_SERVICE_HOST: str = "data-service"
     DATA_SERVICE_PORT: int = 50054
+    CRAWL4AI_SERVICE_HOST: str = os.getenv("CRAWL4AI_SERVICE_HOST", "crawl4ai-service")
+    CRAWL4AI_SERVICE_PORT: int = int(os.getenv("CRAWL4AI_SERVICE_PORT", "50055"))
     
     # WebDAV Configuration for OrgMode mobile sync
     WEBDAV_HOST: str = "0.0.0.0"

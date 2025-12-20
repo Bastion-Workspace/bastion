@@ -105,6 +105,13 @@ You MUST respond with valid JSON matching this schema:
 | EU Countries  | Support for Ukraine | Largely supportive | Aligned messaging |
 ```
 
+**CRITICAL TABLE FORMATTING RULES**:
+- Separator row MUST use exactly 3+ dashes per column: `|----------|----------|`
+- NEVER use long dashes that span the entire column width
+- Each column separator should be: `|` followed by 3+ dashes, ending with `|`
+- Example CORRECT: `|------|------|` or `|-------|-------|`
+- Example WRONG: `|-------------------------------------------------------------|--------------------------------|`
+
 **TIMELINE FORMATTING EXAMPLE**:
 ```markdown
 # Timeline: History of Tequila
@@ -192,10 +199,18 @@ You MUST respond with valid JSON matching this schema:
             if not system_prompt:
                 raise ValueError("System prompt not prepared")
             
+            # Extract conversation history for proper message structure
             # Call LLM with low temperature for consistent formatting - pass state to access user's model selection
             start_time = datetime.now()
             llm = self._get_llm(temperature=0.1, state=state)
-            response = await llm.ainvoke(self._build_messages(system_prompt, query))
+            messages_list = state.get("messages", [])
+            llm_messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=query,
+                messages_list=messages_list,
+                look_back_limit=5
+            )
+            response = await llm.ainvoke(llm_messages)
             processing_time = (datetime.now() - start_time).total_seconds()
             
             # Parse structured response

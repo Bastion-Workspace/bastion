@@ -43,10 +43,10 @@ class EmbeddingServiceWrapper:
         self.vector_store = await get_vector_store()
         logger.info("Vector Store Service initialized")
         
-        # Initialize Vector Service for embedding generation
+        # Initialize Vector Service for embedding generation (non-blocking)
         logger.info("Initializing Vector Service client for embeddings")
-        self.vector_service_client = await get_vector_service_client()
-        logger.info("Vector Service client initialized")
+        self.vector_service_client = await get_vector_service_client(required=False)
+        logger.info("Vector Service client initialized (may retry connection later)")
         
         self._initialized = True
     

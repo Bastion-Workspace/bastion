@@ -579,16 +579,13 @@ This agent performs direct RSS parsing without LLM inference.
         try:
             logger.info(f"🕷️ RSS AGENT: Extracting full content from {url}")
             
-            # Import Crawl4AI tools
-            from services.langgraph_tools.crawl4ai_web_tools import Crawl4AIWebTools
+            # Use module-level wrapper for singleton management
+            from services.langgraph_tools.crawl4ai_web_tools import crawl_web_content
             
-            # Initialize Crawl4AI tools
-            crawl4ai_tools = Crawl4AIWebTools()
-            
-            # Extract content using Crawl4AI
-            result = await crawl4ai_tools.crawl_web_content(
-                urls=[url],
-                extraction_strategy="LLMExtractionStrategy",
+            # Extract content using Crawl4AI (markdown extraction - we don't configure Crawl4AI with LLM)
+            result = await crawl_web_content(
+                url=url,
+                extraction_strategy="markdown",
                 chunking_strategy="NlpSentenceChunking",
                 word_count_threshold=10
             )

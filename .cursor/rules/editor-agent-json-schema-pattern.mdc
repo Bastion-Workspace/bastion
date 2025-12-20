@@ -1,0 +1,256 @@
+# Editor Agent JSON Schema Best Practices
+
+## Universal Pattern for All Editor-Type Agents
+
+All agents that return `ManuscriptEdit` structured output (fiction_editing_agent, outline_editing_agent, rules_editing_agent, character_development_agent, etc.) MUST follow these patterns.
+
+## ✅ CORRECT: Valid JSON Example in System Prompt
+
+**Show a COMPLETE, VALID JSON example that the LLM can copy:**
+
+```python
+def _build_system_prompt(self) -> str:
+    return (
+        "You are a [ROLE] agent. Persona disabled.\n\n"
+        "="*80 + "\n"
+        "STRUCTURED OUTPUT REQUIRED\n"
+        "="*80 + "\n\n"
+        "You MUST return ONLY raw JSON (no prose, no markdown fences, no explanatory text).\n\n"
+        "REQUIRED STRUCTURE (valid JSON example):\n\n"
+        "{\n"
+        '  "target_filename": "document.md",\n'
+        '  "scope": "chapter",\n'
+        '  "summary": "Brief description of changes",\n'
+        '  "safety": "medium",\n'
+        '  "chapter_index": 0,\n'
+        '  "operations": [\n'
+        "    {\n"
+        '      "op_type": "insert_after_heading",\n'
+        '      "start": 0,\n'
+        '      "end": 0,\n'
+        '      "anchor_text": "Exact text to insert after",\n'
+        '      "text": "New content here"\n'
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "FIELD DEFINITIONS:\n"
+        "- target_filename: Name of file (string, REQUIRED)\n"
+        "- scope: Edit scope - \"paragraph\", \"chapter\", or \"multi_chapter\" (REQUIRED)\n"
+        "- summary: Brief description of changes (string, REQUIRED)\n"
+        "- safety: Risk level - \"low\", \"medium\", or \"high\" (REQUIRED, default \"medium\")\n"
+        "- chapter_index: Zero-based chapter index (integer, optional, null for multi-chapter)\n"
+        "- operations: Array of edit operations (REQUIRED, can be empty for questions/analysis)\n\n"
+        # ... rest of prompt ...
+    )
+```
+
+## ❌ WRONG: Schema Notation with Fake Fields
+
+**DO NOT do this:**
+
+```python
+# ❌ BAD - Schema notation, not valid JSON
+"{\n"
+'  "type": "ManuscriptEdit",\n'  # ← Fake field! Not in Pydantic model!
+'  "target_filename": string (REQUIRED),\n'  # ← Not valid JSON!
+'  "scope": one of ["paragraph", "chapter", "multi_chapter"] (REQUIRED),\n'
+'  "operations": [\n'
+```
+
+**Why this is bad:**
+1. `"type": "ManuscriptEdit"` field **does not exist** in the ManuscriptEdit Pydantic model
+2. Inline comments like `(REQUIRED)` and `one of [...]` are schema notation, not valid JSON
+3. LLM might think these are required fields and get confused about the structure
+4. Not showing a concrete example makes it harder for LLM to understand
+
+## ✅ CORRECT: Concrete Example Structure
+
+**Always show the ACTUAL Pydantic model structure:**
+
+From `orchestrator/models/editor_models.py`:
+
+```python
+class ManuscriptEdit(BaseModel):
+    target_filename: str
+    operations: List[EditorOperation]
+    scope: Literal["paragraph", "chapter", "multi_chapter"]
+    chapter_index: Optional[int] = None
+    safety: Literal["low", "medium", "high"] = "medium"
+    summary: str
+    clarifying_questions: Optional[List[str]] = None
+```
+
+**NO `type` field!** Show exactly what the model expects.
+
+## ✅ CORRECT: Reinforce at Generation Time
+
+In addition to the system prompt, reinforce the structure RIGHT BEFORE the LLM generates:
+
+```python
+# In the generation message/context (e.g., in subgraphs or final user message):
+messages.append(HumanMessage(content=(
+    "⚠️⚠️⚠️ CRITICAL: REQUIRED JSON STRUCTURE ⚠️⚠️⚠️\n\n"
+    "Your response MUST be a complete ManuscriptEdit object with this structure:\n\n"
+    "{\n"
+    '  "target_filename": "manuscript.md",\n'
+    '  "scope": "chapter",\n'
+    '  "summary": "Brief description of what you did",\n'
+    '  "safety": "medium",\n'
+    '  "operations": [\n'
+    "    {\n"
+    '      "op_type": "insert_after_heading",\n'
+    '      "anchor_text": "EXACT text from manuscript to insert after",\n'
+    '      "text": "Your generated content here...",\n'
+    '      "start": 0,\n'
+    '      "end": 0\n'
+    "    }\n"
+    "  ]\n"
+    "}\n\n"
+    "❌ DO NOT return a single operation object!\n"
+    "❌ DO NOT use 'operation' (singular) - must be 'operations' (array)!\n"
+    "❌ DO NOT nest op_type at top level - it goes INSIDE operations array!\n\n"
+)))
+```
+
+## Key Principles
+
+### 1. Show, Don't Tell
+- ✅ Show a valid JSON example the LLM can copy
+- ❌ Don't just describe the schema with notation
+
+### 2. Accurate Field Names
+- ✅ Use ONLY fields that exist in the Pydantic model
+- ❌ Don't add documentation fields like `"type"` that aren't real
+
+### 3. Valid JSON
+- ✅ Show actual JSON with proper syntax
+- ❌ Don't use inline comments or schema notation in the example
+
+### 4. Dual Reinforcement
+- ✅ Show structure in system prompt (early guidance)
+- ✅ Show structure again before generation (immediate reminder)
+- ❌ Don't only show it once at the beginning
+
+### 5. Explicit Anti-Patterns
+- ✅ Tell the LLM what NOT to do (common mistakes)
+- ✅ Show both correct and incorrect examples
+- ❌ Don't assume the LLM knows what's wrong
+
+## Checklist for All Editor Agents
+
+When creating or reviewing an editor agent:
+
+- [ ] System prompt shows complete, valid JSON example (with braces and quotes)
+- [ ] **ALL examples use JSON format, NEVER YAML or XML-style notation**
+- [ ] No fake fields (like `"type"`) in the example
+- [ ] No inline schema notation in the example
+- [ ] Field definitions follow the example (not mixed into it)
+- [ ] Generation message reinforces structure before LLM response
+- [ ] **Explicit "JSON ONLY" warning at top of generation message**
+- [ ] Explicit warnings about common mistakes (singular vs plural, nesting, XML, YAML)
+- [ ] **Final reminder: "Start with { and end with }"**
+- [ ] Example matches actual Pydantic model fields exactly
+- [ ] Both system prompt and generation context show the structure
+
+## Common Mistakes to Avoid
+
+### Mistake 1: Showing YAML or XML Format Instead of JSON
+
+**CRITICAL**: Anthropic Claude has a strong preference for XML-style structured output. If you show YAML-style or ambiguous examples, Claude will return XML tags instead of JSON!
+
+```python
+# ❌ WRONG - YAML-style example (triggers XML output)
+f"  op_type: 'insert_after_heading'\n"
+f"  anchor_text: 'Last sentence'\n"
+f"  text: 'Chapter content'\n"
+
+# ✅ CORRECT - Valid JSON example
+f'{{\n'
+f'  "op_type": "insert_after_heading",\n'
+f'  "anchor_text": "Last sentence",\n'
+f'  "text": "Chapter content"\n'
+f'}}\n'
+```
+
+**Why this matters**: If Claude sees `op_type:` without braces, it interprets this as a tag and returns:
+```xml
+<operation>
+<op_type>insert_after_heading</op_type>
+<text>Chapter content</text>
+</operation>
+```
+
+Instead of:
+```json
+{
+  "operations": [{
+    "op_type": "insert_after_heading",
+    "text": "Chapter content"
+  }]
+}
+```
+
+**Solution**: Be EXTREMELY explicit that you want JSON ONLY:
+- Show ONLY valid JSON examples with braces and quotes
+- Explicitly state "DO NOT use XML tags" 
+- Explicitly state "DO NOT use YAML format"
+- Add reminder: "Start with { and end with }"
+- Add reminder: "Must be valid JSON parseable by json.loads()"
+
+### Mistake 2: Fake `"type"` Field
+```json
+{
+  "type": "ManuscriptEdit",  ❌ Not in Pydantic model!
+  "target_filename": "..."
+}
+```
+
+### Mistake 2: Schema Notation Instead of JSON
+```python
+'  "operations": [ array of operations ]\n'  ❌ Not valid JSON!
+```
+
+### Mistake 3: Only Showing Schema Once
+```python
+# System prompt: shows schema
+# ... 200 lines of instructions ...
+# Generation: no reminder of structure  ❌
+```
+
+### Mistake 4: Incomplete Example
+```json
+{
+  "operations": [...]  ❌ Missing required fields!
+}
+```
+
+## Testing
+
+After implementing these patterns, test with:
+1. **Simple generation**: "Generate chapter 1"
+2. **Check response structure**: Does it match ManuscriptEdit exactly?
+3. **Look for common errors**:
+   - Single operation object instead of array
+   - `"operation"` (singular) instead of `"operations"` (plural)
+   - `op_type` at top level instead of inside operations array
+   - Extra fields like `"type"` that don't exist
+
+## Migration Path for Existing Agents
+
+If an agent has the old pattern:
+
+1. **Find the system prompt** (`_build_system_prompt()`)
+2. **Replace schema notation** with valid JSON example
+3. **Remove fake fields** (especially `"type": "ManuscriptEdit"`)
+4. **Add field definitions** AFTER the example
+5. **Check generation messages** for reinforcement
+6. **Test with a simple request**
+
+## Why This Matters
+
+- **LLM Confusion**: Schema notation with fake fields confuses LLMs about what to return
+- **Parsing Failures**: Wrong structure = Pydantic validation fails = 0 operations returned
+- **User Experience**: Failed generations mean users get no output
+- **Debugging Time**: Hard to diagnose why LLM returned wrong structure
+
+**Following these patterns ensures reliable, consistent structured output across all editor agents.**

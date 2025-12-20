@@ -72,6 +72,7 @@ class FileMoveRequest(BaseModel):
     document_id: str = Field(..., description="Document ID to move")
     new_folder_id: str = Field(..., description="New folder ID")
     user_id: Optional[str] = Field(None, description="User ID for permission check")
+    current_user_role: str = Field(default="user", description="Role of the user moving the file")
 
 
 class FileMoveResponse(BaseModel):

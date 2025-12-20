@@ -50,7 +50,9 @@ import {
   Description as DescriptionIcon,
   ListAlt,
   FolderOpen,
-  MusicNote
+  MusicNote,
+  Movie,
+  Info
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
@@ -65,6 +67,7 @@ import TextCompletionModelSelector from './TextCompletionModelSelector';
 import { useModel } from '../contexts/ModelContext';
 import OrgModeSettingsTab from './OrgModeSettingsTab';
 import MediaSettingsTab from './music/MediaSettingsTab';
+import EntertainmentSyncManager from './EntertainmentSyncManager';
 
 // Model Status Display Component
 const ModelStatusDisplay = () => {
@@ -317,6 +320,8 @@ const SettingsPage = () => {
   const [timezoneLoading, setTimezoneLoading] = useState(false);
   const [userZipCode, setUserZipCode] = useState('');
   const [userTimeFormat, setUserTimeFormat] = useState('24h');
+  const [userPreferredName, setUserPreferredName] = useState('');
+  const [userAiContext, setUserAiContext] = useState('');
 
 
   // AI Personality state
@@ -344,7 +349,7 @@ const SettingsPage = () => {
   React.useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     if (urlParams.get('tab') === 'users' && user?.role === 'admin') {
-      setCurrentTab(7); // Database tab is at 6, User Management is at 7
+      setCurrentTab(8); // Database tab is at 7, User Management is at 8
     }
   }, [user]);
 
@@ -440,6 +445,38 @@ const SettingsPage = () => {
       },
       onError: (error) => {
         console.error('Failed to fetch user time format:', error);
+      }
+    }
+  );
+
+  // Fetch user preferred name
+  const { data: preferredNameData, refetch: refetchPreferredName } = useQuery(
+    'userPreferredName',
+    () => apiService.settings.getUserPreferredName(),
+    {
+      onSuccess: (data) => {
+        if (data?.preferred_name !== undefined) {
+          setUserPreferredName(data.preferred_name || '');
+        }
+      },
+      onError: (error) => {
+        console.error('Failed to fetch user preferred name:', error);
+      }
+    }
+  );
+
+  // Fetch user AI context
+  const { data: aiContextData, refetch: refetchAiContext } = useQuery(
+    'userAiContext',
+    () => apiService.settings.getUserAiContext(),
+    {
+      onSuccess: (data) => {
+        if (data?.ai_context !== undefined) {
+          setUserAiContext(data.ai_context || '');
+        }
+      },
+      onError: (error) => {
+        console.error('Failed to fetch user AI context:', error);
       }
     }
   );
@@ -582,6 +619,50 @@ const SettingsPage = () => {
         setSnackbar({
           open: true,
           message: `Failed to update time format: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  // Preferred name update mutation
+  const preferredNameMutation = useMutation(
+    (preferredName) => apiService.settings.setUserPreferredName({ preferred_name: preferredName }),
+    {
+      onSuccess: (data) => {
+        setSnackbar({
+          open: true,
+          message: 'Preferred name updated successfully',
+          severity: 'success'
+        });
+        refetchPreferredName();
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to update preferred name: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  // AI context update mutation
+  const aiContextMutation = useMutation(
+    (aiContext) => apiService.settings.setUserAiContext({ ai_context: aiContext }),
+    {
+      onSuccess: (data) => {
+        setSnackbar({
+          open: true,
+          message: 'AI context updated successfully',
+          severity: 'success'
+        });
+        refetchAiContext();
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to update AI context: ${error.response?.data?.detail || error.message}`,
           severity: 'error'
         });
       }
@@ -989,6 +1070,7 @@ const SettingsPage = () => {
     { label: 'News', icon: <DescriptionIcon /> },
     { label: 'Org-Mode', icon: <ListAlt /> },
     { label: 'Media', icon: <MusicNote /> },
+    { label: 'Entertainment', icon: <Movie /> },
     ...(user?.role === 'admin' ? [
       { label: 'Database', icon: <DeleteSweep /> },
       { label: 'User Management', icon: <Security /> },
@@ -1055,6 +1137,89 @@ const SettingsPage = () => {
                   <Alert severity="info" sx={{ mb: 3 }}>
                     <strong>Personal Settings:</strong> Configure your personal preferences including timezone for accurate time displays.
                   </Alert>
+
+                  {/* Preferred Name Setting */}
+                  <Box mb={3}>
+                    <Typography variant="h6" gutterBottom>
+                      Preferred Name
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" paragraph>
+                      How would you like our AI agents to address you?
+                    </Typography>
+                    
+                    <TextField
+                      fullWidth
+                      label="Preferred Name"
+                      value={userPreferredName}
+                      onChange={(e) => setUserPreferredName(e.target.value)}
+                      sx={{ mb: 2 }}
+                      disabled={preferredNameMutation.isLoading}
+                    />
+
+                    <Button
+                      variant="contained"
+                      onClick={() => preferredNameMutation.mutate(userPreferredName)}
+                      disabled={preferredNameMutation.isLoading}
+                      startIcon={preferredNameMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
+                    >
+                      {preferredNameMutation.isLoading ? 'Updating...' : 'Update Preferred Name'}
+                    </Button>
+                  </Box>
+
+                  {/* AI Context Setting */}
+                  <Box mb={3}>
+                    <Box display="flex" alignItems="center" mb={1}>
+                      <Typography variant="h6" gutterBottom sx={{ mb: 0, mr: 1 }}>
+                        AI Context
+                      </Typography>
+                      <Tooltip title={
+                        <Box>
+                          <Typography variant="body2" gutterBottom>Examples:</Typography>
+                          <Typography variant="body2">• "I'm a software developer working in Python and React"</Typography>
+                          <Typography variant="body2">• "I prefer detailed technical explanations"</Typography>
+                          <Typography variant="body2">• "I'm learning programming - explain step-by-step"</Typography>
+                          <Typography variant="body2">• "I have ADHD - concise responses help me focus"</Typography>
+                        </Box>
+                      } arrow placement="right">
+                        <Info sx={{ fontSize: 18, color: 'text.secondary', cursor: 'help' }} />
+                      </Tooltip>
+                    </Box>
+                    
+                    <Typography variant="body2" color="text.secondary" paragraph>
+                      Provide context to help AI agents tailor their responses to your needs.
+                    </Typography>
+
+                    <Alert severity="warning" sx={{ mb: 2 }}>
+                      <strong>Privacy Notice:</strong> This information will be included in all agent conversations 
+                      and may be transmitted to external AI providers (OpenAI, Anthropic, etc.) as part of system prompts.
+                    </Alert>
+                    
+                    <TextField
+                      fullWidth
+                      multiline
+                      rows={4}
+                      label="Tell your AI about yourself"
+                      value={userAiContext}
+                      onChange={(e) => {
+                        if (e.target.value.length <= 500) {
+                          setUserAiContext(e.target.value);
+                        }
+                      }}
+                      inputProps={{ maxLength: 500 }}
+                      sx={{ mb: 1 }}
+                      disabled={aiContextMutation.isLoading}
+                      helperText={`${userAiContext.length}/500 characters`}
+                    />
+
+                    <Button
+                      variant="contained"
+                      onClick={() => aiContextMutation.mutate(userAiContext)}
+                      disabled={aiContextMutation.isLoading}
+                      startIcon={aiContextMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
+                    >
+                      {aiContextMutation.isLoading ? 'Updating...' : 'Update AI Context'}
+                    </Button>
+                  </Box>
 
                   {/* Timezone Setting */}
                   <Box mb={3}>
@@ -1925,8 +2090,19 @@ const SettingsPage = () => {
         </motion.div>
       )}
 
+      {/* Entertainment Sync Tab */}
+      {currentTab === 6 && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+        >
+          <EntertainmentSyncManager />
+        </motion.div>
+      )}
+
       {/* Database Management Tab */}
-      {currentTab === 6 && user?.role === 'admin' && (
+      {currentTab === 7 && user?.role === 'admin' && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
         <motion.div
@@ -2072,7 +2248,7 @@ const SettingsPage = () => {
       )}
 
       {/* User Management Tab */}
-      {currentTab === 7 && user?.role === 'admin' && (
+      {currentTab === 8 && user?.role === 'admin' && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -2083,7 +2259,7 @@ const SettingsPage = () => {
       )}
 
       {/* Pending Submissions Tab */}
-      {currentTab === 8 && user?.role === 'admin' && (
+      {currentTab === 9 && user?.role === 'admin' && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}

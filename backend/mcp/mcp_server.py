@@ -30,7 +30,6 @@ from mcp.tools.web_content_tool import WebContentTool, WebContentInput
 from mcp.tools.web_search_ingestion_tool import WebSearchIngestionTool, WebSearchIngestionInput
 from mcp.tools.web_search_analysis_tool import WebSearchAnalysisTool, WebSearchAnalysisInput
 from mcp.tools.web_ingest_selected_tool import WebIngestSelectedTool, WebIngestSelectedInput
-from mcp.tools.crawl4ai_tool import Crawl4AITool, Crawl4AIInput
 # Research planning tool removed - migrated to LangGraph subgraph workflows
 from mcp.tools.document_summarization_tool import DocumentSummarizationTool, DocumentSummarizationInput
 from services.user_document_service import UserDocumentService
@@ -166,18 +165,12 @@ class MCPServer:
             await web_search_analysis_tool.initialize()
             self.tools[web_search_analysis_tool.name] = web_search_analysis_tool
             
-            # Initialize and register Crawl4AI tool FIRST (before web_ingest_selected_tool)
-            crawl4ai_tool = Crawl4AITool()
-            await crawl4ai_tool.initialize()
-            self.tools[crawl4ai_tool.name] = crawl4ai_tool
-            
             # Initialize and register web ingest selected tool
             web_ingest_selected_tool = WebIngestSelectedTool(
                 web_content_tool=web_content_tool,
                 document_service=self.document_service,
                 embedding_manager=self.embedding_manager,
-                user_document_service=self.user_document_service,
-                crawl4ai_tool=crawl4ai_tool  # Pass Crawl4AI tool for fallback
+                user_document_service=self.user_document_service
             )
             await web_ingest_selected_tool.initialize()
             self.tools[web_ingest_selected_tool.name] = web_ingest_selected_tool
@@ -223,10 +216,6 @@ class MCPServer:
         # Set user for web search ingestion tool
         if "web_search_and_ingest" in self.tools:
             self.tools["web_search_and_ingest"].set_current_user(user_id)
-        
-        # Set user for Crawl4AI tool
-        if "crawl4ai_web_crawler" in self.tools:
-            self.tools["crawl4ai_web_crawler"].set_current_user(user_id)
         
         # Add other tools here as needed
         logger.debug(f"✅ Current user set to {user_id} for relevant MCP tools")
@@ -326,8 +315,8 @@ class MCPServer:
                 from mcp.tools.coding_assistant_tool import CodingAssistantInput
                 return CodingAssistantInput(**tool_input)
             elif tool_name == "crawl4ai_web_crawler":
-                from mcp.tools.crawl4ai_tool import Crawl4AIInput
-                return Crawl4AIInput(**tool_input)
+                # Crawl4AITool has been removed - use web_content_tool instead
+                raise ValueError("Crawl4AITool has been removed. Use web_content_tool instead.")
             elif tool_name == "plan_research_comprehensive":
                 return ResearchQuery(**tool_input)
             elif tool_name == "summarize_documents":
@@ -487,7 +476,15 @@ IMPORTANT:
 - Provide thorough, well-sourced answers using the gathered information
 - If search results are insufficient, try different queries or use other tools"""
         
-        return create_system_prompt_with_context(base_prompt)
+        # Use user's timezone for date/time context
+        from utils.system_prompt_utils import create_system_prompt_with_context_for_user
+        
+        # Get user_id from chat_service if available
+        user_id = None
+        if self.chat_service and hasattr(self.chat_service, 'current_user_id'):
+            user_id = self.chat_service.current_user_id
+        
+        return await create_system_prompt_with_context_for_user(base_prompt, user_id=user_id)
     
     async def _get_llm_response(self, conversation_log: List[Dict[str, str]]) -> str:
         """Get response from LLM (placeholder - will integrate with actual LLM)"""

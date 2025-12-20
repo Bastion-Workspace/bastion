@@ -24,6 +24,7 @@ from orchestrator.subgraphs import (
     build_validation_subgraph,
     build_generation_subgraph,
     build_resolution_subgraph,
+    build_book_generation_subgraph,
 )
 from orchestrator.utils.fiction_utilities import (
     ChapterRange,
@@ -106,9 +107,11 @@ class FictionEditingState(TypedDict):
     style_body: Optional[str]
     characters_bodies: List[str]
     outline_current_chapter_text: Optional[str]
+    has_references: bool  # CRITICAL: Flag from subgraph indicating if references were loaded
     current_request: str
     requested_chapter_number: Optional[int]
     system_prompt: str
+    datetime_context: str  # ✅ PRESERVE datetime_context for generation subgraph
     llm_response: str
     structured_edit: Optional[Dict[str, Any]]
     editor_operations: List[Dict[str, Any]]
@@ -128,6 +131,8 @@ class FictionEditingState(TypedDict):
     chapter_range: Optional[Tuple[int, int]]  # (start, end) inclusive
     current_generation_chapter: Optional[int]  # Current chapter being generated in multi-chapter mode
     generated_chapters: Dict[int, str]  # Map of chapter_number -> generated text for continuity
+    # Whole-book generation field
+    is_whole_book_generation: bool  # Full automated book generation mode
     # Outline sync detection
     outline_sync_analysis: Optional[Dict[str, Any]]      # Analysis of outline vs manuscript discrepancies
     outline_needs_sync: bool  # Whether manuscript needs updates to match outline
@@ -241,6 +246,12 @@ class FictionEditingAgent(BaseAgent):
             get_datetime_context=self._get_datetime_context
         )
         resolution_subgraph = build_resolution_subgraph(checkpointer)
+        book_generation_subgraph = build_book_generation_subgraph(
+            checkpointer,
+            llm_factory=self._get_llm,
+            get_datetime_context=self._get_datetime_context,
+            continuity_tracker=self._continuity_tracker
+        )
         
         # Phase 1: Context preparation (now a subgraph)
         workflow.add_node("context_preparation", context_subgraph)
@@ -267,6 +278,9 @@ class FictionEditingAgent(BaseAgent):
         workflow.add_node("accumulate_chapter", self._accumulate_chapter_node)
         workflow.add_node("format_response", self._format_response_node)
         
+        # Phase 7: Whole-book generation (new subgraph)
+        workflow.add_node("book_generation", book_generation_subgraph)
+        
         # Entry point
         workflow.set_entry_point("context_preparation")
         
@@ -291,8 +305,15 @@ class FictionEditingAgent(BaseAgent):
             }
         )
         
-        # Route to check_multi_chapter (both questions and edit requests go through same path)
-        workflow.add_edge("detect_request_type", "check_multi_chapter")
+        # Route based on whole-book mode or normal mode
+        workflow.add_conditional_edges(
+            "detect_request_type",
+            self._route_generation_mode,
+            {
+                "whole_book": "book_generation",  # NEW: Whole-book path
+                "normal": "check_multi_chapter"    # EXISTING: Normal path
+            }
+        )
         
         # Single chapter: prepare generation before calling subgraph
         workflow.add_conditional_edges(
@@ -336,55 +357,41 @@ class FictionEditingAgent(BaseAgent):
         
         workflow.add_edge("format_response", END)
         
+        # Whole-book subgraph returns to format_response
+        workflow.add_edge("book_generation", "format_response")
+        
         return workflow.compile(checkpointer=checkpointer)
     
     def _build_system_prompt(self) -> str:
         """Build system prompt for fiction editing"""
-        return (
+        prompt = (
+            "CODE VERSION: 2025-12-14-22:15 UTC - IF YOU SEE THIS, CODE IS FRESH!\n\n"
             "You are a MASTER NOVELIST editor/generator. Persona disabled.\n\n"
-            "=== STYLE GUIDE FIRST PRINCIPLE ===\n\n"
+            "=== REFERENCE USAGE (CRITICAL) ===\n\n"
             "**The Style Guide is HOW to write. The Outline is WHAT happens.**\n\n"
-            "When generating narrative prose:\n"
-            "- The Style Guide establishes your narrative voice, techniques, and craft (POV, tense, pacing, dialogue style, sensory detail level)\n"
-            "- The Outline provides story structure and plot beats (what events occur, character arcs, story progression)\n"
-            "- Your task: Write natural, compelling narrative in the Style Guide's voice that achieves the Outline's story goals\n"
-            "- NEVER convert outline beats mechanically - craft scenes that flow naturally and happen to hit those beats\n"
-            "- The Style Guide voice must permeate every sentence - internalize it BEFORE writing, not as an afterthought\n\n"
-            "Maintain originality and do not copy from references. Adhere strictly to the project's Style Guide and Rules above all else.\n\n"
-            "**REFERENCE USAGE (CRITICAL)**:\n"
             "When references are available, you MUST use them appropriately:\n\n"
             "- **STYLE GUIDE**: Use for HOW to write narrative prose\n"
-            "  - Internalize narrative voice, POV, tense, pacing BEFORE writing\n"
+            "  - Internalize narrative voice, POV, tense, pacing BEFORE writing - the voice must permeate every sentence\n"
             "  - Apply dialogue style, sensory detail level, and show-don't-tell techniques\n"
             "  - Match sentence structure patterns, rhythm, and descriptive style\n"
-            "  - The Style Guide voice must permeate every sentence - not an afterthought\n\n"
+            "  - Every sentence must sound like it was written in the Style Guide's voice\n\n"
             "- **OUTLINE**: Use for WHAT happens in the story (NEVER for text matching!)\n"
-            "  - ⚠️ CRITICAL: Outline text does NOT exist in manuscript - NEVER use for anchors/original_text!\n"
-            "  - 🚫 ABSOLUTE PROHIBITION: DO NOT copy, paraphrase, or reuse outline synopsis/beat text in your narrative prose\n"
-            "  - ✅ DO creatively interpret outline beats into original narrative scenes with full prose\n"
-            "  - Follow story structure and plot beats from the outline as GUIDANCE, not as SOURCE TEXT to copy\n"
+            "  - CRITICAL: Outline text does NOT exist in manuscript - NEVER use for anchors/original_text!\n"
+            "  - ABSOLUTE PROHIBITION: DO NOT copy, paraphrase, or reuse outline synopsis/beat text in your narrative prose\n"
+            "  - DO creatively interpret outline beats into original narrative scenes with full prose\n"
+            "  - Follow story structure and plot beats as GUIDANCE, not as SOURCE TEXT to copy\n"
             "  - Achieve outline's story goals through natural storytelling (don't convert beats mechanically)\n"
-            "  - Reference character arcs and story progression from outline for INSPIRATION, not for copying\n"
-            "  - Use outline context to inform description choices and scene emphasis - but write ORIGINAL prose\n"
-            "  - For all text matching (anchors), use MANUSCRIPT text only, never outline text\n"
-            "  - **REMEMBER**: Outline = inspiration for WHAT happens, Style Guide = HOW to write it, Your prose = ORIGINAL creative narrative\n\n"
+            "  - For all text matching (anchors), use MANUSCRIPT text only, never outline text\n\n"
             "- **CHARACTER PROFILES**: Use when writing character appearances, actions, dialogue, and internal thoughts\n"
             "  - **CRITICAL**: Each character profile is for a DIFFERENT character with distinct traits, dialogue patterns, and behaviors\n"
-            "  - **PAY ATTENTION**: When writing dialogue or character actions, match the CORRECT character's profile - do not confuse characters\n"
-            "  - Reference character traits, motivations, and backgrounds when writing character actions\n"
-            "  - Ensure character dialogue patterns match established character voice from profiles\n"
-            "  - Verify character appearances align with profile descriptions (vary phrasing, keep facts consistent)\n"
-            "  - Check that character relationships and dynamics match profile information\n"
-            "  - Ensure character actions are consistent with their personality, strengths, and flaws\n"
-            "  - Draw from character profiles for authentic details, but express them differently each time\n"
-            "  - **DO NOT MIX UP**: Each character has unique dialogue patterns - Jack's dialogue should match Jack's profile, not another character's\n\n"
-            "- **UNIVERSE RULES**: Use to ensure world-building consistency in narrative prose\n"
+            "  - Match the CORRECT character's profile - do not confuse characters\n"
+            "  - Ensure dialogue patterns, actions, and appearances match profiles (vary phrasing, keep facts consistent)\n"
+            "  - Draw from character profiles for authentic details, but express them differently each time\n\n"
+            "- **UNIVERSE RULES**: Use to ensure world-building consistency\n"
             "  - Verify all world-building elements (magic systems, technology, physics) align with universe rules\n"
             "  - Ensure plot events and character actions don't violate established universe constraints\n"
-            "  - Check that character abilities respect power systems and limitations from rules\n"
-            "  - Ensure timeline and events are consistent with universe history\n"
-            "  - Validate cultural, social, geographic, and environmental rules are followed\n\n"
-            "**IMPORTANT**: References are provided in the context below. Always check them when generating prose to ensure consistency.\n\n"
+            "  - Check timeline and events are consistent with universe history\n\n"
+            "**IMPORTANT**: Maintain originality and do not copy from references. Adhere strictly to the project's Style Guide and Rules above all else.\n\n"
             "=== CREATIVE VARIATION TO AVOID REPETITION ===\n\n"
             "**Vary descriptions and phrasing while maintaining consistency:**\n\n"
             "When writing prose, especially across multiple chapters or scenes:\n"
@@ -421,40 +428,68 @@ class FictionEditingAgent(BaseAgent):
             "- Check character profiles for authentic details to draw from\n"
             "- Check outline for story context that informs description choices\n"
             "- Check Style Guide for voice and technique requirements\n"
-            "- Vary descriptions naturally based on scene context, character perspective, and emotional tone\n\n"
-            "STRUCTURED OUTPUT REQUIRED: You MUST return ONLY raw JSON (no prose, no markdown, no code fences) matching this schema:\n"
+            "- Vary descriptions naturally based on scene context, character perspective, and emotional tone\n\n" +
+            "="*80 + "\n" +
+            "STRUCTURED OUTPUT REQUIRED\n" +
+            "="*80 + "\n\n" +
+            "You MUST return ONLY raw JSON (no prose, no markdown fences, no explanatory text).\n\n"
+            "REQUIRED STRUCTURE (valid JSON example):\n\n"
             "{\n"
-            '  "type": "ManuscriptEdit",\n'
-            '  "target_filename": string (REQUIRED),\n'
-            '  "scope": one of ["paragraph", "chapter", "multi_chapter"] (REQUIRED),\n'
-            '  "summary": string (REQUIRED),\n'
-            '  "chapter_index": integer|null (optional),\n'
-            '  "safety": one of ["low", "medium", "high"] (REQUIRED),\n'
+            '  "target_filename": "manuscript.md",\n'
+            '  "scope": "chapter",\n'
+            '  "summary": "Generated Chapter 1 following outline and style guide",\n'
+            '  "safety": "medium",\n'
+            '  "chapter_index": 0,\n'
             '  "operations": [\n'
             "    {\n"
-            '      "op_type": one of ["replace_range", "delete_range", "insert_after_heading", "insert_after"] (REQUIRED),\n'
-            '      "start": integer (REQUIRED - approximate, anchors take precedence),\n'
-            '      "end": integer (REQUIRED - approximate, anchors take precedence),\n'
-            '      "text": string (REQUIRED - new prose for replace/insert),\n'
-            '      "original_text": string (⚠️ REQUIRED for replace_range/delete_range - EXACT 20-40 words from manuscript!),\n'
-            '      "anchor_text": string (⚠️ REQUIRED for insert_after_heading - EXACT complete line/paragraph to insert after!),\n'
-            '      "left_context": string (optional - text before target),\n'
-            '      "right_context": string (optional - text after target),\n'
-            '      "occurrence_index": integer (optional - which occurrence, 0-based, default 0)\n'
+            '      "op_type": "insert_after_heading",\n'
+            '      "start": 62,\n'
+            '      "end": 62,\n'
+            '      "anchor_text": "---",\n'
+            '      "text": "## Chapter 1: Title\\n\\nAmanda stepped into the office. The morning light..."\n'
             "    }\n"
             "  ]\n"
             "}\n\n"
-            "⚠️ ⚠️ ⚠️ CRITICAL FIELD REQUIREMENTS:\n"
-            "- replace_range → MUST include 'original_text' with EXACT text from manuscript (MINIMUM size for uniqueness, typically 10-40 words)\n"
-            "  * PREFER SMALLER matches (10-20 words) when possible - only use larger matches when necessary for uniqueness\n"
-            "  * For word-level changes: Use minimal context (10-15 words) around the word/phrase\n"
-            "  * For sentence changes: Use just the sentence(s) that need changing (15-30 words)\n"
-            "  * Only use 30-40 words when smaller matches aren't unique enough\n"
-            "- delete_range → MUST include 'original_text' with EXACT text to delete (minimal size for uniqueness)\n"
-            "- insert_after_heading → MUST include 'anchor_text' with EXACT complete line/paragraph to insert after\n"
-            "  * EXCEPTION: For EMPTY files (only frontmatter, no chapters), anchor_text is OPTIONAL\n"
-            "  * For empty files: Use insert_after_heading WITHOUT anchor_text to create the first chapter\n"
-            "- If you don't provide these fields, the operation will FAIL!\n\n"
+            "FIELD DEFINITIONS:\n"
+            "- target_filename: Name of manuscript file (string, REQUIRED)\n"
+            "- scope: Edit scope - \"paragraph\", \"chapter\", or \"multi_chapter\" (REQUIRED)\n"
+            "- summary: Brief description of changes OR conversational answer to user's question (string, REQUIRED)\n"
+            "  * For edit requests: Brief description of what was changed\n"
+            "  * For questions: Natural, conversational answer with analysis and feedback\n"
+            "- safety: Risk level - \"low\", \"medium\", or \"high\" (REQUIRED, default \"medium\")\n"
+            "- chapter_index: Zero-based chapter index (integer, optional, null for multi-chapter)\n"
+            "- operations: Array of edit operations (REQUIRED, can be empty for questions/analysis)\n\n"
+            "=== ANSWERING QUESTIONS CONVERSATIONALLY ===\n\n"
+            "**You are both an editor AND a conversational assistant.** When users ask questions, answer them naturally and helpfully.\n\n"
+            "**QUESTION HANDLING:**\n"
+            "- **Pure questions** (e.g., 'How does our chapter look so far?', 'What's the pacing like?', 'Does this follow the style guide?'):\n"
+            "  * Answer the question conversationally in the 'summary' field\n"
+            "  * Provide specific observations, analysis, and feedback based on the manuscript and references\n"
+            "  * Return empty operations array: []\n"
+            "  * Be helpful, specific, and reference actual content when relevant\n"
+            "  * Example: 'How does our chapter look so far?' → Summary: 'The chapter has strong pacing with good tension building. The dialogue feels natural, and the character development is progressing well. The prose matches the style guide's voice. One area to consider: the transition between scenes could be smoother.' Operations: []\n\n"
+            "- **Questions with conditional edits** (e.g., 'Are we using enough description? Revise if needed', 'Does this follow the outline? Fix if not'):\n"
+            "  * First, answer the question in the 'summary' field\n"
+            "  * Then, if your analysis indicates edits are needed, provide operations\n"
+            "  * If no edits needed, return empty operations array but still answer the question\n"
+            "  * Example: 'Are we using enough description?' → Summary: 'The description level is moderate. Adding more sensory details to enhance immersion.' Operations: [replace_range with enhanced description]\n\n"
+            "- **Evaluation questions** (e.g., 'How's the character development?', 'What's the tone like?'):\n"
+            "  * Provide thoughtful analysis based on the manuscript, style guide, and character profiles\n"
+            "  * Reference specific examples from the text when helpful\n"
+            "  * Return empty operations unless the user explicitly asks for revisions\n"
+            "  * Be conversational and helpful - you're providing feedback, not just editing\n\n"
+            "**KEY PRINCIPLE**: When answering questions, think like a helpful editor giving feedback, not just a code generator.\n"
+            "The 'summary' field is your opportunity to have a conversation with the user about their work.\n\n"
+            "OPERATION FIELDS (inside operations array):\n"
+            "- op_type: \"replace_range\", \"delete_range\", \"insert_after_heading\", or \"insert_after\" (REQUIRED)\n"
+            "- start: Approximate character offset (integer, REQUIRED, anchors take precedence)\n"
+            "- end: Approximate character offset (integer, REQUIRED, anchors take precedence)\n"
+            "- text: New prose for replace/insert (string, REQUIRED)\n"
+            "- original_text: EXACT text from manuscript for replace/delete (string, REQUIRED for replace_range/delete_range)\n"
+            "- anchor_text: EXACT text to insert after (string, REQUIRED for insert_after_heading)\n"
+            "- left_context: Text before target (string, optional)\n"
+            "- right_context: Text after target (string, optional)\n"
+            "- occurrence_index: Which occurrence if text appears multiple times (integer, optional, default 0)\n\n"
             "OUTPUT RULES:\n"
             "- Output MUST be a single JSON object only.\n"
             "- Do NOT include triple backticks or language tags.\n"
@@ -463,7 +498,7 @@ class FictionEditingAgent(BaseAgent):
             "**1. replace_range**: Replace existing text with new text\n"
             "   USE WHEN: User wants to revise, improve, change, modify, or rewrite existing prose\n"
             "   ANCHORING: Provide 'original_text' with EXACT, VERBATIM text from manuscript\n\n"
-            "   **⚠️ CRITICAL: PREFER GRANULAR, WORD-LEVEL EDITS ⚠️**\n\n"
+            "   **CRITICAL: PREFER GRANULAR, WORD-LEVEL EDITS**\n\n"
             "   **DEFAULT PREFERENCE: Make the SMALLEST possible edit that achieves the user's goal.**\n"
             "   - If changing one word → change ONLY that word (with minimal surrounding context for uniqueness)\n"
             "   - If changing a phrase → change ONLY that phrase (with minimal surrounding context)\n"
@@ -475,7 +510,7 @@ class FictionEditingAgent(BaseAgent):
             "      - For word changes: Include just enough context (10-20 words) to uniquely identify the location\n"
             "      - For phrase changes: Include the phrase plus minimal surrounding context (15-25 words)\n"
             "      - For sentence changes: Include just the sentence (or 2-3 sentences if needed for uniqueness)\n"
-            "      - ⚠️ DO NOT default to 20-40 words - use the MINIMUM needed for reliable matching\n\n"
+            "      - DO NOT default to 20-40 words - use the MINIMUM needed for reliable matching\n\n"
             "   2. **Preserve surrounding text**: Only change what needs changing\n"
             "      - Keep all text before and after the edit unchanged\n"
             "      - Match whitespace, punctuation, and formatting exactly\n"
@@ -520,7 +555,7 @@ class FictionEditingAgent(BaseAgent):
             "   - This ensures each edit aligns precisely with the document\n\n"
             "**2. insert_after_heading**: Insert new text AFTER a specific location WITHOUT replacing\n"
             "   USE WHEN: User wants to add, append, or insert NEW content (not replace existing)\n"
-            "   ⚠️ THIS IS FOR NEW TEXT THAT DOESN'T EXIST YET - use this when adding content!\n"
+            "   THIS IS FOR NEW TEXT THAT DOESN'T EXIST YET - use this when adding content!\n"
             "   ANCHORING: Provide 'anchor_text' with EXACT, COMPLETE, VERBATIM paragraph/sentence to insert after\n"
             "   - Find the sentence/paragraph in the manuscript where the new text should go\n"
             "   - Copy that sentence/paragraph EXACTLY as 'anchor_text'\n"
@@ -531,29 +566,28 @@ class FictionEditingAgent(BaseAgent):
             "   ANCHORING: Provide 'original_text' with EXACT text to delete\n\n"
             "=== CHAPTER BOUNDARIES ARE SACRED ===\n\n"
             "Chapters are marked by \"## Chapter N\" headings.\n"
-            "⚠️ CRITICAL: NEVER include the next chapter's heading in your operation!\n\n"
-            "=== CRITICAL TEXT PRECISION REQUIREMENTS ===\n\n"
+            "CRITICAL: NEVER include the next chapter's heading in your operation!\n\n"
+            "**CRITICAL TEXT PRECISION REQUIREMENTS:**\n"
             "For 'original_text' and 'anchor_text' fields:\n"
             "- Must be EXACT, COMPLETE, and VERBATIM from the current manuscript text (not from outline, not from any reference documents)\n"
-            "- ⚠️⚠️⚠️ NEVER EVER use text from the outline for anchors - outline text does NOT exist in the manuscript!\n"
-            "- The outline tells you WHAT happens (story beats), but those words aren't in the manuscript\n"
+            "- NEVER EVER use text from the outline for anchors - outline text does NOT exist in the manuscript!\n"
             "- You must copy text from the '=== MANUSCRIPT CONTEXT ===' sections (current chapter, previous chapter, next chapter)\n"
             "- Include ALL whitespace, line breaks, and formatting exactly as written\n"
             "- Include complete sentences or natural text boundaries (periods, paragraph breaks)\n"
             "- NEVER paraphrase, summarize, or reformat the text\n"
-            "- Minimum 10-20 words for unique identification\n"
-            "- ⚠️ NEVER include chapter headers (##) in original_text for replace_range!\n\n"
+            "- Minimum 10-20 words for unique identification (see granular edit principles above)\n"
+            "- NEVER include chapter headers (##) in original_text for replace_range!\n\n"
             "=== CREATIVE ADDITIONS POLICY ===\n\n"
             "**You have creative freedom to enhance the story with additions:**\n\n"
             "When the user requests additions, enhancements, or expansions, you may add story elements\n"
             "that are NOT explicitly in the outline, as long as they maintain consistency.\n\n"
             "**MANDATORY CONSISTENCY CHECKS for all additions:**\n"
             "Before adding ANY new story element, verify:\n"
-            "1. ✅ Style Guide compliance - matches established voice/tone/pacing\n"
-            "2. ✅ Universe Rules compliance - no violations of established physics/magic/tech\n"
-            "3. ✅ Character consistency - behavior matches character profiles\n"
-            "4. ✅ Manuscript continuity - no contradictions with established facts\n"
-            "5. ✅ Timeline coherence - events fit logically in story sequence\n\n"
+            "1. Style Guide compliance - matches established voice/tone/pacing\n"
+            "2. Universe Rules compliance - no violations of established physics/magic/tech\n"
+            "3. Character consistency - behavior matches character profiles\n"
+            "4. Manuscript continuity - no contradictions with established facts\n"
+            "5. Timeline coherence - events fit logically in story sequence\n\n"
             "**ALLOWED additions (enhance without changing plot):**\n"
             "- Sensory details and atmospheric descriptions\n"
             "- Internal character thoughts and emotional reactions\n"
@@ -580,40 +614,14 @@ class FictionEditingAgent(BaseAgent):
             "- If user says 'stick to outline exactly' → Strict adherence, minimal additions\n"
             "- If user says 'add/enhance/expand/enrich' → Creative freedom with consistency checks\n"
             "- If editing existing prose → Full creative freedom with consistency checks\n\n"
-            "=== CONSISTENCY VALIDATION FRAMEWORK ===\n\n"
-            "For EVERY operation, especially creative additions, validate against ALL references:\n\n"
-            "**Style Guide Validation:**\n"
-            "- Narrative voice (POV, tense, formality level)\n"
-            "- Sentence structure patterns and rhythm\n"
-            "- Dialogue style and character speech patterns\n"
-            "- Pacing and scene construction approach\n"
-            "- Descriptive style (minimalist vs. rich, etc.)\n\n"
-            "**Universe Rules Validation:**\n"
-            "- Physics/magic/technology constraints\n"
-            "- Cultural and social rules\n"
-            "- Historical facts and timeline\n"
-            "- Geographic and environmental limits\n"
-            "- Power systems and their limitations\n\n"
-            "**Character Profile Validation:**\n"
-            "- Core personality traits and behaviors\n"
-            "- Motivations and goals\n"
-            "- Speech patterns and vocabulary\n"
-            "- Relationships and dynamics with other characters\n"
-            "- Backstory and experiences that shape decisions\n"
-            "- Emotional state and character arc position\n\n"
-            "**Manuscript Continuity Validation:**\n"
-            "- Established facts from earlier chapters\n"
-            "- Character emotional states and development\n"
-            "- Ongoing plot threads and setups\n"
-            "- Previously mentioned details (locations, objects, events)\n"
-            "- Cause-and-effect relationships\n"
-            "- Character knowledge and awareness\n\n"
-            "**When adding new elements, ask yourself:**\n"
-            "- Would this character realistically do/say this based on their profile?\n"
-            "- Does this violate any established universe rules?\n"
-            "- Does this contradict anything in previous chapters?\n"
-            "- Does this match the established narrative voice?\n"
-            "- Will this create problems for outlined future events?\n\n"
+            "=== CONSISTENCY VALIDATION ===\n\n"
+            "For EVERY operation, validate against ALL references (see REFERENCE USAGE above):\n\n"
+            "**Before adding or changing content, verify:**\n"
+            "- Style Guide compliance: narrative voice, POV, tense, pacing, dialogue style\n"
+            "- Universe Rules compliance: no violations of physics/magic/tech constraints\n"
+            "- Character consistency: behavior matches character profiles\n"
+            "- Manuscript continuity: no contradictions with established facts from earlier chapters\n"
+            "- Timeline coherence: events fit logically in story sequence\n\n"
             "**CRITICAL: Continuity Maintenance Requirements:**\n"
             "- BEFORE making any revision, check if it would break continuity with adjacent chapters or previously established facts\n"
             "- If your revision would create a contradiction or inconsistency, you MUST provide additional operations to fix it\n"
@@ -646,11 +654,7 @@ class FictionEditingAgent(BaseAgent):
             "- Use atmospheric details to establish mood and tone, not just setting\n"
             "- Balance sensory detail level according to Style Guide requirements\n"
             "- Create immersive scenes that readers can experience, not just observe\n"
-            "- **VARY descriptions to avoid repetition** - use different sensory details, perspectives, and phrasings\n"
-            "- When describing similar elements (characters, locations, actions), find fresh angles and details\n"
-            "- Draw from character profiles and outline context to inform varied descriptions\n"
-            "- Example: Instead of repeatedly saying 'her blue eyes,' vary with 'eyes the color of storm clouds,' 'her gaze sharp as ice,' 'blue eyes that seemed to see through him'\n"
-            "- **CRITICAL**: Variation must still match Style Guide voice and character profiles - don't vary so much that it breaks consistency\n\n"
+            "- Vary descriptions to avoid repetition (see CREATIVE VARIATION section above)\n\n"
             "**Organic Pacing vs Mechanical Beat-Following:**\n"
             "- Write scenes that flow naturally with appropriate pacing for the moment\n"
             "- Don't rush through beats to 'cover' all outline points - let scenes breathe\n"
@@ -658,25 +662,16 @@ class FictionEditingAgent(BaseAgent):
             "- Outline beats are story goals to achieve, not items to check off sequentially\n"
             "- A single scene can achieve multiple outline beats naturally if the story flows that way\n"
             "- Conversely, a single outline beat might require multiple scenes if the story demands it\n\n"
-            "**Style Guide Integration:**\n"
-            "- Every sentence must sound like it was written in the Style Guide's voice\n"
-            "- Apply Style Guide techniques (POV, tense, pacing, dialogue style) consistently throughout\n"
-            "- If Style Guide includes writing samples, emulate their technique and voice, never copy content\n"
-            "- The Style Guide voice should be so internalized that it feels natural, not forced\n\n"
             "=== CONTENT GENERATION RULES ===\n\n"
             "1. operations[].text MUST contain final prose (no placeholders or notes)\n"
             "2. For chapter generation: begin with '## Chapter N'\n"
             "3. Do NOT impose a word count limit. Write as much prose as needed to produce a complete, compelling scene.\n"
-            "4. If outline present: Treat outline beats as plot objectives to achieve, NOT text to expand or reuse.\n"
-            "   - Create fresh scenes with original dialogue, action, and narration in the Style Guide voice.\n"
-            "   - Do not copy or lightly paraphrase outline phrasing.\n"
-            "   - Write complete narrative with dialogue, action, description, character voice, and emotional depth\n"
-            "   - Add all enriching details needed to bring the beats to life as compelling prose\n"
-            "4. NO YAML frontmatter in operations[].text\n"
-            "5. Match established voice and style\n"
+            "4. Treat outline beats as plot objectives to achieve, NOT text to expand or reuse (see REFERENCE USAGE above)\n"
+            "5. NO YAML frontmatter in operations[].text\n"
             "6. Complete sentences with proper grammar\n"
-            "7. NEVER simply paraphrase outline beats - always craft full narrative prose\n"
+            "7. Write complete narrative with dialogue, action, description, character voice, and emotional depth\n"
         )
+        return prompt
     
     async def _validate_fiction_type_node(self, state: FictionEditingState) -> Dict[str, Any]:
         """Parse user query for explicit chapter mentions"""
@@ -739,8 +734,6 @@ class FictionEditingAgent(BaseAgent):
                 # Additional mentions are secondary (for context)
                 secondary_chapters = [m["chapter"] for m in unique_mentions[1:]]
                 
-                logger.info(f"📖 Detected chapters in query:")
-                logger.info(f"   Primary (to edit): Chapter {primary_chapter}")
                 if secondary_chapters:
                     logger.info(f"   Secondary (context): Chapters {secondary_chapters}")
             else:
@@ -772,16 +765,63 @@ class FictionEditingAgent(BaseAgent):
                         "response": "Active editor is not a fiction manuscript; editing agent skipping.",
                         "task_status": "error",
                         "agent_type": "fiction_editing_agent"
-                    }
+                    },
+                    # ✅ CRITICAL: Preserve even on error!
+                    "current_chapter_text": state.get("current_chapter_text", ""),
+                    "current_chapter_number": state.get("current_chapter_number"),
+                    "manuscript": state.get("manuscript", ""),
+                    "filename": state.get("filename", ""),
+                    "chapter_ranges": state.get("chapter_ranges", []),
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
                 }
             
-            return {}
+            return {
+                # ✅ CRITICAL: Preserve all state even on success!
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "prev_chapter_text": state.get("prev_chapter_text"),
+                "prev_chapter_number": state.get("prev_chapter_number"),
+                "next_chapter_text": state.get("next_chapter_text"),
+                "next_chapter_number": state.get("next_chapter_number"),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "selection_start": state.get("selection_start", -1),
+                "selection_end": state.get("selection_end", -1),
+                "cursor_offset": state.get("cursor_offset", -1),
+                "outline_body": state.get("outline_body"),
+                "rules_body": state.get("rules_body"),
+                "style_body": state.get("style_body"),
+                "characters_bodies": state.get("characters_bodies", []),
+                "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+            }
             
         except Exception as e:
             logger.error(f"Failed to validate fiction type: {e}")
             return {
                 "error": str(e),
-                "task_status": "error"
+                "task_status": "error",
+                # ✅ CRITICAL: Preserve even on error!
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
             }
     
     def _route_after_validate_type(self, state: FictionEditingState) -> str:
@@ -792,15 +832,6 @@ class FictionEditingAgent(BaseAgent):
     
     def _route_after_context(self, state: FictionEditingState) -> str:
         """Route after context preparation: check if references exist"""
-        # Diagnostic logging - check state after context subgraph
-        logger.info("="*80)
-        logger.info("🔍 STATE AFTER context_preparation subgraph:")
-        logger.info(f"   state.get('current_request'): {repr(state.get('current_request', 'NOT_FOUND'))}")
-        logger.info(f"   state.get('query'): {repr(state.get('query', 'NOT_FOUND'))}")
-        logger.info(f"   state.get('has_references'): {state.get('has_references', 'NOT_FOUND')}")
-        logger.info(f"   state keys: {list(state.keys())[:20]}...")  # First 20 keys
-        logger.info("="*80)
-        
         # Check for errors first
         if state.get("task_status") == "error":
             return "format_response"  # Skip to format to return error
@@ -809,19 +840,15 @@ class FictionEditingAgent(BaseAgent):
         
         # If no references, use simple fast path
         if not has_references:
-            logger.info("⚡ No references found - using FAST PATH (no validation, no continuity)")
             state["is_simple_request"] = True
             return "simple_path"
         
         # References exist - use full path
-        logger.info("📚 References found - using full workflow path")
         return "full_path"
     
     async def _check_simple_request_node(self, state: FictionEditingState) -> Dict[str, Any]:
         """Check if request is simple enough to skip full workflow (no references needed)"""
         try:
-            logger.info("🔍 Checking if request can use simple path...")
-            
             current_request = state.get("current_request", "")
             current_chapter_text = state.get("current_chapter_text", "")
             cursor_offset = state.get("cursor_offset", -1)
@@ -911,49 +938,28 @@ class FictionEditingAgent(BaseAgent):
         is_simple = state.get("is_simple_request", False)
         
         if is_simple:
-            logger.info("⚡ Using simple fast path - skipping references and validation")
             return "simple_path"
         else:
-            logger.info("📚 Using full workflow path")
             return "full_path"
     
     async def _generate_simple_edit_node(self, state: FictionEditingState) -> Dict[str, Any]:
         """Generate edit using only manuscript context (fast path for simple requests)"""
         try:
-            logger.info("⚡ Generating simple edit (fast path - no references)...")
-            
             # Mark state as simple request for downstream nodes
             state["is_simple_request"] = True
             
             manuscript = state.get("manuscript", "")
             filename = state.get("filename", "manuscript.md")
             
-            # Diagnostic logging for current_request
-            logger.info("="*80)
-            logger.info("🔍 CHECKING current_request in _generate_simple_edit_node:")
-            logger.info(f"   state.get('current_request'): {repr(state.get('current_request', 'NOT_FOUND'))}")
-            logger.info(f"   state.get('query'): {repr(state.get('query', 'NOT_FOUND'))}")
-            messages = state.get("messages", [])
-            logger.info(f"   state.get('messages'): {len(messages) if messages else 'NOT_FOUND'} messages")
-            if messages:
-                latest_message = messages[-1] if messages else None
-                logger.info(f"   Latest message type: {type(latest_message)}")
-                if latest_message:
-                    msg_content = latest_message.content if hasattr(latest_message, 'content') else str(latest_message)
-                    logger.info(f"   Latest message content: {repr(msg_content[:100])}")
-            logger.info("="*80)
-            
             current_request = state.get("current_request", "")
             
             if not current_request:
-                logger.error("❌ current_request is EMPTY in _generate_simple_edit_node - this should have been set by context subgraph!")
-                logger.error("   This indicates a state flow issue between context subgraph and simple edit node")
+                logger.error("current_request is EMPTY in _generate_simple_edit_node - this should have been set by context subgraph!")
+                logger.error("This indicates a state flow issue between context subgraph and simple edit node")
                 return {
                     "error": "No user request found - state flow issue",
                     "task_status": "error"
                 }
-            
-            logger.info(f"📝 User request for simple edit: {current_request[:100]}")
             
             current_chapter_text = state.get("current_chapter_text", "")
             cursor_offset = state.get("cursor_offset", -1)
@@ -963,11 +969,10 @@ class FictionEditingAgent(BaseAgent):
             # If cursor is -1, treat it as end of document
             if cursor_offset == -1:
                 cursor_offset = len(manuscript)
-                logger.info(f"🔍 Cursor at -1 (end of document), setting to manuscript length: {cursor_offset}")
             
             # Use chapter context if available, otherwise fall back to full manuscript
-            prev_chapter_text = state.get("prev_chapter_text", "")
-            next_chapter_text = state.get("next_chapter_text", "")
+            prev_chapter_text = state.get("prev_chapter_text") or ""
+            next_chapter_text = state.get("next_chapter_text") or ""
             
             if current_chapter_text:
                 # Use full chapter context (with prev/next chapters if available)
@@ -978,12 +983,10 @@ class FictionEditingAgent(BaseAgent):
                 if next_chapter_text:
                     context_parts.append(f"\n[NEXT CHAPTER]\n{next_chapter_text}")
                 context_text = "\n".join(context_parts)
-                logger.info(f"🔍 Using chapter context: current={len(current_chapter_text)} chars, prev={len(prev_chapter_text)}, next={len(next_chapter_text)}")
             else:
                 # No chapters found - use entire manuscript for consistency
                 # Without chapter structure, LLM needs full context to maintain character names, plot points, etc.
                 context_text = manuscript
-                logger.info(f"🔍 No chapters found - using ENTIRE manuscript for consistency: {len(context_text)} chars")
             
             if len(context_text) < 100:
                 logger.warning(f"⚠️ Very short context ({len(context_text)} chars) - may not be enough for continuation")
@@ -994,12 +997,16 @@ class FictionEditingAgent(BaseAgent):
                 "**CRITICAL EDITING RULES**:\n"
                 "1. Use GRANULAR edits - prefer word-level or sentence-level changes\n"
                 "2. Keep original_text small (10-20 words) for precise matching\n"
-                "3. Break large edits into multiple operations\n"
+                "3. Break large edits into multiple operations if needed\n"
                 "4. For continuing/adding text: use 'insert_after' with anchor_text = last few words\n"
                 "5. For replacements: use 'replace_range' with original_text\n"
                 "6. For deletions: use 'delete_range' with original_text\n"
                 "7. Match the established voice and style from the manuscript\n"
                 "8. Complete sentences with proper grammar\n"
+                "9. **FOR CONTINUATIONS**: Generate COMPLETE continuations that cover ALL material provided by the user\n"
+                "   - If the user provides multiple points/events/material to cover, address ALL of them\n"
+                "   - Use multiple operations if needed to ensure comprehensive coverage\n"
+                "   - Do NOT truncate or stop early - ensure all requested material is generated\n"
             )
             
             user_prompt = f"""**USER REQUEST**: {current_request}
@@ -1013,16 +1020,22 @@ class FictionEditingAgent(BaseAgent):
 **INSTRUCTIONS**:
 - Generate edits based ONLY on the manuscript context above
 - Use the text around the cursor/selection to find anchor points
-- **FOR CONTINUATION REQUESTS** (e.g., "continue the paragraph", "finish the sentence", "write more"):
+- **FOR CONTINUATION REQUESTS** (e.g., "continue the paragraph", "finish the sentence", "write more", "continue the story"):
   - **PREFER** to generate at least ONE operation with new text
   - Use "insert_after" operation type with anchor_text = last few words before cursor
   - Continue naturally from where the text ends, matching the style and voice
-  - Generate substantial continuation (at least 1-2 sentences, not just a few words)
+  - **CRITICAL FOR COMPREHENSIVE CONTINUATIONS**:
+    - If the user provides material/points/events to cover, you MUST generate text that addresses ALL of it
+    - Generate substantial continuation that fully covers the requested material (multiple paragraphs if needed)
+    - Do NOT stop after just a few sentences if more material needs to be covered
+    - If the continuation is very long, you may break it into multiple operations, but ensure ALL material is covered
+    - The continuation should be complete and comprehensive, not truncated
+  - Generate substantial continuation (at least 1-2 sentences minimum, but more if material is provided)
   - **IF YOU CANNOT CONTINUE** (e.g., unclear context, missing information, concerns about style/consistency):
     - Return empty operations array
     - **EXPLAIN CLEARLY in the summary** why you cannot proceed and what information/clarification you need
 - **FOR REVISION REQUESTS**: Make precise, targeted changes
-- Keep edits granular and focused
+- Keep edits granular and focused, but ensure completeness for continuation requests
 - Always include target_filename and scope in your response
 - **IMPORTANT**: Empty operations are allowed if you have legitimate concerns - but you MUST explain them in the summary field
 
@@ -1060,6 +1073,10 @@ class FictionEditingAgent(BaseAgent):
   - What information would help you proceed
   - Any specific questions you have
 - **PREFER to generate operations** when possible, but prioritize accuracy and clarity over forcing edits
+- **FOR CONTINUATION REQUESTS**: Ensure ALL material provided by the user is covered in your generated text
+  - If multiple points/events are mentioned, address ALL of them
+  - Use multiple operations if needed to ensure comprehensive coverage
+  - Do NOT stop after a few sentences if more material needs to be covered
 - Use original_text from the manuscript context above for precise matching"""
             
             # Call LLM
@@ -1109,12 +1126,8 @@ class FictionEditingAgent(BaseAgent):
                 structured_edit = ManuscriptEdit(**result)
                 
                 if len(structured_edit.operations) == 0:
-                    summary = structured_edit.summary or "No summary provided"
-                    logger.info(f"ℹ️ LLM returned 0 operations for request: {current_request}")
-                    logger.info(f"ℹ️ LLM explanation: {summary}")
                     # This is valid - LLM may have concerns or need clarification
-                
-                logger.info(f"✅ Simple edit generated: {len(structured_edit.operations)} operations")
+                    pass
                 
                 return {
                     "structured_edit": structured_edit.model_dump(),
@@ -1227,7 +1240,33 @@ class FictionEditingAgent(BaseAgent):
                 "mode_guidance": mode_guidance,
                 "requested_chapter_number": requested_chapter_number,
                 "is_multi_chapter": is_multi_chapter,
-                "chapter_range": chapter_range
+                "chapter_range": chapter_range,
+                # ✅ CRITICAL: Preserve manuscript context!
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "prev_chapter_text": state.get("prev_chapter_text"),
+                "prev_chapter_number": state.get("prev_chapter_number"),
+                "next_chapter_text": state.get("next_chapter_text"),
+                "next_chapter_number": state.get("next_chapter_number"),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "selection_start": state.get("selection_start", -1),
+                "selection_end": state.get("selection_end", -1),
+                "cursor_offset": state.get("cursor_offset", -1),
+                # ✅ CRITICAL: Preserve reference context!
+                "outline_body": state.get("outline_body"),
+                "rules_body": state.get("rules_body"),
+                "style_body": state.get("style_body"),
+                "characters_bodies": state.get("characters_bodies", []),
+                "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+                # ✅ CRITICAL: Preserve critical 5 keys!
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
             }
             
         except Exception as e:
@@ -1238,7 +1277,18 @@ class FictionEditingAgent(BaseAgent):
                 "mode_guidance": "",
                 "requested_chapter_number": None,
                 "is_multi_chapter": False,
-                "chapter_range": None
+                "chapter_range": None,
+                # ✅ CRITICAL: Preserve even on error!
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
             }
     
     async def _detect_request_type_node(self, state: FictionEditingState) -> Dict[str, Any]:
@@ -1249,7 +1299,59 @@ class FictionEditingAgent(BaseAgent):
             current_request = state.get("current_request", "")
             if not current_request:
                 logger.warning("No current request found - defaulting to edit_request")
-                return {"request_type": "edit_request"}
+                return {
+                    "request_type": "edit_request",
+                    "is_whole_book_generation": False,
+                    # ✅ CRITICAL: Preserve metadata even in early return!
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                }
+            
+            # Check for whole-book generation patterns FIRST (before LLM call)
+            whole_book_patterns = [
+                "generate entire book",
+                "generate full book",
+                "generate whole book",
+                "generate complete manuscript",
+                "book generation mode",
+                "write the full book"
+            ]
+            is_whole_book = any(pattern in current_request.lower() for pattern in whole_book_patterns)
+            
+            if is_whole_book:
+                return {
+                    "request_type": "edit_request",  # Still an edit request, just whole-book mode
+                    "is_whole_book_generation": True,
+                    # ✅ CRITICAL: Preserve manuscript context!
+                    "current_chapter_text": state.get("current_chapter_text", ""),
+                    "current_chapter_number": state.get("current_chapter_number"),
+                    "prev_chapter_text": state.get("prev_chapter_text"),
+                    "prev_chapter_number": state.get("prev_chapter_number"),
+                    "next_chapter_text": state.get("next_chapter_text"),
+                    "next_chapter_number": state.get("next_chapter_number"),
+                    "manuscript": state.get("manuscript", ""),
+                    "filename": state.get("filename", ""),
+                    "chapter_ranges": state.get("chapter_ranges", []),
+                    "current_request": state.get("current_request", ""),
+                    "selection_start": state.get("selection_start", -1),
+                    "selection_end": state.get("selection_end", -1),
+                    "cursor_offset": state.get("cursor_offset", -1),
+                    # ✅ CRITICAL: Preserve reference context!
+                    "outline_body": state.get("outline_body"),
+                    "rules_body": state.get("rules_body"),
+                    "style_body": state.get("style_body"),
+                    "characters_bodies": state.get("characters_bodies", []),
+                    "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+                    # ✅ CRITICAL: Preserve critical 5 keys!
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                }
             
             current_chapter_text = state.get("current_chapter_text", "")
             style_body = state.get("style_body")
@@ -1319,28 +1421,88 @@ class FictionEditingAgent(BaseAgent):
                     request_type = "edit_request"
                 
                 return {
-                    "request_type": request_type
+                    "request_type": request_type,
+                    "is_whole_book_generation": False,  # Normal mode
+                    # ✅ CRITICAL: Preserve manuscript context!
+                    "current_chapter_text": state.get("current_chapter_text", ""),
+                    "current_chapter_number": state.get("current_chapter_number"),
+                    "prev_chapter_text": state.get("prev_chapter_text"),
+                    "prev_chapter_number": state.get("prev_chapter_number"),
+                    "next_chapter_text": state.get("next_chapter_text"),
+                    "next_chapter_number": state.get("next_chapter_number"),
+                    "manuscript": state.get("manuscript", ""),
+                    "filename": state.get("filename", ""),
+                    "chapter_ranges": state.get("chapter_ranges", []),
+                    "current_request": state.get("current_request", ""),
+                    "selection_start": state.get("selection_start", -1),
+                    "selection_end": state.get("selection_end", -1),
+                    "cursor_offset": state.get("cursor_offset", -1),
+                    # ✅ CRITICAL: Preserve reference context!
+                    "outline_body": state.get("outline_body"),
+                    "rules_body": state.get("rules_body"),
+                    "style_body": state.get("style_body"),
+                    "characters_bodies": state.get("characters_bodies", []),
+                    "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+                    # ✅ CRITICAL: Preserve critical 5 keys!
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
                 }
                 
             except Exception as parse_error:
                 logger.error(f"Failed to parse request type detection: {parse_error}")
                 logger.warning("Defaulting to edit_request due to parse error")
-                return {"request_type": "edit_request"}
+                return {
+                    "request_type": "edit_request",
+                    "is_whole_book_generation": False,
+                    # ✅ CRITICAL: Preserve even on error!
+                    "current_chapter_text": state.get("current_chapter_text", ""),
+                    "current_chapter_number": state.get("current_chapter_number"),
+                    "manuscript": state.get("manuscript", ""),
+                    "filename": state.get("filename", ""),
+                    "chapter_ranges": state.get("chapter_ranges", []),
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                }
             
         except Exception as e:
             logger.error(f"Failed to detect request type: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             # Default to edit_request on error
-            return {"request_type": "edit_request"}
+            return {
+                "request_type": "edit_request",
+                "is_whole_book_generation": False,
+                # ✅ CRITICAL: Preserve even on error!
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+            }
     
     def _route_from_request_type(self, state: FictionEditingState) -> str:
-        """Route based on detected request type"""
+        """Route based on detected request type - DEPRECATED: All requests go through generation subgraph"""
+        # This method is no longer used - all requests (questions and edits) go through the same path
+        # The generation subgraph intelligently handles questions: can analyze and optionally edit
         request_type = state.get("request_type", "edit_request")
-        # ALL questions route to edit path (can analyze and optionally edit)
-        # Pure questions will analyze and return no edits; conditional questions will analyze and edit if needed
-        # Both question and edit_request route to the same path (check_multi_chapter)
         return "edit_request"  # Both question and edit_request go to edit path
+    
+    def _route_generation_mode(self, state: FictionEditingState) -> str:
+        """Route to whole-book generation or normal generation path"""
+        if state.get("is_whole_book_generation", False):
+            return "whole_book"
+        return "normal"
     
     async def _answer_question_node(self, state: FictionEditingState) -> Dict[str, Any]:
         """Answer user questions about the manuscript, references, or general information"""
@@ -1365,25 +1527,8 @@ class FictionEditingAgent(BaseAgent):
             prev_chapter_text = state.get("prev_chapter_text")
             next_chapter_text = state.get("next_chapter_text")
             
-            # Log what we're showing
-            logger.info(f"📖 Chapter context for question: Chapter {chapter_number_to_show} (cursor-based)")
-            if prev_chapter_text:
-                logger.info(f"📖 Previous chapter available ({len(prev_chapter_text)} chars)")
-            if next_chapter_text:
-                logger.info(f"📖 Next chapter available ({len(next_chapter_text)} chars)")
-            logger.info(f"📖 Current chapter text length: {len(chapter_text_to_show) if chapter_text_to_show else 0} chars")
-            
             # Build context for answering
             context_parts = []
-            
-            # Include conversation history
-            messages = state.get("messages", [])
-            conversation_history = self._format_conversation_history_for_prompt(messages, look_back_limit=6)
-            if conversation_history:
-                context_parts.append(conversation_history)
-            
-            context_parts.append("=== USER QUESTION ===\n")
-            context_parts.append(f"{current_request}\n\n")
             
             # Chapter context - show current, previous, and next chapters (cursor-based)
             if prev_chapter_text:
@@ -1448,9 +1593,11 @@ class FictionEditingAgent(BaseAgent):
                     context_parts.append("- Provide original analysis in your own words\n\n")
                     context_parts.append(f"{outline_text_for_question[:1500]}\n\n")
             
-            # Build prompt for answering
-            answer_prompt = "".join(context_parts)
-            answer_prompt += """**YOUR TASK**: Answer the user's question clearly and helpfully.
+            # Build request with instructions
+            request_with_instructions = f"""=== USER QUESTION ===
+{current_request}
+
+**YOUR TASK**: Answer the user's question clearly and helpfully.
 
 - If they're asking about style, explain what style is being used and why
 - If they're asking about content, describe what's in the manuscript
@@ -1463,15 +1610,19 @@ class FictionEditingAgent(BaseAgent):
 
 **OUTPUT**: Provide a natural, conversational answer to the user's question. Do NOT generate JSON or editor operations."""
             
+            # Use standardized helper for message construction with conversation history
+            messages_list = state.get("messages", [])
+            system_prompt = "You are a helpful fiction editing assistant. Answer user questions about the manuscript, style, references, and related information. Be conversational and helpful."
+            messages = self._build_editing_agent_messages(
+                system_prompt=system_prompt,
+                context_parts=context_parts,
+                current_request=request_with_instructions,
+                messages_list=messages_list,
+                look_back_limit=6
+            )
+            
             # Call LLM for conversational response
             llm = self._get_llm(temperature=0.7, state=state)  # Higher temperature for natural conversation
-            
-            datetime_context = self._get_datetime_context()
-            messages = [
-                SystemMessage(content="You are a helpful fiction editing assistant. Answer user questions about the manuscript, style, references, and related information. Be conversational and helpful."),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content=answer_prompt)
-            ]
             
             response = await llm.ainvoke(messages)
             answer_text = response.content if hasattr(response, 'content') else str(response)
@@ -1487,7 +1638,13 @@ class FictionEditingAgent(BaseAgent):
                     "timestamp": datetime.now().isoformat()
                 },
                 "task_status": "complete",
-                "editor_operations": []  # No operations for questions
+                "editor_operations": [],  # No operations for questions
+                # ✅ CRITICAL: Preserve metadata for downstream nodes!
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
             }
             
         except Exception as e:
@@ -1501,7 +1658,13 @@ class FictionEditingAgent(BaseAgent):
                     "agent_type": "fiction_editing_agent"
                 },
                 "task_status": "error",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve metadata even on error!
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
             }
     
     async def _check_multi_chapter_node(self, state: FictionEditingState) -> Dict[str, Any]:
@@ -1517,20 +1680,83 @@ class FictionEditingAgent(BaseAgent):
                     "is_multi_chapter": True,
                     "chapter_range": chapter_range,
                     "current_generation_chapter": start_ch,
-                    "generated_chapters": {}
+                    "generated_chapters": {},
+                    # ✅ CRITICAL: Preserve manuscript context!
+                    "current_chapter_text": state.get("current_chapter_text", ""),
+                    "current_chapter_number": state.get("current_chapter_number"),
+                    "prev_chapter_text": state.get("prev_chapter_text"),
+                    "prev_chapter_number": state.get("prev_chapter_number"),
+                    "next_chapter_text": state.get("next_chapter_text"),
+                    "next_chapter_number": state.get("next_chapter_number"),
+                    "manuscript": state.get("manuscript", ""),
+                    "filename": state.get("filename", ""),
+                    "chapter_ranges": state.get("chapter_ranges", []),
+                    "current_request": state.get("current_request", ""),
+                    "selection_start": state.get("selection_start", -1),
+                    "selection_end": state.get("selection_end", -1),
+                    "cursor_offset": state.get("cursor_offset", -1),
+                    # ✅ CRITICAL: Preserve reference context!
+                    "outline_body": state.get("outline_body"),
+                    "rules_body": state.get("rules_body"),
+                    "style_body": state.get("style_body"),
+                    "characters_bodies": state.get("characters_bodies", []),
+                    "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+                    # ✅ CRITICAL: Preserve critical 5 keys!
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
                 }
             else:
                 return {
                     "is_multi_chapter": False,
                     "current_generation_chapter": None,
-                    "generated_chapters": {}
+                    "generated_chapters": {},
+                    # ✅ CRITICAL: Preserve manuscript context!
+                    "current_chapter_text": state.get("current_chapter_text", ""),
+                    "current_chapter_number": state.get("current_chapter_number"),
+                    "prev_chapter_text": state.get("prev_chapter_text"),
+                    "prev_chapter_number": state.get("prev_chapter_number"),
+                    "next_chapter_text": state.get("next_chapter_text"),
+                    "next_chapter_number": state.get("next_chapter_number"),
+                    "manuscript": state.get("manuscript", ""),
+                    "filename": state.get("filename", ""),
+                    "chapter_ranges": state.get("chapter_ranges", []),
+                    "current_request": state.get("current_request", ""),
+                    "selection_start": state.get("selection_start", -1),
+                    "selection_end": state.get("selection_end", -1),
+                    "cursor_offset": state.get("cursor_offset", -1),
+                    # ✅ CRITICAL: Preserve reference context!
+                    "outline_body": state.get("outline_body"),
+                    "rules_body": state.get("rules_body"),
+                    "style_body": state.get("style_body"),
+                    "characters_bodies": state.get("characters_bodies", []),
+                    "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+                    # ✅ CRITICAL: Preserve critical 5 keys!
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
                 }
         except Exception as e:
             logger.error(f"Multi-chapter check failed: {e}")
             return {
                 "is_multi_chapter": False,
                 "current_generation_chapter": None,
-                "generated_chapters": {}
+                "generated_chapters": {},
+                # ✅ CRITICAL: Preserve even on error!
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
             }
     
     def _route_multi_chapter(self, state: FictionEditingState) -> str:
@@ -1583,8 +1809,7 @@ class FictionEditingAgent(BaseAgent):
                         next_chapter_text = None
                     else:
                         next_chapter_text = _strip_frontmatter_block(manuscript[r.start:r.end])
-                        logger.info(f"📖 Extracted next chapter for multi-chapter: {r.chapter_number} ({len(next_chapter_text)} chars)")
-                    break
+                        break
             
             # Extract outline for current chapter
             outline_body = state.get("outline_body")
@@ -1615,7 +1840,8 @@ class FictionEditingAgent(BaseAgent):
     async def _prepare_generation_node(self, state: FictionEditingState) -> Dict[str, Any]:
         """Prepare generation state: set system_prompt and datetime_context for generation subgraph"""
         try:
-            # Build system prompt
+            # ⚠️ ALWAYS build system prompt FRESH - NEVER use checkpointed version
+            # The system prompt should only contain instructions, not reference content
             system_prompt = self._build_system_prompt()
             
             # Get datetime context
@@ -1623,13 +1849,51 @@ class FictionEditingAgent(BaseAgent):
             
             return {
                 "system_prompt": system_prompt,
-                "datetime_context": datetime_context
+                "datetime_context": datetime_context,
+                # ✅ CRITICAL: Preserve ALL manuscript context for generation subgraph!
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "prev_chapter_text": state.get("prev_chapter_text"),
+                "prev_chapter_number": state.get("prev_chapter_number"),
+                "next_chapter_text": state.get("next_chapter_text"),
+                "next_chapter_number": state.get("next_chapter_number"),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "selection_start": state.get("selection_start", -1),
+                "selection_end": state.get("selection_end", -1),
+                "cursor_offset": state.get("cursor_offset", -1),
+                "requested_chapter_number": state.get("requested_chapter_number"),
+                # ✅ CRITICAL: Preserve reference context too!
+                "outline_body": state.get("outline_body"),
+                "rules_body": state.get("rules_body"),
+                "style_body": state.get("style_body"),
+                "characters_bodies": state.get("characters_bodies", []),
+                "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+                # ✅ CRITICAL: Preserve critical 5 keys!
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
             }
         except Exception as e:
             logger.error(f"Failed to prepare generation: {e}")
             return {
                 "error": str(e),
-                "task_status": "error"
+                "task_status": "error",
+                # ✅ CRITICAL: Preserve even on error!
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
             }
     
     async def _accumulate_chapter_node(self, state: FictionEditingState) -> Dict[str, Any]:
@@ -1692,7 +1956,6 @@ class FictionEditingAgent(BaseAgent):
         
         if is_simple:
             # Simple path: skip everything, go straight to format
-            logger.info("⚡ Simple path: skipping accumulation")
             return "format_response"
         
         # Full path: check if multi-chapter
@@ -1791,23 +2054,35 @@ class FictionEditingAgent(BaseAgent):
                     "task_status": "error"
                 }
             
-            # Handle questions with no operations (analysis-only response)
-            if request_type == "question" and len(editor_operations) == 0 and structured_edit:
-                summary = structured_edit.summary
-                if summary:
-                    logger.info("Question request with no operations - using summary as response")
-                    return {
-                        "response": {
-                            "response": summary,
+            # Handle questions (with or without operations)
+            if request_type == "question":
+                if structured_edit and structured_edit.summary:
+                    summary = structured_edit.summary
+                    if len(editor_operations) == 0:
+                        # Pure question with no operations - return summary as response
+                        logger.info("Question request with no operations - using summary as response")
+                        return {
+                            "response": {
+                                "response": summary,
+                                "task_status": "complete",
+                                "agent_type": "fiction_editing_agent"
+                            },
                             "task_status": "complete",
-                            "agent_type": "fiction_editing_agent"
-                        },
-                        "task_status": "complete",
-                        "editor_operations": []
-                }
-            
-            # Build response text - use summary, not full text
-            if is_multi_chapter and generated_chapters:
+                            "editor_operations": []
+                        }
+                    else:
+                        # Question with operations - use summary as response text (conversational feedback)
+                        logger.info(f"Question request with {len(editor_operations)} operations - using summary as conversational response")
+                        response_text = summary
+                else:
+                    # Question but no summary - fallback
+                    logger.warning("Question request but no summary in structured_edit - using fallback")
+                    if editor_operations:
+                        response_text = f"Analysis complete. Made {len(editor_operations)} edit(s) based on your question."
+                    else:
+                        response_text = "Analysis complete."
+            # Build response text for edit requests - use summary, not full text
+            elif is_multi_chapter and generated_chapters:
                 # Multi-chapter: brief summary only
                 response_text = f"Generated {len(generated_chapters)} chapters."
                 if structured_edit and structured_edit.summary:
@@ -1920,7 +2195,6 @@ class FictionEditingAgent(BaseAgent):
                             "safety": "medium",
                         "operations": all_operations
                     }
-                    logger.info(f"✅ Format response: Added {len(all_operations)} multi-chapter editor_operations to response dict")
             elif editor_operations:
                 # Always include editor_operations when present
                 response["editor_operations"] = editor_operations
@@ -1944,8 +2218,6 @@ class FictionEditingAgent(BaseAgent):
                         "safety": "medium",
                     "operations": editor_operations
                 }
-                logger.info(f"✅ Format response: Added {len(editor_operations)} editor_operations to response dict")
-                logger.info(f"✅ Format response: First operation keys: {list(editor_operations[0].keys()) if editor_operations else 'none'}")
             else:
                 logger.info(f"ℹ️ Format response: No editor_operations to include (editor_operations from state: {len(state.get('editor_operations', []))})")
                 # If no operations, use LLM's summary to explain why
@@ -2016,6 +2288,25 @@ class FictionEditingAgent(BaseAgent):
             existing_shared_memory = {}
             if checkpoint_state and checkpoint_state.values:
                 existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+                
+                # ⚠️ CRITICAL: Clear heavy reference fields from checkpointed state
+                # These fields should be loaded FRESH every turn from files, not accumulated
+                # This prevents sending Chapter 1 content multiple times!
+                heavy_fields_to_clear = [
+                    "outline_body", "rules_body", "style_body", "characters_bodies",
+                    "outline_current_chapter_text", "loaded_references",
+                    # Also clear manuscript content (will be refreshed from active_editor)
+                    "manuscript", "current_chapter_text", "prev_chapter_text", "next_chapter_text",
+                    # ⚠️ CRITICAL: Also clear system_prompt as it can get bloated with references
+                    "system_prompt"
+                ]
+                cleared_count = 0
+                for field in heavy_fields_to_clear:
+                    if existing_shared_memory.pop(field, None) is not None:
+                        cleared_count += 1
+                
+                if cleared_count > 0:
+                    logger.info(f"🧹 Cleared {cleared_count} heavy reference fields from checkpointed shared_memory (will reload fresh)")
             
             # Merge shared_memory: start with checkpoint, then update with NEW data (so new active_editor overwrites old)
             shared_memory_merged = existing_shared_memory.copy()
@@ -2077,6 +2368,8 @@ class FictionEditingAgent(BaseAgent):
                 "chapter_range": None,
                 "current_generation_chapter": None,
                 "generated_chapters": {},
+                # Whole-book generation field
+                "is_whole_book_generation": False,
                 # Outline sync detection
                 "outline_sync_analysis": None,
                 "outline_needs_sync": False
@@ -2088,10 +2381,6 @@ class FictionEditingAgent(BaseAgent):
             # Extract final response
             response = result_state.get("response", {})
             task_status = result_state.get("task_status", "complete")
-            
-            # Debug: log response structure
-            logger.info(f"🔍 Process: response type={type(response)}, keys={list(response.keys()) if isinstance(response, dict) else 'not a dict'}")
-            logger.info(f"🔍 Process: editor_operations in state={bool(result_state.get('editor_operations'))}, count={len(result_state.get('editor_operations', []))}")
             
             if task_status == "error":
                 error_msg = result_state.get("error", "Unknown error")
@@ -2111,8 +2400,10 @@ class FictionEditingAgent(BaseAgent):
                 logger.warning(f"⚠️ Process: editor_operations missing from response dict but present in state - using state")
             
             # Build result dict matching character_development_agent pattern
+            response_value = response.get("response", "Fiction editing complete") if isinstance(response, dict) else str(response)
+            
             result = {
-                "response": response.get("response", "Fiction editing complete") if isinstance(response, dict) else str(response),
+                "response": response_value,
                 "task_status": task_status,
                 "agent_results": {
                     "editor_operations": editor_operations,
@@ -2123,9 +2414,6 @@ class FictionEditingAgent(BaseAgent):
             # Add editor operations at top level for compatibility
             if editor_operations:
                 result["editor_operations"] = editor_operations
-                logger.info(f"✅ Fiction editing agent: Added {len(editor_operations)} editor_operations to result")
-                if editor_operations:
-                    logger.info(f"✅ Fiction editing agent: First operation type={editor_operations[0].get('op_type')}, has_text={bool(editor_operations[0].get('text'))}")
             else:
                 logger.warning(f"⚠️ Fiction editing agent: No editor_operations found (response keys: {list(response.keys()) if isinstance(response, dict) else 'not a dict'}, state has ops: {bool(editor_ops_from_state)})")
             

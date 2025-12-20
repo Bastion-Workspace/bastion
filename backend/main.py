@@ -48,6 +48,7 @@ def strip_yaml_frontmatter(content: str) -> str:
 from services.celery_app import celery_app
 
 # Import Celery tasks to ensure they are registered
+# Note: orchestrator_tasks.process_orchestrator_query removed - deprecated task
 import services.celery_tasks.orchestrator_tasks
 import services.celery_tasks.agent_tasks
 import services.celery_tasks.rss_tasks
@@ -542,19 +543,10 @@ logger.info("✅ Editor API routes registered")
 
 logger.info("✅ Agent API routes registered")
 
-# Context-aware research API routes temporarily disabled - migrating to LangGraph subgraphs
-# from api.context_aware_research_api import router as context_aware_research_router
-# from api.hybrid_research_api import router as hybrid_research_router
-# app.include_router(context_aware_research_router)
-# app.include_router(hybrid_research_router)
-logger.info("⚠️ Context-aware research API routes disabled - migrating to LangGraph subgraph workflows")
+# Context-aware research API routes removed - migrated to LangGraph subgraph workflows
 
 # Deprecated LangGraph APIs removed - using async_orchestrator_api for all LangGraph functionality
-
-# Include Orchestrator chat API routes
-from api.orchestrator_chat_api import router as orchestrator_chat_router
-app.include_router(orchestrator_chat_router)
-logger.info("✅ Orchestrator chat API routes registered")
+# Orchestrator chat API removed - deprecated endpoint that returned 410 errors
 
 # Include Async Orchestrator API routes
 from api.async_orchestrator_api import router as async_orchestrator_router
@@ -628,6 +620,9 @@ logger.info("✅ Agent chaining API routes registered")
 # Include RSS API routes
 from api.rss_api import router as rss_router
 app.include_router(rss_router)
+
+from api.entertainment_sync_api import router as entertainment_sync_router
+app.include_router(entertainment_sync_router)
 logger.info("✅ RSS API routes registered")
 
 
@@ -1012,7 +1007,13 @@ async def get_conversation_messages(conversation_id: str, skip: int = 0, limit: 
                     
                     # Convert database messages to API format
                     for msg in db_messages:
-                        messages.append({
+                        metadata_json = msg.get("metadata_json", {})
+                        
+                        # Extract editor_operations and manuscript_edit from metadata for top-level access
+                        editor_operations = metadata_json.get("editor_operations", []) if isinstance(metadata_json, dict) else []
+                        manuscript_edit = metadata_json.get("manuscript_edit") if isinstance(metadata_json, dict) else None
+                        
+                        message_obj = {
                             "message_id": msg.get("message_id"),
                             "conversation_id": conversation_id,
                             "message_type": msg.get("message_type", "user"),
@@ -1021,10 +1022,18 @@ async def get_conversation_messages(conversation_id: str, skip: int = 0, limit: 
                             "sequence_number": msg.get("sequence_number", 0),
                             "created_at": msg.get("created_at").isoformat() if hasattr(msg.get("created_at"), "isoformat") else str(msg.get("created_at")),
                             "updated_at": msg.get("updated_at").isoformat() if hasattr(msg.get("updated_at"), "isoformat") else str(msg.get("updated_at")),
-                            "metadata_json": msg.get("metadata_json", {}),
-                            "citations": msg.get("metadata_json", {}).get("citations", []) if isinstance(msg.get("metadata_json"), dict) else [],
+                            "metadata_json": metadata_json,
+                            "citations": metadata_json.get("citations", []) if isinstance(metadata_json, dict) else [],
                             "edit_history": []
-                        })
+                        }
+                        
+                        # Add editor_operations and manuscript_edit as top-level fields if present
+                        if editor_operations:
+                            message_obj["editor_operations"] = editor_operations
+                        if manuscript_edit:
+                            message_obj["manuscript_edit"] = manuscript_edit
+                        
+                        messages.append(message_obj)
                     messages_from_database = True
                 else:
                     logger.info(f"📚 No messages in conversation database, will try checkpoints as fallback")
@@ -1451,29 +1460,57 @@ async def websocket_conversations(websocket: WebSocket):
         
         logger.info(f"✅ Conversation WebSocket token validated for user: {user_id}")
         
-        # Connect to WebSocket manager
-        await websocket_manager.connect(websocket, session_id=user_id)
+        # Connect to WebSocket manager (use singleton to ensure same instance as team broadcasts)
+        from utils.websocket_manager import get_websocket_manager
+        ws_manager = get_websocket_manager()
+        
+        await ws_manager.connect(websocket, session_id=user_id)
         logger.info(f"✅ Conversation WebSocket connected to manager for user: {user_id}")
+        logger.info(f"📊 Active sessions after connect: {list(ws_manager.session_connections.keys())}")
+        logger.info(f"📊 Total connections: {len(ws_manager.active_connections)}")
         
         try:
             # Keep connection alive and handle messages
             while True:
-                # Wait for any message (ping/pong or data)
-                data = await websocket.receive_text()
-                
-                # Echo back for now (can be extended for real-time features)
-                await websocket.send_json({
-                    "type": "echo",
-                    "data": data,
-                    "timestamp": datetime.now().isoformat()
-                })
+                # Wait for any message (ping/pong, heartbeat, or data)
+                try:
+                    data = await websocket.receive_json()
+                    
+                    # Handle heartbeat to keep connection alive
+                    if isinstance(data, dict) and data.get("type") == "heartbeat":
+                        await websocket.send_json({
+                            "type": "heartbeat_ack",
+                            "timestamp": datetime.now().isoformat()
+                        })
+                    else:
+                        # Echo back for other message types
+                        await websocket.send_json({
+                            "type": "echo",
+                            "data": data,
+                            "timestamp": datetime.now().isoformat()
+                        })
+                except ValueError:
+                    # Handle non-JSON messages (like plain text pings)
+                    try:
+                        data = await websocket.receive_text()
+                        if data == "ping":
+                            await websocket.send_text("pong")
+                        else:
+                            await websocket.send_json({
+                                "type": "echo",
+                                "data": data,
+                                "timestamp": datetime.now().isoformat()
+                            })
+                    except Exception as text_error:
+                        logger.warning(f"⚠️ Error handling WebSocket text message: {text_error}")
+                        break
                 
         except WebSocketDisconnect:
             logger.info(f"📡 Conversation WebSocket disconnected for user: {user_id}")
         except Exception as e:
-            logger.error(f"❌ Conversation WebSocket error for user {user_id}: {e}")
+            logger.error(f"❌ Conversation WebSocket error for user {user_id}: {e}", exc_info=True)
         finally:
-            websocket_manager.disconnect(websocket, session_id=user_id)
+            ws_manager.disconnect(websocket, session_id=user_id)
             logger.info(f"🧹 Conversation WebSocket cleaned up for user: {user_id}")
             
     except Exception as e:
@@ -1514,8 +1551,11 @@ async def websocket_folders(websocket: WebSocket):
         
         logger.info(f"✅ Folder WebSocket token validated for user: {user_id}")
         
-        # Connect to WebSocket manager
-        await websocket_manager.connect(websocket, session_id=user_id)
+        # Connect to WebSocket manager (use singleton to ensure same instance)
+        from utils.websocket_manager import get_websocket_manager
+        ws_manager = get_websocket_manager()
+        
+        await ws_manager.connect(websocket, session_id=user_id)
         logger.info(f"✅ Folder WebSocket connected to manager for user: {user_id}")
         
         try:
@@ -1536,7 +1576,7 @@ async def websocket_folders(websocket: WebSocket):
         except Exception as e:
             logger.error(f"❌ Folder WebSocket error for user {user_id}: {e}")
         finally:
-            websocket_manager.disconnect(websocket, session_id=user_id)
+            ws_manager.disconnect(websocket, session_id=user_id)
             logger.info(f"🧹 Folder WebSocket cleaned up for user: {user_id}")
             
     except Exception as e:
@@ -3463,41 +3503,87 @@ async def create_folder(
         # Determine collection type based on user role and request
         collection_type = "user"
         user_id = current_user.user_id
+        team_id = None
+        admin_user_id = None
         
-        # Allow admins to create global folders
-        if current_user.role == "admin" and getattr(request, 'collection_type', None) == "global":
-            collection_type = "global"
-            user_id = None  # Global folders have no user_id
-            logger.info(f"🔍 API: Admin creating global folder - setting user_id to None")
+        # Check if parent folder is provided - inherit collection type from parent
+        if request.parent_folder_id:
+            # Get parent folder to determine collection type and team_id
+            parent_folder = await folder_service.get_folder(request.parent_folder_id, current_user.user_id, current_user.role)
+            if parent_folder:
+                parent_collection_type = parent_folder.collection_type or 'user'
+                parent_team_id = parent_folder.team_id
+                
+                # Inherit collection type from parent
+                if parent_collection_type == "team" and parent_team_id:
+                    collection_type = "team"
+                    team_id = str(parent_team_id) if parent_team_id else None
+                    # For team folders, user_id must be NULL (per schema constraint)
+                    user_id = None
+                    # For team folders, use the creator's user_id as admin_user_id (for RLS and created_by)
+                    admin_user_id = current_user.user_id
+                    # Verify user is a team member
+                    from api.teams_api import team_service
+                    member_role = await team_service.check_team_access(team_id, current_user.user_id)
+                    if not member_role:
+                        raise HTTPException(status_code=403, detail="You must be a team member to create folders in team folders")
+                    logger.info(f"🔍 API: Creating team folder - team_id: {team_id}, admin_user_id: {admin_user_id}")
+                elif parent_collection_type == "global":
+                    # Only admins can create folders in global folders
+                    if current_user.role != "admin":
+                        raise HTTPException(status_code=403, detail="Only admins can create folders in global folders")
+                    collection_type = "global"
+                    user_id = None
+                    logger.info(f"🔍 API: Creating global folder")
+                else:
+                    # User folder - inherit user_id from parent or use current user
+                    user_id = parent_folder.user_id or current_user.user_id
+                    logger.info(f"🔍 API: Creating user folder - user_id: {user_id}")
+                
+                logger.info(f"🔍 API: Creating folder '{request.name}' in parent folder '{parent_folder.name}' (collection_type: {collection_type})")
+            else:
+                logger.warning(f"⚠️ Parent folder {request.parent_folder_id} not found, creating at root level")
+        else:
+            # No parent - check explicit collection_type in request
+            if current_user.role == "admin" and getattr(request, 'collection_type', None) == "global":
+                collection_type = "global"
+                user_id = None  # Global folders have no user_id
+                logger.info(f"🔍 API: Admin creating global folder - setting user_id to None")
+            else:
+                # Default to user folder
+                logger.info(f"🔍 API: Creating folder '{request.name}' at root level (user folder)")
         
-        logger.info(f"🔍 API: Final parameters - collection_type: {collection_type}, user_id: {user_id}")
+        logger.info(f"🔍 API: Final parameters - collection_type: {collection_type}, user_id: {user_id}, team_id: {team_id}")
         
         # Additional security validation
-        if current_user.role != "admin":
+        if collection_type == "team":
+            # Team folder creation - already validated team membership above
+            pass
+        elif current_user.role != "admin":
             # Regular users can only create folders for themselves
-            if user_id != current_user.user_id:
+            if collection_type == "user" and user_id != current_user.user_id:
                 raise HTTPException(status_code=403, detail="Regular users can only create folders for themselves")
+            if collection_type == "global":
+                raise HTTPException(status_code=403, detail="Regular users cannot create global folders")
         else:
             # Admins can only create folders for themselves or global folders
             if collection_type == "user" and user_id != current_user.user_id:
                 raise HTTPException(status_code=403, detail="Admins can only create folders for themselves or global folders")
         
-        # Build folder path - if parent_folder_id is provided, we need to get the parent's path
+        # Build folder path
         folder_path = [request.name]
-        if request.parent_folder_id:
-            # Get parent folder to build the full path
-            parent_folder = await folder_service.get_folder(request.parent_folder_id, user_id, current_user.role)
-            if parent_folder:
-                # For now, we'll create the folder directly in the parent
-                # The FileManager will handle the folder structure creation
-                folder_path = [request.name]  # Single folder name
-                logger.info(f"🔍 API: Creating folder '{request.name}' in parent folder '{parent_folder.name}'")
-            else:
-                logger.warning(f"⚠️ Parent folder {request.parent_folder_id} not found, creating at root level")
-        else:
-            logger.info(f"🔍 API: Creating folder '{request.name}' at root level")
         
         # Create folder using FileManager for consistent WebSocket notifications
+        # For team folders, admin_user_id should be the creator (for RLS context)
+        # For user/global folders, admin_user_id is only set if user is admin
+        final_admin_user_id = None
+        if collection_type == "team":
+            # Team folders: admin_user_id is the creator (for RLS context)
+            final_admin_user_id = admin_user_id or current_user.user_id
+        elif current_user.role == "admin":
+            # Admin creating user/global folder
+            final_admin_user_id = current_user.user_id
+        
         folder_request = FolderStructureRequest(
             folder_path=folder_path,
             parent_folder_id=request.parent_folder_id,
@@ -3505,14 +3591,17 @@ async def create_folder(
             collection_type=collection_type,
             description=f"Folder created by {current_user.username}",
             current_user_role=current_user.role,
-            admin_user_id=current_user.user_id if current_user.role == "admin" else None
+            admin_user_id=final_admin_user_id
         )
         
         logger.info(f"🔍 API: Creating folder via FileManager: {folder_request.dict()}")
         response = await file_manager.create_folder_structure(folder_request)
         
         # Get the created folder info to return
-        folder = await folder_service.get_folder(response.folder_id, user_id, current_user.role)
+        # For team folders, use admin_user_id (creator) for RLS context
+        # For user/global folders, use user_id (may be None for global)
+        query_user_id = final_admin_user_id if collection_type == "team" else user_id
+        folder = await folder_service.get_folder(response.folder_id, query_user_id, current_user.role)
         if not folder:
             raise HTTPException(status_code=500, detail="Folder created but could not retrieve folder info")
         
@@ -3523,7 +3612,9 @@ async def create_folder(
         return folder
         
     except Exception as e:
+        import traceback
         logger.error(f"❌ API: Failed to create folder via FileManager: {e}")
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/api/folders/{folder_id}/metadata")
@@ -3613,22 +3704,37 @@ async def delete_folder(
                         "parent_folder_id": folder.parent_folder_id,
                         "user_id": folder.user_id,
                         "collection_type": folder.collection_type,
+                        "team_id": folder.team_id if hasattr(folder, 'team_id') else None,
                         "deleted_at": datetime.now().isoformat()
                     }
-                    await websocket_manager.send_to_session({
+                    notification = {
                         "type": "folder_event",
                         "action": "deleted",
                         "folder": folder_data,
                         "user_id": current_user.user_id,
                         "timestamp": datetime.now().isoformat()
-                    }, current_user.user_id)
-                    logger.info(f"📡 Sent folder deletion notification for user {current_user.user_id}")
+                    }
+                    
+                    # For team folders, send to all team members
+                    if folder.collection_type == "team" and folder.team_id:
+                        from api.teams_api import team_service
+                        members = await team_service.get_team_members(str(folder.team_id), current_user.user_id)
+                        for member in members:
+                            await websocket_manager.send_to_session(notification, member.get('user_id'))
+                        logger.info(f"📡 Sent folder deletion notification to {len(members)} team members")
+                    else:
+                        # For user/global folders, send only to the owner
+                        await websocket_manager.send_to_session(notification, current_user.user_id)
+                        logger.info(f"📡 Sent folder deletion notification for user {current_user.user_id}")
                 else:
                     logger.warning("⚠️ WebSocket manager not available for folder deletion notification")
             except Exception as e:
                 logger.warning(f"⚠️ Failed to send WebSocket notification: {e}")
         
         return {"message": "Folder deleted successfully"}
+    except PermissionError as e:
+        logger.warning(f"⛔ Permission denied for folder deletion: {e}")
+        raise HTTPException(status_code=403, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
@@ -4772,18 +4878,21 @@ async def exempt_folder_from_vectorization(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """Exempt a folder and all descendants from vectorization"""
+    logger.info(f"🚫 API: Exempting folder {folder_id} for user {current_user.user_id}")
     try:
         from services.service_container import get_service_container
         container = await get_service_container()
         folder_service = container.folder_service
-        
+
         success = await folder_service.exempt_folder_from_vectorization(
             folder_id,
             current_user.user_id
         )
         if success:
+            logger.info(f"✅ API: Folder {folder_id} exempted successfully")
             return {"status": "success", "message": "Folder and descendants exempted from vectorization"}
         else:
+            logger.error(f"❌ API: Failed to exempt folder {folder_id} - method returned false")
             raise HTTPException(status_code=500, detail="Failed to exempt folder")
     except Exception as e:
         logger.error(f"❌ Failed to exempt folder {folder_id}: {e}")
@@ -4934,7 +5043,7 @@ async def update_document_content(
             logger.warning(f"⚠️ Failed to update file size metadata: {e}")
 
         # Check if document is exempt from vectorization BEFORE processing
-        is_exempt = await document_service.document_repository.is_document_exempt(doc_id)
+        is_exempt = await document_service.document_repository.is_document_exempt(doc_id, current_user.user_id)
         if is_exempt:
             logger.info(f"🚫 Document {doc_id} is exempt from vectorization - skipping embedding and entity extraction")
             await document_service.document_repository.update_status(doc_id, ProcessingStatus.COMPLETED)

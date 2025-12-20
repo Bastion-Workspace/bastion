@@ -56,7 +56,16 @@ const TeamInvitationMessage = ({ message }) => {
 
   if (invitationStatus === 'accepted') {
     return (
-      <Paper sx={{ p: 2, bgcolor: 'success.light', maxWidth: 400 }}>
+      <Paper 
+        sx={{ 
+          p: 2, 
+          bgcolor: (theme) => 
+            theme.palette.mode === 'dark' 
+              ? 'rgba(46, 125, 50, 0.2)' 
+              : 'success.light', 
+          maxWidth: 400 
+        }}
+      >
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
           <Group />
           <Typography variant="subtitle2">
@@ -72,7 +81,16 @@ const TeamInvitationMessage = ({ message }) => {
 
   if (invitationStatus === 'rejected') {
     return (
-      <Paper sx={{ p: 2, bgcolor: 'grey.200', maxWidth: 400 }}>
+      <Paper 
+        sx={{ 
+          p: 2, 
+          bgcolor: (theme) => 
+            theme.palette.mode === 'dark' 
+              ? 'rgba(158, 158, 158, 0.15)' 
+              : 'grey.200', 
+          maxWidth: 400 
+        }}
+      >
         <Typography variant="body2" color="text.secondary">
           Team invitation declined
         </Typography>
@@ -82,7 +100,16 @@ const TeamInvitationMessage = ({ message }) => {
 
   if (!isInvitedUser) {
     return (
-      <Paper sx={{ p: 2, bgcolor: 'info.light', maxWidth: 400 }}>
+      <Paper 
+        sx={{ 
+          p: 2, 
+          bgcolor: (theme) => 
+            theme.palette.mode === 'dark' 
+              ? 'rgba(2, 136, 209, 0.2)' 
+              : 'info.light', 
+          maxWidth: 400 
+        }}
+      >
         <Typography variant="body2">
           You invited {inviterName} to join {teamName}
         </Typography>
@@ -92,7 +119,16 @@ const TeamInvitationMessage = ({ message }) => {
   }
 
   return (
-    <Paper sx={{ p: 2, bgcolor: 'primary.light', maxWidth: 400 }}>
+    <Paper 
+      sx={{ 
+        p: 2, 
+        bgcolor: (theme) => 
+          theme.palette.mode === 'dark' 
+            ? 'rgba(25, 118, 210, 0.16)' 
+            : 'primary.light', 
+        maxWidth: 400 
+      }}
+    >
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 2 }}>
         <Avatar sx={{ bgcolor: 'primary.main' }}>
           <Group />
@@ -101,7 +137,15 @@ const TeamInvitationMessage = ({ message }) => {
           <Typography variant="subtitle2">
             Team Invitation
           </Typography>
-          <Typography variant="caption" color="text.secondary">
+          <Typography 
+            variant="caption" 
+            sx={{
+              color: (theme) => 
+                theme.palette.mode === 'dark' 
+                  ? 'rgba(255, 255, 255, 0.7)' 
+                  : 'text.secondary'
+            }}
+          >
             from {inviterName}
           </Typography>
         </Box>

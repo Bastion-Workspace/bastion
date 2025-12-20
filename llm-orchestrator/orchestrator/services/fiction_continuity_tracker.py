@@ -349,12 +349,12 @@ class FictionContinuityTracker:
             logger.debug(f"Traceback: {traceback.format_exc()}")
         
         # Return safe fallback
-            return ContinuityValidationResult(
-                is_valid=True,  # Assume valid if we can't parse
-                violations=[],
-                warnings=["Failed to fully validate continuity - proceeding with caution"],
-                confidence=0.3
-            )
+        return ContinuityValidationResult(
+            is_valid=True,  # Assume valid if we can't parse
+            violations=[],
+            warnings=["Failed to fully validate continuity - proceeding with caution"],
+            confidence=0.3
+        )
     
     def _build_extraction_prompt(
         self,

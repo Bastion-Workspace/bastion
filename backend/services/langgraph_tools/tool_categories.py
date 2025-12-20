@@ -76,14 +76,8 @@ AGENT_CORE_TOOLS: Dict[str, List[str]] = {
     "chat_agent": [
         "search_conversation_cache"
     ],
-    "content_analysis_agent": [
-        "search_local",
-        "get_document"
-    ],
-    "story_analysis_agent": [
-        "search_local",
-        "get_document"
-    ],
+    # content_analysis_agent removed - migrated to llm-orchestrator gRPC service
+    # story_analysis_agent removed - migrated to llm-orchestrator gRPC service
     "fiction_editing_agent": [
         "search_local",
         "get_document"

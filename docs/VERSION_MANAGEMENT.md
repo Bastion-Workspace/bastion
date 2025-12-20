@@ -8,7 +8,7 @@ The project uses a single source of truth for version numbers: the `VERSION` fil
 
 ### Root VERSION File
 - Location: `/VERSION`
-- Contains: Single line with version number (e.g., `0.10.0`)
+- Contains: Single line with version number (e.g., `0.11.0`)
 - **This is the only file you need to edit to update the version**
 
 ### Backend (Python)
@@ -41,7 +41,7 @@ The frontend `package.json` version is automatically updated during build:
 
 1. Edit `/VERSION` file:
    ```
-   0.10.0  →  0.11.0
+   0.11.0  →  0.12.0
    ```
 
 2. For frontend, the version will auto-update on next build, or run:

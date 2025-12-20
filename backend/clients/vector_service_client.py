@@ -30,8 +30,12 @@ class VectorServiceClient:
         self.stub: Optional[vector_service_pb2_grpc.VectorServiceStub] = None
         self._initialized = False
     
-    async def initialize(self):
-        """Initialize the gRPC channel and stub"""
+    async def initialize(self, required: bool = False):
+        """Initialize the gRPC channel and stub
+        
+        Args:
+            required: If True, raise exception on failure. If False, log warning and continue.
+        """
         if self._initialized:
             return
         
@@ -60,7 +64,11 @@ class VectorServiceClient:
                 
         except Exception as e:
             logger.error(f"❌ Failed to connect to Vector Service: {e}")
-            raise
+            if required:
+                raise
+            else:
+                logger.warning("⚠️ Vector Service unavailable - backend will start without embedding support")
+                logger.warning("⚠️ Embeddings will be retried when needed")
     
     async def close(self):
         """Close the gRPC channel"""
@@ -85,7 +93,12 @@ class VectorServiceClient:
             List of floats representing the embedding vector
         """
         if not self._initialized:
-            await self.initialize()
+            logger.info("Vector Service not initialized, attempting to connect...")
+            try:
+                await self.initialize(required=True)
+            except Exception as e:
+                logger.error(f"❌ Cannot generate embedding: Vector Service unavailable: {e}")
+                raise RuntimeError("Vector Service is not available") from e
         
         try:
             request = vector_service_pb2.EmbeddingRequest(
@@ -98,6 +111,8 @@ class VectorServiceClient:
             
         except grpc.RpcError as e:
             logger.error(f"❌ gRPC error generating embedding: {e.code()}: {e.details()}")
+            # Mark as uninitialized so next call will retry connection
+            self._initialized = False
             raise
         except Exception as e:
             logger.error(f"❌ Error generating embedding: {e}")
@@ -121,7 +136,12 @@ class VectorServiceClient:
             List of embedding vectors
         """
         if not self._initialized:
-            await self.initialize()
+            logger.info("Vector Service not initialized, attempting to connect...")
+            try:
+                await self.initialize(required=True)
+            except Exception as e:
+                logger.error(f"❌ Cannot generate embeddings: Vector Service unavailable: {e}")
+                raise RuntimeError("Vector Service is not available") from e
         
         try:
             request = vector_service_pb2.BatchEmbeddingRequest(
@@ -135,6 +155,8 @@ class VectorServiceClient:
             
         except grpc.RpcError as e:
             logger.error(f"❌ gRPC error generating batch embeddings: {e.code()}: {e.details()}")
+            # Mark as uninitialized so next call will retry connection
+            self._initialized = False
             raise
         except Exception as e:
             logger.error(f"❌ Error generating batch embeddings: {e}")
@@ -239,13 +261,17 @@ class VectorServiceClient:
 # Singleton instance
 _vector_service_client: Optional[VectorServiceClient] = None
 
-async def get_vector_service_client() -> VectorServiceClient:
-    """Get or create singleton Vector Service client"""
+async def get_vector_service_client(required: bool = False) -> VectorServiceClient:
+    """Get or create singleton Vector Service client
+    
+    Args:
+        required: If True, raise exception if service unavailable. If False, return client anyway.
+    """
     global _vector_service_client
     
     if _vector_service_client is None:
         _vector_service_client = VectorServiceClient()
-        await _vector_service_client.initialize()
+        await _vector_service_client.initialize(required=required)
     
     return _vector_service_client
 

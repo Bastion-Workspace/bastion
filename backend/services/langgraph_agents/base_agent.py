@@ -78,41 +78,42 @@ class BaseAgent:
             "chat_agent": AgentType.CHAT_AGENT,
             # CodingAgent removed - not fully fleshed out
             "report_formatting_agent": AgentType.REPORT_AGENT,
-            "data_formatting_agent": AgentType.DATA_FORMATTING_AGENT,
-            "weather_agent": AgentType.WEATHER_AGENT,
+            # data_formatting_agent removed - migrated to llm-orchestrator gRPC service
+            # weather_agent removed - migrated to llm-orchestrator gRPC service
             "calculate_agent": AgentType.CALCULATE_AGENT,
             "rss_background_agent": AgentType.RSS_BACKGROUND_AGENT,
             "rss_agent": AgentType.RSS_AGENT,
-            "org_inbox_agent": AgentType.ORG_INBOX_AGENT,
-            "org_project_agent": AgentType.ORG_PROJECT_AGENT,
-            "image_generation_agent": AgentType.IMAGE_GENERATION_AGENT,
+            # org_inbox_agent removed - migrated to llm-orchestrator gRPC service
+            # org_project_agent removed - migrated to llm-orchestrator gRPC service
+            # image_generation_agent removed - migrated to llm-orchestrator gRPC service
             # WargamingAgent removed - not fully fleshed out
-            "proofreading_agent": AgentType.PROOFREADING_AGENT,
-            "website_crawler_agent": AgentType.WEBSITE_CRAWLER_AGENT,
+            # proofreading_agent removed - migrated to llm-orchestrator gRPC service
+            # website_crawler_agent removed - migrated to llm-orchestrator gRPC service
             # Content and Writing Agents
             "fiction_editing_agent": AgentType.FICTION_EDITING_AGENT,
             "outline_editing_agent": AgentType.OUTLINE_EDITING_AGENT,
-            "character_development_agent": AgentType.CHARACTER_DEVELOPMENT_AGENT,
-            "rules_editing_agent": AgentType.RULES_EDITING_AGENT,
+            # character_development_agent removed - migrated to llm-orchestrator gRPC service
+            # rules_editing_agent removed - migrated to llm-orchestrator gRPC service
+            "style_editing_agent": AgentType.STYLE_EDITING_AGENT,
             # SysMLAgent removed - not fully fleshed out
-            "story_analysis_agent": AgentType.STORY_ANALYSIS_AGENT,
-            "content_analysis_agent": AgentType.CONTENT_ANALYSIS_AGENT,
+            # story_analysis_agent removed - migrated to llm-orchestrator gRPC service
+            # content_analysis_agent removed - migrated to llm-orchestrator gRPC service
             # FactCheckingAgent removed - not actively used
-            "site_crawl_agent": AgentType.SITE_CRAWL_AGENT,
-            "podcast_script_agent": AgentType.PODCAST_SCRIPT_AGENT,
-            "substack_agent": AgentType.SUBSTACK_AGENT,
-            "email_agent": AgentType.EMAIL_AGENT,
+            # site_crawl_agent removed - migrated to llm-orchestrator gRPC service
+            # podcast_script_agent removed - migrated to llm-orchestrator gRPC service
+            # substack_agent removed - migrated to llm-orchestrator gRPC service
+            # email_agent removed - not used, functionality not migrated
             "messaging_agent": AgentType.MESSAGING_AGENT,
-            "entertainment_agent": AgentType.ENTERTAINMENT_AGENT,
+            # entertainment_agent removed - migrated to llm-orchestrator gRPC service
             # Intent and Intelligence Agents
             # DEPRECATED: simple_intent_agent removed - intent classification now in llm-orchestrator
             # "simple_intent_agent": AgentType.SIMPLE_INTENT_AGENT,
-            "permission_intelligence_agent": AgentType.PERMISSION_INTELLIGENCE_AGENT,
+            # permission_intelligence_agent removed - not used, functionality handled elsewhere
             # Pipeline Agent
             "pipeline_agent": AgentType.PIPELINE_AGENT,
             # Template Agent
             "template_agent": AgentType.TEMPLATE_AGENT,
-            "podcast_script_agent": AgentType.PODCAST_SCRIPT_AGENT,
+            # podcast_script_agent removed - migrated to llm-orchestrator gRPC service (duplicate entry)
         }
         return type_mapping.get(agent_type, AgentType.RESEARCH_AGENT)
     
@@ -384,7 +385,8 @@ class BaseAgent:
         """Universal message preparation with smart context handling"""
         
         # Check if this is a service agent (formats other agents' results)
-        service_agent_types = ["data_formatting_agent", "formatting_service"]
+        # data_formatting_agent removed - migrated to llm-orchestrator gRPC service
+        service_agent_types = ["formatting_service"]
         is_service_agent = self.agent_type in service_agent_types
         
         if is_service_agent:

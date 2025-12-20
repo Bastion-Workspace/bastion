@@ -64,10 +64,20 @@ class FolderService:
             logger.warning(f"⚠️ Could not get username for {user_id}: {e}")
             return user_id
     
-    async def get_folder_physical_path(self, folder_id: str) -> Optional[Path]:
+    async def get_folder_physical_path(self, folder_id: str, user_id: str = None, user_role: str = None) -> Optional[Path]:
         """Get the physical filesystem path for a folder"""
         try:
-            folder_data = await self.document_repository.get_folder(folder_id)
+            # For team folders, we need a valid user_id who is a team member
+            # For user/global folders, we can use admin context
+            # First, try to get folder with provided context (if team folder, user_id must be provided)
+            folder_data = None
+            if user_id:
+                folder_data = await self.document_repository.get_folder(folder_id, user_id=user_id, user_role=user_role or 'user')
+            
+            # If that failed or no user_id provided, try admin context (for user/global folders)
+            if not folder_data:
+                folder_data = await self.document_repository.get_folder(folder_id, user_id='', user_role='admin')
+            
             if not folder_data:
                 return None
             
@@ -80,7 +90,13 @@ class FolderService:
                 parent_id = current_folder.get('parent_folder_id')
                 if not parent_id:
                     break
-                current_folder = await self.document_repository.get_folder(parent_id)
+                # For parent folders, use same context strategy
+                if user_id:
+                    current_folder = await self.document_repository.get_folder(parent_id, user_id=user_id, user_role=user_role or 'user')
+                else:
+                    current_folder = await self.document_repository.get_folder(parent_id, user_id='', user_role='admin')
+                if not current_folder:
+                    break
             
             # Determine base path
             collection_type = folder_data.get('collection_type', 'user')
@@ -209,16 +225,26 @@ class FolderService:
                     logger.warning(f"⚠️ Parent folder {parent_folder_id} not found during creation of {name}, but continuing...")
                     # Don't raise error for now - let the database handle foreign key constraints
             
+            # Determine created_by: use admin_user_id if provided (for team/global folders),
+            # otherwise use user_id (for user folders)
+            created_by = admin_user_id if admin_user_id else user_id
+            
+            # For team folders, user_id must be NULL per schema constraint
+            # For global folders, user_id must also be NULL
+            final_user_id = None if collection_type in ["team", "global"] else user_id
+            
             # Create folder record using UPSERT
             folder_data = {
                 "folder_id": folder_id,
                 "name": name,
                 "parent_folder_id": parent_folder_id,
-                "user_id": user_id,
+                "user_id": final_user_id,  # NULL for team/global folders, user_id for user folders
                 "collection_type": collection_type,
                 "team_id": team_id,
                 "created_at": now,
-                "updated_at": now
+                "updated_at": now,
+                "created_by": created_by,  # Track folder ownership
+                "admin_user_id": admin_user_id  # Pass creator's user_id for RLS context
             }
             
             logger.info(f"📁 Attempting to create or get folder: {name}")
@@ -238,7 +264,8 @@ class FolderService:
                 logger.info(f"✅ Folder created successfully: {name} → {actual_folder_id}")
             
             # Create physical directory on filesystem
-            folder_path = await self.get_folder_physical_path(actual_folder_id)
+            # Pass admin_user_id for team folders so RLS can check team membership
+            folder_path = await self.get_folder_physical_path(actual_folder_id, user_id=admin_user_id, user_role=current_user_role)
             if folder_path:
                 await self._create_physical_directory(folder_path)
             else:
@@ -262,7 +289,7 @@ class FolderService:
         - Admins can access all folders
         """
         try:
-            folder_data = await self.document_repository.get_folder(folder_id)
+            folder_data = await self.document_repository.get_folder(folder_id, user_id, current_user_role)
             if not folder_data:
                 return None
             
@@ -314,9 +341,30 @@ class FolderService:
         Get or create a subfolder under a parent folder
         
         **SIMPLIFIED**: Just calls create_folder - UPSERT handles race conditions!
+        Inherits collection_type and team_id from parent folder.
         """
         try:
             logger.info(f"📁 Getting or creating subfolder '{folder_name}' under parent {parent_folder_id}")
+            
+            # Get parent folder to inherit collection_type and team_id
+            # For team folders, use admin_user_id (creator) for RLS context, otherwise use user_id
+            query_user_id = admin_user_id if admin_user_id else user_id
+            parent_folder = await self.get_folder(parent_folder_id, query_user_id, current_user_role)
+            if parent_folder:
+                # Inherit collection_type and team_id from parent
+                parent_collection_type = parent_folder.collection_type or collection_type
+                parent_team_id = parent_folder.team_id
+                
+                # Override collection_type if parent is team or global
+                if parent_collection_type in ['team', 'global']:
+                    collection_type = parent_collection_type
+                
+                # Convert team_id to string if needed
+                team_id = str(parent_team_id) if parent_team_id else None
+                
+                logger.info(f"📁 Inheriting from parent: collection_type={collection_type}, team_id={team_id}")
+            else:
+                team_id = None
             
             # **BULLY!** No need to check first - create_folder uses UPSERT!
             return await self.create_folder(
@@ -325,7 +373,8 @@ class FolderService:
                 user_id=user_id,
                 collection_type=collection_type,
                 current_user_role=current_user_role,
-                admin_user_id=admin_user_id
+                admin_user_id=admin_user_id,
+                team_id=team_id
             )
             
         except Exception as e:
@@ -386,7 +435,7 @@ class FolderService:
                     user_teams = await team_service.list_user_teams(user_id)
                     team_ids = [team['team_id'] for team in user_teams]
                     if team_ids:
-                        team_folders_data = await self.document_repository.get_folders_by_teams(team_ids)
+                        team_folders_data = await self.document_repository.get_folders_by_teams(team_ids, user_id=user_id)
                         logger.info(f"📁 Found {len(team_folders_data)} team folders for user {user_id}")
                 except Exception as e:
                     logger.warning(f"Failed to get team folders for user {user_id}: {e}")
@@ -394,10 +443,22 @@ class FolderService:
             # Combine all folders
             all_folders_data = user_folders_data + global_folders_data + team_folders_data
             
-            # Add counts for each folder
+            # Add counts for each folder with RLS context
             for folder_data in all_folders_data:
-                folder_data["document_count"] = await self.document_repository.get_document_count_in_folder(folder_data["folder_id"])
-                folder_data["subfolder_count"] = await self.document_repository.get_subfolder_count(folder_data["folder_id"])
+                # Determine RLS context based on folder's collection type
+                if folder_data.get('collection_type') == 'global':
+                    count_user_id = None
+                    count_role = 'admin'
+                else:
+                    count_user_id = user_id
+                    count_role = 'user'
+                
+                folder_data["document_count"] = await self.document_repository.get_document_count_in_folder(
+                    folder_data["folder_id"], count_user_id, count_role
+                )
+                folder_data["subfolder_count"] = await self.document_repository.get_subfolder_count(
+                    folder_data["folder_id"], count_user_id, count_role
+                )
             
             folders = [DocumentFolder(**folder_data) for folder_data in all_folders_data]
             
@@ -543,11 +604,13 @@ class FolderService:
             
             # Virtual web sources folders have been removed - only RSS Feeds virtual folders remain
             
-            # Get folder info
-            folder = await self.get_folder(folder_id, user_id, "user")  # Default to user role for now
-            if not folder:
+            # Get folder info - pass user_id to repository for RLS context
+            folder_data = await self.document_repository.get_folder(folder_id, user_id, "user")
+            if not folder_data:
                 logger.warning(f"⚠️ Folder {folder_id} not found or access denied for user {user_id}")
                 return None
+            
+            folder = DocumentFolder(**folder_data)
             
             # Get documents in folder with proper RLS context
             # For global folders, we need to pass user_id=None to get global documents
@@ -568,8 +631,10 @@ class FolderService:
                 for doc in documents[:5]:  # Log first 5 docs
                     logger.info(f"📄 Document in response: {doc.document_id} - {doc.filename}")
             
-            # Get subfolders
-            subfolders_data = await self.document_repository.get_subfolders(folder_id)
+            # Get subfolders with RLS context
+            # Use 'user' role for normal folder access, 'admin' for global folders
+            user_role = 'admin' if folder.collection_type == 'global' else 'user'
+            subfolders_data = await self.document_repository.get_subfolders(folder_id, query_user_id, user_role)
             subfolders = [DocumentFolder(**subfolder_data) for subfolder_data in subfolders_data]
             logger.info(f"📁 Found {len(subfolders)} subfolders in folder {folder_id}")
             
@@ -780,36 +845,60 @@ class FolderService:
             logger.info(f"🚫 Exempting folder {folder_id} and all descendants from vectorization")
             
             # Mark folder as exempt (TRUE)
+            logger.info(f"🔍 DEBUG: Updating folder {folder_id} exemption status to True")
             success = await self.document_repository.update_folder_exemption_status(folder_id, True)
             if not success:
                 logger.error(f"Failed to update exemption status for folder {folder_id}")
                 return False
+            logger.info(f"✅ DEBUG: Folder {folder_id} exemption status updated successfully")
             
-            # Get all descendant folders and documents
-            descendant_folder_ids, descendant_document_ids = await self.document_repository.get_folder_descendants(folder_id)
+            logger.info(f"🔍 DEBUG: About to call get_folder_descendants for folder {folder_id} with user_id {user_id}")
+
+            # Get all descendant folders and documents (with RLS context)
+            descendant_folder_ids, descendant_document_ids = await self.document_repository.get_folder_descendants(folder_id, user_id)
+
+            logger.info(f"🔍 DEBUG: get_folder_descendants returned {len(descendant_folder_ids)} folders and {len(descendant_document_ids)} documents")
+
+            # Also get documents directly in this folder (not just descendants)
+            # Note: get_documents_by_folder returns DocumentInfo objects
+            direct_documents = await self.document_repository.get_documents_by_folder(folder_id, user_id)
+            direct_document_ids = [doc.document_id for doc in direct_documents]
+
+            logger.info(f"🔍 DEBUG: get_documents_by_folder returned {len(direct_documents)} documents: {[doc.document_id for doc in direct_documents]}")
+            
+            # Combine direct and descendant documents, removing duplicates
+            all_document_ids = list(set(direct_document_ids + descendant_document_ids))
+            logger.info(f"🔍 Found {len(direct_document_ids)} direct documents and {len(descendant_document_ids)} descendant documents in folder {folder_id} (total: {len(all_document_ids)} unique documents)")
+            
+            if len(all_document_ids) == 0:
+                logger.warning(f"⚠️ No documents found to exempt in folder {folder_id} - this might be an RLS issue")
             
             # Force all descendant folders to exempt (TRUE) to ensure hierarchy aligns with parent
             for desc_folder_id in descendant_folder_ids:
                 await self.document_repository.update_folder_exemption_status(desc_folder_id, True)
                 logger.info(f"🚫 Set descendant folder {desc_folder_id} to exempt (TRUE)")
             
-            # Force all descendant documents to exempt (TRUE) so no existing override prevents shutdown
-            for desc_doc_id in descendant_document_ids:
-                await self.document_repository.update_document_exemption_status(desc_doc_id, True)
-                logger.info(f"🚫 Set descendant document {desc_doc_id} to exempt (TRUE)")
+            # Force all documents (direct and descendant) to exempt (TRUE) so no existing override prevents shutdown
+            for doc_id in all_document_ids:
+                # Get document user_id for RLS context
+                doc_info = await self.document_repository.get_by_id(doc_id)
+                doc_user_id = doc_info.user_id if doc_info else user_id
+                await self.document_repository.update_document_exemption_status(doc_id, True, doc_user_id)
+                logger.info(f"🚫 Set document {doc_id} to exempt (TRUE)")
             
             # Get document service for vector/KG deletion
             from services.service_container import get_service_container
             container = await get_service_container()
             document_service = container.document_service
             
-            # Delete vectors and entities for all documents
+            # Delete vectors and entities for all documents, and update status to completed
             deleted_count = 0
-            for doc_id in descendant_document_ids:
+            for doc_id in all_document_ids:
                 try:
                     # Get document info for user_id
                     doc_info = await self.document_repository.get_by_id(doc_id)
                     doc_user_id = doc_info.user_id if doc_info else user_id
+                    logger.info(f"🔍 DEBUG: Document {doc_id} - doc_info exists: {doc_info is not None}, doc_user_id: {doc_user_id}, user_id: {user_id}")
                     
                     # Delete vectors
                     await document_service.embedding_manager.delete_document_chunks(doc_id, doc_user_id)
@@ -818,9 +907,18 @@ class FolderService:
                     if document_service.kg_service:
                         await document_service.kg_service.delete_document_entities(doc_id)
                     
+                    # Update status to completed since document is now exempt
+                    from models.api_models import ProcessingStatus
+
+                    # The update_status method will handle RLS context automatically
+                    await self.document_repository.update_status(doc_id, ProcessingStatus.COMPLETED, doc_user_id)
+                    
+                    # Emit WebSocket notification for UI update
+                    await document_service._emit_document_status_update(doc_id, ProcessingStatus.COMPLETED.value, doc_user_id)
+                    
                     deleted_count += 1
                 except Exception as e:
-                    logger.warning(f"Failed to delete vectors/entities for document {doc_id}: {e}")
+                    logger.warning(f"Failed to delete vectors/entities or update status for document {doc_id}: {e}")
             
             logger.info(f"✅ Folder {folder_id} exempted: {len(descendant_folder_ids)} folders, {deleted_count} documents cleaned")
             return True
@@ -839,8 +937,8 @@ class FolderService:
                 logger.error(f"Failed to remove exemption status for folder {folder_id}")
                 return False
             
-            # Get all descendant folders and documents
-            descendant_folder_ids, descendant_document_ids = await self.document_repository.get_folder_descendants(folder_id)
+            # Get all descendant folders and documents (with RLS context)
+            descendant_folder_ids, descendant_document_ids = await self.document_repository.get_folder_descendants(folder_id, user_id)
             
             # Set descendant folders to inherit (NULL) - they'll inherit from new parent state
             for desc_folder_id in descendant_folder_ids:
@@ -860,7 +958,7 @@ class FolderService:
             for doc_id in descendant_document_ids:
                 try:
                     # Check if document is now exempt (after inheritance)
-                    is_exempt = await self.document_repository.is_document_exempt(doc_id)
+                    is_exempt = await self.document_repository.is_document_exempt(doc_id, user_id)
                     if not is_exempt:
                         success = await document_service.remove_document_exemption(doc_id, user_id)
                         if success:
@@ -888,8 +986,8 @@ class FolderService:
                 logger.error(f"Failed to set override status for folder {folder_id}")
                 return False
             
-            # Get all descendant folders and documents
-            descendant_folder_ids, descendant_document_ids = await self.document_repository.get_folder_descendants(folder_id)
+            # Get all descendant folders and documents (with RLS context)
+            descendant_folder_ids, descendant_document_ids = await self.document_repository.get_folder_descendants(folder_id, user_id)
             
             # Set descendant folders to inherit (NULL) - they'll inherit from this folder's override
             for desc_folder_id in descendant_folder_ids:
@@ -909,7 +1007,7 @@ class FolderService:
             for doc_id in descendant_document_ids:
                 try:
                     # Check if document is now not exempt (after override)
-                    is_exempt = await self.document_repository.is_document_exempt(doc_id)
+                    is_exempt = await self.document_repository.is_document_exempt(doc_id, user_id)
                     if not is_exempt:
                         success = await document_service.remove_document_exemption(doc_id, user_id)
                         if success:
@@ -935,23 +1033,30 @@ class FolderService:
             if folder.collection_type == "team" and folder.parent_folder_id is None:
                 raise ValueError("Cannot delete team root folder. Delete the team instead to remove the folder.")
             
-            # No cache to clear - database is the source of truth
+            # **CRITICAL FIX:** Check deletion permission BEFORE deleting contents!
+            # Try to delete the folder from database first to verify permissions
+            # This prevents physical deletion when RLS would block database deletion
+            deletion_success = await self.document_repository.delete_folder(
+                folder_id,
+                user_id=user_id,
+                user_role=current_user_role
+            )
             
-            # Check if folder has contents
-            contents = await self.get_folder_contents(folder_id, user_id)
-            if contents and (contents.total_documents > 0 or contents.total_subfolders > 0):
-                if not recursive:
-                    raise ValueError("Folder is not empty. Use recursive=True to delete with contents.")
-                
-                # Recursively delete contents
-                await self._delete_folder_contents(folder_id, user_id)
+            if not deletion_success:
+                logger.error(f"❌ Permission denied: Cannot delete folder {folder_id} (RLS policy blocked)")
+                raise PermissionError(f"Permission denied: You do not have permission to delete this folder")
             
-            # **ROOSEVELT FIX:** Get physical folder path BEFORE deleting from database
-            folder_path = await self.get_folder_physical_path(folder_id)
-            
-            # Delete the folder from database
-            await self.document_repository.delete_folder(folder_id)
             logger.info(f"🗑️ Folder deleted from database: {folder_id}")
+            
+            # **ROOSEVELT FIX:** Get physical folder path AFTER database deletion succeeds
+            query_user_id = user_id
+            query_user_role = current_user_role
+            if folder.collection_type == "team" and not user_id:
+                # For team folders, if no user_id provided, try admin context
+                query_user_id = ""
+                query_user_role = "admin"
+            
+            folder_path = await self.get_folder_physical_path(folder_id, user_id=query_user_id, user_role=query_user_role)
             
             # **BULLY!** Delete physical directory from filesystem
             if folder_path and folder_path.exists():
@@ -1126,7 +1231,8 @@ class FolderService:
                     return True
                 visited.add(current_parent)
                 
-                parent_folder = await self.document_repository.get_folder(current_parent)
+                # Use admin context to check circular references
+                parent_folder = await self.document_repository.get_folder(current_parent, user_id='', user_role='admin')
                 if not parent_folder:
                     break
                 current_parent = parent_folder["parent_folder_id"]
@@ -1167,7 +1273,8 @@ class FolderService:
     async def _is_essential_automated_folder_by_id(self, folder_id: str) -> bool:
         """Check if a folder is an essential automated folder by its ID"""
         try:
-            folder_data = await self.document_repository.get_folder(folder_id)
+            # Use admin context to check folder names
+            folder_data = await self.document_repository.get_folder(folder_id, user_id='', user_role='admin')
             if not folder_data:
                 return False
             

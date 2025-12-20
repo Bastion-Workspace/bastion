@@ -13,7 +13,6 @@ import {
 } from '@mui/material';
 import {
   Send,
-  SmartToy,
   Clear,
   Stop,
   Mic,
@@ -142,6 +141,35 @@ const ChatInputArea = () => {
     return availableModelsData?.models?.find(m => m.id === modelId);
   };
 
+  // Format cost for display (per 1M tokens by default)
+  const formatCost = (cost) => {
+    if (!cost) return 'Free';
+    if (cost < 0.001) return `$${(cost * 1000000).toFixed(2)}`;
+    if (cost < 1) return `$${(cost * 1000).toFixed(2)}`;
+    return `$${cost.toFixed(3)}`;
+  };
+
+  // Format pricing string for display
+  const formatPricing = (modelInfo) => {
+    if (!modelInfo) return '';
+    
+    const parts = [];
+    
+    // Add context length
+    if (modelInfo.context_length) {
+      parts.push(`${modelInfo.context_length.toLocaleString()} ctx`);
+    }
+    
+    // Add pricing if available
+    if (modelInfo.input_cost || modelInfo.output_cost) {
+      const inputPrice = modelInfo.input_cost ? formatCost(modelInfo.input_cost) : 'Free';
+      const outputPrice = modelInfo.output_cost ? formatCost(modelInfo.output_cost) : 'Free';
+      parts.push(`I/O: ${inputPrice} / ${outputPrice}`);
+    }
+    
+    return parts.join(' • ');
+  };
+
   const isSendDisabled = !inputValue.trim() || isLoading;
 
   const startRecording = async () => {
@@ -266,29 +294,43 @@ const ChatInputArea = () => {
   };
 
   return (
-    <Box sx={{ p: 2, borderTop: '1px solid', borderColor: 'divider' }}>
+    <Box sx={{ p: 1.5, borderTop: '1px solid', borderColor: 'divider' }}>
       {/* Model Selection */}
       {enabledModelsData?.enabled_models?.length > 0 && (
-        <Box sx={{ mb: 2 }}>
+        <Box sx={{ mb: 1.5 }}>
           <FormControl size="small" fullWidth>
             <InputLabel>AI Model</InputLabel>
             <Select
               value={selectedModel}
               onChange={(e) => handleModelChange(e.target.value)}
               label="AI Model"
-              startAdornment={<SmartToy sx={{ mr: 1, color: 'primary.main' }} />}
             >
               {enabledModelsData.enabled_models.map((modelId) => {
                 const modelInfo = getModelInfo(modelId);
+                const pricingInfo = formatPricing(modelInfo);
+                const isSelected = selectedModel === modelId;
                 return (
                   <MenuItem key={modelId} value={modelId}>
-                    <Box>
-                      <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                    <Box display="flex" alignItems="center" justifyContent="space-between" width="100%" sx={{ gap: 1 }}>
+                      <Typography 
+                        variant="body2" 
+                        sx={{ 
+                          fontWeight: isSelected ? 'bold' : 'normal',
+                          flex: 1,
+                          textAlign: 'left'
+                        }}
+                      >
                         {modelInfo?.name || modelId}
                       </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {modelInfo?.provider} • {modelInfo?.context_length?.toLocaleString()} ctx
-                      </Typography>
+                      {pricingInfo && (
+                        <Typography 
+                          variant="caption" 
+                          color="text.secondary"
+                          sx={{ textAlign: 'right', whiteSpace: 'nowrap' }}
+                        >
+                          {pricingInfo}
+                        </Typography>
+                      )}
                     </Box>
                   </MenuItem>
                 );
@@ -301,7 +343,7 @@ const ChatInputArea = () => {
 
 
       {/* Input Area */}
-      <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-end' }}>
+      <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
         <TextField
           ref={textFieldRef}
           multiline
@@ -379,23 +421,6 @@ const ChatInputArea = () => {
               </IconButton>
             </Tooltip>
           )}
-          
-          {inputValue.trim() && !isLoading && (
-            <Tooltip title="Clear input">
-              <IconButton
-                onClick={handleClearChat}
-                size="small"
-                sx={{ 
-                  backgroundColor: 'action.hover',
-                  '&:hover': {
-                    backgroundColor: 'action.selected',
-                  },
-                }}
-              >
-                <Clear fontSize="small" />
-              </IconButton>
-            </Tooltip>
-          )}
         </Box>
       </Box>
 
@@ -409,13 +434,6 @@ const ChatInputArea = () => {
       {inputValue && (
         <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
           {inputValue.length} characters
-        </Typography>
-      )}
-
-      {/* No conversation selected message */}
-      {!currentConversationId && (
-        <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-          Type a message to start a new conversation
         </Typography>
       )}
     </Box>

@@ -23,8 +23,8 @@ import {
 import { useTeam } from '../../contexts/TeamContext';
 import apiService from '../../services/apiService';
 
-const TeamInviteDialog = ({ open, onClose, teamId }) => {
-  const { inviteMember } = useTeam();
+const TeamInviteDialog = ({ open, onClose, teamId, mode = 'invite' }) => {
+  const { inviteMember, addMember } = useTeam();
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -51,16 +51,10 @@ const TeamInviteDialog = ({ open, onClose, teamId }) => {
     setError(null);
 
     try {
-      // Get all users and filter on frontend (admin API doesn't have search yet)
-      const response = await apiService.get('/api/admin/users?limit=100');
-      const allUsers = response.users || [];
-      const query = searchQuery.trim().toLowerCase();
-      const filtered = allUsers.filter(user => 
-        user.username?.toLowerCase().includes(query) ||
-        user.email?.toLowerCase().includes(query) ||
-        user.display_name?.toLowerCase().includes(query)
-      );
-      setSearchResults(filtered);
+      // Use teams API endpoint for user search (available to all authenticated users)
+      const response = await apiService.get(`/api/teams/users/search?query=${encodeURIComponent(searchQuery.trim())}&limit=100`);
+      const users = response.users || [];
+      setSearchResults(users);
     } catch (error) {
       console.error('Failed to search users:', error);
       setError('Failed to search users');
@@ -76,10 +70,16 @@ const TeamInviteDialog = ({ open, onClose, teamId }) => {
     setError(null);
 
     try {
-      await inviteMember(teamId, selectedUser.user_id);
+      if (mode === 'add') {
+        await addMember(teamId, selectedUser.user_id);
+      } else {
+        await inviteMember(teamId, selectedUser.user_id);
+      }
+      // Trigger a custom event to notify components to refresh
+      window.dispatchEvent(new CustomEvent('teamMemberChanged', { detail: { teamId } }));
       onClose();
     } catch (error) {
-      setError(error.response?.data?.detail || 'Failed to invite user');
+      setError(error.response?.data?.detail || `Failed to ${mode === 'add' ? 'add' : 'invite'} user`);
     } finally {
       setIsInviting(false);
     }
@@ -89,7 +89,9 @@ const TeamInviteDialog = ({ open, onClose, teamId }) => {
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
       <DialogTitle>
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Typography variant="h6">Invite Team Member</Typography>
+          <Typography variant="h6">
+            {mode === 'add' ? 'Add Team Member' : 'Invite Team Member'}
+          </Typography>
           <Button onClick={onClose} size="small">
             <Close />
           </Button>
@@ -165,7 +167,9 @@ const TeamInviteDialog = ({ open, onClose, teamId }) => {
           onClick={handleInvite}
           disabled={!selectedUser || isInviting}
         >
-          {isInviting ? 'Inviting...' : 'Send Invitation'}
+          {isInviting 
+            ? (mode === 'add' ? 'Adding...' : 'Inviting...') 
+            : (mode === 'add' ? 'Add Member' : 'Send Invitation')}
         </Button>
       </DialogActions>
     </Dialog>

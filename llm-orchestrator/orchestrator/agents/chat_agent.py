@@ -22,10 +22,10 @@ class ChatState(TypedDict):
     messages: List[Any]
     persona: Optional[Dict[str, Any]]
     system_prompt: str
-    conversation_history: List[Dict[str, str]]
     llm_messages: List[Any]
     needs_calculations: bool
     calculation_result: Optional[Dict[str, Any]]
+    local_data_results: Optional[str]  # Vector search results for local data queries
     response: Dict[str, Any]
     task_status: str
     error: str
@@ -45,6 +45,7 @@ class ChatAgent(BaseAgent):
         
         # Add nodes
         workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("check_local_data", self._check_local_data_node)
         workflow.add_node("detect_calculations", self._detect_calculations_node)
         workflow.add_node("perform_calculations", self._perform_calculations_node)
         workflow.add_node("generate_response", self._generate_response_node)
@@ -52,8 +53,9 @@ class ChatAgent(BaseAgent):
         # Entry point
         workflow.set_entry_point("prepare_context")
         
-        # Flow: prepare context -> detect calculations -> (conditional) -> generate response
-        workflow.add_edge("prepare_context", "detect_calculations")
+        # Flow: prepare context -> check local data -> detect calculations -> (conditional) -> generate response
+        workflow.add_edge("prepare_context", "check_local_data")
+        workflow.add_edge("check_local_data", "detect_calculations")
         
         # Route based on whether calculations are needed
         workflow.add_conditional_edges(
@@ -78,17 +80,32 @@ class ChatAgent(BaseAgent):
             return "calculate"
         return "respond"
     
-    def _build_chat_prompt(self, persona: Optional[Dict[str, Any]] = None) -> str:
+    def _build_chat_prompt(self, persona: Optional[Dict[str, Any]] = None, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Build system prompt for chat agent"""
         ai_name = persona.get("ai_name", "Alex") if persona else "Alex"
         persona_style = persona.get("persona_style", "professional") if persona else "professional"
         
+        # Extract user context from metadata
+        preferred_name = metadata.get("user_preferred_name", "") if metadata else ""
+        user_context = metadata.get("user_ai_context", "") if metadata else ""
+        
         # Build style instruction based on persona_style
         style_instruction = self._get_style_instruction(persona_style)
+        
+        # Build user context sections
+        user_context_sections = []
+        if preferred_name and preferred_name.strip():
+            user_context_sections.append(f"USER PREFERENCE:\nThe user prefers to be addressed as: {preferred_name.strip()}")
+        if user_context and user_context.strip():
+            user_context_sections.append(f"USER CONTEXT:\n{user_context.strip()}")
+        
+        user_context_text = "\n\n".join(user_context_sections) + "\n\n" if user_context_sections else ""
         
         base_prompt = f"""You are {ai_name}, a conversational AI assistant. Your role is to have natural conversations while providing accurate, useful information.
 
 {style_instruction}
+
+{user_context_text}
 
 CONVERSATION GUIDELINES:
 1. **BE APPROPRIATELY RESPONSIVE**: Match your response length to the user's input - brief acknowledgments get brief responses
@@ -96,6 +113,13 @@ CONVERSATION GUIDELINES:
 3. **ASK FOR CLARIFICATION**: If a question is unclear, ask for more details
 4. **BE CONCISE AND NATURAL**: Provide appropriate conversational responses
 5. **STAY CONVERSATIONAL**: Focus on dialogue and helpful information
+6. **USE MARKDOWN FORMATTING**: Format your responses using Markdown for better readability:
+   - Use **bold** for emphasis and key terms
+   - Use *italics* for subtle emphasis
+   - Use bullet points (-) or numbered lists (1.) for lists
+   - Use `code blocks` for technical terms, code, or specific values
+   - Use ## headings for longer responses with multiple sections
+   - Use tables (| column | column |) when presenting structured data
 
 RESPONSE LENGTH GUIDELINES:
 - **Simple acknowledgments** ("thanks", "thank you"): Brief friendly response (1-2 sentences)
@@ -112,6 +136,7 @@ WHAT YOU HANDLE:
 - Follow-up questions and clarifications
 - Technical discussions using your training knowledge
 - Mathematical calculations (the system will automatically calculate for you)
+- Questions about local documents and data (the system will search your documents automatically)
 
 PROJECT GUIDANCE:
 - If user asks about electronics/circuits/components without an electronics project open:
@@ -142,9 +167,67 @@ Detailed response:
 }}
 
 CONVERSATION CONTEXT:
-You have access to conversation history for context. Use this to understand follow-up questions and maintain conversational flow."""
+You have access to conversation history for context. Use this to understand follow-up questions and maintain conversational flow.
+
+LOCAL DATA SEARCH:
+If the system provides "RELEVANT LOCAL INFORMATION" in the context, use that information to answer the user's question accurately. The local information takes precedence over general knowledge when answering questions about specific documents, files, or data in the user's knowledge base."""
 
         return base_prompt
+    
+    async def _check_local_data_node(self, state: ChatState) -> Dict[str, Any]:
+        """Check local documents for relevant information using intelligent retrieval subgraph"""
+        try:
+            query = state.get("query", "")
+            
+            # Extract user_id from metadata, shared_memory, or state
+            metadata = state.get("metadata", {})
+            shared_memory = state.get("shared_memory", {})
+            user_id = metadata.get("user_id") or shared_memory.get("user_id") or state.get("user_id", "system")
+            
+            # Use intelligent document retrieval subgraph
+            from orchestrator.subgraphs.intelligent_document_retrieval_subgraph import retrieve_documents_intelligently
+            
+            result = await retrieve_documents_intelligently(
+                query=query,
+                user_id=user_id,
+                mode="fast",  # Quick retrieval for chat agent
+                max_results=3,
+                small_doc_threshold=10000  # Increased to handle medium-sized docs
+            )
+            
+            if result.get("success") and result.get("formatted_context"):
+                logger.info(f"💬 Found relevant local documents via intelligent retrieval")
+                return {
+                    "local_data_results": result.get("formatted_context"),
+                    # ✅ CRITICAL: Preserve state for subsequent nodes
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
+                }
+            
+            return {
+                "local_data_results": None,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
+            
+        except Exception as e:
+            logger.warning(f"💬 Local data check failed: {e} - continuing without local data")
+            return {
+                "local_data_results": None,
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
     
     async def _prepare_context_node(self, state: ChatState) -> Dict[str, Any]:
         """Prepare context: extract persona, build prompt, extract conversation history"""
@@ -155,30 +238,41 @@ You have access to conversation history for context. Use this to understand foll
             metadata = state.get("metadata", {})
             persona = metadata.get("persona")
             
-            # Build system prompt
-            system_prompt = self._build_chat_prompt(persona)
+            # Build system prompt (pass metadata for user context)
+            system_prompt = self._build_chat_prompt(persona, metadata)
             
-            # Extract conversation history
-            conversation_history = []
-            messages = state.get("messages", [])
-            if messages:
-                conversation_history = self._extract_conversation_history(messages, limit=10)
-            
-            # Build messages for LLM
-            llm_messages = self._build_messages(system_prompt, state["query"], conversation_history)
+            # Build messages for LLM using standardized helper
+            messages_list = state.get("messages", [])
+            llm_messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=state["query"],
+                messages_list=messages_list,
+                look_back_limit=10
+            )
             
             return {
                 "persona": persona,
                 "system_prompt": system_prompt,
-                "conversation_history": conversation_history,
-                "llm_messages": llm_messages
+                "llm_messages": llm_messages,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
             logger.error(f"❌ Context preparation failed: {e}")
             return {
                 "error": str(e),
-                "task_status": "error"
+                "task_status": "error",
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _detect_calculations_node(self, state: ChatState) -> Dict[str, Any]:
@@ -207,13 +301,25 @@ You have access to conversation history for context. Use this to understand foll
             logger.info(f"💬 Calculation detection: {needs_calculations} (symbols: {has_math_symbols}, keywords: {has_calculation_keywords}, pattern: {bool(arithmetic_pattern)})")
             
             return {
-                "needs_calculations": needs_calculations
+                "needs_calculations": needs_calculations,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
             logger.error(f"❌ Calculation detection failed: {e}")
             return {
-                "needs_calculations": False
+                "needs_calculations": False,
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _perform_calculations_node(self, state: ChatState) -> Dict[str, Any]:
@@ -261,13 +367,25 @@ You have access to conversation history for context. Use this to understand foll
                             "result": calculation_result,
                             "steps": result.get("steps", [])
                         },
-                        "needs_calculations": False
+                        "needs_calculations": False,
+                        # ✅ CRITICAL: Preserve state for subsequent nodes
+                        "metadata": state.get("metadata", {}),
+                        "user_id": state.get("user_id", "system"),
+                        "shared_memory": state.get("shared_memory", {}),
+                        "messages": state.get("messages", []),
+                        "query": state.get("query", "")
                     }
                 else:
                     logger.warning(f"⚠️ Calculation failed: {result.get('error')}")
                     return {
                         "calculation_result": None,
-                        "needs_calculations": False
+                        "needs_calculations": False,
+                        # ✅ CRITICAL: Preserve state for subsequent nodes
+                        "metadata": state.get("metadata", {}),
+                        "user_id": state.get("user_id", "system"),
+                        "shared_memory": state.get("shared_memory", {}),
+                        "messages": state.get("messages", []),
+                        "query": state.get("query", "")
                     }
             else:
                 # Try to extract expression using LLM
@@ -322,13 +440,25 @@ Return ONLY valid JSON:
                                 "result": calc_result.get("result"),
                                 "steps": calc_result.get("steps", [])
                             },
-                            "needs_calculations": False
+                            "needs_calculations": False,
+                            # ✅ CRITICAL: Preserve state for subsequent nodes
+                            "metadata": state.get("metadata", {}),
+                            "user_id": state.get("user_id", "system"),
+                            "shared_memory": state.get("shared_memory", {}),
+                            "messages": state.get("messages", []),
+                            "query": state.get("query", "")
                         }
             
             # No calculation could be extracted
             return {
                 "calculation_result": None,
-                "needs_calculations": False
+                "needs_calculations": False,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -336,7 +466,13 @@ Return ONLY valid JSON:
             return {
                 "calculation_result": None,
                 "needs_calculations": False,
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _generate_response_node(self, state: ChatState) -> Dict[str, Any]:
@@ -349,8 +485,27 @@ Return ONLY valid JSON:
                 return {
                     "error": "No LLM messages prepared",
                     "task_status": "error",
-                    "response": {}
+                    "response": {},
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
+            
+            # Include local data results in the prompt if available
+            local_data_results = state.get("local_data_results")
+            if local_data_results:
+                # Add local data context to the last user message
+                # Find the last HumanMessage and append the local data context
+                if llm_messages and len(llm_messages) > 0:
+                    last_message = llm_messages[-1]
+                    if isinstance(last_message, HumanMessage):
+                        # Append local data to the query
+                        enhanced_content = f"{last_message.content}\n\n{local_data_results}"
+                        llm_messages[-1] = HumanMessage(content=enhanced_content)
+                        logger.info("💬 Enhanced prompt with local data context")
             
             # Call LLM - pass state to access user's model selection from metadata
             start_time = datetime.now()
@@ -391,6 +546,11 @@ Return ONLY valid JSON:
             shared_memory["primary_agent_selected"] = "chat_agent"
             shared_memory["last_agent"] = "chat_agent"
             state["shared_memory"] = shared_memory
+            
+            # Clear request-scoped data (active_editor) before checkpoint save
+            # This ensures it's available during the request (for subgraphs) but doesn't persist
+            state = self._clear_request_scoped_data(state)
+            shared_memory = state.get("shared_memory", {})
             
             # Build result
             result = {
@@ -458,10 +618,10 @@ Return ONLY valid JSON:
                 "messages": conversation_messages,
                 "persona": None,
                 "system_prompt": "",
-                "conversation_history": [],
                 "llm_messages": [],
                 "needs_calculations": False,
                 "calculation_result": None,
+                "local_data_results": None,
                 "response": {},
                 "task_status": "",
                 "error": "",

@@ -23,9 +23,10 @@ Think of it as your personal command center - whether you're researching documen
 
 ### **LangGraph Agent System**
 - **Specialized Agents**: Research, chat, coding, weather, RSS, entertainment, fiction editing, proofreading, image generation, messaging, and more
+- **Subgraph Architecture**: Modular, reusable subgraphs for complex workflows (context preparation, validation, generation, research, gap analysis, and more)
 - **Intelligent Routing**: Automatic intent classification routes queries to the appropriate agent
 - **Human-in-the-Loop (HITL)**: Permission-based workflows for sensitive operations
-- **PostgreSQL State Persistence**: Full conversation history and state management
+- **PostgreSQL State Persistence**: Full conversation history and state management with checkpointing
 - **Structured Outputs**: Type-safe Pydantic models for all agent communications
 
 ### **Document Processing & Management**
@@ -223,11 +224,13 @@ That's it! The application will automatically:
 - **Celery Flower**: http://localhost:5555
 
 ### 5. Create Admin User
-On first startup, an admin user is automatically created:
-- **Username**: admin (or from `ADMIN_USERNAME` env var)
-- **Password**: admin123 (or from `ADMIN_PASSWORD` env var)
+On first startup, an admin user is automatically created using environment variables:
+- **Username**: Set via `ADMIN_USERNAME` env var (default: admin)
+- **Password**: Set via `ADMIN_PASSWORD` env var
 
-**IMPORTANT**: Change the admin password immediately after first login!
+**IMPORTANT**: 
+- Set strong credentials via environment variables before first startup
+- Change the admin password immediately after first login!
 
 ## Usage Guide
 
@@ -308,7 +311,7 @@ UPLOAD_MAX_SIZE=1500MB
 # Authentication
 JWT_SECRET_KEY="your-secret-key"
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=admin123
+ADMIN_PASSWORD="your-secure-password-here"
 DEVELOPMENT_BYPASS_AUTH=false
 ```
 
@@ -412,10 +415,15 @@ Models are configurable in the chat sidebar dropdown.
 
 ### **Database-Level Security**
 - **Password Hashing**: All passwords hashed with bcrypt (cost factor 10+)
-- **Row-Level Security (RLS)**: PostgreSQL RLS policies enforce data isolation at the database level
-  - Document access: Users see only their documents, team documents, and global documents
-  - Team data: Team members can only access their team's data
-  - Automatic enforcement: Database-level policies prevent unauthorized access even if application logic fails
+- **Row-Level Security (RLS)**: Comprehensive PostgreSQL RLS implementation enforcing data isolation at the database level
+  - **Document Access**: Users see only their documents, team documents, and global documents
+  - **Team Data**: Team members can only access their team's data
+  - **Chat & Messaging**: Users can only access rooms they're participants in
+  - **User Sessions**: Session isolation with authentication lookup policies
+  - **Music Service**: User-specific music configuration and cache isolation
+  - **Automatic Enforcement**: Database-level policies prevent unauthorized access even if application logic fails
+  - **RLS Context**: All database operations set `app.current_user_id` and `app.current_user_role` session variables
+  - **Admin Bypass**: System admins can access user documents for support, but not team documents (privacy-preserving)
 - **Path Traversal Protection**: Filename sanitization prevents directory traversal attacks
 - **Authorization Checks**: All document endpoints verify user access before operations
 - **Password Requirements**: Minimum 8 characters enforced at API level (user creation and password changes)
@@ -428,6 +436,119 @@ Models are configurable in the chat sidebar dropdown.
 - **WebSocket Events**: Real-time processing status updates
 - **Health Checks**: `/health` endpoint for service status
 - **Error Tracking**: Comprehensive error logging with stack traces
+
+## Architecture Deep Dive
+
+### Row-Level Security (RLS) Implementation
+
+Bastion implements comprehensive PostgreSQL Row-Level Security (RLS) policies to enforce data isolation at the database level. This provides defense-in-depth security, ensuring users can only access their own data even if application-level checks fail.
+
+#### RLS-Protected Tables
+
+- **`document_metadata`**: Users see only their documents, team documents, and global documents
+- **`document_folders`**: Folder access follows document access rules
+- **`teams`** & **`team_members`**: Team data isolated to team members
+- **`chat_rooms`** & **`room_participants`**: Users can only access rooms they're in
+- **`user_sessions`**: Session isolation with special authentication lookup policy
+- **`music_service_configs`** & **`music_cache`**: User-specific music data isolation
+- **`checkpoints`** & **`checkpoint_blobs`**: LangGraph state isolation by user
+
+#### RLS Context Setting
+
+All database operations set PostgreSQL session variables:
+```sql
+SET app.current_user_id = 'user_id';
+SET app.current_user_role = 'user' | 'admin';
+```
+
+This is handled automatically by:
+- `DatabaseContextManager` for connection pool operations
+- `DatabaseManager.execute_query()` with `rls_context` parameter
+- `DocumentRepository.create_with_folder()` for document creation
+- All agent tools that create/access user data
+
+#### RLS Policy Pattern
+
+Policies follow this pattern:
+```sql
+CREATE POLICY policy_name ON table_name
+    FOR SELECT USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR collection_type = 'global'
+        OR (team_id IN (SELECT team_id FROM team_members WHERE user_id = ...))
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+```
+
+See `backend/sql/01_init.sql` for complete RLS policy definitions.
+
+### Subgraph-Capable Agent Architecture
+
+Bastion's agents use LangGraph subgraphs for modular, reusable workflow components. This enables complex multi-step operations while maintaining clean separation of concerns.
+
+#### Available Subgraphs
+
+**Fiction Editing Subgraphs:**
+- `build_context_preparation_subgraph`: Chapter detection, reference loading, scope analysis
+- `build_validation_subgraph`: Continuity tracking, outline sync, consistency checks
+- `build_generation_subgraph`: Context assembly, prompt building, LLM calls, output validation
+- `build_resolution_subgraph`: Operation resolution with progressive search and validation
+- `build_book_generation_subgraph`: Full automated book generation workflow
+
+**Research & Knowledge Subgraphs:**
+- `build_research_workflow_subgraph`: Complete research pipeline (local + web search, gap analysis, synthesis)
+- `build_web_research_subgraph`: Web search + crawling workflow
+- `build_gap_analysis_subgraph`: Universal gap analysis for any domain
+- `build_fact_verification_subgraph`: Fact verification workflow
+- `build_knowledge_document_subgraph`: Knowledge document creation workflow
+- `build_intelligent_document_retrieval_subgraph`: Smart document retrieval with multiple strategies
+- `build_full_document_analysis_subgraph`: Parallel document analysis with multiple queries
+
+**Utility Subgraphs:**
+- `build_assessment_subgraph`: Assessment and evaluation workflows
+
+#### Subgraph Usage Pattern
+
+Agents integrate subgraphs as nodes in their main workflow:
+
+```python
+def _build_workflow(self, checkpointer) -> StateGraph:
+    workflow = StateGraph(AgentState)
+    
+    # Build subgraphs
+    research_sg = build_research_workflow_subgraph(checkpointer)
+    validation_sg = build_validation_subgraph(checkpointer, ...)
+    
+    # Add subgraphs as nodes
+    workflow.add_node("research", research_sg)
+    workflow.add_node("validate", validation_sg)
+    
+    # Connect in workflow
+    workflow.add_edge("research", "validate")
+    
+    return workflow.compile(checkpointer=checkpointer)
+```
+
+#### Subgraph Benefits
+
+- **Modularity**: Reusable components across multiple agents
+- **State Preservation**: Subgraphs maintain critical state (user_id, metadata, shared_memory)
+- **Checkpointing**: Full state persistence through LangGraph checkpoints
+- **Testability**: Subgraphs can be tested independently
+- **Complexity Management**: Break complex workflows into manageable pieces
+
+#### State Management in Subgraphs
+
+All subgraph nodes preserve critical state keys:
+- `metadata`: User model preferences and configuration
+- `user_id`: Database access context
+- `shared_memory`: Cross-agent and cross-turn context
+- `messages`: Conversation history
+- `query`: Original user request
+
+This ensures subgraphs work correctly with user preferences, RLS permissions, and conversation continuity.
+
+See `.cursor/rules/langgraph-best-practices.mdc` for detailed subgraph development guidelines.
 
 ## Future Plans
 

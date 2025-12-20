@@ -157,23 +157,11 @@ class CrawlWebContentInput(BaseModel):
 async def crawl_web_content(url: Optional[str] = None, urls: Optional[List[str]] = None, user_id: Optional[str] = None) -> str:
     """Crawl web content from URL(s) - accepts either single URL or list of URLs"""
     try:
-        from services.langgraph_tools.crawl4ai_web_tools import Crawl4AIWebTools
+        from services.langgraph_tools.crawl4ai_web_tools import crawl_web_content as crawl_func
         
-        # Handle both single URL and multiple URLs
-        if url and not urls:
-            target_urls = [url]  # Convert single URL to list
-        elif urls and not url:
-            target_urls = urls   # Use provided list
-        elif url and urls:
-            target_urls = [url] + urls  # Combine both
-        else:
-                            return {"success": False, "content": "❌ Error: Either 'url' or 'urls' parameter must be provided", "error": "Missing required parameters"}
+        logger.info(f"🕷️ Roosevelt's Web Crawler: Processing URL(s)")
         
-        logger.info(f"🕷️ Roosevelt's Web Crawler: Processing {len(target_urls)} URL(s)")
-        logger.info(f"🕷️ ROOSEVELT'S DEBUG: Calling crawler.crawl_web_content(urls={target_urls})")
-        
-        crawler = Crawl4AIWebTools()
-        result = await crawler.crawl_web_content(urls=target_urls)
+        result = await crawl_func(url=url, urls=urls, user_id=user_id)
         
         if result.get("success"):
             crawled_results = result.get("results", [])
@@ -191,107 +179,6 @@ async def crawl_web_content(url: Optional[str] = None, urls: Optional[List[str]]
     except Exception as e:
         logger.error(f"❌ crawl_web_content failed: {e}")
         return {"success": False, "content": f"Web crawling failed: {str(e)}", "error": str(e)}
-
-
-class SearchAndCrawlInput(BaseModel):
-    query: str = Field(description="Search query")
-    max_results: Optional[int] = Field(default=None, description="Max results to crawl")
-    num_results: Optional[int] = Field(default=None, description="Number of results to crawl (alias for max_results)")
-
-@tool(args_schema=SearchAndCrawlInput)
-async def search_and_crawl(query: str, max_results: Optional[int] = None, num_results: Optional[int] = None, user_id: Optional[str] = None) -> str:
-    """Search the web and crawl top results"""
-    try:
-        # Handle both max_results and num_results parameters
-        crawl_limit = max_results or num_results or 15
-        from services.langgraph_tools.crawl4ai_web_tools import Crawl4AIWebTools
-        
-        crawler = Crawl4AIWebTools()
-        result = await crawler.search_and_crawl(query, max_results=crawl_limit)
-        
-        if result.get("success"):
-            results = result.get("results", [])
-            formatted_results = [f"🔍🕷️ **Search and crawl results for '{query}':**\n"]
-            for i, item in enumerate(results[:crawl_limit], 1):
-                title = item.get("title", "No title")
-                url = item.get("url", "")
-                crawled = item.get("crawled", False)
-                if crawled:
-                    content_length = len(item.get("full_content", ""))
-                    formatted_results.append(f"\n**{i}. {title}** ✅ Crawled ({content_length} chars)\nURL: {url}\n")
-                else:
-                    formatted_results.append(f"\n**{i}. {title}** ⏭️ Search only\nURL: {url}\n")
-            return "".join(formatted_results)
-        else:
-            return f"❌ Search and crawl failed: {result.get('error', 'Unknown error')}"
-        
-    except Exception as e:
-        logger.error(f"❌ search_and_crawl failed: {e}")
-        return {"success": False, "content": f"Search and crawl failed: {str(e)}", "error": str(e)}
-
-
-class CrawlSiteInput(BaseModel):
-    seed_url: str = Field(description="Seed URL whose domain will be crawled")
-    query_criteria: str = Field(description="Criteria to identify relevant pages on the site")
-    max_pages: Optional[int] = Field(default=50, description="Maximum pages to crawl")
-    max_depth: Optional[int] = Field(default=2, description="Maximum depth from seed")
-    allowed_path_prefix: Optional[str] = Field(default=None, description="Restrict crawl to path prefix under the domain")
-    include_pdfs: Optional[bool] = Field(default=False, description="Whether to include PDFs in crawl scope")
-
-@tool(args_schema=CrawlSiteInput)
-async def crawl_site(seed_url: str, query_criteria: str, max_pages: Optional[int] = 50, max_depth: Optional[int] = 2, allowed_path_prefix: Optional[str] = None, include_pdfs: Optional[bool] = False, user_id: Optional[str] = None) -> str:
-    """Domain-scoped crawl starting from a seed URL, filtering pages by query criteria."""
-    try:
-        from services.langgraph_tools.crawl4ai_web_tools import Crawl4AIWebTools
-        crawler = Crawl4AIWebTools()
-        result = await crawler.crawl_site(
-            seed_url=seed_url,
-            query_criteria=query_criteria,
-            max_pages=max_pages or 50,
-            max_depth=max_depth or 2,
-            allowed_path_prefix=allowed_path_prefix,
-            include_pdfs=include_pdfs,
-            user_id=user_id,
-        )
-        if result.get("success"):
-            domain = result.get("domain", "")
-            crawled = result.get("successful_crawls", 0)
-            considered = result.get("urls_considered", 0)
-            lines = [f"🕷️ Domain crawl for {domain} — crawled {crawled} of {considered} considered URLs\n"]
-            for item in result.get("results", [])[:20]:
-                if item.get("success"):
-                    title = ((item.get("metadata") or {}).get("title") or "No title").strip() or "No title"
-                    url = item.get("url", "")
-                    score = item.get("relevance_score", 0.0)
-                    lines.append(f"\n**{title}** (relevance: {score:.2f})\nURL: {url}\n")
-            return "".join(lines)
-        else:
-            return {"success": False, "content": f"Site crawl failed: {result.get('error', 'Unknown error')}", "error": result.get('error', 'Unknown error')}
-    except Exception as e:
-        logger.error(f"❌ crawl_site failed: {e}")
-        return {"success": False, "content": f"Site crawl failed: {str(e)}", "error": str(e)}
-
-class AnalyzeAndIngestInput(BaseModel):
-    urls: List[str] = Field(description="URLs to analyze and ingest")
-
-@tool(args_schema=AnalyzeAndIngestInput)
-async def analyze_and_ingest(urls: List[str]) -> str:
-    """Analyze and ingest URLs as documents"""
-    try:
-        from services.langgraph_tools.web_content_tools import analyze_and_ingest_url
-        
-        result = await analyze_and_ingest_url(urls)
-        
-        if result.get("success"):
-            analyzed = result.get("urls_analyzed", 0)
-            ingested = result.get("urls_ingested", 0)
-            return f"✅ Analyzed {analyzed} URLs, successfully ingested {ingested} as documents"
-        else:
-            return f"❌ Analysis and ingestion failed: {result.get('error', 'Unknown error')}"
-        
-    except Exception as e:
-        logger.error(f"❌ analyze_and_ingest failed: {e}")
-        return {"success": False, "content": f"Analysis and ingestion failed: {str(e)}", "error": str(e)}
 
 
 class SummarizeContentInput(BaseModel):
@@ -415,10 +302,7 @@ def get_web_research_tools() -> List[BaseTool]:
     """Get web-only tools for research"""
     return [
         search_web,
-        crawl_web_content,
-        search_and_crawl,
-        analyze_and_ingest,
-        crawl_site
+        crawl_web_content
     ]
 
 

@@ -466,7 +466,7 @@ class DocumentService:
         logger.info(f"🚀 Fast-track processing native PDF: {document_id}")
         
         # Check if document is exempt from vectorization BEFORE processing
-        is_exempt = await self.document_repository.is_document_exempt(document_id)
+        is_exempt = await self.document_repository.is_document_exempt(document_id, user_id)
         if is_exempt:
             logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping all processing")
             await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
@@ -513,7 +513,7 @@ class DocumentService:
         logger.info(f"🔄 OCR candidate processing: {document_id}")
         
         # Check if document is exempt from vectorization BEFORE processing
-        is_exempt = await self.document_repository.is_document_exempt(document_id)
+        is_exempt = await self.document_repository.is_document_exempt(document_id, user_id)
         if is_exempt:
             logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping all processing")
             await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
@@ -646,7 +646,7 @@ class DocumentService:
         # ROOSEVELT DOCTRINE: Org Mode files skip vectorization entirely!
         if doc_type == 'org':
             logger.info(f"📋 Org file stored for structured access: {document_id}")
-            logger.info(f"Use OrgInboxAgent or OrgProjectAgent for task management operations")
+            logger.info(f"Use llm-orchestrator for task management operations (OrgInboxAgent and OrgProjectAgent migrated)")
             
             # Process document for metadata only (no vectorization)
             result = await self.document_processor.process_document(str(file_path), doc_type, document_id)
@@ -663,7 +663,7 @@ class DocumentService:
         
         # Check if document is exempt from vectorization BEFORE processing
         # This prevents unnecessary processing work for exempt documents
-        is_exempt = await self.document_repository.is_document_exempt(document_id)
+        is_exempt = await self.document_repository.is_document_exempt(document_id, user_id)
         if is_exempt:
             logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping all processing")
             await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
@@ -676,7 +676,6 @@ class DocumentService:
         # Update status to embedding for regular documents
         await self.document_repository.update_status(document_id, ProcessingStatus.EMBEDDING)
         await self._emit_document_status_update(document_id, ProcessingStatus.EMBEDDING.value, user_id)
-        await self._emit_document_status_update(document_id, ProcessingStatus.EMBEDDING, user_id)
         
         # **ROOSEVELT METADATA FIX**: Fetch document category and tags for vector filtering
         doc_info = await self.document_repository.get_by_id(document_id)
@@ -709,7 +708,6 @@ class DocumentService:
         # Update final status
         await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
         await self._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
-        await self._emit_document_status_update(document_id, ProcessingStatus.COMPLETED, user_id)
         if result.quality_metrics:
             await self.document_repository.update_quality_metrics(document_id, result.quality_metrics)
     
@@ -830,7 +828,7 @@ class DocumentService:
                 self.embedding_manager = await get_embedding_service()
             
             # Check if document is exempt from vectorization BEFORE processing
-            is_exempt = await self.document_repository.is_document_exempt(document_id)
+            is_exempt = await self.document_repository.is_document_exempt(document_id, user_id)
             if is_exempt:
                 logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping all processing")
                 await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
@@ -890,7 +888,7 @@ class DocumentService:
             # Extract content using Crawl4AI
             result = await crawl4ai_tools.crawl_web_content(
                 urls=[url],
-                extraction_strategy="LLMExtractionStrategy",
+                extraction_strategy="markdown",  # Always markdown - we don't configure Crawl4AI with LLM
                 chunking_strategy="NlpSentenceChunking",
                 word_count_threshold=10
             )
@@ -1217,7 +1215,8 @@ class DocumentService:
                         document_title=doc_info.title,
                         document_author=doc_info.author,
                         document_filename=doc_info.filename,
-                        user_id=doc_info.user_id
+                        user_id=getattr(doc_info, 'user_id', None),
+                        team_id=getattr(doc_info, 'team_id', None)
                     )
                     logger.info(f"✅ Updated Qdrant metadata for document {document_id}")
                 else:
@@ -1341,19 +1340,25 @@ class DocumentService:
         document_title: Optional[str] = None,
         document_author: Optional[str] = None,
         document_filename: Optional[str] = None,
-        user_id: Optional[str] = None
+        user_id: Optional[str] = None,
+        team_id: Optional[str] = None
     ):
         """
         Update metadata in Qdrant vector payloads for all chunks of a document.
         This ensures tag/category filters work without reprocessing!
+        
+        Collection determination priority: team_id > user_id > global
         """
         try:
             from qdrant_client.models import Filter, FieldCondition, MatchValue, SetPayload
+            from services.vector_store_service import VectorStoreService
             
-            # Determine which collection to update
-            if user_id:
-                from services.vector_store_service import VectorStoreService
-                vector_store = VectorStoreService()
+            vector_store = VectorStoreService()
+            
+            # Determine which collection to update (priority: team > user > global)
+            if team_id:
+                collection_name = vector_store._get_team_collection_name(team_id)
+            elif user_id:
                 collection_name = vector_store._get_user_collection_name(user_id)
             else:
                 collection_name = settings.VECTOR_COLLECTION_NAME
@@ -1494,8 +1499,13 @@ class DocumentService:
             
             # Always remove from database (even if file deletion failed)
             try:
-                await self.document_repository.delete(document_id)
-                logger.info(f"🗑️  Removed document {document_id} from database")
+                # Pass user_id for proper RLS context
+                deleted = await self.document_repository.delete(document_id, doc_info.user_id)
+                if deleted:
+                    logger.info(f"🗑️  Removed document {document_id} from database")
+                else:
+                    logger.warning(f"⚠️  Document {document_id} not found in database (may have been already deleted)")
+                    # Document not found is still a successful outcome for delete (idempotent)
             except Exception as e:
                 logger.error(f"❌ Failed to remove document {document_id} from database: {e}")
                 return False
@@ -1522,7 +1532,7 @@ class DocumentService:
             logger.info(f"🚫 Exempting document {document_id} from vectorization")
             
             # Mark document as exempt
-            success = await self.document_repository.update_document_exemption_status(document_id, True)
+            success = await self.document_repository.update_document_exemption_status(document_id, True, user_id)
             if not success:
                 logger.error(f"Failed to update exemption status for document {document_id}")
                 return False
@@ -1542,8 +1552,12 @@ class DocumentService:
                 except Exception as e:
                     logger.warning(f"Failed to delete KG entities for {document_id}: {e}")
             
+            # Update status to completed since document is exempt
+            # The update_status method will handle RLS context automatically
+            await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED, user_id)
+            
             # Emit WebSocket notification
-            await self._emit_document_status_update(document_id, "exempted", user_id)
+            await self._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
             
             logger.info(f"✅ Document {document_id} exempted from vectorization")
             return True
@@ -1569,7 +1583,7 @@ class DocumentService:
                 exempt_status = False
             
             # Update document exemption status
-            success = await self.document_repository.update_document_exemption_status(document_id, exempt_status)
+            success = await self.document_repository.update_document_exemption_status(document_id, exempt_status, user_id)
             if not success:
                 logger.error(f"Failed to update exemption status for document {document_id}")
                 return False
@@ -1835,6 +1849,15 @@ class DocumentService:
             # Store in database - use create_with_folder to inherit exemption from parent folder
             await self.document_repository.create_with_folder(document_info, folder_id)
             
+            # Check if document is exempt from vectorization BEFORE processing
+            # This prevents unnecessary processing work for exempt documents
+            is_exempt = await self.document_repository.is_document_exempt(doc_id, user_id)
+            if is_exempt:
+                logger.info(f"🚫 Document {doc_id} is exempt from vectorization - skipping all processing")
+                await self.document_repository.update_status(doc_id, ProcessingStatus.COMPLETED)
+                logger.info(f"✅ Successfully stored text document (exempt): {doc_id}")
+                return True
+            
             # Update status to embedding
             await self.document_repository.update_status(doc_id, ProcessingStatus.EMBEDDING)
             
@@ -1847,7 +1870,7 @@ class DocumentService:
             if chunks:
                 await self.embedding_manager.embed_and_store_chunks(
                     chunks,
-                    user_id=None,  # Direct text storage, no user association
+                    user_id=user_id,  # Use provided user_id instead of None
                     document_category=None,  # No category for direct text
                     document_tags=None  # No tags for direct text
                 )

@@ -14,8 +14,6 @@ from orchestrator.tools.web_tools import (
     search_web_tool,
     search_web_structured,
     crawl_web_content_tool,
-    search_and_crawl_tool,
-    crawl_site_tool,
     WEB_TOOLS
 )
 
@@ -62,8 +60,6 @@ __all__ = [
     'search_web_tool',
     'search_web_structured',
     'crawl_web_content_tool',
-    'search_and_crawl_tool',
-    'crawl_site_tool',
     'WEB_TOOLS',
     # Enhancement tools
     'expand_query_tool',

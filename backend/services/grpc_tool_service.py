@@ -75,15 +75,33 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             if tags or categories:
                 logger.info(f"SearchDocuments: Filtering by tags={tags}, categories={categories}")
             
+            # Get user's team IDs for hybrid search (user + team + global collections)
+            team_ids = None
+            user_id = request.user_id if request.user_id and request.user_id != "system" else None
+            if user_id:
+                try:
+                    from services.team_service import TeamService
+                    team_service = TeamService()
+                    await team_service.initialize()
+                    user_teams = await team_service.list_user_teams(user_id)
+                    team_ids = [team['team_id'] for team in user_teams] if user_teams else None
+                    if team_ids:
+                        logger.info(f"SearchDocuments: User {user_id} is member of {len(team_ids)} teams - including team collections in search")
+                except Exception as e:
+                    logger.warning(f"SearchDocuments: Failed to get user teams for {user_id}: {e} - continuing without team collections")
+                    team_ids = None
+            
             # Get search service
             search_service = await self._get_search_service()
             
             # Perform direct search with optional tag/category filtering
+            # Includes hybrid search across user, team, and global collections
             search_result = await search_service.search_documents(
                 query=request.query,
                 limit=request.limit or 10,
                 similarity_threshold=0.3,  # Lowered from 0.7 for better recall
-                user_id=request.user_id if request.user_id and request.user_id != "system" else None,
+                user_id=user_id,
+                team_ids=team_ids,
                 tags=tags if tags else None,
                 categories=categories if categories else None
             )
@@ -102,11 +120,15 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             for result in results:
                 # DirectSearchService returns nested structure with document metadata
                 document_metadata = result.get('document', {})
+
+                # Get document_id from result directly (from vector search), fallback to metadata
+                document_id = result.get('document_id') or document_metadata.get('document_id', '')
+
                 doc_result = tool_service_pb2.DocumentResult(
-                    document_id=str(document_metadata.get('document_id', '')),
+                    document_id=str(document_id),
                     title=document_metadata.get('title', document_metadata.get('filename', '')),
                     filename=document_metadata.get('filename', ''),
-                    content_preview=result.get('text', '')[:500],  # Limit preview
+                    content_preview=result.get('text', '')[:1500],  # Increased for better context
                     relevance_score=float(result.get('similarity_score', 0.0))
                 )
                 response.results.append(doc_result)
@@ -192,7 +214,8 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             logger.info(f"GetDocument: doc_id={request.document_id}, user={request.user_id}")
             
             doc_repo = self._get_document_repo()
-            doc = await doc_repo.get_document_by_id(document_id=request.document_id)
+            # Pass user_id for RLS context
+            doc = await doc_repo.get_document_by_id(document_id=request.document_id, user_id=request.user_id)
             
             if not doc:
                 await context.abort(grpc.StatusCode.NOT_FOUND, "Document not found")
@@ -206,6 +229,9 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             
             return response
             
+        except (grpc.RpcError, grpc._cython.cygrpc.AbortError):
+            # Re-raise gRPC errors (including AbortError from context.abort calls)
+            raise
         except Exception as e:
             logger.error(f"GetDocument error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Get document failed: {str(e)}")
@@ -217,10 +243,11 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
     ) -> tool_service_pb2.DocumentContentResponse:
         """Get document full content from disk"""
         try:
-            logger.info(f"GetDocumentContent: doc_id={request.document_id}")
+            logger.info(f"GetDocumentContent: doc_id={request.document_id}, user_id={request.user_id}")
             
             doc_repo = self._get_document_repo()
-            doc = await doc_repo.get_document_by_id(document_id=request.document_id)
+            # Pass user_id for RLS context
+            doc = await doc_repo.get_document_by_id(document_id=request.document_id, user_id=request.user_id)
             
             if not doc:
                 await context.abort(grpc.StatusCode.NOT_FOUND, "Document not found")
@@ -230,6 +257,8 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             user_id = doc.get('user_id')
             folder_id = doc.get('folder_id')
             collection_type = doc.get('collection_type', 'user')
+            
+            logger.info(f"GetDocumentContent: filename={filename}, user_id={user_id}, folder_id={folder_id}, collection_type={collection_type}")
             
             full_content = None
             
@@ -246,12 +275,14 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                     full_content = ""
                 else:
                     try:
+                        logger.info(f"GetDocumentContent: Calling folder_service.get_document_file_path...")
                         file_path_str = await folder_service.get_document_file_path(
                             filename=filename,
                             folder_id=folder_id,
                             user_id=user_id,
                             collection_type=collection_type
                         )
+                        logger.info(f"GetDocumentContent: Got file path: {file_path_str}")
                         file_path = Path(file_path_str)
                         
                         if file_path.exists():
@@ -261,12 +292,16 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                         else:
                             logger.warning(f"GetDocumentContent: File not found at {file_path}")
                     except Exception as e:
-                        logger.warning(f"GetDocumentContent: Failed to load from folder service: {e}")
+                        logger.error(f"GetDocumentContent: Failed to load from folder service: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
             
             # If content is None, file wasn't found
             if full_content is None:
-                logger.error(f"GetDocumentContent: File not found for document {request.document_id}")
+                logger.error(f"GetDocumentContent: File not found for document {request.document_id} (filename={filename}, folder_id={folder_id})")
                 await context.abort(grpc.StatusCode.NOT_FOUND, f"Document file not found on disk")
+            
+            logger.info(f"GetDocumentContent: Returning content with {len(full_content)} characters")
             
             response = tool_service_pb2.DocumentContentResponse(
                 document_id=str(doc.get('document_id', '')),
@@ -276,13 +311,125 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             
             return response
             
-        except grpc.RpcError:
+        except (grpc.RpcError, grpc._cython.cygrpc.AbortError):
+            # Re-raise gRPC errors (including AbortError from context.abort calls)
+            # This prevents trying to abort twice
             raise
         except Exception as e:
             logger.error(f"GetDocumentContent error: {e}")
             import traceback
             traceback.print_exc()
             await context.abort(grpc.StatusCode.INTERNAL, f"Get content failed: {str(e)}")
+    
+    async def GetDocumentChunks(
+        self,
+        request: tool_service_pb2.DocumentRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.DocumentChunksResponse:
+        """Get chunks from a document using vector store"""
+        try:
+            logger.info(f"GetDocumentChunks: doc_id={request.document_id}")
+            
+            # Get vector store service
+            from services.vector_store_service import get_vector_store
+            vector_store = await get_vector_store()
+            
+            # Use Qdrant scroll to get all chunks for this document
+            from qdrant_client.models import Filter, FieldCondition, MatchValue, ScrollRequest
+            
+            # Create filter for document_id
+            document_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="document_id",
+                        match=MatchValue(value=request.document_id)
+                    )
+                ]
+            )
+            
+            # Scroll through all collections to find chunks
+            # Try global collection first
+            from config import settings
+            collections_to_search = [settings.VECTOR_COLLECTION_NAME]
+            
+            # Also try user collection if user_id is provided
+            if request.user_id and request.user_id != "system":
+                user_collection = f"user_{request.user_id}_documents"
+                collections_to_search.append(user_collection)
+            
+            all_chunks = []
+            for collection_name in collections_to_search:
+                try:
+                    # Check if collection exists
+                    collections = vector_store.client.get_collections()
+                    collection_names = [col.name for col in collections.collections]
+                    
+                    if collection_name not in collection_names:
+                        continue
+                    
+                    # Scroll to get all points matching the filter
+                    loop = asyncio.get_event_loop()
+                    scroll_result = await loop.run_in_executor(
+                        None,
+                        lambda: vector_store.client.scroll(
+                            collection_name=collection_name,
+                            scroll_filter=document_filter,
+                            limit=1000,  # Get up to 1000 chunks per document
+                            with_payload=True,
+                            with_vectors=False
+                        )
+                    )
+                    
+                    # Extract chunks from scroll result
+                    points, next_page_offset = scroll_result
+                    for point in points:
+                        payload = point.payload or {}
+                        chunk_data = {
+                            'chunk_id': payload.get('chunk_id', str(point.id)),
+                            'document_id': payload.get('document_id', request.document_id),
+                            'content': payload.get('content', ''),
+                            'chunk_index': payload.get('chunk_index', 0),
+                            'metadata': payload.get('metadata', {})
+                        }
+                        all_chunks.append(chunk_data)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to search collection {collection_name}: {e}")
+                    continue
+            
+            if not all_chunks:
+                logger.warning(f"No chunks found for document {request.document_id}")
+                return tool_service_pb2.DocumentChunksResponse(
+                    document_id=request.document_id,
+                    chunks=[]
+                )
+            
+            # Sort by chunk_index
+            all_chunks.sort(key=lambda x: x.get('chunk_index', 0))
+            
+            # Convert to proto response
+            chunks_proto = []
+            for chunk_data in all_chunks:
+                chunk_proto = tool_service_pb2.DocumentChunk(
+                    chunk_id=chunk_data.get('chunk_id', ''),
+                    document_id=chunk_data.get('document_id', request.document_id),
+                    content=chunk_data.get('content', ''),
+                    chunk_index=chunk_data.get('chunk_index', 0),
+                    metadata=json.dumps(chunk_data.get('metadata', {}))
+                )
+                chunks_proto.append(chunk_proto)
+            
+            logger.info(f"GetDocumentChunks: Found {len(chunks_proto)} chunks")
+            return tool_service_pb2.DocumentChunksResponse(
+                document_id=request.document_id,
+                chunks=chunks_proto
+            )
+            
+        except Exception as e:
+            logger.error(f"GetDocumentChunks error: {e}")
+            import traceback
+            traceback.print_exc()
+            await context.abort(grpc.StatusCode.INTERNAL, f"Get chunks failed: {str(e)}")
     
     async def FindDocumentByPath(
         self,
@@ -382,17 +529,24 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                     
                     if folder_start_idx < folder_end_idx:
                         folder_parts = parts[folder_start_idx:folder_end_idx]
+                        logger.info(f"📁 DB QUERY: Resolving folder hierarchy: {folder_parts}")
                         # Get folders and resolve hierarchy
                         folders_data = await doc_repo.get_folders_by_user(user_id, collection_type)
+                        logger.info(f"📁 DB QUERY: Found {len(folders_data)} total folders for user")
                         folder_map = {(f.get('name'), f.get('parent_folder_id')): f.get('folder_id') for f in folders_data}
+                        logger.info(f"📁 DB QUERY: Folder map keys: {list(folder_map.keys())[:10]}...")  # Show first 10
                         
                         parent_folder_id = None
-                        for folder_name in folder_parts:
+                        for i, folder_name in enumerate(folder_parts):
                             key = (folder_name, parent_folder_id)
+                            logger.info(f"📁 DB QUERY: Step {i+1}: Looking for folder '{folder_name}' with parent={parent_folder_id}")
                             if key in folder_map:
                                 folder_id = folder_map[key]
                                 parent_folder_id = folder_id
+                                logger.info(f"✅ DB QUERY: Found folder_id={folder_id} for '{folder_name}'")
                             else:
+                                logger.warning(f"❌ DB QUERY: Folder '{folder_name}' with parent={parent_folder_id} NOT FOUND in folder_map!")
+                                logger.warning(f"   Available folders with parent={parent_folder_id}: {[k[0] for k in folder_map.keys() if k[1] == parent_folder_id]}")
                                 folder_id = None
                                 break
                 
@@ -422,6 +576,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                                 break
             
             # Find document by filename, user_id, and folder_id
+            logger.info(f"📄 DB QUERY: Searching for filename='{filename}', user_id={user_id}, collection_type={collection_type}, folder_id={folder_id}")
             document = await doc_repo.find_by_filename_and_context(
                 filename=filename,
                 user_id=user_id,
@@ -430,6 +585,9 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             )
             
             if not document:
+                logger.warning(f"❌ DB QUERY: NO MATCH FOUND in database")
+                logger.warning(f"   Searched for: filename='{filename}', folder_id={folder_id}, user_id={user_id}")
+                logger.warning(f"   Resolved path: {resolved_path}")
                 logger.warning(f"FindDocumentByPath: No document record found for {resolved_path}")
                 return tool_service_pb2.FindDocumentByPathResponse(
                     success=False,
@@ -1311,7 +1469,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             logger.info(f"CrawlWebContent: {len(urls)} URLs")
             
             # Import crawl tool
-            from services.langgraph_tools.web_content_tools import crawl_web_content
+            from services.langgraph_tools.crawl4ai_web_tools import crawl_web_content
             
             # Execute crawl
             result = await crawl_web_content(url=request.url if request.url else None, urls=list(request.urls) if request.urls else None)
@@ -1321,12 +1479,32 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             # Parse result
             if isinstance(result, dict) and 'results' in result:
                 for item in result['results']:
+                    if not item.get('success'):
+                        continue
+                    
+                    # Extract title from metadata if available
+                    metadata = item.get('metadata', {})
+                    title = metadata.get('title', '') if isinstance(metadata, dict) else ''
+                    
+                    # Extract content (full_content is the main content field)
+                    content = item.get('full_content', '') or item.get('content', '')
+                    
+                    # Extract HTML from result
+                    html = item.get('html', '')
+                    
+                    # Create crawl result
                     crawl_result = tool_service_pb2.WebCrawlResult(
                         url=item.get('url', ''),
-                        title=item.get('title', ''),
-                        content=item.get('content', ''),
-                        metadata={}  # WebCrawlResult doesn't have html field
+                        title=title,
+                        content=content,
+                        html=html
                     )
+                    
+                    # Properly assign metadata map field using update()
+                    if isinstance(metadata, dict):
+                        for key, value in metadata.items():
+                            crawl_result.metadata[str(key)] = str(value)
+                    
                     response.results.append(crawl_result)
             
             logger.info(f"CrawlWebContent: Crawled {len(response.results)} URLs")
@@ -1696,54 +1874,6 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 "stored_count": 0
             }
     
-    async def SearchAndCrawl(
-        self,
-        request: tool_service_pb2.SearchAndCrawlRequest,
-        context: grpc.aio.ServicerContext
-    ) -> tool_service_pb2.SearchAndCrawlResponse:
-        """Combined search and crawl operation"""
-        try:
-            logger.info(f"SearchAndCrawl: query={request.query}")
-            
-            # Import tool
-            from services.langgraph_tools.web_content_tools import search_and_crawl
-            
-            # Execute combined operation
-            result = await search_and_crawl(query=request.query, max_results=request.num_results or 10)
-            
-            response = tool_service_pb2.SearchAndCrawlResponse()
-            
-            # Parse results - tool returns dict with search_results and crawled_content
-            if isinstance(result, dict):
-                # Add search results
-                if 'search_results' in result and isinstance(result['search_results'], list):
-                    for item in result['search_results']:
-                        search_result = tool_service_pb2.WebSearchResult(
-                            title=item.get('title', ''),
-                            url=item.get('url', ''),
-                            snippet=item.get('snippet', ''),
-                            relevance_score=float(item.get('relevance_score', 0.0))
-                        )
-                        response.search_results.append(search_result)
-                
-                # Add crawl results
-                if 'crawled_content' in result and isinstance(result['crawled_content'], list):
-                    for item in result['crawled_content']:
-                        crawl_result = tool_service_pb2.WebCrawlResult(
-                            url=item.get('url', ''),
-                            title=item.get('title', ''),
-                            content=item.get('content', ''),
-                            metadata={}  # WebCrawlResult doesn't have html field, use metadata instead
-                        )
-                        response.crawl_results.append(crawl_result)
-            
-            logger.info(f"SearchAndCrawl: {len(response.search_results)} search results, {len(response.crawl_results)} crawled")
-            return response
-            
-        except Exception as e:
-            logger.error(f"SearchAndCrawl error: {e}")
-            await context.abort(grpc.StatusCode.INTERNAL, f"Search and crawl failed: {str(e)}")
-    
     # ===== Query Enhancement =====
     
     async def ExpandQuery(
@@ -1758,10 +1888,18 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             # Import expansion tool
             from services.langgraph_tools.query_expansion_tool import expand_query
             
+            # Extract conversation context if provided
+            conversation_context = None
+            # Check if conversation_context field is set and not empty
+            if hasattr(request, 'conversation_context') and request.conversation_context:
+                conversation_context = request.conversation_context
+                logger.info(f"ExpandQuery: Using conversation context ({len(conversation_context)} chars)")
+            
             # Execute expansion - returns JSON string
             result_json = await expand_query(
                 original_query=request.query, 
-                num_expansions=request.num_variations or 3
+                num_expansions=request.num_variations or 3,
+                conversation_context=conversation_context
             )
             result = json.loads(result_json)
             
@@ -2219,7 +2357,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             pool = await get_shared_db_pool()
             async with pool.acquire() as conn:
                 # Set user context for RLS policies
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", request.user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", request.user_id)
                 
                 # Verify conversation exists and belongs to user
                 conversation = await conn.fetchrow(

@@ -318,28 +318,56 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         
         # Add question request guidance (all questions route here - can analyze and optionally edit)
         request_type = state.get("request_type", "edit_request")
+        current_request = state.get("current_request", "")
         if request_type == "question":
-            context_parts.append(
-                "\n=== QUESTION REQUEST: ANALYZE AND OPTIONALLY EDIT ===\n"
-                "The user has asked a question about the manuscript.\n\n"
-                "**YOUR TASK**:\n"
-                "1. **ANALYZE FIRST**: Answer the user's question by evaluating the current content\n"
-                "   - Pure questions: 'How old is Tom here?' → Find and report Tom's age\n"
-                "   - Evaluation questions: 'Are we using enough description?' → Evaluate description level\n"
-                "   - Verification questions: 'Does this follow the style guide?' → Check style guide compliance\n"
-                "   - Conditional questions: 'Is Tom 23? We want him to be 24' → Check age, then edit if needed\n"
-                "2. **THEN EDIT IF NEEDED**: Based on your analysis, make edits if necessary\n"
-                "   - If question implies a desired state ('We want him to be 24') → Provide editor operations\n"
-                "   - If question asks for evaluation ('Are we using enough?') → Edit if answer is 'no'\n"
-                "   - If question is pure information ('How old is Tom?') → No edits needed, just answer\n"
-                "   - Include your analysis in the 'summary' field of your response\n\n"
-                "**RESPONSE FORMAT**:\n"
-                "- In the 'summary' field: Answer the question clearly and explain your analysis\n"
-                "- In the 'operations' array: Provide editor operations ONLY if edits are needed\n"
-                "- If no edits needed: Return empty operations array, but answer the question in summary\n"
-                "- If edits needed: Provide operations AND explain what you found in summary\n\n"
-                "**EXAMPLES**:\n"
-                "- 'How old is Tom here?' → Summary: 'Tom is 23 years old in this chapter.' Operations: []\n"
+            # Check for explicit "don't revise" / "just report" instructions
+            request_lower = current_request.lower()
+            explicit_no_edit = any(phrase in request_lower for phrase in [
+                "don't revise", "dont revise", "do not revise", "no revisions", "no edits",
+                "just report", "just tell me", "just answer", "only report", "only tell",
+                "don't change", "dont change", "do not change", "no changes", "no modifications"
+            ])
+            
+            if explicit_no_edit:
+                context_parts.append(
+                    "\n=== QUESTION REQUEST: ANALYSIS ONLY (NO EDITS) ===\n"
+                    "The user has asked a question and EXPLICITLY requested NO revisions or edits.\n\n"
+                    "**YOUR TASK**:\n"
+                    "1. **ANALYZE AND ANSWER**: Answer the user's question by evaluating the current content\n"
+                    "   - Provide a clear, helpful answer based on the manuscript and references\n"
+                    "   - Explain what you observe, identify, or verify\n"
+                    "   - Be specific and reference the actual content when relevant\n"
+                    "2. **NO EDITS**: Do NOT provide any editor operations - user explicitly requested analysis only\n"
+                    "   - Return empty operations array: []\n"
+                    "   - Put your complete answer in the 'summary' field\n\n"
+                    "**RESPONSE FORMAT**:\n"
+                    "- In the 'summary' field: Complete answer to the question with analysis\n"
+                    "- In the 'operations' array: MUST be empty [] (user requested no edits)\n\n"
+                )
+            else:
+                context_parts.append(
+                    "\n=== QUESTION REQUEST: ANALYZE AND OPTIONALLY EDIT ===\n"
+                    "The user has asked a question about the manuscript.\n\n"
+                    "**YOUR TASK**:\n"
+                    "1. **ANALYZE FIRST**: Answer the user's question by evaluating the current content\n"
+                    "   - Pure questions: 'How old is Tom here?' → Find and report Tom's age\n"
+                    "   - Evaluation questions: 'Are we using enough description?' → Evaluate description level\n"
+                    "   - Verification questions: 'Does this follow the style guide?' → Check style guide compliance\n"
+                    "   - Conditional questions: 'Is Tom 23? We want him to be 24' → Check age, then edit if needed\n"
+                    "   - Questions with edit hints: 'How does our chapter look? Let me know if there are revisions needed' → Analyze, then edit if issues found\n"
+                    "2. **THEN EDIT IF NEEDED**: Based on your analysis, make edits if necessary\n"
+                    "   - If question implies a desired state ('We want him to be 24') → Provide editor operations\n"
+                    "   - If question asks for evaluation ('Are we using enough?') → Edit if answer is 'no'\n"
+                    "   - If question hints at revisions ('Let me know if revisions needed') → Edit if issues found\n"
+                    "   - If question is pure information ('How old is Tom?') → No edits needed, just answer\n"
+                    "   - Include your analysis in the 'summary' field of your response\n\n"
+                    "**RESPONSE FORMAT**:\n"
+                    "- In the 'summary' field: Answer the question clearly and explain your analysis\n"
+                    "- In the 'operations' array: Provide editor operations ONLY if edits are needed\n"
+                    "- If no edits needed: Return empty operations array, but answer the question in summary\n"
+                    "- If edits needed: Provide operations AND explain what you found in summary\n\n"
+                    "**EXAMPLES**:\n"
+                    "- 'How old is Tom here?' → Summary: 'Tom is 23 years old in this chapter.' Operations: []\n"
                 "- 'Is Tom 23? We want him to be 24' → Summary: 'Tom is currently 23. Updating to 24.' Operations: [replace_range with age change]\n"
                 "- 'Are we using enough description? Revise if necessary' → Summary: 'Description level is low. Adding sensory details.' Operations: [replace_range with enhanced description]\n\n"
             )
@@ -379,6 +407,25 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
             "is_empty_file": is_empty_file,
             "target_chapter_number": target_chapter_number,
             "current_chapter_label": current_chapter_label,
+            # CRITICAL: Preserve state for subsequent nodes
+            "system_prompt": state.get("system_prompt", ""),  # ✅ PRESERVE system_prompt!
+            "datetime_context": state.get("datetime_context", ""),  # ✅ PRESERVE datetime_context!
+            "metadata": state.get("metadata", {}),  # Contains user_chat_model!
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            # ✅ PRESERVE manuscript context for next node!
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "selection_start": state.get("selection_start", -1),
+            "selection_end": state.get("selection_end", -1),
+            "cursor_offset": state.get("cursor_offset", -1),
+            "requested_chapter_number": state.get("requested_chapter_number"),
         }
         
     except Exception as e:
@@ -388,7 +435,26 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         return {
             "generation_context_parts": [],
             "error": str(e),
-            "task_status": "error"
+            "task_status": "error",
+            # CRITICAL: Preserve state even on error
+            "system_prompt": state.get("system_prompt", ""),  # ✅ PRESERVE system_prompt!
+            "datetime_context": state.get("datetime_context", ""),  # ✅ PRESERVE datetime_context!
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            # ✅ PRESERVE manuscript context even on error!
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "selection_start": state.get("selection_start", -1),
+            "selection_end": state.get("selection_end", -1),
+            "cursor_offset": state.get("cursor_offset", -1),
+            "requested_chapter_number": state.get("requested_chapter_number"),
         }
 
 
@@ -399,6 +465,23 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Get system prompt from state (built by main agent)
         system_prompt = state.get("system_prompt", "")
+        logger.info(f"📊 SYSTEM PROMPT DEBUG: length = {len(system_prompt):,} chars (~{len(system_prompt) // 4:,} tokens)")
+        logger.info(f"📊 SYSTEM PROMPT first 500 chars: {system_prompt[:500]}")
+        logger.info(f"📊 SYSTEM PROMPT last 500 chars: {system_prompt[-500:]}")
+        
+        # ⚠️ CRITICAL DEBUG: Check if references are INSIDE the system prompt
+        if "===  OUTLINE" in system_prompt or "outline_body" in system_prompt or len(system_prompt) > 100000:
+            logger.error(f"🚨 SYSTEM PROMPT CONTAINS REFERENCES! This should NEVER happen!")
+            logger.error(f"🚨 Searching for reference markers in system_prompt:")
+            if "OUTLINE" in system_prompt:
+                outline_pos = system_prompt.find("OUTLINE")
+                logger.error(f"  - Found 'OUTLINE' at position {outline_pos}")
+                logger.error(f"  - Context: ...{system_prompt[max(0, outline_pos-100):outline_pos+200]}...")
+            if len(system_prompt) > 100000:
+                # Show the middle section where references might be
+                mid_point = len(system_prompt) // 2
+                logger.error(f"📊 SYSTEM PROMPT middle section ({mid_point-500}:{mid_point+500}): {system_prompt[mid_point-500:mid_point+500]}")
+        
         if not system_prompt:
             # Fallback: build it if not provided
             # This should normally come from the main agent's _build_system_prompt()
@@ -509,11 +592,21 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         f"The chapter doesn't exist yet - you need to insert it after the last existing chapter.\n"
                         f"Last existing chapter: Chapter {last_chapter_num}\n"
                         f"**CRITICAL**: Use 'insert_after_heading' with anchor_text set to the LAST LINE of Chapter {last_chapter_num}\n"
-                        f"Find the last line of Chapter {last_chapter_num} in the manuscript above and use it as anchor_text.\n"
-                        f"Example: If the last line is 'She closed the door behind her.', then:\n"
-                        f"  op_type: 'insert_after_heading'\n"
-                        f"  anchor_text: 'She closed the door behind her.'\n"
-                        f"  text: '## Chapter {requested_chapter_number}\\n\\n[your chapter content]'\n"
+                        f"Find the last line of Chapter {last_chapter_num} in the manuscript above and use it as anchor_text.\n\n"
+                        f"Example JSON structure:\n"
+                        f"{{\n"
+                        f'  "target_filename": "manuscript.md",\n'
+                        f'  "scope": "chapter",\n'
+                        f'  "summary": "Generated Chapter {requested_chapter_number}",\n'
+                        f'  "safety": "medium",\n'
+                        f'  "operations": [{{\n'
+                        f'    "op_type": "insert_after_heading",\n'
+                        f'    "anchor_text": "She closed the door behind her.",\n'
+                        f'    "text": "## Chapter {requested_chapter_number}\\n\\nYour chapter content here...",\n'
+                        f'    "start": 0,\n'
+                        f'    "end": 0\n'
+                        f"  }}]\n"
+                        f"}}\n\n"
                         f"**MANDATORY**: Your 'text' field MUST start with '## Chapter {requested_chapter_number}' followed by two newlines, then your chapter content.\n"
                         f"**DO NOT** use '## Chapter {requested_chapter_number}' as anchor_text - it doesn't exist yet!\n"
                         f"**DO NOT** insert at the beginning of the file - insert after the last chapter!\n"
@@ -521,6 +614,15 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     )
             
             messages.append(HumanMessage(content=(
+                "\n" + "="*80 + "\n"
+                "⚠️⚠️⚠️ OUTPUT FORMAT REQUIREMENTS ⚠️⚠️⚠️\n"
+                "="*80 + "\n\n"
+                "YOU MUST RESPOND WITH **JSON ONLY**\n\n"
+                "❌ DO NOT use XML tags like <operation> or <op_type>\n"
+                "❌ DO NOT use YAML format (key: value without braces)\n"
+                "❌ DO NOT use any format other than JSON\n"
+                "✅ ONLY return valid JSON with curly braces { }\n"
+                "✅ ONLY return a JSON object matching ManuscriptEdit structure\n\n"
                 f"USER REQUEST: {current_request}\n\n"
                 + selection_context +
                 granular_correction_hints +
@@ -563,6 +665,31 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "="*80 + "\n"
                 "NOW GENERATE YOUR JSON RESPONSE:\n"
                 "="*80 + "\n\n"
+                "⚠️⚠️⚠️ CRITICAL: REQUIRED JSON STRUCTURE ⚠️⚠️⚠️\n\n"
+                "**OUTPUT FORMAT: JSON ONLY - NO XML, NO YAML, ONLY JSON!**\n\n"
+                "Your response MUST be a complete ManuscriptEdit JSON object with this EXACT structure:\n\n"
+                "{\n"
+                '  "target_filename": "manuscript.md",\n'
+                '  "scope": "chapter",\n'
+                '  "summary": "Brief description of what you did",\n'
+                '  "safety": "medium",\n'
+                '  "operations": [\n'
+                "    {\n"
+                '      "op_type": "insert_after_heading",\n'
+                '      "anchor_text": "EXACT text from manuscript to insert after",\n'
+                '      "text": "## Chapter 1: Title\\n\\nYour generated prose here...",\n'
+                '      "start": 0,\n'
+                '      "end": 0\n'
+                "    }\n"
+                "  ]\n"
+                "}\n\n"
+                "❌ DO NOT use XML tags: <operation>, <op_type>, <text>, etc.\n"
+                "❌ DO NOT use YAML format: op_type: value\n"
+                "❌ DO NOT return a single operation object!\n"
+                "❌ DO NOT use 'operation' (singular) - must be 'operations' (array)!\n"
+                "❌ DO NOT nest op_type at top level - it goes INSIDE operations array!\n"
+                "✅ ONLY return JSON with curly braces { } and square brackets [ ]\n"
+                "✅ ONLY use the exact field names shown above\n\n"
                 "For REPLACE/DELETE operations in prose (no headers), you MUST provide robust anchors:\n\n"
                 "**⚠️ PREFER GRANULAR EDITS: Use the SMALLEST possible 'original_text' match**\n"
                 "- For word-level changes: 10-15 words of context (minimal, unique match)\n"
@@ -583,12 +710,38 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "- Include complete sentences with natural boundaries\n"
                 "- ⚠️ Copy from manuscript text above, NEVER from outline text!\n\n"
                 "⚠️ NEVER include chapter headers (##) in original_text - they will be deleted!\n"
-                "⚠️ NEVER use outline text as anchor - it doesn't exist in the manuscript and will fail to match!\n"
+                "⚠️ NEVER use outline text as anchor - it doesn't exist in the manuscript and will fail to match!\n\n"
+                "="*80 + "\n"
+                "⚠️ FINAL REMINDER: RETURN JSON ONLY ⚠️\n"
+                "="*80 + "\n\n"
+                "Start your response with { and end with }\n"
+                "Do NOT use any XML-style tags or YAML-style notation\n"
+                "Your response must be valid JSON that can be parsed by json.loads()\n\n"
+                "NOW GENERATE YOUR JSON RESPONSE:\n"
             )))
         
         return {
             "generation_messages": messages,
             "system_prompt": system_prompt,
+            # CRITICAL: Preserve state for subsequent nodes
+            "system_prompt": state.get("system_prompt", ""),
+            "datetime_context": state.get("datetime_context", ""),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            # ✅ PRESERVE manuscript context!
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "selection_start": state.get("selection_start", -1),
+            "selection_end": state.get("selection_end", -1),
+            "cursor_offset": state.get("cursor_offset", -1),
+            "requested_chapter_number": state.get("requested_chapter_number"),
         }
         
     except Exception as e:
@@ -598,7 +751,26 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "generation_messages": [],
             "error": str(e),
-            "task_status": "error"
+            "task_status": "error",
+            # CRITICAL: Preserve state even on error
+            "system_prompt": state.get("system_prompt", ""),  # ✅ PRESERVE system_prompt!
+            "datetime_context": state.get("datetime_context", ""),  # ✅ PRESERVE datetime_context!
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            # ✅ PRESERVE manuscript context even on error!
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "selection_start": state.get("selection_start", -1),
+            "selection_end": state.get("selection_end", -1),
+            "cursor_offset": state.get("cursor_offset", -1),
+            "requested_chapter_number": state.get("requested_chapter_number"),
         }
 
 
@@ -612,8 +784,37 @@ async def call_generation_llm_node(state: Dict[str, Any], llm_factory) -> Dict[s
             return {
                 "llm_response": "",
                 "error": "No generation messages available",
-                "task_status": "error"
+                "task_status": "error",
+                # CRITICAL: Preserve state even on error
+                "system_prompt": state.get("system_prompt", ""),
+                "datetime_context": state.get("datetime_context", ""),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "selection_start": state.get("selection_start", -1),
+                "selection_end": state.get("selection_end", -1),
+                "cursor_offset": state.get("cursor_offset", -1),
+                "requested_chapter_number": state.get("requested_chapter_number"),
             }
+        
+        # DEBUG: Log message sizes to identify token bloat
+        total_chars = 0
+        for i, msg in enumerate(generation_messages):
+            msg_content = msg.content if hasattr(msg, 'content') else str(msg)
+            msg_type = msg.__class__.__name__ if hasattr(msg, '__class__') else 'Unknown'
+            msg_len = len(msg_content)
+            total_chars += msg_len
+            logger.info(f"📊 Message {i+1}/{len(generation_messages)} ({msg_type}): {msg_len:,} chars (~{msg_len // 4:,} tokens)")
+        logger.info(f"📊 TOTAL: {total_chars:,} chars (~{total_chars // 4:,} tokens)")
+        logger.info(f"📊 Expected token count: ~{total_chars // 4:,} (limit: 200,000)")
         
         # Get LLM from factory
         llm = llm_factory(temperature=0.4, state=state)
@@ -622,6 +823,7 @@ async def call_generation_llm_node(state: Dict[str, Any], llm_factory) -> Dict[s
         response = await llm.ainvoke(generation_messages)
         
         content = response.content if hasattr(response, 'content') else str(response)
+        
         content = _unwrap_json_response(content)
         
         elapsed = (datetime.now() - start_time).total_seconds()
@@ -630,6 +832,24 @@ async def call_generation_llm_node(state: Dict[str, Any], llm_factory) -> Dict[s
         return {
             "llm_response": content,
             "llm_response_raw": content,
+            # CRITICAL: Preserve state for subsequent nodes
+            "system_prompt": state.get("system_prompt", ""),
+            "datetime_context": state.get("datetime_context", ""),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "selection_start": state.get("selection_start", -1),
+            "selection_end": state.get("selection_end", -1),
+            "cursor_offset": state.get("cursor_offset", -1),
+            "requested_chapter_number": state.get("requested_chapter_number"),
         }
         
     except Exception as e:
@@ -639,7 +859,25 @@ async def call_generation_llm_node(state: Dict[str, Any], llm_factory) -> Dict[s
         return {
             "llm_response": "",
             "error": str(e),
-            "task_status": "error"
+            "task_status": "error",
+            # CRITICAL: Preserve state even on error
+            "system_prompt": state.get("system_prompt", ""),
+            "datetime_context": state.get("datetime_context", ""),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "selection_start": state.get("selection_start", -1),
+            "selection_end": state.get("selection_end", -1),
+            "cursor_offset": state.get("cursor_offset", -1),
+            "requested_chapter_number": state.get("requested_chapter_number"),
         }
 
 
@@ -655,7 +893,24 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
             return {
                 "structured_edit": None,
                 "error": "No LLM response to validate",
-                "task_status": "error"
+                "task_status": "error",
+                "system_prompt": state.get("system_prompt", ""),
+                "datetime_context": state.get("datetime_context", ""),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "selection_start": state.get("selection_start", -1),
+                "selection_end": state.get("selection_end", -1),
+                "cursor_offset": state.get("cursor_offset", -1),
+                "requested_chapter_number": state.get("requested_chapter_number"),
             }
         
         # Parse and validate structured response using Pydantic
@@ -723,7 +978,24 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                     "llm_response": content,
                     "structured_edit": None,
                     "error": error_msg,
-                    "task_status": "error"
+                    "task_status": "error",
+                    "system_prompt": state.get("system_prompt", ""),
+                    "datetime_context": state.get("datetime_context", ""),
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "manuscript": state.get("manuscript", ""),
+                    "filename": state.get("filename", ""),
+                    "current_chapter_text": state.get("current_chapter_text", ""),
+                    "current_chapter_number": state.get("current_chapter_number"),
+                    "chapter_ranges": state.get("chapter_ranges", []),
+                    "current_request": state.get("current_request", ""),
+                    "selection_start": state.get("selection_start", -1),
+                    "selection_end": state.get("selection_end", -1),
+                    "cursor_offset": state.get("cursor_offset", -1),
+                    "requested_chapter_number": state.get("requested_chapter_number"),
                 }
                 
         except json.JSONDecodeError as e:
@@ -732,7 +1004,24 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                 "llm_response": content,
                 "structured_edit": None,
                 "error": f"Failed to parse JSON: {str(e)}",
-                "task_status": "error"
+                "task_status": "error",
+                "system_prompt": state.get("system_prompt", ""),
+                "datetime_context": state.get("datetime_context", ""),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "selection_start": state.get("selection_start", -1),
+                "selection_end": state.get("selection_end", -1),
+                "cursor_offset": state.get("cursor_offset", -1),
+                "requested_chapter_number": state.get("requested_chapter_number"),
             }
         except Exception as e:
             logger.error(f"Failed to parse structured edit: {e}")
@@ -742,7 +1031,24 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                 "llm_response": content,
                 "structured_edit": None,
                 "error": f"Failed to parse edit plan: {str(e)}",
-                "task_status": "error"
+                "task_status": "error",
+                "system_prompt": state.get("system_prompt", ""),
+                "datetime_context": state.get("datetime_context", ""),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "selection_start": state.get("selection_start", -1),
+                "selection_end": state.get("selection_end", -1),
+                "cursor_offset": state.get("cursor_offset", -1),
+                "requested_chapter_number": state.get("requested_chapter_number"),
             }
         
         if structured_edit is None:
@@ -750,12 +1056,46 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                 "llm_response": content,
                 "structured_edit": None,
                 "error": "Failed to produce a valid ManuscriptEdit. Ensure ONLY raw JSON ManuscriptEdit with operations is returned.",
-                "task_status": "error"
+                "task_status": "error",
+                "system_prompt": state.get("system_prompt", ""),
+                "datetime_context": state.get("datetime_context", ""),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "selection_start": state.get("selection_start", -1),
+                "selection_end": state.get("selection_end", -1),
+                "cursor_offset": state.get("cursor_offset", -1),
+                "requested_chapter_number": state.get("requested_chapter_number"),
             }
         
         return {
             "llm_response": content,
             "structured_edit": structured_edit,
+            "system_prompt": state.get("system_prompt", ""),
+            "datetime_context": state.get("datetime_context", ""),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "selection_start": state.get("selection_start", -1),
+            "selection_end": state.get("selection_end", -1),
+            "cursor_offset": state.get("cursor_offset", -1),
+            "requested_chapter_number": state.get("requested_chapter_number"),
         }
         
     except Exception as e:
@@ -765,7 +1105,24 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
         return {
             "structured_edit": None,
             "error": str(e),
-            "task_status": "error"
+            "task_status": "error",
+            "system_prompt": state.get("system_prompt", ""),
+            "datetime_context": state.get("datetime_context", ""),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "selection_start": state.get("selection_start", -1),
+            "selection_end": state.get("selection_end", -1),
+            "cursor_offset": state.get("cursor_offset", -1),
+            "requested_chapter_number": state.get("requested_chapter_number"),
         }
 
 

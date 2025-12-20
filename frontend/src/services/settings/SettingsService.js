@@ -84,6 +84,24 @@ class SettingsService extends ApiServiceBase {
   getPromptOptions = async () => {
     return this.get('/api/settings/prompt/options');
   }
+
+  // User preferred name methods
+  getUserPreferredName = async () => {
+    return this.get('/api/settings/user/preferred-name');
+  }
+
+  setUserPreferredName = async (preferredNameData) => {
+    return this.put('/api/settings/user/preferred-name', preferredNameData);
+  }
+
+  // User AI context methods
+  getUserAiContext = async () => {
+    return this.get('/api/settings/user/ai-context');
+  }
+
+  setUserAiContext = async (aiContextData) => {
+    return this.put('/api/settings/user/ai-context', aiContextData);
+  }
 }
 
 export default new SettingsService();

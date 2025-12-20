@@ -108,6 +108,19 @@ class TeamService extends ApiServiceBase {
   async deleteComment(teamId, postId, commentId) {
     return this.delete(`/api/teams/${teamId}/posts/${postId}/comments/${commentId}`);
   }
+
+  // Unread Tracking
+  async getUnreadPostCounts() {
+    return this.get('/api/teams/unread-counts');
+  }
+
+  async markTeamPostsAsRead(teamId) {
+    return this.post(`/api/teams/${teamId}/mark-read`);
+  }
+
+  async muteTeam(teamId, muted = true) {
+    return this.put(`/api/teams/${teamId}/mute?muted=${muted}`);
+  }
 }
 
 export default new TeamService();

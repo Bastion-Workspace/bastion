@@ -12,7 +12,6 @@ import {
   useTheme,
 } from '@mui/material';
 import {
-  SmartToy,
   Person,
   Error,
   AutoAwesome,
@@ -357,7 +356,18 @@ ${message.content}
       case 'user':
         return <Person fontSize="small" />;
       case 'assistant':
-        return <SmartToy fontSize="small" />;
+        return (
+          <Box
+            component="img"
+            src="/images/favicon.ico"
+            alt="Bastion"
+            sx={{ 
+              width: 20, 
+              height: 20,
+              objectFit: 'contain'
+            }}
+          />
+        );
       case 'system':
         return <Error fontSize="small" />;
       default:

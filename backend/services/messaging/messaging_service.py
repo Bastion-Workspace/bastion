@@ -76,8 +76,15 @@ class MessagingService:
         
         try:
             async with self.db_pool.acquire() as conn:
-                # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", creator_id)
+                # Get creator's role for RLS context
+                creator_role_row = await conn.fetchrow("""
+                    SELECT role FROM users WHERE user_id = $1
+                """, creator_id)
+                creator_role = creator_role_row["role"] if creator_role_row else "user"
+                
+                # Set user context for RLS (both user_id and role)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", creator_id)
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", creator_role)
                 
                 # Create room
                 room_id = str(uuid.uuid4())
@@ -149,7 +156,7 @@ class MessagingService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Get rooms
                 rows = await conn.fetch("""
@@ -242,7 +249,7 @@ class MessagingService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Update room name
                 result = await conn.execute("""
@@ -287,7 +294,7 @@ class MessagingService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Update notification settings
                 import json
@@ -328,7 +335,7 @@ class MessagingService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Verify user is a participant
                 is_participant = await conn.fetchval("""
@@ -387,7 +394,7 @@ class MessagingService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", added_by)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", added_by)
                 
                 # Verify adding user is a participant
                 is_participant = await conn.fetchval("""
@@ -481,7 +488,7 @@ class MessagingService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", sender_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", sender_id)
                 
                 # Insert message
                 message_id = str(uuid.uuid4())
@@ -542,7 +549,7 @@ class MessagingService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 # Build query based on pagination
                 if before_message_id:
@@ -630,7 +637,7 @@ class MessagingService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 if delete_for == 'everyone':
                     # Only sender can delete for everyone
@@ -680,7 +687,7 @@ class MessagingService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 reaction_id = str(uuid.uuid4())
                 await conn.execute("""
@@ -715,7 +722,7 @@ class MessagingService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 result = await conn.execute("""
                     DELETE FROM message_reactions
@@ -754,7 +761,7 @@ class MessagingService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 await conn.execute("""
                     INSERT INTO user_presence (user_id, status, last_seen_at, status_message)
@@ -882,7 +889,7 @@ class MessagingService:
         try:
             async with self.db_pool.acquire() as conn:
                 # Set user context for RLS
-                await conn.execute("SELECT set_config('app.current_user_id', $1, true)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
                 rows = await conn.fetch("""
                     SELECT 

@@ -348,10 +348,34 @@ class OutlineEditingAgent(BaseAgent):
         """Build system prompt for outline editing"""
         return (
             "You are an outline editor. Generate operations to edit story outlines.\n\n"
+            "**CRITICAL: WORK WITH AVAILABLE INFORMATION FIRST**\n"
+            "Always start by working with what you know from the request, existing outline content, and references:\n"
+            "- Make edits based on available information - don't wait for clarification\n"
+            "- Use context from rules, style guide, and character profiles to inform your work\n"
+            "- Add or revise content based on reasonable inferences from the request\n"
+            "- **FOR EMPTY FILES**: When the outline is empty (only frontmatter), ASK QUESTIONS FIRST before creating content\n"
+            "  * Don't create the entire outline structure at once\n"
+            "  * Ask about story genre, main characters, key plot points, or chapter count\n"
+            "  * Build incrementally based on user responses\n"
+            "- Only proceed without questions when you have enough information to make meaningful edits\n"
+            "\n"
+            "**WHEN TO ASK QUESTIONS**:\n"
+            "- **ALWAYS for empty files**: When outline is empty, ask questions about story basics before creating content\n"
+            "- When the request is vague and you cannot make reasonable edits (e.g., 'improve outline' with no existing content)\n"
+            "- When there's a critical plot conflict that requires user decision (e.g., existing beat directly contradicts new request)\n"
+            "- When user requests a large amount of content (e.g., 'create the whole outline') - break it into steps and ask about priorities\n"
+            "- When asking, you can provide operations for what you CAN do, then ask questions in the summary about what you need\n"
+            "\n"
+            "**HOW TO ASK QUESTIONS**: Include operations for work you CAN do, then add questions/suggestions in the summary field.\n"
+            "For empty files, it's acceptable to return a clarification request with questions instead of operations.\n"
+            "DO NOT return empty operations array for edit requests - always provide edits OR ask questions.\n\n"
             "OUTLINE STRUCTURE:\n"
             "# Overall Synopsis (high-level story summary - major elements only)\n"
             "# Notes (rules, themes, worldbuilding)\n"
-            "# Characters (protagonists, antagonists, supporting)\n"
+            "# Characters (BRIEF list only: names and roles like 'Protagonist: John', 'Antagonist: Sarah')\n"
+            "  **CRITICAL**: Character DETAILS belong in character profile files, NOT in the outline!\n"
+            "  The outline should only have brief character references (name + role), not full profiles.\n"
+            "  Do NOT copy character descriptions, backstories, or traits into the outline.\n"
             "## Chapter N (with summary paragraph + bullet point beats)\n\n"
             "BEAT FORMATTING:\n"
             "- Every beat MUST start with '- ' (dash space)\n"
@@ -372,22 +396,41 @@ class OutlineEditingAgent(BaseAgent):
             "- If you can't find exact text in the outline, DO NOT use replace_range\n\n"
             "**2. insert_after_heading - ADDING COMPLETELY NEW TEXT**:\n"
             "- Use this when adding NEW content that DOES NOT overlap with existing text\n"
-            "- You MUST provide 'anchor_text' with EXACT text from outline to insert after\n"
+            "- **CRITICAL FOR EMPTY FILES**: If the outline file is empty (only frontmatter), DO NOT provide 'anchor_text'\n"
+            "  * Empty file = no content exists yet, so there's nothing to anchor to\n"
+            "  * Omit the 'anchor_text' field entirely - the system will insert after frontmatter automatically\n"
+            "  * Example for empty file: {\"op_type\": \"insert_after_heading\", \"text\": \"## Chapter 1\\n\\n[content]\"}\n"
+            "- **For files with content**: You MUST provide 'anchor_text' with EXACT text from outline to insert after\n"
             "- For new chapters: anchor_text = last line of previous chapter\n"
             "- For truly new beats (no overlap): anchor_text = last existing beat or chapter heading\n"
-            "- **ONLY use this if your generated content is 100% new** (no existing beats included)\n\n"
+            "- **ONLY use this if your generated content is 100% new** (no existing beats included)\n"
+            "- ⚠️ CRITICAL WARNING: When adding beats to existing chapter, if chapter already has beats:\n"
+            "  * anchor_text should be the LAST beat of that chapter, NOT the chapter heading\n"
+            "  * Using chapter heading as anchor when beats exist will INSERT BETWEEN heading and first beat!\n"
+            "  * This splits the chapter and breaks structure - NEVER do this!\n"
+            "  * Example WRONG: '## Chapter 2\\n[INSERT HERE]\\n- Existing beat 1' ← splits chapter!\n"
+            "  * Example CORRECT: anchor_text='- Existing beat 3' (last beat) → inserts after all beats\n"
+            "- ⚠️ If chapter has NO beats yet (empty), THEN you can use chapter heading as anchor\n"
+            "- ⚠️ **NEVER use anchor_text that references context headers** - Text like '=== CURRENT OUTLINE ===' or 'File: filename.md' does NOT exist in the file\n\n"
             "**3. delete_range - REMOVING CONTENT**:\n"
             "- Provide original_text (exact text to remove)\n\n"
             "**DECISION RULE**:\n"
+            "**STEP 1: Check what exists in the target chapter/section**\n"
+            "- Does the chapter already have beats? How many?\n"
+            "- Is the section empty or does it have content?\n"
+            "\n"
+            "**STEP 2: Choose operation and anchor:**\n"
             "- Generated content overlaps with existing text? → Use 'replace_range' with 'original_text'\n"
             "- Generated content is 100% new (no overlap)? → Use 'insert_after_heading' with 'anchor_text'\n"
+            "- Adding beats to chapter with existing beats? → anchor_text = LAST existing beat, NOT chapter heading\n"
+            "- Adding beats to empty chapter? → anchor_text = chapter heading (no beats to split)\n"
             "- When in doubt: if you copy ANY existing beats, use 'replace_range'\n\n"
             "OUTPUT FORMAT - ManuscriptEdit JSON:\n"
             "{\n"
             '  "type": "ManuscriptEdit",\n'
             '  "target_filename": "filename.md",\n'
             '  "scope": "paragraph|chapter|multi_chapter",\n'
-            '  "summary": "brief description",\n'
+            '  "summary": "brief description (or questions if seeking clarification)",\n'
             '  "operations": [\n'
             "    {\n"
             '      "op_type": "replace_range|delete_range|insert_after_heading|insert_after",\n'
@@ -399,7 +442,11 @@ class OutlineEditingAgent(BaseAgent):
             "    }\n"
             "  ]\n"
             "}\n\n"
-            "Return raw JSON only (no markdown fences, no explanatory text).\n"
+            "**OUTPUT RULES**:\n"
+            "- Return raw JSON only (no markdown fences, no explanatory text)\n"
+            "- Always provide operations based on available information - work with what you know\n"
+            "- If you need clarification, include it in the summary field AFTER describing the work you've done\n"
+            "- Never return empty operations array unless the request is completely impossible to fulfill\n"
         )
     
     async def _prepare_context_node(self, state: OutlineEditingState) -> Dict[str, Any]:
@@ -427,7 +474,13 @@ class OutlineEditingAgent(BaseAgent):
                         "response": "Active editor is not an outline file; skipping.",
                         "task_status": "error",
                         "agent_type": "outline_editing_agent"
-                    }
+                    },
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             # Check if responding to previous clarification request
@@ -474,14 +527,26 @@ class OutlineEditingAgent(BaseAgent):
                 "para_start": para_start,
                 "para_end": para_end,
                 "clarification_context": clarification_context,
-                "current_request": current_request.strip()
+                "current_request": current_request.strip(),
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
             logger.error(f"Failed to prepare context: {e}")
             return {
                 "error": str(e),
-                "task_status": "error"
+                "task_status": "error",
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _load_references_node(self, state: OutlineEditingState) -> Dict[str, Any]:
@@ -574,7 +639,13 @@ class OutlineEditingAgent(BaseAgent):
                     "rules": rules_quality,
                     "characters": avg_character_quality
                 },
-                "reference_warnings": all_warnings
+                "reference_warnings": all_warnings,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -587,7 +658,13 @@ class OutlineEditingAgent(BaseAgent):
                 "characters_bodies": [],
                 "reference_quality": {},
                 "reference_warnings": [],
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _analyze_mode_node(self, state: OutlineEditingState) -> Dict[str, Any]:
@@ -835,7 +912,9 @@ Chapter count: {chapter_count}
   * "Sarah should become the main protagonist instead of supporting character" → 1 piece (structural change)
 
 **ROUTING RULES**:
-- Character info → # Characters (detect if role change: supporting → protagonist)
+- Character info → # Characters (BRIEF references only: name + role like 'Protagonist: John')
+  **CRITICAL**: Character DETAILS (descriptions, backstories, traits) belong in character profile files, NOT in the outline!
+  The outline # Characters section should only list names and roles, not full character information.
 - Universe-wide rules/themes → # Notes
 - High-level story summary (MAJOR elements only) → # Overall Synopsis
 - Chapter-specific events → ## Chapter N
@@ -1126,15 +1205,6 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             # Build context for answering
             context_parts = []
             
-            # Include conversation history
-            messages = state.get("messages", [])
-            conversation_history = self._format_conversation_history_for_prompt(messages, look_back_limit=6)
-            if conversation_history:
-                context_parts.append(conversation_history)
-            
-            context_parts.append("=== USER QUESTION ===\n")
-            context_parts.append(f"{current_request}\n\n")
-            
             # Current outline state
             if body_only:
                 context_parts.append("=== CURRENT OUTLINE ===\n")
@@ -1160,9 +1230,11 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     char_summary = char_body[:500] + "..." if len(char_body) > 500 else char_body
                     context_parts.append(f"**Character {i}**:\n{char_summary}\n\n")
             
-            # Build prompt for answering
-            answer_prompt = "".join(context_parts)
-            answer_prompt += """**YOUR TASK**: Answer the user's question clearly and helpfully with specific details from the outline.
+            # Build request with instructions
+            request_with_instructions = f"""=== USER QUESTION ===
+{current_request}
+
+**YOUR TASK**: Answer the user's question clearly and helpfully with specific details from the outline.
 
 - If they're asking about the outline structure, provide specific details about chapters, beats, characters, etc.
 - If they're asking for an assessment, provide a thorough analysis with specific examples from the outline
@@ -1174,15 +1246,19 @@ Return ONLY the JSON object, no markdown, no code blocks."""
 
 **OUTPUT**: Provide a natural, conversational answer to the user's question. Do NOT generate JSON or editor operations. Be specific and detailed."""
             
+            # Use standardized helper for message construction with conversation history
+            messages_list = state.get("messages", [])
+            system_prompt = "You are a helpful outline assistant. Answer user questions about the outline, references, and related information. Be conversational, detailed, and helpful."
+            messages = self._build_editing_agent_messages(
+                system_prompt=system_prompt,
+                context_parts=context_parts,
+                current_request=request_with_instructions,
+                messages_list=messages_list,
+                look_back_limit=6
+            )
+            
             # Call LLM for conversational response
             llm = self._get_llm(temperature=0.7, state=state)  # Higher temperature for natural conversation
-            
-            datetime_context = self._get_datetime_context()
-            messages = [
-                SystemMessage(content="You are a helpful outline assistant. Answer user questions about the outline, references, and related information. Be conversational, detailed, and helpful."),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content=answer_prompt)
-            ]
             
             response = await llm.ainvoke(messages)
             answer_text = response.content if hasattr(response, 'content') else str(response)
@@ -1211,15 +1287,6 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             
             # Build context for answering
             context_parts = []
-            
-            # Include conversation history
-            messages = state.get("messages", [])
-            conversation_history = self._format_conversation_history_for_prompt(messages, look_back_limit=6)
-            if conversation_history:
-                context_parts.append(conversation_history)
-            
-            context_parts.append("=== USER QUESTION ===\n")
-            context_parts.append(f"{current_request}\n\n")
             
             # Current outline state
             if body_only:
@@ -1253,9 +1320,11 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             if structure_guidance:
                 context_parts.append(f"=== OUTLINE STRUCTURE ===\n{structure_guidance}\n\n")
             
-            # Build prompt for answering
-            answer_prompt = "".join(context_parts)
-            answer_prompt += """**YOUR TASK**: Answer the user's question clearly and helpfully.
+            # Build request with instructions
+            request_with_instructions = f"""=== USER QUESTION ===
+{current_request}
+
+**YOUR TASK**: Answer the user's question clearly and helpfully.
 
 - If they're asking about references (characters, rules, style), confirm what's loaded and provide relevant information
 - If they're asking about the outline, describe what's currently in it
@@ -1266,15 +1335,19 @@ Return ONLY the JSON object, no markdown, no code blocks."""
 
 **OUTPUT**: Provide a natural, conversational answer to the user's question. Do NOT generate JSON or editor operations."""
             
+            # Use standardized helper for message construction with conversation history
+            messages_list = state.get("messages", [])
+            system_prompt = "You are a helpful outline assistant. Answer user questions about the outline, references, and related information. Be conversational and helpful."
+            messages = self._build_editing_agent_messages(
+                system_prompt=system_prompt,
+                context_parts=context_parts,
+                current_request=request_with_instructions,
+                messages_list=messages_list,
+                look_back_limit=6
+            )
+            
             # Call LLM for conversational response
             llm = self._get_llm(temperature=0.7, state=state)  # Higher temperature for natural conversation
-            
-            datetime_context = self._get_datetime_context()
-            messages = [
-                SystemMessage(content="You are a helpful outline assistant. Answer user questions about the outline, references, and related information. Be conversational and helpful."),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content=answer_prompt)
-            ]
             
             try:
                 response = await self._safe_llm_invoke(llm, messages, error_context="Answer question")
@@ -1337,19 +1410,19 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             # Build routing prompt
             routing_prompt = self._build_content_routing_prompt(state)
             
-            # Include conversation history for context (standardized 6-message look-back)
+            # Use standardized helper for message construction with conversation history
             messages_list = state.get("messages", [])
-            conversation_history = self._format_conversation_history_for_prompt(messages_list, look_back_limit=6, max_message_length=300)
+            system_prompt = "You are an outline content routing expert. Analyze user requests and route content pieces to appropriate outline sections."
+            messages = self._build_editing_agent_messages(
+                system_prompt=system_prompt,
+                context_parts=[],  # Routing doesn't need file context
+                current_request=routing_prompt,
+                messages_list=messages_list,
+                look_back_limit=6
+            )
             
             # Call LLM with structured output
             llm = self._get_llm(temperature=0.2, state=state)
-            
-            datetime_context = self._get_datetime_context()
-            messages = [
-                SystemMessage(content="You are an outline content routing expert. Analyze user requests and route content pieces to appropriate outline sections."),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content=conversation_history + routing_prompt)
-            ]
             
             # Parse JSON response (structured output requires Pydantic model, so we use JSON parsing)
             try:
@@ -1470,23 +1543,18 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             # Build context message - simple and focused
             context_parts = []
             
-            # Include conversation history for context
-            messages = state.get("messages", [])
-            conversation_history = self._format_conversation_history_for_prompt(messages, look_back_limit=6)
-            if conversation_history:
-                context_parts.append(conversation_history)
-            
-            # User request
-            if current_request:
-                context_parts.append("=== USER REQUEST ===\n")
-                context_parts.append(f"{current_request}\n\n")
-            else:
+            # User request will be separated into request_with_instructions below
+            if not current_request:
                 logger.error("current_request is empty - user's request will not be sent to LLM")
             
             # Current outline
+            is_empty_file = not body_only.strip()
             context_parts.append("=== CURRENT OUTLINE ===\n")
             context_parts.append(f"File: {filename}\n")
-            context_parts.append("\n" + body_only + "\n\n")
+            if is_empty_file:
+                context_parts.append("\n⚠️ EMPTY FILE DETECTED: This file contains only frontmatter (no content yet)\n\n")
+            else:
+                context_parts.append("\n" + body_only + "\n\n")
             
             # References (if present)
             if rules_body:
@@ -1499,22 +1567,81 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             
             if characters_bodies:
                 context_parts.append("=== CHARACTER PROFILES ===\n")
+                context_parts.append("**NOTE**: Character details (descriptions, backstories, traits) belong in character profile files.\n")
+                context_parts.append("The outline should only reference characters briefly (name + role), not include full character information.\n\n")
                 context_parts.append("".join([f"{b}\n---\n" for b in characters_bodies]))
                 context_parts.append("\n")
             
             if clarification_context:
                 context_parts.append(clarification_context)
             
-            # Final instruction
-            context_parts.append("Generate ManuscriptEdit JSON with operations to fulfill the user's request.\n")
-            context_parts.append("Use replace_range for changing existing content, insert_after_heading for adding new content, delete_range for removing content.\n")
+            # Add "WORK FIRST" guidance and cross-reference instructions (like character agent)
+            context_parts.append(
+                "\n=== EDIT REQUEST: WORK WITH AVAILABLE INFORMATION ===\n"
+                "The user wants you to add or revise outline content.\n\n"
+                "**YOUR APPROACH**:\n"
+                "1. **FOR EMPTY FILES**: If the outline is empty, ASK QUESTIONS FIRST before creating content\n"
+                "   - Don't create the entire outline structure at once\n"
+                "   - Ask about story basics: genre, main characters, key plot points, chapter count\n"
+                "   - Build incrementally - create one section at a time based on user responses\n"
+                "2. **FOR FILES WITH CONTENT**: Make edits based on the request and available context (outline file, rules, style, characters)\n"
+                "3. **USE INFERENCE**: Make reasonable inferences from the request - but ask if starting from scratch\n"
+                "4. **ASK ALONG THE WAY**: If you need specific details, include questions in the summary AFTER describing the work you've done\n"
+                "5. **NEVER EMPTY OPERATIONS FOR EDIT REQUESTS**: Always provide operations OR ask questions (clarification request)\n"
+                "6. **CHARACTER INFORMATION**: Keep character details in character profiles, not in the outline!\n"
+                "   - Outline should only have brief character references (name + role)\n"
+                "   - Do NOT copy character descriptions, backstories, or traits into the outline\n\n"
+                "CRITICAL: CHECK FOR DUPLICATES FIRST\n"
+                "Before adding ANY new content:\n"
+                "1. **CHECK FOR SIMILAR CONTENT** - Does similar plot/beat information already exist in related chapters?\n"
+                "2. **CONSOLIDATE IF NEEDED** - If plot point appears in multiple places, ensure each adds unique perspective\n"
+                "3. **AVOID REDUNDANCY** - Don't add identical information to multiple chapters\n"
+                "\n"
+                "CRITICAL: CROSS-REFERENCE RELATED SECTIONS\n"
+                "After checking for duplicates:\n"
+                "1. **SCAN THE ENTIRE OUTLINE** - Read through ALL chapters to identify related plot information\n"
+                "2. **IDENTIFY ALL AFFECTED SECTIONS** - When adding/updating plot content, find ALL places it should appear\n"
+                "3. **GENERATE MULTIPLE OPERATIONS** - If plot content affects multiple chapters, create operations for EACH affected section\n"
+                "4. **ENSURE CONSISTENCY** - Related chapters must be updated together to maintain plot coherence\n"
+                "\n"
+                "Examples of when to generate multiple operations:\n"
+                "- Adding character introduction → Update chapter where introduced AND character list section\n"
+                "- Adding plot twist → Update chapter with twist AND any earlier chapters that need foreshadowing\n"
+                "- Updating character arc → Update relevant chapters AND character section if arc affects character description\n"
+                "- Adding worldbuilding detail → Update chapter where detail appears AND Notes section if it's a major world element\n\n"
+            )
             
-            datetime_context = self._get_datetime_context()
-            messages = [
-                SystemMessage(content=system_prompt),
-                SystemMessage(content=datetime_context),
-                HumanMessage(content="".join(context_parts))
-            ]
+            # Build request with instructions
+            request_with_instructions = ""
+            if current_request:
+                request_with_instructions = f"""=== USER REQUEST ===
+{current_request}
+
+Generate ManuscriptEdit JSON with operations to fulfill the user's request.
+Use replace_range for changing existing content, insert_after_heading for adding new content, delete_range for removing content."""
+                if is_empty_file:
+                    request_with_instructions += """
+
+⚠️ CRITICAL: EMPTY FILE INSTRUCTIONS
+Since this file is empty (only frontmatter), follow these rules:
+1. **DO NOT use anchor_text** - The file has no content to anchor to
+2. **Use insert_after_heading WITHOUT anchor_text** - The system will automatically insert after frontmatter
+3. **Include section headings in your text** - For example, if creating the first chapter, include '## Chapter 1' in the text
+4. **Example operation for empty file**:
+   {"op_type": "insert_after_heading", "text": "## Chapter 1\\n\\n[your content]"}
+   (Note: NO anchor_text field needed - omit it entirely)
+5. **DO NOT reference context headers** - Text like '=== CURRENT OUTLINE ===' or 'File: filename.md' does NOT exist in the file
+6. **DO NOT use anchor_text like '# Notes' or '# Characters'** - These sections don't exist yet in an empty file"""
+            
+            # Use standardized helper for message construction with conversation history
+            messages_list = state.get("messages", [])
+            messages = self._build_editing_agent_messages(
+                system_prompt=system_prompt,
+                context_parts=context_parts,
+                current_request=request_with_instructions,
+                messages_list=messages_list,
+                look_back_limit=6
+            )
             
             # Call LLM - pass state to access user's model selection from metadata
             llm = self._get_llm(temperature=0.3, state=state)
@@ -1557,7 +1684,7 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 questions = clarification_request.get("questions", [])
                 questions_formatted = "\n".join([f"{i+1}. {q}" for i, q in enumerate(questions)])
                 response_text = (
-                    f"**⚠️ Critical Ambiguity Detected**\n\n"
+                    f"**Critical Ambiguity Detected**\n\n"
                     f"{clarification_request.get('context', '')}\n\n"
                     f"I cannot proceed without clarification on:\n\n"
                     f"{questions_formatted}\n\n"
@@ -1746,6 +1873,19 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                         # Store answer in structured_edit summary for format_response to use
                         structured_edit["summary"] = answer
                         structured_edit["is_question_answer"] = True
+                else:
+                    # Edit request with no operations - this is an error!
+                    # The LLM should have generated operations for edit requests
+                    logger.error("⚠️ Edit request detected but no operations generated - this should not happen!")
+                    logger.error(f"   Request: {current_request[:200]}")
+                    logger.error(f"   Summary: {structured_edit.get('summary', '')[:200]}")
+                    # Force an error response
+                    return {
+                        "llm_response": content,
+                        "structured_edit": None,
+                        "error": "Edit request received but no operations were generated. Please try rephrasing your request or be more specific about what you want to add or change.",
+                        "task_status": "error"
+                    }
             
             return {
                 "llm_response": content,
@@ -1817,11 +1957,17 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     
                     # Check if resolver returned failure signal (anchor text not found)
                     if resolved_start == -1 and resolved_end == -1:
-                        # Anchor text not found - try to find last chapter heading as fallback
+                        # Anchor text not found - check if file is empty first
                         op_type = op.get("op_type", "")
                         anchor_text = op.get("anchor_text", "")
                         
-                        if op_type == "insert_after_heading" and anchor_text:
+                        # For empty files, if anchor_text was provided but not found, insert after frontmatter
+                        if is_empty_file and op_type == "insert_after_heading":
+                            resolved_start = fm_end_idx
+                            resolved_end = fm_end_idx
+                            resolved_confidence = 0.7
+                            logger.info(f"Empty file: anchor_text not found or invalid, inserting after frontmatter at {fm_end_idx}")
+                        elif op_type == "insert_after_heading" and anchor_text:
                             # Try to find the last chapter heading as fallback
                             chapter_pattern = re.compile(r"\n##\s+Chapter\s+\d+", re.MULTILINE)
                             matches = list(chapter_pattern.finditer(outline, fm_end_idx))
@@ -1994,6 +2140,7 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             }
             
             if editor_operations:
+                logger.info(f"✅ Adding {len(editor_operations)} editor operations to response")
                 response["editor_operations"] = editor_operations
                 response["manuscript_edit"] = {
                     "target_filename": structured_edit.get("target_filename"),
@@ -2003,12 +2150,16 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     "safety": structured_edit.get("safety"),
                     "operations": editor_operations
                 }
+            else:
+                logger.warning(f"⚠️ No editor_operations to add (editor_operations={editor_operations}, type={type(editor_operations)})")
             
             # Clear any pending clarification since we're completing successfully
             shared_memory = state.get("shared_memory", {}) or {}
             shared_memory_out = shared_memory.copy()
             shared_memory_out.pop("pending_outline_clarification", None)
             response["shared_memory"] = shared_memory_out
+            
+            logger.info(f"🔍 _format_response_node returning: response_keys={list(response.keys())}, has_editor_ops={bool(response.get('editor_operations'))}")
             
             return {
                 "response": response,
@@ -2139,12 +2290,15 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             # Add editor operations at top level for compatibility
             if response.get("editor_operations"):
                 result["editor_operations"] = response["editor_operations"]
+                logger.info(f"✅ Added {len(response['editor_operations'])} editor operations to result")
+            else:
+                logger.warning(f"⚠️ No editor_operations in response dict (response keys: {list(response.keys())})")
             if response.get("manuscript_edit"):
                 result["manuscript_edit"] = response["manuscript_edit"]
             if response.get("shared_memory"):
                 result["shared_memory"] = response["shared_memory"]
             
-            logger.info(f"Outline editing agent completed: {task_status}")
+            logger.info(f"Outline editing agent completed: {task_status}, result_keys={list(result.keys())}")
             return result
             
         except Exception as e:

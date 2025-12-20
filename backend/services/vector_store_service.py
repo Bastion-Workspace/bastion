@@ -393,9 +393,15 @@ class VectorStoreService:
             # Limit final results
             final_results = combined_results[:limit]
             
+            # Log search results summary
+            global_count = len(results_dict.get("global", []))
+            user_count = len(results_dict.get("user", []))
+            team_counts = {k: len(v) for k, v in results_dict.items() if k.startswith("team_")}
+            team_total = sum(team_counts.values())
+            
             logger.info(
-                f"Hybrid search: {len(global_results)} global + "
-                f"{len(user_results)} user = {len(final_results)} total"
+                f"Hybrid search: {global_count} global + "
+                f"{user_count} user + {team_total} team = {len(final_results)} total"
             )
             return final_results
             

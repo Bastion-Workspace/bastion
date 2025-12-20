@@ -23,7 +23,6 @@ class HelpState(TypedDict):
     shared_memory: Dict[str, Any]
     persona: Optional[Dict[str, Any]]
     system_prompt: str
-    conversation_history: List[Dict[str, str]]
     llm_messages: List[Any]
     response: Dict[str, Any]
     task_status: str
@@ -577,19 +576,18 @@ Remember: Be helpful, clear, and practical. Provide actionable guidance that use
             # Build system prompt (preserves all documentation)
             system_prompt = self._build_help_prompt(persona)
             
-            # Extract conversation history
-            conversation_history = []
-            messages = state.get("messages", [])
-            if messages:
-                conversation_history = self._extract_conversation_history(messages, limit=5)
-            
-            # Build messages for LLM
-            llm_messages = self._build_messages(system_prompt, state["query"], conversation_history)
+            # Build messages for LLM using standardized helper
+            messages_list = state.get("messages", [])
+            llm_messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=state["query"],
+                messages_list=messages_list,
+                look_back_limit=5
+            )
             
             return {
                 "persona": persona,
                 "system_prompt": system_prompt,
-                "conversation_history": conversation_history,
                 "llm_messages": llm_messages
             }
             
@@ -706,7 +704,6 @@ Remember: Be helpful, clear, and practical. Provide actionable guidance that use
                 "shared_memory": shared_memory,
                 "persona": None,
                 "system_prompt": "",
-                "conversation_history": [],
                 "llm_messages": [],
                 "response": {},
                 "task_status": "",

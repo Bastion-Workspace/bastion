@@ -3,7 +3,7 @@
 Complete reference for all services and containers in the Bastion workspace platform.
 
 **Last Updated:** December 2025  
-**Version:** 0.10.5
+**Version:** 0.11.0
 
 ---
 
@@ -766,5 +766,5 @@ docker compose build
 
 ---
 
-**Note:** This documentation reflects the current state of services as of version 0.10.5. For the most up-to-date information, refer to `docker-compose.yml` and individual service documentation.
+**Note:** This documentation reflects the current state of services as of version 0.11.0. For the most up-to-date information, refer to `docker-compose.yml` and individual service documentation.
 

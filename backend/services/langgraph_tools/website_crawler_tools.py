@@ -1,6 +1,6 @@
 """
 Website Crawler Tools Module
-Recursive website crawling with Crawl4AI for complete site capture and vectorization
+Recursive website crawling using Crawl4AI Service via gRPC for complete site capture and vectorization
 """
 
 import logging
@@ -12,54 +12,31 @@ from collections import deque
 import hashlib
 import time
 
+from clients.crawl_service_client import get_crawl_service_client
+
 logger = logging.getLogger(__name__)
 
 
 class WebsiteCrawlerTools:
-    """Advanced recursive website crawling tools using Crawl4AI"""
+    """Advanced recursive website crawling tools using Crawl4AI Service via gRPC"""
     
     def __init__(self):
-        self._crawler = None
+        self._crawl_client = None
         self.rate_limit = 2.0  # seconds between requests
         self.last_request_time = 0
-        logger.info("🕷️ Website Crawler Tools initialized")
+        logger.info("🕷️ Website Crawler Tools initialized (using gRPC service)")
     
-    async def _get_crawler(self):
-        """Get Crawl4AI crawler with lazy initialization"""
-        if self._crawler is None:
+    async def _get_crawl_client(self):
+        """Get Crawl4AI service client with lazy initialization"""
+        if self._crawl_client is None:
             try:
-                from crawl4ai import AsyncWebCrawler
-                
-                # Configure crawler for optimal content extraction
-                self._crawler = AsyncWebCrawler(
-                    headless=True,
-                    browser_type="chromium",
-                    verbose=False,
-                    always_by_pass_cache=False,
-                    base_directory="/tmp/crawl4ai",
-                    # Anti-detection settings
-                    user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    headers={
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.5",
-                        "Accept-Encoding": "gzip, deflate",
-                        "Connection": "keep-alive",
-                        "Upgrade-Insecure-Requests": "1",
-                    }
-                )
-                
-                # Start the crawler
-                await self._crawler.start()
-                logger.info("✅ Crawl4AI crawler initialized and started")
-                
-            except ImportError:
-                logger.error("❌ Crawl4AI not installed. Install with: pip install crawl4ai")
-                raise
+                self._crawl_client = await get_crawl_service_client()
+                logger.info("✅ Crawl4AI service client initialized")
             except Exception as e:
-                logger.error(f"❌ Failed to initialize Crawl4AI crawler: {e}")
+                logger.error(f"❌ Failed to initialize Crawl4AI service client: {e}")
                 raise
-        
-        return self._crawler
+                
+        return self._crawl_client
     
     async def _rate_limit(self):
         """Apply rate limiting between requests"""
@@ -213,38 +190,44 @@ class WebsiteCrawlerTools:
             }
     
     async def _crawl_html_page(self, url: str) -> Dict[str, Any]:
-        """Crawl an HTML page using Crawl4AI"""
+        """Crawl an HTML page using Crawl4AI Service via gRPC"""
         try:
-            crawler = await self._get_crawler()
+            crawl_client = await self._get_crawl_client()
             
             logger.info(f"🌐 Crawling HTML page: {url}")
             
-            # Perform crawl
-            result = await crawler.arun(
+            # Perform crawl via gRPC service
+            result = await crawl_client.crawl(
                 url=url,
-                word_count_threshold=10,
-                bypass_cache=True
+                extraction_strategy="markdown",
+                chunking_strategy="RegexChunking",
+                include_links=True,
+                include_metadata=True,
+                timeout_seconds=60,
+                use_fit_markdown=True
             )
             
-            if not result or not result.success:
-                logger.error(f"❌ Failed to crawl {url}: {getattr(result, 'error_message', 'Unknown error')}")
+            if not result.get("success"):
+                error_msg = result.get("error", "Unknown error")
+                logger.error(f"❌ Failed to crawl {url}: {error_msg}")
                 return {
                     "success": False,
                     "url": url,
                     "content_type": "html",
-                    "error": getattr(result, 'error_message', 'Unknown error')
+                    "error": error_msg
                 }
             
-            # Extract content
-            markdown_content = result.markdown or ""
-            html_content = result.html or ""
+            # Extract content from gRPC response
+            markdown_content = result.get("markdown", "")
+            html_content = result.get("html", "")
             
             # Extract metadata
+            metadata_dict = result.get("metadata", {}) or {}
             metadata = {
-                "title": getattr(result, 'title', ''),
-                "description": getattr(result, 'description', ''),
-                "keywords": getattr(result, 'keywords', ''),
-                "language": getattr(result, 'language', 'en'),
+                "title": metadata_dict.get("title", ""),
+                "description": metadata_dict.get("description", ""),
+                "keywords": metadata_dict.get("keywords", ""),
+                "language": metadata_dict.get("language", "en"),
             }
             
             # Extract links, images, and documents
@@ -497,12 +480,13 @@ class WebsiteCrawlerTools:
     
     async def cleanup(self):
         """Cleanup crawler resources"""
-        if self._crawler:
+        if self._crawl_client:
             try:
-                await self._crawler.close()
-                logger.info("✅ Crawl4AI crawler closed")
+                await self._crawl_client.close()
+                self._crawl_client = None
+                logger.info("✅ Crawl4AI service client closed")
             except Exception as e:
-                logger.error(f"❌ Failed to close crawler: {e}")
+                logger.error(f"❌ Failed to close crawl client: {e}")
 
 
 # Module-level wrapper functions for tool registry

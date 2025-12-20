@@ -535,6 +535,55 @@ class SettingsService:
         except Exception as e:
             logger.error(f"❌ Failed to save prompt settings for user {user_id}: {str(e)}")
             return False
+    
+    async def get_user_preferred_name(self, user_id: str) -> Optional[str]:
+        """Get user's preferred name for addressing"""
+        try:
+            from services.user_settings_kv_service import get_user_setting
+            preferred_name = await get_user_setting(user_id, "user_preferred_name")
+            return preferred_name if preferred_name else None
+        except Exception as e:
+            logger.warning(f"Failed to get preferred name for user {user_id}: {e}")
+            return None
+    
+    async def set_user_preferred_name(self, user_id: str, preferred_name: str) -> bool:
+        """Set user's preferred name for addressing"""
+        try:
+            from services.user_settings_kv_service import set_user_setting
+            success = await set_user_setting(user_id, "user_preferred_name", preferred_name, "string")
+            if success:
+                logger.info(f"✅ Updated preferred name for user {user_id}")
+            return success
+        except Exception as e:
+            logger.error(f"❌ Failed to set preferred name for user {user_id}: {e}")
+            return False
+    
+    async def get_user_ai_context(self, user_id: str) -> Optional[str]:
+        """Get user's AI context information"""
+        try:
+            from services.user_settings_kv_service import get_user_setting
+            ai_context = await get_user_setting(user_id, "user_ai_context")
+            return ai_context if ai_context else None
+        except Exception as e:
+            logger.warning(f"Failed to get AI context for user {user_id}: {e}")
+            return None
+    
+    async def set_user_ai_context(self, user_id: str, ai_context: str) -> bool:
+        """Set user's AI context information (max 500 characters)"""
+        try:
+            # Validate length
+            if len(ai_context) > 500:
+                logger.warning(f"AI context exceeds 500 characters for user {user_id}, truncating")
+                ai_context = ai_context[:500]
+            
+            from services.user_settings_kv_service import set_user_setting
+            success = await set_user_setting(user_id, "user_ai_context", ai_context, "string")
+            if success:
+                logger.info(f"✅ Updated AI context for user {user_id}")
+            return success
+        except Exception as e:
+            logger.error(f"❌ Failed to set AI context for user {user_id}: {e}")
+            return False
 
     async def close(self):
         """Clean up resources"""

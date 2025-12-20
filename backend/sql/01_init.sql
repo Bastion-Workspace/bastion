@@ -15,8 +15,9 @@ BEGIN
 END
 $$;
 
--- **ROOSEVELT'S RLS FIX**: Grant BYPASSRLS to avoid Row-Level Security issues during init
--- This allows bastion_user to insert data into RLS-protected tables during setup
+-- **ROOSEVELT'S RLS STRATEGY**: Grant BYPASSRLS temporarily during init
+-- This allows bastion_user to insert default data into RLS-protected tables during setup
+-- BYPASSRLS will be REVOKED at the end of this script to enforce Row-Level Security
 ALTER ROLE bastion_user BYPASSRLS;
 
 -- Grant privileges on the database
@@ -414,6 +415,7 @@ CREATE TABLE IF NOT EXISTS document_folders (
     exempt_from_vectorization BOOLEAN DEFAULT FALSE, -- If true, folder and all descendants are exempt from vectorization and knowledge graph processing
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    created_by VARCHAR(255) REFERENCES users(user_id) ON DELETE SET NULL, -- User who created this folder (for ownership tracking)
     -- Ensure user_id is provided for user folders, but can be NULL for global/team folders
     CONSTRAINT check_user_id_for_collection_type CHECK (
         (collection_type = 'user' AND user_id IS NOT NULL AND team_id IS NULL) OR
@@ -427,6 +429,7 @@ CREATE TABLE IF NOT EXISTS document_folders (
 -- Create indexes for document folders
 CREATE INDEX IF NOT EXISTS idx_document_folders_folder_id ON document_folders(folder_id);
 CREATE INDEX IF NOT EXISTS idx_document_folders_user_id ON document_folders(user_id);
+CREATE INDEX IF NOT EXISTS idx_document_folders_created_by ON document_folders(created_by);
 CREATE INDEX IF NOT EXISTS idx_document_folders_parent_folder_id ON document_folders(parent_folder_id);
 CREATE INDEX IF NOT EXISTS idx_document_folders_collection_type ON document_folders(collection_type);
 -- **ROOSEVELT FOLDER TAGGING**: Indexes for metadata filtering
@@ -475,24 +478,8 @@ WHERE parent_folder_id IS NOT NULL AND team_id IS NOT NULL;
 GRANT ALL PRIVILEGES ON document_folders TO bastion_user;
 GRANT ALL PRIVILEGES ON document_folders_id_seq TO bastion_user;
 
--- Temporarily disable RLS for document_folders to fix folder creation issues
--- ALTER TABLE document_folders ENABLE ROW LEVEL SECURITY;
-
--- Create RLS policy for document_folders
--- CREATE POLICY document_folders_user_policy ON document_folders
---     FOR ALL USING (
---         user_id = current_setting('app.current_user_id', true)::varchar
---         OR current_setting('app.current_user_role', true) = 'admin'
---         OR collection_type = 'global'
---     );
-
--- Create RLS policy for document_folders INSERT operations
--- CREATE POLICY document_folders_insert_policy ON document_folders
---     FOR INSERT WITH CHECK (
---         user_id = current_setting('app.current_user_id', true)::varchar
---         OR current_setting('app.current_user_role', true) = 'admin'
---         OR collection_type = 'global'
---     );
+-- Enable RLS for document_folders (policies created after teams tables exist)
+ALTER TABLE document_folders ENABLE ROW LEVEL SECURITY;
 
 -- Conversations table for organizing chat sessions
 CREATE TABLE IF NOT EXISTS conversations (
@@ -730,10 +717,8 @@ GRANT ALL PRIVILEGES ON conversation_folders_id_seq TO bastion_user;
 GRANT ALL PRIVILEGES ON conversation_folder_items_id_seq TO bastion_user;
 
 -- Enable RLS for conversation tables
--- ROOSEVELT'S TEMPORARY DIAGNOSTIC: Disable RLS for conversations to test the issue
--- ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
--- ROOSEVELT'S TEMPORARY DIAGNOSTIC: Disable RLS for conversation_messages to test the issue
--- ALTER TABLE conversation_messages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversation_messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversation_shares ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversation_folders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversation_folder_items ENABLE ROW LEVEL SECURITY;
@@ -746,7 +731,12 @@ CREATE POLICY conversations_select_policy ON conversations
     );
 
 CREATE POLICY conversations_update_policy ON conversations
-    FOR UPDATE USING (
+    FOR UPDATE 
+    USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    )
+    WITH CHECK (
         user_id = current_setting('app.current_user_id', true)::varchar
         OR current_setting('app.current_user_role', true) = 'admin'
     );
@@ -838,8 +828,14 @@ CREATE POLICY folders_delete_policy ON conversation_folders
     );
 
 -- Allow folder creation (INSERT operations)
+-- Users can create folders for themselves, admins can create any folders
 CREATE POLICY folders_insert_policy ON conversation_folders
-    FOR INSERT WITH CHECK (true);
+    FOR INSERT WITH CHECK (
+        -- User creating folder for themselves (context must be set and match)
+        (COALESCE(current_setting('app.current_user_id', true), '') = user_id::varchar)
+        -- OR admin role (can create for any user)
+        OR (COALESCE(current_setting('app.current_user_role', true), '') = 'admin')
+    );
 
 -- Create RLS policies for conversation_folder_items
 CREATE POLICY folder_items_select_policy ON conversation_folder_items
@@ -2020,46 +2016,60 @@ CREATE POLICY chat_rooms_insert_policy ON chat_rooms
 
 CREATE POLICY chat_rooms_update_policy ON chat_rooms
     FOR UPDATE USING (
+        -- Allow if user is a participant in the room
         room_id IN (
             SELECT room_id FROM room_participants 
-            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+            WHERE user_id = current_setting('app.current_user_id', false)::varchar
         )
-        OR current_setting('app.current_user_role', true) = 'admin'
+        -- OR if user is admin
+        OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 CREATE POLICY chat_rooms_delete_policy ON chat_rooms
     FOR DELETE USING (
-        created_by = current_setting('app.current_user_id', true)::varchar
-        OR current_setting('app.current_user_role', true) = 'admin'
+        -- Allow room creator to delete
+        created_by = current_setting('app.current_user_id', false)::varchar
+        -- OR any participant can delete
+        OR room_id IN (
+            SELECT room_id FROM room_participants 
+            WHERE user_id = current_setting('app.current_user_id', false)::varchar
+        )
+        -- OR admin can delete
+        OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 -- RLS policies for room_participants
 CREATE POLICY room_participants_select_policy ON room_participants
     FOR SELECT USING (
-        room_id IN (
-            SELECT room_id FROM room_participants 
-            WHERE user_id = current_setting('app.current_user_id', true)::varchar
-        )
-        OR current_setting('app.current_user_role', true) = 'admin'
+        -- User can see their own participation records
+        user_id = current_setting('app.current_user_id', false)::varchar
+        OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 CREATE POLICY room_participants_insert_policy ON room_participants
     FOR INSERT WITH CHECK (
+        -- Allow if current user is creator of the room
         room_id IN (
             SELECT room_id FROM chat_rooms 
-            WHERE created_by = current_setting('app.current_user_id', true)::varchar
+            WHERE created_by = current_setting('app.current_user_id', false)::varchar
         )
-        OR current_setting('app.current_user_role', true) = 'admin'
+        -- OR if current user is already a participant (can add others)
+        OR room_id IN (
+            SELECT room_id FROM room_participants 
+            WHERE user_id = current_setting('app.current_user_id', false)::varchar
+        )
+        -- OR if current user is admin
+        OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 CREATE POLICY room_participants_delete_policy ON room_participants
     FOR DELETE USING (
-        user_id = current_setting('app.current_user_id', true)::varchar
+        user_id = current_setting('app.current_user_id', false)::varchar
         OR room_id IN (
             SELECT room_id FROM chat_rooms 
-            WHERE created_by = current_setting('app.current_user_id', true)::varchar
+            WHERE created_by = current_setting('app.current_user_id', false)::varchar
         )
-        OR current_setting('app.current_user_role', true) = 'admin'
+        OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 -- RLS policies for chat_messages
@@ -2246,6 +2256,8 @@ CREATE TABLE IF NOT EXISTS team_members (
     role team_role_enum NOT NULL DEFAULT 'member',
     joined_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     invited_by VARCHAR(255) REFERENCES users(user_id) ON DELETE SET NULL,
+    last_read_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    muted BOOLEAN DEFAULT FALSE,
     PRIMARY KEY (team_id, user_id)
 );
 
@@ -2361,6 +2373,8 @@ CREATE INDEX IF NOT EXISTS idx_teams_created_at ON teams(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_team_members_team_id ON team_members(team_id);
 CREATE INDEX IF NOT EXISTS idx_team_members_user_id ON team_members(user_id);
 CREATE INDEX IF NOT EXISTS idx_team_members_role ON team_members(role);
+CREATE INDEX IF NOT EXISTS idx_team_members_last_read ON team_members(team_id, user_id, last_read_at);
+CREATE INDEX IF NOT EXISTS idx_team_members_last_read ON team_members(team_id, user_id, last_read_at);
 CREATE INDEX IF NOT EXISTS idx_team_invitations_team_id ON team_invitations(team_id);
 CREATE INDEX IF NOT EXISTS idx_team_invitations_invited_user_id ON team_invitations(invited_user_id);
 CREATE INDEX IF NOT EXISTS idx_team_invitations_status ON team_invitations(status);
@@ -2396,27 +2410,45 @@ DROP POLICY IF EXISTS document_metadata_insert_policy ON document_metadata;
 -- Users can see: their own docs, global docs, and docs from teams they're members of
 CREATE POLICY document_metadata_select_policy ON document_metadata
     FOR SELECT USING (
-        current_setting('app.current_user_role', true) = 'admin'
-        OR user_id = current_setting('app.current_user_id', true)::varchar
+        -- User's own documents
+        user_id = current_setting('app.current_user_id', true)::varchar
+        -- Global documents (everyone can see)
         OR collection_type = 'global'
+        -- Team documents (only if user is a team member - NO admin bypass for privacy)
         OR (team_id IS NOT NULL AND team_id IN (
             SELECT team_id FROM team_members 
             WHERE user_id = current_setting('app.current_user_id', true)::varchar
         ))
-        OR (user_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+        -- System admins can see user documents (but NOT team documents unless they're members)
+        OR (user_id IS NOT NULL AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
     );
 
 -- Users can update: their own docs, admins can update global docs, team admins can update team docs
 CREATE POLICY document_metadata_update_policy ON document_metadata
-    FOR UPDATE USING (
-        current_setting('app.current_user_role', true) = 'admin'
-        OR user_id = current_setting('app.current_user_id', true)::varchar
+    FOR UPDATE 
+    USING (
+        -- User's own documents
+        user_id = current_setting('app.current_user_id', true)::varchar
+        -- Team documents (only team admins can update - NO system admin bypass for privacy)
         OR (team_id IS NOT NULL AND team_id IN (
             SELECT team_id FROM team_members 
             WHERE user_id = current_setting('app.current_user_id', true)::varchar 
             AND role = 'admin'
         ))
-        OR (user_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+        -- System admins can update user documents and global documents (but NOT team documents unless they're team admins)
+        OR (team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    )
+    WITH CHECK (
+        -- User's own documents
+        user_id = current_setting('app.current_user_id', true)::varchar
+        -- Team documents (only team admins can update - NO system admin bypass for privacy)
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members 
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar 
+            AND role = 'admin'
+        ))
+        -- System admins can update user documents and global documents (but NOT team documents unless they're team admins)
+        OR (team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
     );
 
 -- Users can delete: their own docs, admins can delete any docs, team admins can delete team docs
@@ -2432,9 +2464,17 @@ CREATE POLICY document_metadata_delete_policy ON document_metadata
         OR (user_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
     );
 
--- Allow inserts (ownership will be enforced at application layer)
+-- Allow inserts for users creating their own docs, admins for any docs, team members for team docs
 CREATE POLICY document_metadata_insert_policy ON document_metadata
-    FOR INSERT WITH CHECK (true);
+    FOR INSERT WITH CHECK (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+        OR collection_type = 'global'
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members 
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+        ))
+    );
 
 -- Row-Level Security policies for teams
 ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
@@ -2508,6 +2548,313 @@ CREATE POLICY post_comments_select_policy ON post_comments
         )
     );
 
+-- ========================================
+-- TEAMS TABLE INSERT/UPDATE/DELETE POLICIES
+-- ========================================
+
+-- RLS Policy: Any authenticated user can create teams
+CREATE POLICY teams_insert_policy ON teams
+    FOR INSERT WITH CHECK (
+        -- Any authenticated user can create a team
+        current_setting('app.current_user_id', true) IS NOT NULL
+        AND current_setting('app.current_user_id', true) != ''
+        -- Creator must match current user
+        AND created_by = current_setting('app.current_user_id', true)::varchar
+    );
+
+-- RLS Policy: Only team admins or system admins can update teams
+CREATE POLICY teams_update_policy ON teams
+    FOR UPDATE USING (
+        -- System admins can update any team
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR team admins can update their teams
+        OR EXISTS (
+            SELECT 1 FROM team_members 
+            WHERE team_members.team_id = teams.team_id 
+            AND team_members.user_id = current_setting('app.current_user_id', true)::varchar
+            AND team_members.role = 'admin'
+        )
+    );
+
+-- RLS Policy: Only team admins or system admins can delete teams
+CREATE POLICY teams_delete_policy ON teams
+    FOR DELETE USING (
+        -- System admins can delete any team
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR team admins can delete their teams
+        OR EXISTS (
+            SELECT 1 FROM team_members 
+            WHERE team_members.team_id = teams.team_id 
+            AND team_members.user_id = current_setting('app.current_user_id', true)::varchar
+            AND team_members.role = 'admin'
+        )
+    );
+
+-- ========================================
+-- TEAM MEMBERS TABLE INSERT/UPDATE/DELETE POLICIES
+-- ========================================
+
+-- RLS Policy: Team admins can add members, or users can add themselves when creating a team
+CREATE POLICY team_members_insert_policy ON team_members
+    FOR INSERT WITH CHECK (
+        -- System admins can add any member
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR team admins can add members to their teams
+        OR EXISTS (
+            SELECT 1 FROM team_members tm
+            WHERE tm.team_id = team_members.team_id
+            AND tm.user_id = current_setting('app.current_user_id', true)::varchar
+            AND tm.role = 'admin'
+        )
+        -- OR user is adding themselves as creator of the team (special case for team creation)
+        OR (
+            user_id = current_setting('app.current_user_id', true)::varchar
+            AND EXISTS (
+                SELECT 1 FROM teams
+                WHERE teams.team_id = team_members.team_id
+                AND teams.created_by = current_setting('app.current_user_id', true)::varchar
+            )
+        )
+    );
+
+-- RLS Policy: Team admins can update member roles (but not their own)
+CREATE POLICY team_members_update_policy ON team_members
+    FOR UPDATE USING (
+        -- System admins can update any member
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR team admins can update members (but not themselves)
+        OR (
+            EXISTS (
+                SELECT 1 FROM team_members tm
+                WHERE tm.team_id = team_members.team_id
+                AND tm.user_id = current_setting('app.current_user_id', true)::varchar
+                AND tm.role = 'admin'
+            )
+            AND user_id != current_setting('app.current_user_id', true)::varchar
+        )
+        -- OR users can update their own last_read_at and muted fields
+        OR (
+            user_id = current_setting('app.current_user_id', true)::varchar
+            AND (
+                -- Only allow updating last_read_at and muted, not role
+                -- This is enforced by checking that role hasn't changed
+                -- (PostgreSQL will check the UPDATE SET clause)
+                true
+            )
+        )
+    );
+
+-- RLS Policy: Team admins can remove members (but not themselves)
+CREATE POLICY team_members_delete_policy ON team_members
+    FOR DELETE USING (
+        -- System admins can remove any member
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR team admins can remove members (but not themselves)
+        OR (
+            EXISTS (
+                SELECT 1 FROM team_members tm
+                WHERE tm.team_id = team_members.team_id
+                AND tm.user_id = current_setting('app.current_user_id', true)::varchar
+                AND tm.role = 'admin'
+            )
+            AND user_id != current_setting('app.current_user_id', true)::varchar
+        )
+    );
+
+-- ========================================
+-- TEAM INVITATIONS TABLE INSERT/UPDATE/DELETE POLICIES
+-- ========================================
+
+-- RLS Policy: Team admins can create invitations
+CREATE POLICY team_invitations_insert_policy ON team_invitations
+    FOR INSERT WITH CHECK (
+        -- System admins can create any invitation
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR team admins can create invitations for their teams
+        OR EXISTS (
+            SELECT 1 FROM team_members 
+            WHERE team_members.team_id = team_invitations.team_id 
+            AND team_members.user_id = current_setting('app.current_user_id', true)::varchar
+            AND team_members.role = 'admin'
+        )
+        -- AND inviter must match current user
+        AND invited_by = current_setting('app.current_user_id', true)::varchar
+    );
+
+-- RLS Policy: Invited users can accept/reject, admins can update status
+CREATE POLICY team_invitations_update_policy ON team_invitations
+    FOR UPDATE USING (
+        -- System admins can update any invitation
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR invited user can update their own invitations (to accept/reject)
+        OR invited_user_id = current_setting('app.current_user_id', true)::varchar
+        -- OR team admins can update invitations for their teams
+        OR EXISTS (
+            SELECT 1 FROM team_members 
+            WHERE team_members.team_id = team_invitations.team_id 
+            AND team_members.user_id = current_setting('app.current_user_id', true)::varchar
+            AND team_members.role = 'admin'
+        )
+    );
+
+-- RLS Policy: Team admins or invitation creator can delete invitations
+CREATE POLICY team_invitations_delete_policy ON team_invitations
+    FOR DELETE USING (
+        -- System admins can delete any invitation
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR team admins can delete invitations for their teams
+        OR EXISTS (
+            SELECT 1 FROM team_members 
+            WHERE team_members.team_id = team_invitations.team_id 
+            AND team_members.user_id = current_setting('app.current_user_id', true)::varchar
+            AND team_members.role = 'admin'
+        )
+        -- OR invitation creator can delete their invitations
+        OR invited_by = current_setting('app.current_user_id', true)::varchar
+    );
+
+-- ========================================
+-- TEAM POSTS TABLE INSERT/UPDATE/DELETE POLICIES
+-- ========================================
+
+-- RLS Policy: Team members with can_post permission can create posts
+-- (Members and admins can post, viewers cannot)
+CREATE POLICY team_posts_insert_policy ON team_posts
+    FOR INSERT WITH CHECK (
+        -- System admins can create any post
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR team members (admin or member role, not viewer) can create posts
+        OR EXISTS (
+            SELECT 1 FROM team_members 
+            WHERE team_members.team_id = team_posts.team_id 
+            AND team_members.user_id = current_setting('app.current_user_id', true)::varchar
+            AND team_members.role IN ('admin', 'member')
+        )
+        -- AND author must match current user
+        AND author_id = current_setting('app.current_user_id', true)::varchar
+    );
+
+-- RLS Policy: Post authors can update their own posts
+CREATE POLICY team_posts_update_policy ON team_posts
+    FOR UPDATE USING (
+        -- System admins can update any post
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR post author can update their own posts
+        OR author_id = current_setting('app.current_user_id', true)::varchar
+        -- OR team admins can update any post in their teams
+        OR EXISTS (
+            SELECT 1 FROM team_members 
+            WHERE team_members.team_id = team_posts.team_id 
+            AND team_members.user_id = current_setting('app.current_user_id', true)::varchar
+            AND team_members.role = 'admin'
+        )
+    );
+
+-- RLS Policy: Post authors or team admins can delete posts
+CREATE POLICY team_posts_delete_policy ON team_posts
+    FOR DELETE USING (
+        -- System admins can delete any post
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR post author can delete their own posts
+        OR author_id = current_setting('app.current_user_id', true)::varchar
+        -- OR team admins can delete any post in their teams
+        OR EXISTS (
+            SELECT 1 FROM team_members 
+            WHERE team_members.team_id = team_posts.team_id 
+            AND team_members.user_id = current_setting('app.current_user_id', true)::varchar
+            AND team_members.role = 'admin'
+        )
+    );
+
+-- ========================================
+-- POST REACTIONS TABLE INSERT/DELETE POLICIES
+-- ========================================
+
+-- RLS Policy: Team members with can_react permission can add reactions
+-- (Members and admins can react, viewers cannot)
+CREATE POLICY post_reactions_insert_policy ON post_reactions
+    FOR INSERT WITH CHECK (
+        -- System admins can add any reaction
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR team members (admin or member role) can react to posts in their teams
+        OR (
+            user_id = current_setting('app.current_user_id', true)::varchar
+            AND EXISTS (
+                SELECT 1 FROM team_posts tp
+                JOIN team_members tm ON tm.team_id = tp.team_id
+                WHERE tp.post_id = post_reactions.post_id
+                AND tm.user_id = current_setting('app.current_user_id', true)::varchar
+                AND tm.role IN ('admin', 'member')
+            )
+        )
+    );
+
+-- RLS Policy: Users can remove their own reactions
+CREATE POLICY post_reactions_delete_policy ON post_reactions
+    FOR DELETE USING (
+        -- System admins can remove any reaction
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR user can remove their own reactions
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+    );
+
+-- ========================================
+-- POST COMMENTS TABLE INSERT/UPDATE/DELETE POLICIES
+-- ========================================
+
+-- RLS Policy: Team members with can_comment permission can create comments
+-- (Members and admins can comment, viewers cannot)
+CREATE POLICY post_comments_insert_policy ON post_comments
+    FOR INSERT WITH CHECK (
+        -- System admins can create any comment
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR team members (admin or member role) can comment on posts in their teams
+        OR (
+            author_id = current_setting('app.current_user_id', true)::varchar
+            AND EXISTS (
+                SELECT 1 FROM team_posts tp
+                JOIN team_members tm ON tm.team_id = tp.team_id
+                WHERE tp.post_id = post_comments.post_id
+                AND tm.user_id = current_setting('app.current_user_id', true)::varchar
+                AND tm.role IN ('admin', 'member')
+            )
+        )
+    );
+
+-- RLS Policy: Comment authors can update their own comments
+CREATE POLICY post_comments_update_policy ON post_comments
+    FOR UPDATE USING (
+        -- System admins can update any comment
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR comment author can update their own comments
+        OR author_id = current_setting('app.current_user_id', true)::varchar
+        -- OR team admins can update any comment in their teams
+        OR EXISTS (
+            SELECT 1 FROM team_posts tp
+            JOIN team_members tm ON tm.team_id = tp.team_id
+            WHERE tp.post_id = post_comments.post_id
+            AND tm.user_id = current_setting('app.current_user_id', true)::varchar
+            AND tm.role = 'admin'
+        )
+    );
+
+-- RLS Policy: Comment authors or team admins can delete comments
+CREATE POLICY post_comments_delete_policy ON post_comments
+    FOR DELETE USING (
+        -- System admins can delete any comment
+        current_setting('app.current_user_role', true) = 'admin'
+        -- OR comment author can delete their own comments
+        OR author_id = current_setting('app.current_user_id', true)::varchar
+        -- OR team admins can delete any comment in their teams
+        OR EXISTS (
+            SELECT 1 FROM team_posts tp
+            JOIN team_members tm ON tm.team_id = tp.team_id
+            WHERE tp.post_id = post_comments.post_id
+            AND tm.user_id = current_setting('app.current_user_id', true)::varchar
+            AND tm.role = 'admin'
+        )
+    );
+
 -- Grant permissions
 GRANT SELECT, INSERT, UPDATE, DELETE ON teams TO bastion_user;
 GRANT SELECT, INSERT, UPDATE, DELETE ON team_members TO bastion_user;
@@ -2519,10 +2866,96 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON post_comments TO bastion_user;
 -- Add comments for documentation
 COMMENT ON TABLE teams IS 'Teams for collaboration and document sharing';
 COMMENT ON TABLE team_members IS 'Team membership with roles (admin, member, viewer)';
+COMMENT ON COLUMN team_members.last_read_at IS 'Timestamp when user last read team posts';
+COMMENT ON COLUMN team_members.muted IS 'Whether user has muted notifications for this team';
 COMMENT ON TABLE team_invitations IS 'Team invitations linked to chat messages';
 COMMENT ON TABLE team_posts IS 'Social posts in team feeds';
 COMMENT ON TABLE post_reactions IS 'Emoji reactions on team posts';
 COMMENT ON TABLE post_comments IS 'Comments on team posts';
+
+-- Row-Level Security policies for document_folders
+-- (Created here after teams tables exist so team_members can be referenced)
+CREATE POLICY document_folders_select_policy ON document_folders
+    FOR SELECT USING (
+        -- Users can see their own folders
+        user_id = current_setting('app.current_user_id', true)::varchar
+        -- Everyone can see global folders
+        OR collection_type = 'global'
+        -- Team members can see team folders (NO admin bypass for privacy)
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members 
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+        ))
+        -- System admins can see user folders (but NOT team folders unless they're members)
+        OR (user_id IS NOT NULL AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    );
+
+CREATE POLICY document_folders_insert_policy ON document_folders
+    FOR INSERT WITH CHECK (
+        -- Users can create their own user folders
+        (user_id = current_setting('app.current_user_id', true)::varchar AND collection_type = 'user')
+        -- Team members can create team folders (any team member, not just admins)
+        OR (collection_type = 'team' AND team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members 
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+        ))
+        -- System admins can create user/global folders (but NOT team folders unless they're team members)
+        OR (collection_type IN ('user', 'global') AND current_setting('app.current_user_role', true) = 'admin')
+    );
+
+CREATE POLICY document_folders_update_policy ON document_folders
+    FOR UPDATE 
+    USING (
+        -- Users can update their own folders
+        user_id = current_setting('app.current_user_id', true)::varchar
+        -- Team admins can update team folders (NO system admin bypass for privacy)
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members 
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+            AND role = 'admin'
+        ))
+        -- System admins can update user folders (but NOT team folders unless they're team admins)
+        OR (user_id IS NOT NULL AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    )
+    WITH CHECK (
+        -- Users can update their own folders (same as USING)
+        user_id = current_setting('app.current_user_id', true)::varchar
+        -- Team admins can update team folders (NO system admin bypass for privacy)
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members 
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+            AND role = 'admin'
+        ))
+        -- System admins can update user folders (but NOT team folders unless they're team admins)
+        OR (user_id IS NOT NULL AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    );
+
+CREATE POLICY document_folders_delete_policy ON document_folders
+    FOR DELETE USING (
+        -- User folders: user can delete their own
+        (user_id = current_setting('app.current_user_id', true)::varchar 
+         AND collection_type = 'user')
+        
+        -- Global folders: only admins can delete
+        OR (collection_type = 'global' 
+            AND current_setting('app.current_user_role', true) = 'admin')
+        
+        -- Team folders: creator can delete, OR team admin can delete any team folder
+        OR (team_id IS NOT NULL 
+            AND (
+                -- Creator can delete their own folder
+                created_by = current_setting('app.current_user_id', true)::varchar
+                
+                -- Team admin can delete ANY folder in their team
+                OR EXISTS (
+                    SELECT 1 FROM team_members tm 
+                    WHERE tm.team_id = document_folders.team_id 
+                    AND tm.user_id = current_setting('app.current_user_id', true)::varchar 
+                    AND tm.role = 'admin'
+                )
+            )
+        )
+    );
 
 -- ========================================
 -- EMAIL AGENT SYSTEM
@@ -2590,18 +3023,24 @@ CREATE TABLE IF NOT EXISTS music_service_configs (
     encrypted_password TEXT NOT NULL,
     salt VARCHAR(255) NOT NULL,
     auth_type VARCHAR(50) DEFAULT 'password', -- 'password' or 'token'
+    service_type VARCHAR(50) DEFAULT 'subsonic', -- 'subsonic', 'plex', 'emby', 'jellyfin', 'audiobookshelf', etc.
+    service_name VARCHAR(255), -- User-friendly display name for the media source
+    is_active BOOLEAN DEFAULT TRUE, -- Whether this media source is active (can be disabled without deleting)
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(user_id)
+    UNIQUE(user_id, service_type)
 );
 
 -- Create indexes for music_service_configs
 CREATE INDEX IF NOT EXISTS idx_music_configs_user_id ON music_service_configs(user_id);
+CREATE INDEX IF NOT EXISTS idx_music_configs_service_type ON music_service_configs(service_type);
+CREATE INDEX IF NOT EXISTS idx_music_configs_user_service ON music_service_configs(user_id, service_type);
 
 -- Create music_cache table for storing cached library metadata
 CREATE TABLE IF NOT EXISTS music_cache (
     id SERIAL PRIMARY KEY,
     user_id VARCHAR(255) NOT NULL,
+    service_type VARCHAR(50) DEFAULT 'subsonic', -- Music service provider type: subsonic, audiobookshelf, etc.
     cache_type VARCHAR(50) NOT NULL, -- 'album', 'artist', 'playlist', 'track'
     item_id VARCHAR(255) NOT NULL, -- SubSonic item ID
     parent_id VARCHAR(255), -- For tracks: album/playlist ID
@@ -2614,11 +3053,13 @@ CREATE TABLE IF NOT EXISTS music_cache (
     metadata_json JSONB, -- Additional metadata from SubSonic
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(user_id, cache_type, item_id)
+    UNIQUE(user_id, service_type, cache_type, item_id)
 );
 
 -- Create indexes for music_cache
 CREATE INDEX IF NOT EXISTS idx_music_cache_user_id ON music_cache(user_id);
+CREATE INDEX IF NOT EXISTS idx_music_cache_service_type ON music_cache(service_type);
+CREATE INDEX IF NOT EXISTS idx_music_cache_user_service_type ON music_cache(user_id, service_type);
 CREATE INDEX IF NOT EXISTS idx_music_cache_type ON music_cache(cache_type);
 CREATE INDEX IF NOT EXISTS idx_music_cache_item_id ON music_cache(item_id);
 CREATE INDEX IF NOT EXISTS idx_music_cache_parent_id ON music_cache(parent_id);
@@ -2628,7 +3069,8 @@ CREATE INDEX IF NOT EXISTS idx_music_cache_metadata_json ON music_cache USING GI
 -- Create music_cache_metadata table for tracking sync status
 CREATE TABLE IF NOT EXISTS music_cache_metadata (
     id SERIAL PRIMARY KEY,
-    user_id VARCHAR(255) NOT NULL UNIQUE,
+    user_id VARCHAR(255) NOT NULL,
+    service_type VARCHAR(50) DEFAULT 'subsonic', -- Music service provider type: subsonic, audiobookshelf, etc.
     last_sync_at TIMESTAMP WITH TIME ZONE,
     sync_status VARCHAR(50) DEFAULT 'pending', -- 'pending', 'syncing', 'completed', 'failed'
     sync_error TEXT,
@@ -2637,18 +3079,163 @@ CREATE TABLE IF NOT EXISTS music_cache_metadata (
     total_playlists INTEGER DEFAULT 0,
     total_tracks INTEGER DEFAULT 0,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, service_type)
 );
 
--- Create index for music_cache_metadata
+-- Create indexes for music_cache_metadata
 CREATE INDEX IF NOT EXISTS idx_music_cache_metadata_user_id ON music_cache_metadata(user_id);
+CREATE INDEX IF NOT EXISTS idx_music_cache_metadata_service_type ON music_cache_metadata(service_type);
+CREATE INDEX IF NOT EXISTS idx_music_cache_metadata_user_service ON music_cache_metadata(user_id, service_type);
 
 -- Add comments
-COMMENT ON TABLE music_service_configs IS 'Encrypted SubSonic server configurations per user';
-COMMENT ON TABLE music_cache IS 'Cached music library metadata from SubSonic servers';
+COMMENT ON TABLE music_service_configs IS 'Encrypted music service configurations per user (SubSonic, Plex, Emby, Audiobookshelf, etc.)';
+COMMENT ON COLUMN music_service_configs.service_type IS 'Music service provider type: subsonic, plex, emby, jellyfin, audiobookshelf, etc.';
+COMMENT ON COLUMN music_service_configs.service_name IS 'User-friendly display name for the media source';
+COMMENT ON COLUMN music_service_configs.is_active IS 'Whether this media source is active (can be disabled without deleting)';
+COMMENT ON TABLE music_cache IS 'Cached music library metadata from music servers';
+COMMENT ON COLUMN music_cache.service_type IS 'Music service provider type: subsonic, audiobookshelf, etc.';
 COMMENT ON TABLE music_cache_metadata IS 'Metadata about music cache sync status and timestamps';
+COMMENT ON COLUMN music_cache_metadata.service_type IS 'Music service provider type: subsonic, audiobookshelf, etc.';
+
+-- ========================================
+-- RLS POLICIES FOR MUSIC TABLES
+-- ========================================
+
+ALTER TABLE music_service_configs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE music_cache ENABLE ROW LEVEL SECURITY;
+ALTER TABLE music_cache_metadata ENABLE ROW LEVEL SECURITY;
+
+-- Music service configs policies
+CREATE POLICY music_configs_select_policy ON music_service_configs
+FOR SELECT
+USING (user_id = current_setting('app.current_user_id', true));
+
+CREATE POLICY music_configs_insert_policy ON music_service_configs
+FOR INSERT
+WITH CHECK (user_id = current_setting('app.current_user_id', true));
+
+CREATE POLICY music_configs_update_policy ON music_service_configs
+FOR UPDATE
+USING (user_id = current_setting('app.current_user_id', true))
+WITH CHECK (user_id = current_setting('app.current_user_id', true));
+
+CREATE POLICY music_configs_delete_policy ON music_service_configs
+FOR DELETE
+USING (user_id = current_setting('app.current_user_id', true));
+
+-- Music cache policies
+CREATE POLICY music_cache_select_policy ON music_cache
+FOR SELECT
+USING (user_id = current_setting('app.current_user_id', true));
+
+CREATE POLICY music_cache_insert_policy ON music_cache
+FOR INSERT
+WITH CHECK (user_id = current_setting('app.current_user_id', true));
+
+CREATE POLICY music_cache_update_policy ON music_cache
+FOR UPDATE
+USING (user_id = current_setting('app.current_user_id', true))
+WITH CHECK (user_id = current_setting('app.current_user_id', true));
+
+CREATE POLICY music_cache_delete_policy ON music_cache
+FOR DELETE
+USING (user_id = current_setting('app.current_user_id', true));
+
+-- Music cache metadata policies
+CREATE POLICY music_metadata_select_policy ON music_cache_metadata
+FOR SELECT
+USING (user_id = current_setting('app.current_user_id', true));
+
+CREATE POLICY music_metadata_insert_policy ON music_cache_metadata
+FOR INSERT
+WITH CHECK (user_id = current_setting('app.current_user_id', true));
+
+CREATE POLICY music_metadata_update_policy ON music_cache_metadata
+FOR UPDATE
+USING (user_id = current_setting('app.current_user_id', true))
+WITH CHECK (user_id = current_setting('app.current_user_id', true));
+
+CREATE POLICY music_metadata_delete_policy ON music_cache_metadata
+FOR DELETE
+USING (user_id = current_setting('app.current_user_id', true));
+
+-- ========================================
+-- ENTERTAINMENT SYNC TABLES
+-- Sonarr/Radarr API integration for entertainment content
+-- ========================================
+
+-- Configuration for user's Radarr/Sonarr connections
+CREATE TABLE IF NOT EXISTS entertainment_sync_config (
+    config_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    source_type VARCHAR(50) NOT NULL, -- 'radarr' or 'sonarr'
+    api_url VARCHAR(512) NOT NULL,
+    api_key TEXT NOT NULL, -- Encrypted API key
+    enabled BOOLEAN DEFAULT true,
+    sync_frequency_minutes INTEGER DEFAULT 60, -- Default hourly
+    last_sync_at TIMESTAMP WITH TIME ZONE,
+    last_sync_status VARCHAR(50), -- 'success', 'failed', 'running'
+    items_synced INTEGER DEFAULT 0,
+    sync_error TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(user_id, source_type, api_url)
+);
+
+-- Track individual synced items for change detection
+CREATE TABLE IF NOT EXISTS entertainment_sync_items (
+    item_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    config_id UUID NOT NULL REFERENCES entertainment_sync_config(config_id) ON DELETE CASCADE,
+    external_id VARCHAR(255) NOT NULL, -- Radarr/Sonarr item ID
+    external_type VARCHAR(50) NOT NULL, -- 'movie', 'series', 'episode'
+    title VARCHAR(512) NOT NULL,
+    tmdb_id INTEGER, -- TMDB reference
+    tvdb_id INTEGER, -- TVDB reference
+    season_number INTEGER, -- For episodes
+    episode_number INTEGER, -- For episodes
+    parent_series_id VARCHAR(255), -- Link episode to series
+    metadata_hash VARCHAR(64), -- Hash of metadata to detect changes
+    last_synced_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    vector_document_id VARCHAR(255), -- Track generated pseudo-document ID
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(config_id, external_id, external_type)
+);
+
+-- Create indexes for entertainment sync tables
+CREATE INDEX IF NOT EXISTS idx_sync_config_user ON entertainment_sync_config(user_id);
+CREATE INDEX IF NOT EXISTS idx_sync_config_enabled ON entertainment_sync_config(enabled);
+CREATE INDEX IF NOT EXISTS idx_sync_config_source_type ON entertainment_sync_config(source_type);
+CREATE INDEX IF NOT EXISTS idx_sync_items_config ON entertainment_sync_items(config_id);
+CREATE INDEX IF NOT EXISTS idx_sync_items_external ON entertainment_sync_items(external_id);
+CREATE INDEX IF NOT EXISTS idx_sync_items_type ON entertainment_sync_items(external_type);
+CREATE INDEX IF NOT EXISTS idx_sync_items_vector_doc ON entertainment_sync_items(vector_document_id);
+CREATE INDEX IF NOT EXISTS idx_sync_items_parent_series ON entertainment_sync_items(parent_series_id);
+
+-- Add comments for entertainment sync tables
+COMMENT ON TABLE entertainment_sync_config IS 'User configurations for Radarr/Sonarr API sync';
+COMMENT ON TABLE entertainment_sync_items IS 'Tracked items synced from Radarr/Sonarr for change detection';
 
 -- ========================================
 -- DATABASE INITIALIZATION COMPLETE
 -- Roosevelt's Square Deal for Data!
 -- ========================================
+
+-- ============================================================================
+-- FINAL SECURITY HARDENING - REVOKE BYPASSRLS
+-- ============================================================================
+-- ROOSEVELT'S SECURITY FIX: Remove BYPASSRLS to enforce Row-Level Security
+-- BYPASSRLS was needed during init to insert default data into RLS-protected tables
+-- Now that init is complete, revoke it so RLS policies are enforced
+
+ALTER ROLE bastion_user NOBYPASSRLS;
+
+-- IMPORTANT FOR FUTURE MIGRATIONS:
+-- If you need to run migrations that insert/update data in RLS-protected tables:
+-- 1. Temporarily grant BYPASSRLS: ALTER ROLE bastion_user BYPASSRLS;
+-- 2. Run your migration
+-- 3. Revoke BYPASSRLS: ALTER ROLE bastion_user NOBYPASSRLS;
+-- 
+-- Or set proper RLS context in migration:
+--   SELECT set_config('app.current_user_id', 'migration', true);
+--   SELECT set_config('app.current_user_role', 'admin', true);

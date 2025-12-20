@@ -212,6 +212,7 @@ class DatabaseManager:
                     
                     # ROOSEVELT FIX: Set RLS context on this connection before executing query
                     # This ensures RLS context persists for the duration of this query
+                    # CRITICAL: Use false (session-level) not true (transaction-local)!
                     rls_context = kwargs.get('rls_context', {})
                     if rls_context:
                         user_id = rls_context.get('user_id', '')
@@ -220,11 +221,11 @@ class DatabaseManager:
                         # Handle None values properly for RLS context
                         if user_id is None:
                             # Set to NULL for global/admin operations
-                            await conn.execute("SELECT set_config('app.current_user_id', NULL, true)")
+                            await conn.execute("SELECT set_config('app.current_user_id', NULL, false)")
                         else:
-                            await conn.execute("SELECT set_config('app.current_user_id', $1, true)", str(user_id))
+                            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", str(user_id))
                         
-                        await conn.execute("SELECT set_config('app.current_user_role', $1, true)", user_role)
+                        await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_role)
                         logger.info(f"🔍 Set RLS context on connection {id(conn)}: user_id={user_id}, role={user_role}")
                     else:
                         logger.debug(f"🔍 No RLS context provided for query on connection {id(conn)}")
