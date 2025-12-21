@@ -102,8 +102,21 @@ const OrgTodosView = ({ onOpenDocument }) => {
   
   // Check if a file is expanded
   const isFileExpanded = useCallback((filename) => {
+    if (!filename) return false;
     return expandedFiles.has(filename);
   }, [expandedFiles]);
+
+  // Group todos by filename, then by parent path
+  const groupByFile = useCallback((todos) => {
+    const grouped = {};
+    todos.forEach(todo => {
+      if (!grouped[todo.filename]) {
+        grouped[todo.filename] = [];
+      }
+      grouped[todo.filename].push(todo);
+    });
+    return grouped;
+  }, []);
 
   // Map filter to TODO states
   const getStatesForFilter = useCallback((filter) => {
@@ -153,11 +166,13 @@ const OrgTodosView = ({ onOpenDocument }) => {
   // Expand all files by default when data loads
   useEffect(() => {
     if (todosData?.results && sortBy === 'file') {
-      const grouped = groupByFile(getSortedTodos(todosData.results));
+      // Use groupByFile directly on results to get unique filenames
+      // Don't use getSortedTodos here to avoid dependency on filters
+      const grouped = groupByFile(todosData.results);
       const filenames = Object.keys(grouped);
       setExpandedFiles(new Set(filenames));
     }
-  }, [todosData, sortBy, groupByFile, getSortedTodos]);
+  }, [todosData, sortBy, groupByFile]);
 
   // Handle clicking a TODO item
   const handleItemClick = (item) => {
@@ -230,18 +245,6 @@ const OrgTodosView = ({ onOpenDocument }) => {
     const doneStates = ['DONE', 'CANCELED', 'CANCELLED', 'WONTFIX', 'FIXED'];
     return doneStates.includes(state) ? 'success' : 'error';
   };
-
-  // Group todos by filename, then by parent path
-  const groupByFile = useCallback((todos) => {
-    const grouped = {};
-    todos.forEach(todo => {
-      if (!grouped[todo.filename]) {
-        grouped[todo.filename] = [];
-      }
-      grouped[todo.filename].push(todo);
-    });
-    return grouped;
-  }, []);
 
   // Group todos within a file by their parent heading path
   const groupByParentPath = useCallback((todos) => {

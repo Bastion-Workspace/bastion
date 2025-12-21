@@ -1,5 +1,6 @@
 import { EditorView, ViewPlugin, Decoration, WidgetType } from '@codemirror/view';
 import { StateField, StateEffect } from '@codemirror/state';
+import { documentDiffStore } from '../../../services/documentDiffStore';
 
 // State effects for managing live diffs
 const addLiveDiff = StateEffect.define();
@@ -175,11 +176,12 @@ const liveDiffField = StateField.define({
   provide: f => EditorView.decorations.from(f)
 });
 
-// Plugin to manage live diffs
-const liveEditDiffPlugin = ViewPlugin.fromClass(class {
-  constructor(view) {
+// Plugin class for managing live diffs
+const LiveEditDiffPluginClass = class {
+  constructor(view, documentId) {
     try {
       this.view = view;
+      this.documentId = documentId || null; // Store document identity
       this.operations = new Map(); // operationId -> {from, to, original, proposed, opType, messageId, start, end}
       this.maxOperations = 50; // Limit concurrent diffs (increased to prevent blocking)
       this.currentMessageId = null; // Track current message ID to clear old operations
@@ -189,7 +191,16 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
       
       // Only log in development mode
       if (process.env.NODE_ENV === 'development') {
-        console.log('🔍 Live diff extension plugin initialized for view:', view);
+        console.log('🔍 Live diff extension plugin initialized for view:', view, 'documentId:', documentId);
+      }
+      
+      // Restore persisted diffs for THIS document
+      if (this.documentId) {
+        const savedDiffs = documentDiffStore.getDiffs(this.documentId);
+        if (savedDiffs && savedDiffs.operations && Array.isArray(savedDiffs.operations) && savedDiffs.operations.length > 0) {
+          console.log(`Restoring ${savedDiffs.operations.length} diffs for document ${this.documentId}`);
+          this.addOperations(savedDiffs.operations, savedDiffs.messageId);
+        }
       }
       
       // Listen for live diff events
@@ -229,11 +240,22 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
         console.log('🔍 Live diff extension handleLiveDiffEvent called:', event.type, event.detail);
       }
       if (event.type === 'editorOperationsLive') {
-        const { operations, messageId } = event.detail || {};
+        const { operations, messageId, documentId } = event.detail || {};
+        
+        // Only process operations for THIS document
+        if (documentId && documentId !== this.documentId) {
+          if (process.env.NODE_ENV === 'development') {
+            console.log(`Ignoring operations for different document (${documentId} vs ${this.documentId})`);
+          }
+          return;
+        }
+        
         if (process.env.NODE_ENV === 'development') {
           console.log('🔍 Live diff extension received editorOperationsLive:', { 
             operationsCount: operations?.length, 
             messageId,
+            documentId: documentId,
+            thisDocumentId: this.documentId,
             firstOp: operations?.[0],
             allOps: operations
           });
@@ -243,6 +265,9 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
           // This ensures new operations always have room and aren't blocked by old ones
           console.log('🔍 Calling addOperations with', operations.length, 'operations');
           this.addOperations(operations, messageId);
+          
+          // ✅ NOTE: ChatSidebarContext already saved to documentDiffStore
+          // No need to save again here - that would create duplicates!
         } else {
           console.warn('⚠️ No operations array or empty array received');
         }
@@ -267,7 +292,60 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
       const toRemove = [];
       let needsUpdate = false;
       
+      // Smart invalidation: Check if user manual edits overlap with pending diffs
+      if (update.changes && this.documentId) {
+        update.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
+          // User edited range: [fromA, toA]
+          const editStart = fromA;
+          const editEnd = toA;
+          
+          // Invalidate overlapping diffs
+          this.operations.forEach((op, id) => {
+            const opStart = op.from !== undefined ? op.from : (op.start !== undefined ? op.start : 0);
+            const opEnd = op.to !== undefined ? op.to : (op.end !== undefined ? op.end : opStart);
+            
+            // Check for overlap
+            const overlaps = !(editEnd < opStart || editStart > opEnd);
+            
+            if (overlaps) {
+              console.log(`User edit [${editStart}-${editEnd}] overlaps diff [${opStart}-${opEnd}] - invalidating`);
+              toRemove.push(id);
+              // Also remove from centralized store
+              documentDiffStore.removeDiff(this.documentId, id);
+            }
+          });
+        });
+      }
+      
+      // Adjust positions for remaining operations based on text length changes
+      if (update.changes && this.operations.size > 0) {
+        update.changes.iterChanges((fromA, toA, fromB, toB) => {
+          const lenChange = (toB - fromB) - (toA - fromA);
+          
+          this.operations.forEach((op, id) => {
+            if (toRemove.includes(id)) return; // Skip already-invalidated operations
+            
+            const opStart = op.from !== undefined ? op.from : (op.start !== undefined ? op.start : 0);
+            const opEnd = op.to !== undefined ? op.to : (op.end !== undefined ? op.end : opStart);
+            
+            // If operation is after the edit, adjust its position
+            if (opStart >= toA) {
+              op.start += lenChange;
+              op.end += lenChange;
+              op.from = op.start;
+              op.to = op.end;
+              needsUpdate = true;
+            } else if (opEnd > fromA && opStart < toA && !toRemove.includes(id)) {
+              // Partial overlap - operation was already invalidated above, but ensure cleanup
+              // This shouldn't happen due to overlap check above, but safety check
+            }
+          });
+        });
+      }
+      
       this.operations.forEach((op, id) => {
+        if (toRemove.includes(id)) return; // Skip already-invalidated operations
+        
         const from = op.from !== undefined ? op.from : (op.start !== undefined ? op.start : 0);
         const to = op.to !== undefined ? op.to : (op.end !== undefined ? op.end : from);
         
@@ -291,8 +369,12 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
       
       // Remove clearly invalid operations
       toRemove.forEach(id => {
+        if (!this.operations.has(id)) return; // Already removed
         console.warn('Removing operation with invalid positions:', id);
         this.operations.delete(id);
+        if (this.documentId) {
+          documentDiffStore.removeDiff(this.documentId, id);
+        }
         needsUpdate = true;
       });
       
@@ -652,6 +734,11 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
     const op = this.operations.get(operationId);
     if (!op) return;
     
+    // Remove from centralized store
+    if (this.documentId) {
+      documentDiffStore.removeDiff(this.documentId, operationId);
+    }
+    
     // CRITICAL: Remove the accepted operation from the map FIRST
     // This prevents it from being affected by position adjustments
     this.operations.delete(operationId);
@@ -792,6 +879,11 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
     const op = this.operations.get(operationId);
     if (!op) return;
     
+    // Remove from centralized store
+    if (this.documentId) {
+      documentDiffStore.removeDiff(this.documentId, operationId);
+    }
+    
     // Emit event for external handling
     window.dispatchEvent(new CustomEvent('liveEditRejected', {
       detail: {
@@ -802,7 +894,10 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
     // Remove from active diffs
     this.removeOperation(operationId);
   }
-});
+};
+
+// Create default plugin instance (for backward compatibility)
+const liveEditDiffPlugin = ViewPlugin.fromClass(LiveEditDiffPluginClass);
 
 /**
  * Create live edit diff extension for CodeMirror
@@ -814,7 +909,7 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
  * 
  * Usage:
  * ```javascript
- * const extension = createLiveEditDiffExtension();
+ * const extension = createLiveEditDiffExtension(documentId);
  * // Add to CodeMirror extensions array
  * ```
  * 
@@ -823,18 +918,35 @@ const liveEditDiffPlugin = ViewPlugin.fromClass(class {
  * window.dispatchEvent(new CustomEvent('editorOperationsLive', {
  *   detail: {
  *     operations: [{ start: 100, end: 150, text: 'new text', op_type: 'replace_range' }],
- *     messageId: 'message-id'
+ *     messageId: 'message-id',
+ *     documentId: 'doc-123'
  *   }
  * }));
  * ```
+ * 
+ * @param {string} documentId - Document identifier for persistent diff storage
  */
-export function createLiveEditDiffExtension() {
+export function createLiveEditDiffExtension(documentId = null) {
   try {
-    console.log('🔍 Creating live edit diff extension');
+    console.log('🔍 Creating live edit diff extension for document:', documentId);
+    
+    // Store documentId in a closure variable that the plugin class can access
+    const pluginDocumentId = documentId;
+    
+    // Create a plugin class that has access to documentId through closure
+    class DocumentAwareDiffPlugin extends LiveEditDiffPluginClass {
+      constructor(view) {
+        // Pass documentId to parent constructor
+        super(view, pluginDocumentId);
+      }
+    }
+    
     const extension = [
       diffTheme,
       liveDiffField,
-      liveEditDiffPlugin
+      ViewPlugin.fromClass(DocumentAwareDiffPlugin, {
+        decorations: v => v.decorations
+      })
     ];
     console.log('🔍 Live edit diff extension created:', extension.length, 'items');
     return extension;

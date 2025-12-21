@@ -41,6 +41,7 @@ import AudioPlayer from './AudioPlayer';
 import { useEditor } from '../contexts/EditorContext';
 import { parseFrontmatter } from '../utils/frontmatterUtils';
 import { useTheme } from '../contexts/ThemeContext';
+import { documentDiffStore } from '../services/documentDiffStore';
 
 const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHeading = null, initialScrollPosition = 0, onScrollChange }) => {
   const [document, setDocument] = useState(null);
@@ -775,6 +776,8 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   }, [isEditing, editContent, document?.filename]);
 
   // **ROOSEVELT'S CLEANUP**: Clear editor state when component unmounts (tab closes)
+  // Note: Diffs are intentionally NOT cleared here - they persist in documentDiffStore
+  // so they can be restored when the tab is reopened
   useEffect(() => {
     return () => {
       console.log('🧹 ROOSEVELT: DocumentViewer unmounting - clearing editor state');
@@ -798,6 +801,8 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
       } catch (e) {
         console.error('Failed to clear editor_ctx_cache:', e);
       }
+      // Diffs persist in documentDiffStore - they will be restored when tab reopens
+      // To manually clear diffs, use: documentDiffStore.clearDiffs(document?.document_id)
     };
   }, [setEditorState]);
 
@@ -1311,6 +1316,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                   onChange={setEditContent} 
                   filename={document.filename}
                   canonicalPath={document.canonical_path}
+                  documentId={document.document_id} 
                   initialScrollPosition={initialScrollPosition}
                   onScrollChange={onScrollChange}
                 />

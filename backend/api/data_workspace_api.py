@@ -11,10 +11,16 @@ from models.data_workspace_models import (
     PreviewImportRequest, PreviewImportResponse,
     ExecuteImportRequest, ImportJobResponse,
     TableDataResponse, InsertRowRequest, UpdateRowRequest, UpdateCellRequest,
-    ShareWorkspaceRequest, WorkspaceShareResponse
+    ShareWorkspaceRequest, WorkspaceShareResponse,
+    SQLQueryRequest, NaturalLanguageQueryRequest, QueryResultResponse
 )
 from models.api_models import AuthenticatedUserResponse
 from utils.auth_middleware import get_current_user
+from utils.data_workspace_middleware import (
+    require_workspace_permission,
+    get_workspace_for_database,
+    get_workspace_for_table
+)
 from services.data_workspace_grpc_client import DataWorkspaceGRPCClient
 from services.data_workspace_sharing_service import get_sharing_service
 from services.team_service import TeamService
@@ -212,8 +218,11 @@ async def create_database(
     request: CreateDatabaseRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Create a new database in a workspace"""
+    """Create a new database in a workspace (requires write permission)"""
     try:
+        # Check workspace write permission
+        await require_workspace_permission(request.workspace_id, 'write', current_user)
+        
         client = get_grpc_client()
         database = await client.create_database(
             workspace_id=request.workspace_id,
@@ -223,6 +232,8 @@ async def create_database(
             source_type=request.source_type
         )
         return database
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to create database: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -233,11 +244,21 @@ async def list_databases(
     workspace_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """List all databases in a workspace"""
+    """List all databases in a workspace (requires read permission)"""
     try:
+        # Check workspace read permission
+        await require_workspace_permission(workspace_id, 'read', current_user)
+        
         client = get_grpc_client()
-        databases = await client.list_databases(workspace_id)
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        databases = await client.list_databases(
+            workspace_id,
+            user_id=current_user.user_id,
+            user_team_ids=user_team_ids
+        )
         return databases
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to list databases: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -248,10 +269,18 @@ async def get_database(
     database_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Get a single database"""
+    """Get a single database (requires read permission)"""
     try:
+        # Verify workspace access via database lookup
+        workspace_id = await get_workspace_for_database(database_id, current_user)
+        
         client = get_grpc_client()
-        database = await client.get_database(database_id)
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        database = await client.get_database(
+            database_id,
+            user_id=current_user.user_id,
+            user_team_ids=user_team_ids
+        )
         if not database:
             raise HTTPException(status_code=404, detail="Database not found")
         return database
@@ -267,10 +296,19 @@ async def delete_database(
     database_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Delete a database"""
+    """Delete a database (requires admin permission)"""
     try:
+        # Verify workspace admin access via database lookup
+        workspace_id = await get_workspace_for_database(database_id, current_user)
+        await require_workspace_permission(workspace_id, 'admin', current_user)
+        
         client = get_grpc_client()
-        success = await client.delete_database(database_id)
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        success = await client.delete_database(
+            database_id,
+            user_id=current_user.user_id,
+            user_team_ids=user_team_ids
+        )
         if not success:
             raise HTTPException(status_code=404, detail="Database not found")
         return {"success": True, "message": "Database deleted successfully"}
@@ -340,8 +378,11 @@ async def execute_import(
     request: ExecuteImportRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Execute import job"""
+    """Execute import job (requires write permission)"""
     try:
+        # Check workspace write permission
+        await require_workspace_permission(request.workspace_id, 'write', current_user)
+        
         client = get_grpc_client()
         job = await client.execute_import(
             workspace_id=request.workspace_id,
@@ -352,6 +393,8 @@ async def execute_import(
             field_mapping=request.field_mapping
         )
         return job
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to execute import: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -382,8 +425,12 @@ async def create_table(
     request: CreateTableRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Create a new table in a database"""
+    """Create a new table in a database (requires write permission)"""
     try:
+        # Verify workspace write access via database lookup
+        workspace_id = await get_workspace_for_database(request.database_id, current_user)
+        await require_workspace_permission(workspace_id, 'write', current_user)
+        
         client = get_grpc_client()
         table = await client.create_table(
             database_id=request.database_id,
@@ -393,6 +440,8 @@ async def create_table(
             table_schema=request.table_schema
         )
         return table
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to create table: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -403,11 +452,21 @@ async def list_tables(
     database_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """List all tables in a database"""
+    """List all tables in a database (requires read permission)"""
     try:
+        # Verify workspace read access via database lookup
+        workspace_id = await get_workspace_for_database(database_id, current_user, client)
+        
         client = get_grpc_client()
-        tables = await client.list_tables(database_id)
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        tables = await client.list_tables(
+            database_id,
+            user_id=current_user.user_id,
+            user_team_ids=user_team_ids
+        )
         return tables
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to list tables: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -418,10 +477,18 @@ async def get_table(
     table_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Get a single table"""
+    """Get a single table (requires read permission)"""
     try:
+        # Verify workspace read access via table lookup
+        workspace_id = await get_workspace_for_table(table_id, current_user, client)
+        
         client = get_grpc_client()
-        table = await client.get_table(table_id)
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        table = await client.get_table(
+            table_id,
+            user_id=current_user.user_id,
+            user_team_ids=user_team_ids
+        )
         if not table:
             raise HTTPException(status_code=404, detail="Table not found")
         return table
@@ -437,10 +504,19 @@ async def delete_table(
     table_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Delete a table"""
+    """Delete a table (requires admin permission)"""
     try:
+        # Verify workspace admin access via table lookup
+        workspace_id = await get_workspace_for_table(table_id, current_user)
+        await require_workspace_permission(workspace_id, 'admin', current_user)
+        
         client = get_grpc_client()
-        success = await client.delete_table(table_id)
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        success = await client.delete_table(
+            table_id,
+            user_id=current_user.user_id,
+            user_team_ids=user_team_ids
+        )
         if not success:
             raise HTTPException(status_code=404, detail="Table not found")
         return {"success": True, "message": "Table deleted successfully"}
@@ -459,11 +535,23 @@ async def get_table_data(
     limit: int = 100,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Get table data with pagination"""
+    """Get table data with pagination (requires read permission)"""
     try:
+        # Verify workspace read access via table lookup
+        workspace_id = await get_workspace_for_table(table_id, current_user, client)
+        
         client = get_grpc_client()
-        data = await client.get_table_data(table_id, offset, limit)
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        data = await client.get_table_data(
+            table_id, 
+            offset, 
+            limit,
+            user_id=current_user.user_id,
+            user_team_ids=user_team_ids
+        )
         return data
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get table data: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -475,11 +563,17 @@ async def insert_table_row(
     request: InsertRowRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Insert a new row into a table"""
+    """Insert a new row into a table (requires write permission)"""
     try:
+        # Verify workspace write access via table lookup
+        workspace_id = await get_workspace_for_table(table_id, current_user)
+        await require_workspace_permission(workspace_id, 'write', current_user)
+        
         client = get_grpc_client()
         row = await client.insert_table_row(table_id, request.row_data, current_user.user_id)
         return row
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to insert row: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -492,11 +586,17 @@ async def update_table_row(
     request: UpdateRowRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Update an existing row in a table"""
+    """Update an existing row in a table (requires write permission)"""
     try:
+        # Verify workspace write access via table lookup
+        workspace_id = await get_workspace_for_table(table_id, current_user)
+        await require_workspace_permission(workspace_id, 'write', current_user)
+        
         client = get_grpc_client()
         row = await client.update_table_row(table_id, row_id, request.row_data, current_user.user_id)
         return row
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to update row: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -527,8 +627,12 @@ async def delete_table_row(
     row_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Delete a row from a table"""
+    """Delete a row from a table (requires write permission)"""
     try:
+        # Verify workspace write access via table lookup
+        workspace_id = await get_workspace_for_table(table_id, current_user)
+        await require_workspace_permission(workspace_id, 'write', current_user)
+        
         client = get_grpc_client()
         success = await client.delete_table_row(table_id, row_id)
         if not success:
@@ -639,5 +743,90 @@ async def list_shared_workspaces(
         return workspaces
     except Exception as e:
         logger.error(f"Failed to list shared workspaces: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Query Endpoints
+@router.post("/workspaces/{workspace_id}/query/sql", response_model=QueryResultResponse)
+async def execute_sql_query(
+    workspace_id: str,
+    request: SQLQueryRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Execute SQL query against workspace databases (requires read permission)"""
+    try:
+        # Check workspace read permission
+        await require_workspace_permission(workspace_id, 'read', current_user)
+        
+        client = get_grpc_client()
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        
+        result = await client.execute_sql_query(
+            workspace_id=workspace_id,
+            query=request.query,
+            user_id=current_user.user_id,
+            limit=request.limit,
+            user_team_ids=user_team_ids
+        )
+        
+        # Parse results_json to List[Dict]
+        import json
+        results = json.loads(result['results_json']) if result.get('results_json') else []
+        
+        return QueryResultResponse(
+            query_id=result['query_id'],
+            column_names=result['column_names'],
+            results=results,
+            result_count=result['result_count'],
+            execution_time_ms=result['execution_time_ms'],
+            generated_sql=result.get('generated_sql'),
+            error_message=result.get('error_message')
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to execute SQL query: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/workspaces/{workspace_id}/query/natural-language", response_model=QueryResultResponse)
+async def execute_nl_query(
+    workspace_id: str,
+    request: NaturalLanguageQueryRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Execute natural language query (requires read permission)"""
+    try:
+        # Check workspace read permission
+        await require_workspace_permission(workspace_id, 'read', current_user)
+        
+        client = get_grpc_client()
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        
+        result = await client.execute_nl_query(
+            workspace_id=workspace_id,
+            natural_query=request.query,
+            user_id=current_user.user_id,
+            include_documents=request.include_documents,
+            user_team_ids=user_team_ids
+        )
+        
+        # Parse results_json to List[Dict]
+        import json
+        results = json.loads(result['results_json']) if result.get('results_json') else []
+        
+        return QueryResultResponse(
+            query_id=result['query_id'],
+            column_names=result['column_names'],
+            results=results,
+            result_count=result['result_count'],
+            execution_time_ms=result['execution_time_ms'],
+            generated_sql=result.get('generated_sql'),
+            error_message=result.get('error_message')
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to execute NL query: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

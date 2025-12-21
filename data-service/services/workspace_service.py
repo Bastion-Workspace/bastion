@@ -66,7 +66,12 @@ class WorkspaceService:
                 ORDER BY is_pinned DESC, created_at DESC
             """
             
-            owned_rows = await self.db.fetch(owned_query, user_id)
+            owned_rows = await self.db.fetch(
+                owned_query, 
+                user_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             workspaces = [self._row_to_dict(row) for row in owned_rows]
             
             # Add shared workspaces if requested
@@ -80,7 +85,12 @@ class WorkspaceService:
             logger.error(f"Failed to list workspaces: {e}")
             raise
     
-    async def get_workspace(self, workspace_id: str) -> Optional[Dict[str, Any]]:
+    async def get_workspace(
+        self, 
+        workspace_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> Optional[Dict[str, Any]]:
         """Get a single workspace by ID"""
         try:
             query = """
@@ -90,7 +100,12 @@ class WorkspaceService:
                 WHERE workspace_id = $1
             """
             
-            row = await self.db.fetchrow(query, workspace_id)
+            row = await self.db.fetchrow(
+                query, 
+                workspace_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             return self._row_to_dict(row) if row else None
             
         except Exception as e:
@@ -142,7 +157,9 @@ class WorkspaceService:
                 updates['color'],
                 updates['is_pinned'],
                 updates['updated_at'],
-                user_id
+                user_id,
+                user_id=user_id,
+                user_team_ids=None
             )
             
             logger.info(f"Updated workspace: {workspace_id}")
@@ -152,11 +169,21 @@ class WorkspaceService:
             logger.error(f"Failed to update workspace {workspace_id}: {e}")
             raise
     
-    async def delete_workspace(self, workspace_id: str) -> bool:
+    async def delete_workspace(
+        self, 
+        workspace_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> bool:
         """Delete a workspace and all associated data"""
         try:
             query = "DELETE FROM data_workspaces WHERE workspace_id = $1"
-            result = await self.db.execute(query, workspace_id)
+            result = await self.db.execute(
+                query, 
+                workspace_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             
             # Check if any rows were deleted
             deleted = result.split()[-1] != '0'

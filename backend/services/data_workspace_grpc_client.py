@@ -86,10 +86,19 @@ class DataWorkspaceGRPCClient:
             logger.error(f"gRPC error listing workspaces: {e}")
             raise
     
-    async def get_workspace(self, workspace_id: str) -> Optional[Dict[str, Any]]:
+    async def get_workspace(
+        self, 
+        workspace_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> Optional[Dict[str, Any]]:
         """Get a single workspace"""
         try:
-            request = data_service_pb2.GetWorkspaceRequest(workspace_id=workspace_id)
+            request = data_service_pb2.GetWorkspaceRequest(
+                workspace_id=workspace_id,
+                user_id=user_id or "",
+                user_team_ids=user_team_ids or []
+            )
             response = await self.stub.GetWorkspace(request)
             return self._workspace_response_to_dict(response)
         except grpc.RpcError as e:
@@ -128,10 +137,19 @@ class DataWorkspaceGRPCClient:
             logger.error(f"gRPC error updating workspace: {e}")
             raise
     
-    async def delete_workspace(self, workspace_id: str) -> bool:
+    async def delete_workspace(
+        self, 
+        workspace_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> bool:
         """Delete a workspace"""
         try:
-            request = data_service_pb2.DeleteWorkspaceRequest(workspace_id=workspace_id)
+            request = data_service_pb2.DeleteWorkspaceRequest(
+                workspace_id=workspace_id,
+                user_id=user_id or "",
+                user_team_ids=user_team_ids or []
+            )
             response = await self.stub.DeleteWorkspace(request)
             return response.success
         except grpc.RpcError as e:
@@ -163,20 +181,38 @@ class DataWorkspaceGRPCClient:
             logger.error(f"gRPC error creating database: {e}")
             raise
     
-    async def list_databases(self, workspace_id: str) -> List[Dict[str, Any]]:
+    async def list_databases(
+        self, 
+        workspace_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
         """List databases in a workspace"""
         try:
-            request = data_service_pb2.ListDatabasesRequest(workspace_id=workspace_id)
+            request = data_service_pb2.ListDatabasesRequest(
+                workspace_id=workspace_id,
+                user_id=user_id or "",
+                user_team_ids=user_team_ids or []
+            )
             response = await self.stub.ListDatabases(request)
             return [self._database_response_to_dict(db) for db in response.databases]
         except grpc.RpcError as e:
             logger.error(f"gRPC error listing databases: {e}")
             raise
     
-    async def get_database(self, database_id: str) -> Optional[Dict[str, Any]]:
+    async def get_database(
+        self, 
+        database_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> Optional[Dict[str, Any]]:
         """Get a single database"""
         try:
-            request = data_service_pb2.GetDatabaseRequest(database_id=database_id)
+            request = data_service_pb2.GetDatabaseRequest(
+                database_id=database_id,
+                user_id=user_id or "",
+                user_team_ids=user_team_ids or []
+            )
             response = await self.stub.GetDatabase(request)
             return self._database_response_to_dict(response)
         except grpc.RpcError as e:
@@ -185,10 +221,19 @@ class DataWorkspaceGRPCClient:
             logger.error(f"gRPC error getting database: {e}")
             raise
     
-    async def delete_database(self, database_id: str) -> bool:
+    async def delete_database(
+        self, 
+        database_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> bool:
         """Delete a database"""
         try:
-            request = data_service_pb2.DeleteDatabaseRequest(database_id=database_id)
+            request = data_service_pb2.DeleteDatabaseRequest(
+                database_id=database_id,
+                user_id=user_id or "",
+                user_team_ids=user_team_ids or []
+            )
             response = await self.stub.DeleteDatabase(request)
             return response.success
         except grpc.RpcError as e:
@@ -267,14 +312,18 @@ class DataWorkspaceGRPCClient:
         self,
         table_id: str,
         offset: int = 0,
-        limit: int = 100
+        limit: int = 100,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """Get table data"""
         try:
             request = data_service_pb2.GetTableDataRequest(
                 table_id=table_id,
                 offset=offset,
-                limit=limit
+                limit=limit,
+                user_id=user_id or "",
+                user_team_ids=user_team_ids or []
             )
             
             response = await self.stub.GetTableData(request)
@@ -325,20 +374,38 @@ class DataWorkspaceGRPCClient:
             logger.error(f"gRPC error creating table: {e}")
             raise
     
-    async def list_tables(self, database_id: str) -> List[Dict[str, Any]]:
+    async def list_tables(
+        self, 
+        database_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
         """List tables in a database"""
         try:
-            request = data_service_pb2.ListTablesRequest(database_id=database_id)
+            request = data_service_pb2.ListTablesRequest(
+                database_id=database_id,
+                user_id=user_id or "",
+                user_team_ids=user_team_ids or []
+            )
             response = await self.stub.ListTables(request)
             return [self._table_response_to_dict(table) for table in response.tables]
         except grpc.RpcError as e:
             logger.error(f"gRPC error listing tables: {e}")
             raise
     
-    async def get_table(self, table_id: str) -> Optional[Dict[str, Any]]:
+    async def get_table(
+        self, 
+        table_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> Optional[Dict[str, Any]]:
         """Get a single table"""
         try:
-            request = data_service_pb2.GetTableRequest(table_id=table_id)
+            request = data_service_pb2.GetTableRequest(
+                table_id=table_id,
+                user_id=user_id or "",
+                user_team_ids=user_team_ids or []
+            )
             response = await self.stub.GetTable(request)
             return self._table_response_to_dict(response)
         except grpc.RpcError as e:
@@ -347,10 +414,19 @@ class DataWorkspaceGRPCClient:
             logger.error(f"gRPC error getting table: {e}")
             raise
     
-    async def delete_table(self, table_id: str) -> bool:
+    async def delete_table(
+        self, 
+        table_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> bool:
         """Delete a table"""
         try:
-            request = data_service_pb2.DeleteTableRequest(table_id=table_id)
+            request = data_service_pb2.DeleteTableRequest(
+                table_id=table_id,
+                user_id=user_id or "",
+                user_team_ids=user_team_ids or []
+            )
             response = await self.stub.DeleteTable(request)
             return response.success
         except grpc.RpcError as e:
@@ -519,5 +595,72 @@ class DataWorkspaceGRPCClient:
             'completed_at': response.completed_at if response.completed_at else None,
             'progress_percent': int((response.rows_processed / response.rows_total * 100)) if response.rows_total > 0 else 0
         }
+    
+    # Query methods
+    async def execute_sql_query(
+        self,
+        workspace_id: str,
+        query: str,
+        user_id: str,
+        limit: int = 1000,
+        user_team_ids: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Execute SQL query against workspace databases"""
+        try:
+            request = data_service_pb2.SQLQueryRequest(
+                workspace_id=workspace_id,
+                sql_query=query,
+                limit=limit,
+                user_id=user_id,
+                user_team_ids=user_team_ids or []
+            )
+            
+            response = await self.stub.ExecuteSQLQuery(request)
+            
+            return {
+                'query_id': response.query_id,
+                'column_names': list(response.column_names),
+                'results_json': response.results_json,
+                'result_count': response.result_count,
+                'execution_time_ms': response.execution_time_ms,
+                'generated_sql': response.generated_sql,
+                'error_message': response.error_message if response.error_message else None
+            }
+        except grpc.RpcError as e:
+            logger.error(f"gRPC error executing SQL query: {e}")
+            raise
+    
+    async def execute_nl_query(
+        self,
+        workspace_id: str,
+        natural_query: str,
+        user_id: str,
+        include_documents: bool = False,
+        user_team_ids: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """Execute natural language query"""
+        try:
+            request = data_service_pb2.NLQueryRequest(
+                workspace_id=workspace_id,
+                natural_language_query=natural_query,
+                include_documents=include_documents,
+                user_id=user_id,
+                user_team_ids=user_team_ids or []
+            )
+            
+            response = await self.stub.ExecuteNaturalLanguageQuery(request)
+            
+            return {
+                'query_id': response.query_id,
+                'column_names': list(response.column_names),
+                'results_json': response.results_json,
+                'result_count': response.result_count,
+                'execution_time_ms': response.execution_time_ms,
+                'generated_sql': response.generated_sql,
+                'error_message': response.error_message if response.error_message else None
+            }
+        except grpc.RpcError as e:
+            logger.error(f"gRPC error executing NL query: {e}")
+            raise
 
 

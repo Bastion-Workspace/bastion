@@ -182,7 +182,7 @@ function buildFrontmatter(data) {
   return `---\n${lines.join('\n')}\n---\n`;
 }
 
-export default function MarkdownCMEditor({ value, onChange, filename, canonicalPath, initialScrollPosition = 0, onScrollChange }) {
+export default function MarkdownCMEditor({ value, onChange, filename, canonicalPath, documentId, initialScrollPosition = 0, onScrollChange }) {
   const { darkMode } = useTheme();
   
   // Refs for scroll position preservation
@@ -228,9 +228,16 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
   }, { debounceMs: 350 }) : [], [suggestionsEnabled]);
   const mdTheme = useMemo(() => createMdTheme(darkMode), [darkMode]);
   const inlineEditExt = useMemo(() => createInlineEditSuggestionsExtension(), []);
+  
+  // ✅ documentId comes from props, passed down from DocumentViewer
   const liveEditDiffExt = useMemo(() => {
-    const ext = createLiveEditDiffExtension();
-    console.log('🔍 MarkdownCMEditor: Created liveEditDiffExt:', ext?.length, 'items');
+    if (!documentId) {
+      console.log('🔍 MarkdownCMEditor: No documentId, skipping liveEditDiffExt');
+      return [];
+    }
+    
+    const ext = createLiveEditDiffExtension(documentId);
+    console.log('🔍 MarkdownCMEditor: Created liveEditDiffExt for document:', documentId, 'items:', ext?.length);
     // Test event listener to verify events are firing
     const testListener = (e) => {
       console.log('🔍 TEST: MarkdownCMEditor received editorOperationsLive event:', e.detail);
@@ -241,7 +248,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
       window.removeEventListener('editorOperationsLive', testListener);
     }, 30000);
     return ext;
-  }, []);
+  }, [documentId]);
   const extensions = useMemo(() => [
     history(),
     keymap.of([...defaultKeymap, ...historyKeymap]),
@@ -403,6 +410,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
       selectionStart: -1,
       selectionEnd: -1,
       canonicalPath: canonicalPath || null,
+      documentId: documentId || null, // ✅ CRITICAL: Include documentId for diff persistence
     };
     
     setEditorState(payload);
@@ -432,11 +440,12 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
         selectionStart: -1,
         selectionEnd: -1,
         canonicalPath: null,
+        documentId: null, // ✅ Clear documentId on unmount
       });
     };
     // Only run on mount/unmount and when file changes, NOT on every keystroke
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filename, canonicalPath]);
+  }, [filename, canonicalPath, documentId]);
 
   // Watch for frontmatter changes in content and update cache
   useEffect(() => {
@@ -650,7 +659,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
         const ops = [normalizedOp];
         applyOperations({ detail: { operations: ops } });
         
-        // Remove from pending diffs
+        // Remove from pending diffs (handled by plugin, but dispatch for consistency)
         window.dispatchEvent(new CustomEvent('removeLiveDiff', { 
           detail: { operationId } 
         }));
@@ -865,6 +874,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
               selectionStart,
               selectionEnd,
               canonicalPath: canonicalPath || null,
+              documentId: documentId || null, // ✅ CRITICAL: Include documentId for diff persistence
             };
             
             // **PERFORMANCE FIX**: Don't update React context during typing!

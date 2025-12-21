@@ -57,32 +57,71 @@ class DatabaseConnectionManager:
             logger.info("Database connection pool closed")
     
     @asynccontextmanager
-    async def acquire(self):
-        """Acquire a connection from the pool"""
+    async def acquire(self, user_id: Optional[str] = None, user_team_ids: Optional[List[str]] = None):
+        """Acquire a connection from the pool with optional RLS context"""
         if not self._initialized or not self.pool:
             raise RuntimeError("Connection pool not initialized")
         
-        async with self.pool.acquire() as conn:
+        conn = await self.pool.acquire()
+        try:
+            # Set RLS context if user information provided
+            if user_id:
+                await self._set_rls_context(conn, user_id, user_team_ids or [])
+            
             yield conn
+        finally:
+            # Clear RLS context before releasing
+            if user_id:
+                await self._clear_rls_context(conn)
+            await self.pool.release(conn)
     
-    async def execute(self, query: str, *args) -> str:
+    async def _set_rls_context(self, conn: asyncpg.Connection, user_id: str, user_team_ids: List[str]):
+        """Set PostgreSQL session variables for RLS"""
+        try:
+            # Set user ID for RLS policies
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, false)",
+                user_id
+            )
+            
+            # Set team IDs as comma-separated string
+            team_ids_str = ','.join(user_team_ids) if user_team_ids else ''
+            await conn.execute(
+                "SELECT set_config('app.current_user_team_ids', $1, false)",
+                team_ids_str
+            )
+            
+            logger.debug(f"RLS context set for user: {user_id} (teams: {len(user_team_ids)})")
+        except Exception as e:
+            logger.error(f"Failed to set RLS context: {e}")
+            raise
+    
+    async def _clear_rls_context(self, conn: asyncpg.Connection):
+        """Clear PostgreSQL session variables"""
+        try:
+            await conn.execute("SELECT set_config('app.current_user_id', '', false)")
+            await conn.execute("SELECT set_config('app.current_user_team_ids', '', false)")
+        except Exception as e:
+            logger.debug(f"Failed to clear RLS context: {e}")
+    
+    async def execute(self, query: str, *args, user_id: Optional[str] = None, user_team_ids: Optional[List[str]] = None) -> str:
         """Execute a query that doesn't return results"""
-        async with self.acquire() as conn:
+        async with self.acquire(user_id=user_id, user_team_ids=user_team_ids) as conn:
             return await conn.execute(query, *args)
     
-    async def fetch(self, query: str, *args) -> List[asyncpg.Record]:
+    async def fetch(self, query: str, *args, user_id: Optional[str] = None, user_team_ids: Optional[List[str]] = None) -> List[asyncpg.Record]:
         """Fetch multiple rows"""
-        async with self.acquire() as conn:
+        async with self.acquire(user_id=user_id, user_team_ids=user_team_ids) as conn:
             return await conn.fetch(query, *args)
     
-    async def fetchrow(self, query: str, *args) -> Optional[asyncpg.Record]:
+    async def fetchrow(self, query: str, *args, user_id: Optional[str] = None, user_team_ids: Optional[List[str]] = None) -> Optional[asyncpg.Record]:
         """Fetch a single row"""
-        async with self.acquire() as conn:
+        async with self.acquire(user_id=user_id, user_team_ids=user_team_ids) as conn:
             return await conn.fetchrow(query, *args)
     
-    async def fetchval(self, query: str, *args) -> Any:
+    async def fetchval(self, query: str, *args, user_id: Optional[str] = None, user_team_ids: Optional[List[str]] = None) -> Any:
         """Fetch a single value"""
-        async with self.acquire() as conn:
+        async with self.acquire(user_id=user_id, user_team_ids=user_team_ids) as conn:
             return await conn.fetchval(query, *args)
     
     async def executemany(self, query: str, args_list: List[tuple]) -> None:

@@ -15,12 +15,14 @@ import OrgAgendaView from './OrgAgendaView';
 import OrgTodosView from './OrgTodosView';
 import OrgContactsView from './OrgContactsView';
 import DataWorkspaceManager from './data_workspace/DataWorkspaceManager';
+import { documentDiffStore } from '../services/documentDiffStore';
 
 const TabbedContentManager = forwardRef((props, ref) => {
     const theme = useTheme();
     const [tabs, setTabs] = useState([]);
     const [activeTabId, setActiveTabId] = useState(null);
     const [showFeedManager, setShowFeedManager] = useState(false);
+    const [tabDiffCounts, setTabDiffCounts] = useState({}); // { [tabId]: diffCount }
     
     const MAX_TABS = 5;
 
@@ -49,6 +51,41 @@ const TabbedContentManager = forwardRef((props, ref) => {
     // Save tabs to localStorage whenever tabs change
     useEffect(() => {
         localStorage.setItem('rss-tabs', JSON.stringify(tabs));
+    }, [tabs]);
+
+    // Subscribe to diff store changes for badge updates
+    useEffect(() => {
+        const handleDiffChange = (documentId, changeType) => {
+            // Find all tabs with this documentId
+            const matchingTabs = tabs.filter(t => t.type === 'document' && t.documentId === documentId);
+            
+            matchingTabs.forEach(tab => {
+                const diffs = documentDiffStore.getDiffs(documentId);
+                const diffCount = diffs && Array.isArray(diffs.operations) ? diffs.operations.length : 0;
+                
+                setTabDiffCounts(prev => ({
+                    ...prev,
+                    [tab.id]: diffCount
+                }));
+            });
+        };
+        
+        // Initial load: check all document tabs for existing diffs
+        tabs.forEach(tab => {
+            if (tab.type === 'document' && tab.documentId) {
+                const diffs = documentDiffStore.getDiffs(tab.documentId);
+                const diffCount = diffs && Array.isArray(diffs.operations) ? diffs.operations.length : 0;
+                if (diffCount > 0) {
+                    setTabDiffCounts(prev => ({
+                        ...prev,
+                        [tab.id]: diffCount
+                    }));
+                }
+            }
+        });
+        
+        documentDiffStore.subscribe(handleDiffChange);
+        return () => documentDiffStore.unsubscribe(handleDiffChange);
     }, [tabs]);
 
     // Save active tab to localStorage whenever it changes
@@ -496,7 +533,11 @@ const TabbedContentManager = forwardRef((props, ref) => {
             {/* Tab Bar - visually merged with content via shared border and background */}
             <div style={tabBarStyle}>
                 <div style={tabListStyle}>
-                    {tabs.map((tab) => (
+                    {tabs.map((tab) => {
+                        const diffCount = tabDiffCounts[tab.id] || 0;
+                        const hasPendingDiffs = diffCount > 0;
+                        
+                        return (
                         <div
                             key={tab.id}
                             style={{
@@ -507,6 +548,25 @@ const TabbedContentManager = forwardRef((props, ref) => {
                         >
                             <span style={tabIconStyle}>{tab.icon}</span>
                             <span style={tabTitleStyle}>{tab.title}</span>
+                            
+                            {/* Diff badge */}
+                            {hasPendingDiffs && (
+                                <span style={{
+                                    backgroundColor: '#ff9800',
+                                    color: 'white',
+                                    borderRadius: '10px',
+                                    padding: '2px 6px',
+                                    fontSize: '11px',
+                                    fontWeight: 'bold',
+                                    marginLeft: '6px',
+                                    minWidth: '18px',
+                                    textAlign: 'center',
+                                    display: 'inline-block'
+                                }}>
+                                    {diffCount}
+                                </span>
+                            )}
+                            
                             <button
                                 onClick={(e) => {
                                     e.stopPropagation();
@@ -517,7 +577,8 @@ const TabbedContentManager = forwardRef((props, ref) => {
                                 ×
                             </button>
                         </div>
-                    ))}
+                        );
+                    })}
                 </div>
                 
                 <div style={tabActionsStyle} />
