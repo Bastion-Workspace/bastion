@@ -40,7 +40,9 @@ class DatabaseService:
             row = await self.db.fetchrow(
                 query,
                 database_id, workspace_id, name, description, source_type,
-                0, 0, json.dumps({}), now, now, user_id, user_id
+                0, 0, json.dumps({}), now, now, user_id, user_id,
+                user_id=user_id,
+                user_team_ids=None
             )
             
             logger.info(f"Created database: {database_id} in workspace: {workspace_id}")
@@ -50,7 +52,12 @@ class DatabaseService:
             logger.error(f"Failed to create database: {e}")
             raise
     
-    async def list_databases(self, workspace_id: str) -> List[Dict[str, Any]]:
+    async def list_databases(
+        self, 
+        workspace_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
         """List all databases in a workspace"""
         try:
             query = """
@@ -61,14 +68,24 @@ class DatabaseService:
                 ORDER BY created_at DESC
             """
             
-            rows = await self.db.fetch(query, workspace_id)
+            rows = await self.db.fetch(
+                query, 
+                workspace_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             return [self._row_to_dict(row) for row in rows]
             
         except Exception as e:
             logger.error(f"Failed to list databases: {e}")
             raise
     
-    async def get_database(self, database_id: str) -> Optional[Dict[str, Any]]:
+    async def get_database(
+        self, 
+        database_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> Optional[Dict[str, Any]]:
         """Get a single database by ID"""
         try:
             query = """
@@ -78,7 +95,12 @@ class DatabaseService:
                 WHERE database_id = $1
             """
             
-            row = await self.db.fetchrow(query, database_id)
+            row = await self.db.fetchrow(
+                query, 
+                database_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             return self._row_to_dict(row) if row else None
             
         except Exception as e:
@@ -124,11 +146,21 @@ class DatabaseService:
             logger.error(f"Failed to update database stats {database_id}: {e}")
             raise
     
-    async def delete_database(self, database_id: str) -> bool:
+    async def delete_database(
+        self, 
+        database_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> bool:
         """Delete a database and all associated tables/data"""
         try:
             query = "DELETE FROM custom_databases WHERE database_id = $1"
-            result = await self.db.execute(query, database_id)
+            result = await self.db.execute(
+                query, 
+                database_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             
             deleted = result.split()[-1] != '0'
             

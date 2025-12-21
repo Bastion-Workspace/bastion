@@ -1,5 +1,6 @@
 import logging
 import json
+import uuid
 from typing import Dict, Any
 
 import grpc
@@ -10,6 +11,7 @@ from services.workspace_service import WorkspaceService
 from services.database_service import DatabaseService
 from services.table_service import TableService
 from services.data_import_service import DataImportService
+from services.query_service import QueryService
 from config.settings import settings
 
 # Import generated protobuf code
@@ -31,6 +33,7 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
         self.database_service = None
         self.table_service = None
         self.import_service = None
+        self.query_service = None
     
     async def initialize(self):
         """Initialize services with database connection"""
@@ -39,6 +42,7 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
         self.database_service = DatabaseService(db_manager)
         self.table_service = TableService(db_manager)
         self.import_service = DataImportService(db_manager)
+        self.query_service = QueryService(db_manager)
         logger.info("Data service initialized successfully")
     
     async def HealthCheck(self, request, context):
@@ -102,7 +106,14 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
     async def GetWorkspace(self, request, context):
         """Get a single workspace"""
         try:
-            workspace = await self.workspace_service.get_workspace(request.workspace_id)
+            user_id = request.user_id if request.user_id else None
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            
+            workspace = await self.workspace_service.get_workspace(
+                request.workspace_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             
             if not workspace:
                 context.set_code(grpc.StatusCode.NOT_FOUND)
@@ -146,7 +157,14 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
     async def DeleteWorkspace(self, request, context):
         """Delete a workspace"""
         try:
-            success = await self.workspace_service.delete_workspace(request.workspace_id)
+            user_id = request.user_id if request.user_id else None
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            
+            success = await self.workspace_service.delete_workspace(
+                request.workspace_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             
             return data_service_pb2.DeleteResponse(
                 success=success,
@@ -181,7 +199,14 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
     async def ListDatabases(self, request, context):
         """List databases in a workspace"""
         try:
-            databases = await self.database_service.list_databases(request.workspace_id)
+            user_id = request.user_id if request.user_id else None
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            
+            databases = await self.database_service.list_databases(
+                request.workspace_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             
             database_responses = [
                 data_service_pb2.DatabaseResponse(**db) for db in databases
@@ -198,10 +223,42 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             context.set_details(str(e))
             return data_service_pb2.DatabaseListResponse()
     
+    async def GetDatabase(self, request, context):
+        """Get a single database"""
+        try:
+            user_id = request.user_id if request.user_id else None
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            
+            database = await self.database_service.get_database(
+                request.database_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
+            
+            if not database:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details("Database not found")
+                return data_service_pb2.DatabaseResponse()
+            
+            return data_service_pb2.DatabaseResponse(**database)
+            
+        except Exception as e:
+            logger.error(f"Failed to get database: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return data_service_pb2.DatabaseResponse()
+    
     async def DeleteDatabase(self, request, context):
         """Delete a database"""
         try:
-            success = await self.database_service.delete_database(request.database_id)
+            user_id = request.user_id if request.user_id else None
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            
+            success = await self.database_service.delete_database(
+                request.database_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             
             return data_service_pb2.DeleteResponse(
                 success=success,
@@ -343,7 +400,14 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
     async def ListTables(self, request, context):
         """List all tables in a database"""
         try:
-            tables = await self.table_service.list_tables(request.database_id)
+            user_id = request.user_id if request.user_id else None
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            
+            tables = await self.table_service.list_tables(
+                request.database_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             
             table_responses = [
                 data_service_pb2.TableResponse(**table)
@@ -364,7 +428,14 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
     async def GetTable(self, request, context):
         """Get a single table"""
         try:
-            table = await self.table_service.get_table(request.table_id)
+            user_id = request.user_id if request.user_id else None
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            
+            table = await self.table_service.get_table(
+                request.table_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             
             if not table:
                 context.set_code(grpc.StatusCode.NOT_FOUND)
@@ -382,11 +453,22 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
     async def DeleteTable(self, request, context):
         """Delete a table"""
         try:
+            user_id = request.user_id if request.user_id else None
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            
             # Get table info before deleting (to get database_id)
-            table = await self.table_service.get_table(request.table_id)
+            table = await self.table_service.get_table(
+                request.table_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             database_id = table.get('database_id') if table else None
             
-            success = await self.table_service.delete_table(request.table_id)
+            success = await self.table_service.delete_table(
+                request.table_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             
             # Update database stats (table count and total rows)
             if success and database_id:
@@ -406,10 +488,15 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
     async def GetTableData(self, request, context):
         """Get table data with pagination"""
         try:
+            user_id = request.user_id if request.user_id else None
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            
             data = await self.table_service.get_table_data(
                 table_id=request.table_id,
                 offset=request.offset,
-                limit=request.limit if request.limit > 0 else 100
+                limit=request.limit if request.limit > 0 else 100,
+                user_id=user_id,
+                user_team_ids=user_team_ids
             )
             
             row_responses = [
@@ -544,5 +631,70 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return data_service_pb2.DeleteResponse(success=False, message=str(e))
+    
+    # Query operations
+    async def ExecuteSQLQuery(self, request, context):
+        """Execute SQL query against workspace databases"""
+        try:
+            user_id = request.user_id if request.user_id else None
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            
+            result = await self.query_service.execute_sql_query(
+                workspace_id=request.workspace_id,
+                sql_query=request.sql_query,
+                user_id=user_id,
+                limit=request.limit if request.limit > 0 else 1000,
+                user_team_ids=user_team_ids
+            )
+            
+            return data_service_pb2.QueryResultResponse(**result)
+            
+        except Exception as e:
+            logger.error(f"Failed to execute SQL query: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return data_service_pb2.QueryResultResponse(
+                query_id="",
+                column_names=[],
+                results_json=json.dumps([]),
+                result_count=0,
+                execution_time_ms=0,
+                generated_sql=request.sql_query if request else "",
+                error_message=str(e)
+            )
+    
+    async def ExecuteNaturalLanguageQuery(self, request, context):
+        """Execute natural language query (converts to SQL and executes)"""
+        try:
+            user_id = request.user_id if request.user_id else None
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            
+            # For now, basic implementation - just return error
+            # TODO: Implement NL to SQL conversion using LLM
+            error_message = "Natural language query conversion not yet implemented"
+            
+            return data_service_pb2.QueryResultResponse(
+                query_id=str(uuid.uuid4()),
+                column_names=[],
+                results_json=json.dumps([]),
+                result_count=0,
+                execution_time_ms=0,
+                generated_sql="",
+                error_message=error_message
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to execute NL query: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return data_service_pb2.QueryResultResponse(
+                query_id="",
+                column_names=[],
+                results_json=json.dumps([]),
+                result_count=0,
+                execution_time_ms=0,
+                generated_sql="",
+                error_message=str(e)
+            )
 
 

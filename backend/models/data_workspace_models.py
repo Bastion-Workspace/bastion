@@ -161,9 +161,8 @@ class ImportJobResponse(BaseModel):
 
 # Query Models
 class SQLQueryRequest(BaseModel):
-    table_id: str
-    sql_query: str
-    limit: int = 100
+    query: str
+    limit: int = 1000
 
 
 class NaturalLanguageQueryRequest(BaseModel):

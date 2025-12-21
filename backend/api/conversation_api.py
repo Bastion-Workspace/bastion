@@ -239,7 +239,7 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
                         from services.conversation_service import ConversationService
                         conversation_service = ConversationService()
                         conversation_service.set_current_user(current_user.user_id)
-                        db_conversation = await conversation_service.lifecycle_manager.get_conversation_lifecycle(conversation_id)
+                        db_conversation = await conversation_service.lifecycle_manager.get_conversation_lifecycle(conversation_id, current_user.user_id)
                         if db_conversation:
                             db_title = db_conversation.get("title")
                             # Prefer database title if it exists and is not default
@@ -277,7 +277,7 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
                 conversation_service.set_current_user(current_user.user_id)
                 
                 # Get conversation from database
-                db_conversation = await conversation_service.lifecycle_manager.get_conversation_lifecycle(conversation_id)
+                db_conversation = await conversation_service.lifecycle_manager.get_conversation_lifecycle(conversation_id, current_user.user_id)
                 if db_conversation:
                     user_context = db_conversation.get("user_context", {})
                     if user_context.get("user_id") == current_user.user_id:

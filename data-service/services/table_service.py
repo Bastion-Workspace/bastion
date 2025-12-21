@@ -41,7 +41,9 @@ class TableService:
             row = await self.db.fetchrow(
                 query,
                 table_id, database_id, name, description, 0,
-                json.dumps(schema), json.dumps({}), json.dumps({}), now, now, user_id, user_id
+                json.dumps(schema), json.dumps({}), json.dumps({}), now, now, user_id, user_id,
+                user_id=user_id,
+                user_team_ids=None
             )
             
             logger.info(f"Created table: {table_id} in database: {database_id}")
@@ -51,7 +53,12 @@ class TableService:
             logger.error(f"Failed to create table: {e}")
             raise
     
-    async def list_tables(self, database_id: str) -> List[Dict[str, Any]]:
+    async def list_tables(
+        self, 
+        database_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
         """List all tables in a database"""
         try:
             query = """
@@ -62,14 +69,24 @@ class TableService:
                 ORDER BY created_at DESC
             """
             
-            rows = await self.db.fetch(query, database_id)
+            rows = await self.db.fetch(
+                query, 
+                database_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             return [self._row_to_dict(row) for row in rows]
             
         except Exception as e:
             logger.error(f"Failed to list tables for database {database_id}: {e}")
             raise
     
-    async def get_table(self, table_id: str) -> Optional[Dict[str, Any]]:
+    async def get_table(
+        self, 
+        table_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> Optional[Dict[str, Any]]:
         """Get table metadata"""
         try:
             query = """
@@ -79,23 +96,43 @@ class TableService:
                 WHERE table_id = $1
             """
             
-            row = await self.db.fetchrow(query, table_id)
+            row = await self.db.fetchrow(
+                query, 
+                table_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             return self._row_to_dict(row) if row else None
             
         except Exception as e:
             logger.error(f"Failed to get table {table_id}: {e}")
             raise
     
-    async def delete_table(self, table_id: str) -> bool:
+    async def delete_table(
+        self, 
+        table_id: str,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
+    ) -> bool:
         """Delete a table and all its data"""
         try:
             # Delete all rows first
             delete_rows_query = "DELETE FROM custom_data_rows WHERE table_id = $1"
-            await self.db.execute(delete_rows_query, table_id)
+            await self.db.execute(
+                delete_rows_query, 
+                table_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             
             # Delete table
             delete_table_query = "DELETE FROM custom_tables WHERE table_id = $1"
-            result = await self.db.execute(delete_table_query, table_id)
+            result = await self.db.execute(
+                delete_table_query, 
+                table_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             
             deleted = result.split()[-1] != '0'
             if deleted:
@@ -111,12 +148,14 @@ class TableService:
         self,
         table_id: str,
         offset: int = 0,
-        limit: int = 100
+        limit: int = 100,
+        user_id: Optional[str] = None,
+        user_team_ids: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """Get table data with pagination"""
         try:
             # Get table metadata first
-            table = await self.get_table(table_id)
+            table = await self.get_table(table_id, user_id=user_id, user_team_ids=user_team_ids)
             if not table:
                 return {'error': 'Table not found'}
             
@@ -129,7 +168,14 @@ class TableService:
                 LIMIT $2 OFFSET $3
             """
             
-            rows = await self.db.fetch(query, table_id, limit, offset)
+            rows = await self.db.fetch(
+                query, 
+                table_id, 
+                limit, 
+                offset,
+                user_id=user_id,
+                user_team_ids=user_team_ids
+            )
             
             data_rows = []
             for row in rows:

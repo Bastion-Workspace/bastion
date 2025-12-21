@@ -4,6 +4,7 @@ import { useLocation } from 'react-router-dom';
 import apiService from '../services/apiService';
 import BackgroundJobService from '../services/backgroundJobService';
 import tabNotificationManager from '../utils/tabNotification';
+import { documentDiffStore } from '../services/documentDiffStore';
 
 // Format agent type to display name
 const formatAgentName = (agentType) => {
@@ -1230,9 +1231,35 @@ export const ChatSidebarProvider = ({ children }) => {
                   
                   // Emit event for live diff display in editor
                   if (ops.length > 0) {
+                    // Get document context from active editor
+                    let editorCtx = null;
+                    try {
+                      const cached = localStorage.getItem('editor_ctx_cache');
+                      if (cached) {
+                        editorCtx = JSON.parse(cached);
+                      }
+                    } catch (e) {
+                      console.warn('Failed to parse editor context cache:', e);
+                    }
+                    
+                    const documentId = editorCtx?.documentId || null;
+                    const filename = editorCtx?.filename || null;
+                    const contentSnapshot = editorCtx?.content?.substring(0, 1000) || null;
+                    
+                    //  ⚠️ CRITICAL: Warn if documentId is missing
+                    if (!documentId) {
+                      console.warn('⚠️ No documentId in editor_ctx_cache - diffs will not be displayed!', {
+                        editorCtx: editorCtx,
+                        hasCache: !!editorCtx,
+                        cacheKeys: editorCtx ? Object.keys(editorCtx) : []
+                      });
+                    }
+                    
                     console.log('🔍 ChatSidebarContext emitting editorOperationsLive:', {
                       operationsCount: ops.length,
                       messageId: streamingMessage.id,
+                      documentId: documentId,
+                      filename: filename,
                       firstOp: ops[0],
                       allOps: ops.map(op => ({
                         start: op.start,
@@ -1242,14 +1269,24 @@ export const ChatSidebarProvider = ({ children }) => {
                         textLength: op.text?.length
                       }))
                     });
+                    
                     const event = new CustomEvent('editorOperationsLive', {
                       detail: { 
                         operations: ops,
                         manuscriptEdit: mEdit,
-                        messageId: streamingMessage.id
+                        messageId: streamingMessage.id,
+                        documentId: documentId,
+                        filename: filename,
+                        contentSnapshot: contentSnapshot
                       }
                     });
                     window.dispatchEvent(event);
+                    
+                    // Save to centralized store
+                    if (documentId) {
+                      documentDiffStore.setDiffs(documentId, ops, streamingMessage.id, editorCtx?.content || '');
+                    }
+                    
                     console.log('✅ ChatSidebarContext: editorOperationsLive event dispatched');
                   } else {
                     console.warn('⚠️ ChatSidebarContext: No operations to emit (ops.length = 0)');
@@ -1280,15 +1317,49 @@ export const ChatSidebarProvider = ({ children }) => {
                       
                       console.log('✅ All chunks received - dispatching editorOperationsLive event with', ops.length, 'operations');
                       
+                      // Get document context from active editor
+                      let editorCtx = null;
+                      try {
+                        const cached = localStorage.getItem('editor_ctx_cache');
+                        if (cached) {
+                          editorCtx = JSON.parse(cached);
+                        }
+                      } catch (e) {
+                        console.warn('Failed to parse editor context cache:', e);
+                      }
+                      
+                      const documentId = editorCtx?.documentId || null;
+                      const filename = editorCtx?.filename || null;
+                      const contentSnapshot = editorCtx?.content?.substring(0, 1000) || null;
+                      
+                      // ⚠️ CRITICAL: Warn if documentId is missing
+                      if (!documentId) {
+                        console.warn('⚠️ No documentId in editor_ctx_cache - diffs will not be displayed!', {
+                          editorCtx: editorCtx,
+                          hasCache: !!editorCtx,
+                          cacheKeys: editorCtx ? Object.keys(editorCtx) : []
+                        });
+                      } else {
+                        console.log('✅ Dispatching editorOperationsLive with documentId:', documentId);
+                      }
+                      
                       // Dispatch the event
                       const event = new CustomEvent('editorOperationsLive', {
                         detail: { 
                           operations: ops,
                           manuscriptEdit: mEdit,
-                          messageId: streamingMessage.id
+                          messageId: streamingMessage.id,
+                          documentId: documentId,
+                          filename: filename,
+                          contentSnapshot: contentSnapshot
                         }
                       });
                       window.dispatchEvent(event);
+                      
+                      // Save to centralized store
+                      if (documentId) {
+                        documentDiffStore.setDiffs(documentId, ops, streamingMessage.id, editorCtx?.content || '');
+                      }
                       
                       // Clean up accumulator
                       delete window.__editor_ops_accumulator;
