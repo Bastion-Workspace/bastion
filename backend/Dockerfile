@@ -36,6 +36,9 @@ RUN python -m spacy download en_core_web_lg && \
 # Copy shared proto files first
 COPY protos /app/protos
 
+# Copy VERSION file for version management
+COPY VERSION /app/VERSION
+
 # Copy application code
 COPY backend /app
 
