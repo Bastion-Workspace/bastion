@@ -23,7 +23,8 @@ import {
   Dialog,
   DialogTitle,
   DialogContent,
-  DialogActions
+  DialogActions,
+  Collapse
 } from '@mui/material';
 import {
   CheckCircle,
@@ -63,6 +64,9 @@ const OrgTodosView = ({ onOpenDocument }) => {
   // **BULLY!** Collapsible section state management
   // Store expanded paths as Set of stringified paths for fast lookup
   const [expandedPaths, setExpandedPaths] = useState(new Set());
+  
+  // Track which files are expanded
+  const [expandedFiles, setExpandedFiles] = useState(new Set());
 
   // Toggle expand/collapse for a specific path
   const togglePath = useCallback((path) => {
@@ -82,6 +86,24 @@ const OrgTodosView = ({ onOpenDocument }) => {
   const isPathExpanded = useCallback((path) => {
     return expandedPaths.has(JSON.stringify(path));
   }, [expandedPaths]);
+  
+  // Toggle file expansion
+  const toggleFile = useCallback((filename) => {
+    setExpandedFiles(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(filename)) {
+        newSet.delete(filename);
+      } else {
+        newSet.add(filename);
+      }
+      return newSet;
+    });
+  }, []);
+  
+  // Check if a file is expanded
+  const isFileExpanded = useCallback((filename) => {
+    return expandedFiles.has(filename);
+  }, [expandedFiles]);
 
   // Map filter to TODO states
   const getStatesForFilter = useCallback((filter) => {
@@ -127,6 +149,15 @@ const OrgTodosView = ({ onOpenDocument }) => {
   useEffect(() => {
     loadTodos();
   }, [loadTodos]);
+  
+  // Expand all files by default when data loads
+  useEffect(() => {
+    if (todosData?.results && sortBy === 'file') {
+      const grouped = groupByFile(getSortedTodos(todosData.results));
+      const filenames = Object.keys(grouped);
+      setExpandedFiles(new Set(filenames));
+    }
+  }, [todosData, sortBy, groupByFile, getSortedTodos]);
 
   // Handle clicking a TODO item
   const handleItemClick = (item) => {
@@ -316,6 +347,7 @@ const OrgTodosView = ({ onOpenDocument }) => {
   // Expand all sections
   const expandAll = useCallback(() => {
     const allPaths = new Set();
+    const allFiles = new Set();
     
     const collectPaths = (node) => {
       if (node.path && node.path.length > 0) {
@@ -329,18 +361,21 @@ const OrgTodosView = ({ onOpenDocument }) => {
     // Collect from all files
     if (sortBy === 'file' && todosData?.results) {
       const grouped = groupByFile(getSortedTodos(todosData.results));
-      Object.values(grouped).forEach(fileTodos => {
-        const tree = buildHierarchicalTree(fileTodos);
+      Object.keys(grouped).forEach(filename => {
+        allFiles.add(filename);
+        const tree = buildHierarchicalTree(grouped[filename]);
         collectPaths(tree);
       });
     }
     
     setExpandedPaths(allPaths);
+    setExpandedFiles(allFiles);
   }, [sortBy, todosData, groupByFile, getSortedTodos, buildHierarchicalTree]);
 
   // Collapse all sections
   const collapseAll = useCallback(() => {
     setExpandedPaths(new Set());
+    setExpandedFiles(new Set());
   }, []);
 
   // Extract all unique tags from todos
@@ -392,7 +427,7 @@ const OrgTodosView = ({ onOpenDocument }) => {
   const groupedTodos = sortBy === 'file' ? groupByFile(sortedTodos) : null;
 
   // **BULLY!** Render hierarchical tree with proper indentation and collapsibility
-  const renderHierarchicalNode = useCallback((node, depth = 0, baseIndent = 0) => {
+  const renderHierarchicalNode = useCallback((node, depth = 0, baseIndent = 0, filename = null) => {
     /**
      * Recursively render a tree node with:
      * - Collapsible heading (if not orphan root)
@@ -419,6 +454,9 @@ const OrgTodosView = ({ onOpenDocument }) => {
     if (totalTodos === 0) return null;  // Don't render empty sections
     
     const isExpanded = node.path && node.path.length > 0 ? isPathExpanded(node.path) : true;
+    
+    // For orphan nodes, check if the file is expanded
+    const shouldShowOrphanTodos = node.isOrphan ? (filename ? isFileExpanded(filename) : true) : false;
     
     // Calculate indent for this node
     // Root and level-1 headings have same indent
@@ -459,40 +497,10 @@ const OrgTodosView = ({ onOpenDocument }) => {
           </Box>
         )}
         
-        {/* Orphan section heading */}
-        {node.isOrphan && node.todos.length > 0 && (
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 0.5,
-              ml: nodeIndent * 3,
-              mb: 1,
-              cursor: 'pointer',
-              '&:hover': { backgroundColor: 'action.hover' },
-              borderRadius: 1,
-              p: 0.5
-            }}
-            onClick={() => togglePath(['__orphan__'])}
-          >
-            {isPathExpanded(['__orphan__']) ? <ExpandMore fontSize="small" /> : <ChevronRight fontSize="small" />}
-            <Typography
-              variant="subtitle2"
-              sx={{
-                fontWeight: 600,
-                color: 'text.secondary',
-                fontStyle: 'italic',
-                flex: 1
-              }}
-            >
-              File Root
-            </Typography>
-            <Chip label={node.todos.length} size="small" />
-          </Box>
-        )}
-        
         {/* TODOs directly under this heading (when expanded) */}
-        {((node.isOrphan && isPathExpanded(['__orphan__'])) || (!node.isOrphan && isExpanded)) && node.todos.length > 0 && (
+        {/* For orphan nodes, show TODOs when file is expanded (no "File Root" wrapper) */}
+        {/* For regular nodes, show when heading is expanded */}
+        {((node.isOrphan && shouldShowOrphanTodos) || (!node.isOrphan && isExpanded)) && node.todos.length > 0 && (
           <List disablePadding sx={{ ml: (nodeIndent + 1) * 3 }}>
             {node.todos.map((item, idx) => (
               <React.Fragment key={idx}>
@@ -580,12 +588,12 @@ const OrgTodosView = ({ onOpenDocument }) => {
         {/* Child headings (recursive, when expanded) */}
         {isExpanded && node.children && node.children.length > 0 && (
           <Box>
-            {node.children.map(child => renderHierarchicalNode(child, depth + 1, baseIndent))}
+            {node.children.map(child => renderHierarchicalNode(child, depth + 1, baseIndent, filename))}
           </Box>
         )}
       </Box>
     );
-  }, [handleItemClick, setRefileItem, setRefileDialogOpen, getTodoStateColor, isPathExpanded, togglePath]);
+  }, [handleItemClick, setRefileItem, setRefileDialogOpen, getTodoStateColor, isPathExpanded, togglePath, isFileExpanded]);
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
@@ -773,26 +781,41 @@ const OrgTodosView = ({ onOpenDocument }) => {
                     // Build hierarchical tree for this file
                     const tree = buildHierarchicalTree(items);
                     
+                    const fileExpanded = isFileExpanded(filename);
+                    
                     return (
                       <Box key={filename} sx={{ mb: 4 }}>
-                        {/* File header */}
-                        <Typography
-                          variant="subtitle2"
+                        {/* File header - now collapsible */}
+                        <Box
                           sx={{
-                            fontWeight: 600,
-                            mb: 2,
-                            color: 'primary.main',
                             display: 'flex',
                             alignItems: 'center',
                             gap: 1,
+                            mb: 2,
                             borderBottom: '2px solid',
                             borderColor: 'primary.main',
-                            pb: 1
+                            pb: 1,
+                            cursor: 'pointer',
+                            '&:hover': { backgroundColor: 'action.hover' },
+                            borderRadius: 1,
+                            px: 1,
+                            py: 0.5
                           }}
+                          onClick={() => toggleFile(filename)}
                         >
+                          {fileExpanded ? <ExpandMore fontSize="small" /> : <ChevronRight fontSize="small" />}
                           <Description fontSize="small" />
-                          {filename}
-                          <Chip label={items.length} size="small" sx={{ ml: 'auto' }} />
+                          <Typography
+                            variant="subtitle2"
+                            sx={{
+                              fontWeight: 600,
+                              color: 'primary.main',
+                              flex: 1
+                            }}
+                          >
+                            {filename}
+                          </Typography>
+                          <Chip label={items.length} size="small" />
                           {tagFilter && (
                             <Chip 
                               label={`Tag: ${tagFilter}`} 
@@ -802,12 +825,14 @@ const OrgTodosView = ({ onOpenDocument }) => {
                               sx={{ ml: 1 }}
                             />
                           )}
-                        </Typography>
+                        </Box>
 
-                        {/* Render hierarchical tree */}
-                        <Paper variant="outlined" sx={{ p: 2 }}>
-                          {renderHierarchicalNode(tree, 0, 0)}
-                        </Paper>
+                        {/* Render hierarchical tree - collapsible */}
+                        <Collapse in={fileExpanded}>
+                          <Paper variant="outlined" sx={{ p: 2 }}>
+                            {renderHierarchicalNode(tree, 0, 0, filename)}
+                          </Paper>
+                        </Collapse>
                       </Box>
                     );
                   })

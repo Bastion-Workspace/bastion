@@ -35,17 +35,6 @@ class AdminService extends ApiServiceBase {
     return this.post(`/api/admin/users/${userId}/change-password`, passwordData);
   }
 
-  // Pending submissions methods
-  getPendingSubmissions = async () => {
-    return this.get('/api/admin/pending-submissions');
-  }
-
-  reviewSubmission = async (documentId, action, comment = '') => {
-    return this.post(`/api/admin/submissions/${documentId}/review`, {
-      action,
-      comment
-    });
-  }
 }
 
 export default new AdminService();

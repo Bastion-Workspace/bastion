@@ -254,6 +254,7 @@ k8s-*.yml
 # IDE
 .vscode/
 .idea/
+.cursor/
 *.swp
 *.swo
 *~

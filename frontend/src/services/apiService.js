@@ -65,7 +65,6 @@ class ApiService {
   updateDocumentMetadata = (documentId, metadata) => this.documents.updateDocumentMetadata(documentId, metadata);
   renameDocument = (documentId, newFilename) => this.documents.renameDocument(documentId, newFilename);
   moveDocument = (documentId, newFolderId, userId) => this.documents.moveDocument(documentId, newFolderId, userId);
-  submitDocumentToGlobal = (documentId, reason) => this.documents.submitDocumentToGlobal(documentId, reason);
   getDocumentContent = (documentId) => this.documents.getDocumentContent(documentId);
   updateDocumentContent = (documentId, content) => this.documents.updateDocumentContent(documentId, content);
   createDocument = (documentData) => this.documents.createDocument(documentData);
@@ -139,8 +138,6 @@ class ApiService {
   createUser = (userData) => this.admin.createUser(userData);
   updateUser = (userId, userData) => this.admin.updateUser(userId, userData);
   deleteUser = (userId) => this.admin.deleteUser(userId);
-  getPendingSubmissions = () => this.admin.getPendingSubmissions();
-  reviewSubmission = (documentId, action, comment) => this.admin.reviewSubmission(documentId, action, comment);
 
   // ===== FOLDER METHODS =====
   getFolderTree = (collectionType) => this.folders.getFolderTree(collectionType);

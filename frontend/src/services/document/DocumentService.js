@@ -103,12 +103,6 @@ class DocumentService extends ApiServiceBase {
     });
   }
 
-  submitDocumentToGlobal = async (documentId, reason = null) => {
-    return this.post(`/api/user/documents/${documentId}/submit`, {
-      document_id: documentId,
-      reason: reason
-    });
-  }
 
   // Document content retrieval
   getDocumentContent = async (documentId) => {
