@@ -44,7 +44,8 @@ const StatusBar = () => {
           // Ensure we always have required fields
           current_time: data.current_time || prev.current_time || '',
           date_formatted: data.date_formatted || prev.date_formatted || '',
-          app_version: data.app_version || prev.app_version || APP_VERSION
+          // Prioritize frontend version (from package.json) over backend version
+          app_version: APP_VERSION || data.app_version || prev.app_version
         }));
       }
     } catch (error) {
@@ -140,7 +141,7 @@ const StatusBar = () => {
 
       {/* Right side: App Version */}
       <Typography variant="caption" sx={{ fontSize: '0.75rem', color: 'text.secondary', flexShrink: 0 }}>
-        v{statusData?.app_version || APP_VERSION}
+        v{APP_VERSION || statusData?.app_version}
       </Typography>
     </Box>
   );
