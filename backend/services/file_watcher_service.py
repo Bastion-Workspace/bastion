@@ -956,18 +956,100 @@ class DocumentFileHandler(FileSystemEventHandler):
         
         **ROOSEVELT'S FOLDER RELOCATION CAVALRY!** 📦
         Update folder record when folder is moved or renamed on disk
+        
+        When a folder is moved programmatically (via API), the database is already updated.
+        We just need to ensure the folder record exists at the new location.
+        File events are handled separately - no need to reprocess all files.
         """
         try:
             from pathlib import Path
             logger.info(f"📦 Processing moved folder: {old_path} -> {new_path}")
             
-            # For now, we'll handle this as: delete old, create new
-            # This is simpler and handles both rename and move cases
-            # More sophisticated logic could preserve folder_id and update parent
+            # Parse NEW path to verify folder exists in database
+            path = Path(new_path)
+            parts = path.parts
             
-            logger.info(f"📁 Handling folder move as delete + create")
-            await self._handle_folder_deleted(old_path)
-            await self._handle_folder_created(new_path)
+            uploads_idx = -1
+            for i, part in enumerate(parts):
+                if part == 'uploads':
+                    uploads_idx = i
+                    break
+            
+            if uploads_idx == -1:
+                logger.warning(f"⚠️ Folder path doesn't contain 'uploads': {new_path}")
+                return
+            
+            # Determine collection type
+            if uploads_idx + 1 >= len(parts):
+                logger.warning(f"⚠️ Invalid folder path structure: {new_path}")
+                return
+            
+            collection_dir = parts[uploads_idx + 1]
+            
+            if collection_dir == 'Users' and uploads_idx + 2 < len(parts):
+                username = parts[uploads_idx + 2]
+                collection_type = 'user'
+                
+                # Get user_id from username
+                user_id = await self._get_user_id_from_username(username)
+                if not user_id:
+                    logger.warning(f"⚠️ Could not find user_id for username: {username}")
+                    return
+                
+                # Get folder path parts (everything after username)
+                folder_start_idx = uploads_idx + 3
+                folder_parts = parts[folder_start_idx:]
+                
+                if not folder_parts:
+                    logger.info(f"📁 Root directory move - no action needed")
+                    return
+                
+                logger.info(f"📁 Verifying folder exists at new location: {' -> '.join(folder_parts)}")
+                
+                # Check if folder exists at new location in database
+                folder_id = await self._resolve_deepest_folder_id(tuple(folder_parts), user_id, collection_type)
+                
+                if folder_id:
+                    logger.info(f"✅ Folder already exists in database at new location: {folder_id}")
+                    # Folder is already in the correct location in DB (from programmatic move)
+                    # No need to process individual files - they keep their folder_id
+                else:
+                    logger.warning(f"⚠️ Folder not found at new location - may be external move")
+                    # This might be an external move (not via API)
+                    # Handle as delete + create for external moves
+                    logger.info(f"📁 Handling external folder move as delete + create")
+                    await self._handle_folder_deleted(old_path)
+                    await self._handle_folder_created(new_path)
+            
+            elif collection_dir == 'Global':
+                # Similar logic for global folders
+                collection_type = 'global'
+                user_id = None
+                
+                folder_start_idx = uploads_idx + 2
+                folder_parts = parts[folder_start_idx:]
+                
+                if not folder_parts:
+                    logger.info(f"📁 Root directory move - no action needed")
+                    return
+                
+                folder_id = await self._resolve_deepest_folder_id(tuple(folder_parts), None, collection_type)
+                
+                if folder_id:
+                    logger.info(f"✅ Folder already exists in database at new location: {folder_id}")
+                else:
+                    logger.info(f"📁 Handling external folder move as delete + create")
+                    await self._handle_folder_deleted(old_path)
+                    await self._handle_folder_created(new_path)
+            
+            elif collection_dir == 'Teams':
+                # Team folders are managed by application - skip file watcher processing
+                logger.info(f"📁 Team folder moved: {new_path} (managed by application)")
+                return
+            
+            else:
+                logger.warning(f"⚠️ Unknown collection directory: {collection_dir}")
+                return
             
         except Exception as e:
             logger.error(f"❌ Error handling folder move: {e}")

@@ -145,6 +145,38 @@ docs = await find_documents_by_tags_tool(
 
 ---
 
+#### 6. **`search_within_document_tool`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/document_tools.py`
+
+**Purpose**: Search within a specific document by document_id (exact or fuzzy matching)
+
+**Parameters**:
+- `document_id`: Document ID to search within
+- `query`: Search query string
+- `search_type`: `"exact"` or `"fuzzy"` (default: `"exact"`)
+- `context_window`: Number of characters around match (default: 200)
+- `case_sensitive`: Case-sensitive search (default: False)
+- `user_id`: User ID for access control
+
+**Returns**: `Dict` with `matches` (list of match locations with context) and `total_matches`
+
+**Usage**:
+```python
+from orchestrator.tools.document_tools import search_within_document_tool
+
+results = await search_within_document_tool(
+    document_id=doc_id,
+    query="voltage regulator",
+    search_type="fuzzy",
+    context_window=300,
+    user_id=user_id
+)
+```
+
+**Universal**: ✅ Works for ANY document by ID
+
+---
+
 ### Project-Specific Tools (For Referenced Files)
 
 #### 6. **`load_referenced_files`** (Backend gRPC)
@@ -176,6 +208,292 @@ result = await load_referenced_files(
 ```
 
 **Universal**: ❌ Only works for files referenced in active editor's frontmatter
+
+---
+
+## 🌐 WEB SEARCH & CRAWLING
+
+### Universal Tools (Work for ANY web search)
+
+#### 1. **`search_web_tool`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/web_tools.py`
+
+**Purpose**: Search the web for information using search engine API
+
+**Parameters**:
+- `query`: Search query string
+- `max_results`: Maximum number of results (default: 15)
+- `user_id`: User ID for access control
+
+**Returns**: List of search results with titles, URLs, and snippets
+
+**Usage**:
+```python
+from orchestrator.tools.web_tools import search_web_tool
+
+results = await search_web_tool(
+    query="circuit design best practices",
+    max_results=10,
+    user_id=user_id
+)
+```
+
+**Universal**: ✅ Searches the web for any query
+
+---
+
+#### 2. **`search_web_structured`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/web_tools.py`
+
+**Purpose**: Search the web and return structured results
+
+**Parameters**:
+- `query`: Search query string
+- `max_results`: Maximum number of results (default: 15)
+
+**Returns**: List of structured result dictionaries
+
+**Universal**: ✅ Structured web search results
+
+---
+
+#### 3. **`crawl_web_content_tool`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/web_tools.py`
+
+**Purpose**: Crawl and extract content from web URLs
+
+**Parameters**:
+- `url`: Single URL to crawl (optional)
+- `urls`: List of URLs to crawl (optional)
+- `user_id`: User ID for access control
+
+**Returns**: Extracted content from URLs
+
+**Usage**:
+```python
+from orchestrator.tools.web_tools import crawl_web_content_tool
+
+content = await crawl_web_content_tool(
+    url="https://example.com/article",
+    user_id=user_id
+)
+```
+
+**Universal**: ✅ Crawls any web URL
+
+---
+
+## 🔍 ENHANCEMENT & CACHE TOOLS
+
+### Universal Tools
+
+#### 1. **`expand_query_tool`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/enhancement_tools.py`
+
+**Purpose**: Generate alternative search queries for better recall
+
+**Parameters**:
+- `query`: Original search query
+- `num_expansions`: Number of alternative queries to generate (default: 2)
+- `expansion_type`: Type of expansion (default: `"semantic"`)
+
+**Returns**: List of expanded query variations
+
+**Universal**: ✅ Works for any query
+
+---
+
+#### 2. **`search_conversation_cache_tool`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/enhancement_tools.py`
+
+**Purpose**: Search conversation history for previous research/chat work before doing new searches
+
+**Parameters**:
+- `query`: Query to search for in conversation cache
+- `conversation_id`: Conversation ID (auto-detected if not provided)
+- `freshness_hours`: How recent cache should be in hours (default: 24)
+
+**Returns**: `Dict` with `cache_hit` (bool) and `entries` (list of matching cache entries)
+
+**Universal**: ✅ Searches conversation history
+
+---
+
+## 📊 SEGMENT SEARCH TOOLS
+
+### Universal Tools
+
+#### 1. **`search_segments_across_documents_tool`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/segment_search_tools.py`
+
+**Purpose**: Search for relevant SEGMENTS within documents, not just documents. Prioritizes project documents over library documents.
+
+**Parameters**:
+- `queries`: List of search queries
+- `project_documents`: Optional dict of project documents by category
+- `user_id`: User ID for access control
+- `limit_per_query`: Maximum results per query (default: 5)
+- `max_queries`: Maximum number of queries to process (default: 3)
+- `prioritize_project_docs`: Whether to prioritize project documents (default: True)
+- `context_window`: Context window size (default: 500)
+- `domain_keywords`: Optional list of domain-specific keywords
+
+**Returns**: `Dict` with segment results organized by query
+
+**Universal**: ✅ Searches segments across any documents
+
+---
+
+#### 2. **`extract_relevant_content_section`** (Pure Function)
+**Location**: `llm-orchestrator/orchestrator/tools/segment_search_tools.py`
+
+**Purpose**: Extract relevant content sections from a document based on query using semantic matching
+
+**Parameters**:
+- `full_content`: Full document content
+- `query`: Search query to match against
+- `max_length`: Maximum length of extracted content (default: 2000)
+- `domain_keywords`: Optional list of domain-specific keywords to boost
+
+**Returns**: Extracted relevant content section
+
+**Universal**: ✅ Works for any document content
+
+---
+
+## 🧮 MATH & CALCULATION TOOLS
+
+### Universal Tools
+
+#### 1. **`calculate_expression_tool`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/math_tools.py`
+
+**Purpose**: Perform safe mathematical calculations using expression evaluator
+
+**Parameters**:
+- `expression`: Mathematical expression to evaluate (string)
+- `user_id`: User ID for access control
+
+**Returns**: Calculation result or error message
+
+**Usage**:
+```python
+from orchestrator.tools.math_tools import calculate_expression_tool
+
+result = await calculate_expression_tool(
+    expression="2 * pi * 10",
+    user_id=user_id
+)
+```
+
+**Universal**: ✅ Calculates any mathematical expression
+
+---
+
+#### 2. **`evaluate_formula_tool`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/math_formulas.py`
+
+**Purpose**: Evaluate predefined formulas from the formula registry
+
+**Parameters**:
+- `formula_name`: Name of formula to evaluate
+- `variables`: Dict of variable values for the formula
+- `user_id`: User ID for access control
+
+**Returns**: Formula evaluation result
+
+**Universal**: ✅ Evaluates any registered formula
+
+---
+
+#### 3. **`list_available_formulas_tool`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/math_tools.py`
+
+**Purpose**: List all available formulas in the formula registry
+
+**Parameters**: None
+
+**Returns**: `Dict` with `formulas` (list of available formulas with descriptions)
+
+**Universal**: ✅ Lists all formulas
+
+---
+
+#### 4. **`convert_units_tool`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/unit_conversions.py`
+
+**Purpose**: Convert between different units (length, weight, temperature, etc.)
+
+**Parameters**:
+- `value`: Numeric value to convert
+- `from_unit`: Source unit (e.g., `"meters"`, `"celsius"`)
+- `to_unit`: Target unit (e.g., `"feet"`, `"fahrenheit"`)
+- `user_id`: User ID for access control
+
+**Returns**: Converted value or error message
+
+**Usage**:
+```python
+from orchestrator.tools.unit_conversions import convert_units_tool
+
+result = await convert_units_tool(
+    value=100,
+    from_unit="meters",
+    to_unit="feet",
+    user_id=user_id
+)
+```
+
+**Universal**: ✅ Converts any supported units
+
+---
+
+## 🌤️ WEATHER TOOLS
+
+### Universal Tools
+
+#### 1. **`weather_conditions`** (Class Method)
+**Location**: `llm-orchestrator/orchestrator/tools/weather_tools.py`
+
+**Purpose**: Get current weather conditions for a specific location
+
+**Parameters**:
+- `location`: Location (ZIP code, city name, or 'city,country' format)
+- `units`: Temperature units - `"imperial"` (Fahrenheit), `"metric"` (Celsius), or `"kelvin"` (default: `"imperial"`)
+- `user_id`: User ID for access control
+
+**Returns**: `Dict` with current weather conditions
+
+**Usage**:
+```python
+from orchestrator.tools.weather_tools import WeatherTools
+
+weather = WeatherTools()
+result = await weather.get_weather_conditions(
+    location="Los Angeles",
+    units="metric",
+    user_id=user_id
+)
+```
+
+**Universal**: ✅ Gets weather for any location
+
+---
+
+#### 2. **`weather_forecast`** (Class Method)
+**Location**: `llm-orchestrator/orchestrator/tools/weather_tools.py`
+
+**Purpose**: Get weather forecast for a specific location (up to 5 days)
+
+**Parameters**:
+- `location`: Location (ZIP code, city name, or 'city,country' format)
+- `days`: Number of days to forecast (1-5, default: 3)
+- `units`: Temperature units (default: `"imperial"`)
+- `user_id`: User ID for access control
+
+**Returns**: `Dict` with forecast data
+
+**Universal**: ✅ Forecasts weather for any location
 
 ---
 
@@ -414,7 +732,42 @@ result = await apply_document_edit_proposal_tool(
 
 ---
 
-#### 4. **`update_document_metadata_tool`** (Backend gRPC)
+#### 4. **`apply_operations_directly_tool`** (Backend gRPC - Restricted)
+**Location**: `llm-orchestrator/orchestrator/tools/document_editing_tools.py`
+
+**Purpose**: Apply operations directly to a document file without creating a proposal (RESTRICTED - only for specific agents)
+
+**Parameters**:
+- `document_id`: Document ID to edit
+- `operations`: List of EditorOperation dicts to apply
+- `user_id`: User ID (required - must match document owner)
+- `agent_name`: Name of agent requesting this operation (for security check)
+
+**Returns**: `Dict` with `success`, `document_id`, `applied_count`, `message`
+
+**Usage**:
+```python
+from orchestrator.tools.document_editing_tools import apply_operations_directly_tool
+
+result = await apply_operations_directly_tool(
+    document_id=doc_id,
+    operations=[{
+        "op_type": "insert_after_heading",
+        "heading": "## Components",
+        "content": "\n\n### New Component\n\nDescription..."
+    }],
+    user_id=user_id,
+    agent_name="electronics_agent"
+)
+```
+
+**Universal**: ✅ Works for ANY document, but RESTRICTED to specific agents
+
+**Security**: Only allowed for specific agents (e.g., electronics_agent) editing referenced files. Use with caution!
+
+---
+
+#### 5. **`update_document_metadata_tool`** (Backend gRPC)
 **Location**: `llm-orchestrator/orchestrator/tools/document_editing_tools.py`
 
 **Purpose**: Update document title and/or frontmatter type
@@ -440,6 +793,50 @@ result = await update_document_metadata_tool(
 ```
 
 **Universal**: ✅ Works for ANY document by ID
+
+---
+
+## 🧠 INFORMATION ANALYSIS TOOLS
+
+### Universal Tools
+
+#### 1. **`analyze_information_needs_tool`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/information_analysis_tools.py`
+
+**Purpose**: Analyze user query to determine information needs and search strategy
+
+**Parameters**:
+- `query`: User query to analyze
+- `project_context`: Optional project context dict
+- `user_id`: User ID for access control
+- `llm_model`: Optional LLM model override
+- `get_llm_func`: Optional LLM function override
+
+**Returns**: `Dict` with `information_needs`, `search_strategy`, `recommended_tools`
+
+**Universal**: ✅ Analyzes any query
+
+---
+
+#### 2. **`generate_project_aware_queries_tool`** (Backend gRPC)
+**Location**: `llm-orchestrator/orchestrator/tools/information_analysis_tools.py`
+
+**Purpose**: Generate project-aware search queries based on information needs and project context
+
+**Parameters**:
+- `query`: Original user query
+- `query_type`: Type of query (e.g., `"component"`, `"protocol"`)
+- `information_needs`: Information needs dict from `analyze_information_needs_tool`
+- `project_context`: Project context dict
+- `domain_examples`: Optional list of domain-specific examples
+- `user_id`: User ID for access control
+- `num_queries`: Number of queries to generate (default: 5)
+- `llm_model`: Optional LLM model override
+- `get_llm_func`: Optional LLM function override
+
+**Returns**: `Dict` with `queries` (list of generated queries) and metadata
+
+**Universal**: ✅ Generates queries for any project context
 
 ---
 
@@ -546,6 +943,28 @@ await save_or_update_project_content(
 - `search_documents_structured` - Semantic search
 - `search_by_tags_tool` - Search by tags/categories
 - `find_documents_by_tags_tool` - Find by required tags
+- `search_within_document_tool` - Search within specific document
+- `search_segments_across_documents_tool` - Search segments across documents
+- `extract_relevant_content_section` - Extract relevant sections from content
+
+**Web & Enhancement**:
+- `search_web_tool` - Web search
+- `search_web_structured` - Structured web search
+- `crawl_web_content_tool` - Crawl web URLs
+- `expand_query_tool` - Generate query variations
+- `search_conversation_cache_tool` - Search conversation history
+
+**Math & Weather**:
+- `calculate_expression_tool` - Mathematical calculations
+- `evaluate_formula_tool` - Evaluate predefined formulas
+- `list_available_formulas_tool` - List available formulas
+- `convert_units_tool` - Unit conversions
+- `weather_conditions` - Current weather
+- `weather_forecast` - Weather forecast
+
+**Information Analysis**:
+- `analyze_information_needs_tool` - Analyze query information needs
+- `generate_project_aware_queries_tool` - Generate project-aware queries
 
 **Creating**:
 - `create_user_file_tool` - Create any file
@@ -555,6 +974,7 @@ await save_or_update_project_content(
 - `update_document_content_tool` - Update content (append/replace)
 - `propose_document_edit_tool` - Propose edits (HITL)
 - `apply_document_edit_proposal_tool` - Apply approved proposals
+- `apply_operations_directly_tool` - Apply operations directly (RESTRICTED)
 - `update_document_metadata_tool` - Update title/type
 - `propose_section_update` - Propose section updates (HITL)
 - `append_project_content` - Append to sections

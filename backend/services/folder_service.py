@@ -768,9 +768,10 @@ class FolderService:
             if not folder:
                 return None
             
-            # Get old physical path before any updates
-            old_physical_path = await self.get_folder_physical_path(folder_id)
+            # Get old physical path before any updates (use correct RLS context)
+            old_physical_path = await self.get_folder_physical_path(folder_id, user_id=user_id, user_role=current_user_role)
             old_folder_name = folder.name
+            old_parent_folder_id = folder.parent_folder_id
             
             # Validate parent folder if changing
             if update_data.parent_folder_id and update_data.parent_folder_id != folder.parent_folder_id:
@@ -782,18 +783,19 @@ class FolderService:
                 if await self._would_create_circular_reference(folder_id, update_data.parent_folder_id):
                     raise ValueError("Cannot move folder: would create circular reference")
             
-            # Update folder in database
+            # Update folder in database with proper RLS context
             update_dict = update_data.dict(exclude_unset=True)
             if update_dict:
                 update_dict["updated_at"] = datetime.utcnow()
-                await self.document_repository.update_folder(folder_id, update_dict)
+                await self.document_repository.update_folder(folder_id, update_dict, user_id=user_id, user_role=current_user_role)
                 
                 # Get updated folder
                 updated_folder = await self.get_folder(folder_id, user_id, current_user_role)
                 
                 # If folder name changed, rename physical directory
                 if update_data.name and update_data.name != old_folder_name and old_physical_path:
-                    new_physical_path = await self.get_folder_physical_path(folder_id)
+                    # Use correct RLS context to get updated path (reads new name from database)
+                    new_physical_path = await self.get_folder_physical_path(folder_id, user_id=user_id, user_role=current_user_role)
                     
                     if old_physical_path.exists():
                         try:
@@ -802,8 +804,8 @@ class FolderService:
                             logger.info(f"✅ Renamed physical directory: {old_physical_path} -> {new_physical_path}")
                         except Exception as rename_error:
                             logger.error(f"❌ Failed to rename physical directory: {rename_error}")
-                            # Rollback database change
-                            await self.document_repository.update_folder(folder_id, {"name": old_folder_name})
+                            # Rollback database change with proper RLS context
+                            await self.document_repository.update_folder(folder_id, {"name": old_folder_name}, user_id=user_id, user_role=current_user_role)
                             raise ValueError(f"Failed to rename physical directory: {rename_error}")
                     else:
                         logger.warning(f"⚠️ Physical directory not found, creating new one: {new_physical_path}")
@@ -825,6 +827,50 @@ class FolderService:
                             "old_name": old_folder_name
                         })
                         logger.info(f"📡 WebSocket notification sent for folder rename: {folder_id}")
+                    except Exception as ws_error:
+                        logger.warning(f"⚠️ Failed to send WebSocket notification: {ws_error}")
+                
+                # If parent folder changed, move physical directory
+                if update_data.parent_folder_id and update_data.parent_folder_id != old_parent_folder_id and old_physical_path:
+                    # Use correct RLS context to get updated path (reads new parent from database)
+                    new_physical_path = await self.get_folder_physical_path(folder_id, user_id=user_id, user_role=current_user_role)
+                    
+                    if old_physical_path.exists() and new_physical_path:
+                        try:
+                            # Ensure parent directory exists
+                            new_physical_path.parent.mkdir(parents=True, exist_ok=True)
+                            
+                            # Move the physical directory
+                            import shutil
+                            shutil.move(str(old_physical_path), str(new_physical_path))
+                            logger.info(f"✅ Moved physical directory: {old_physical_path} -> {new_physical_path}")
+                        except Exception as move_error:
+                            logger.error(f"❌ Failed to move physical directory: {move_error}")
+                            # Rollback database change with proper RLS context
+                            await self.document_repository.update_folder(folder_id, {"parent_folder_id": old_parent_folder_id}, user_id=user_id, user_role=current_user_role)
+                            raise ValueError(f"Failed to move physical directory: {move_error}")
+                    else:
+                        if not old_physical_path.exists():
+                            logger.warning(f"⚠️ Physical directory not found, will be created on next access: {old_physical_path}")
+                        if not new_physical_path:
+                            logger.warning(f"⚠️ Could not determine new physical path for moved folder")
+                    
+                    # Send WebSocket notification for folder move
+                    try:
+                        from services.websocket_manager import get_websocket_manager
+                        ws_manager = get_websocket_manager()
+                        await ws_manager.send_to_user(user_id, {
+                            "type": "folder_update",
+                            "action": "moved",
+                            "folder": {
+                                "folder_id": updated_folder.folder_id,
+                                "name": updated_folder.name,
+                                "parent_folder_id": updated_folder.parent_folder_id,
+                                "updated_at": updated_folder.updated_at.isoformat() if updated_folder.updated_at else None
+                            },
+                            "old_parent_folder_id": old_parent_folder_id
+                        })
+                        logger.info(f"📡 WebSocket notification sent for folder move: {folder_id}")
                     except Exception as ws_error:
                         logger.warning(f"⚠️ Failed to send WebSocket notification: {ws_error}")
                 
@@ -1033,8 +1079,19 @@ class FolderService:
             if folder.collection_type == "team" and folder.parent_folder_id is None:
                 raise ValueError("Cannot delete team root folder. Delete the team instead to remove the folder.")
             
-            # **CRITICAL FIX:** Check deletion permission BEFORE deleting contents!
-            # Try to delete the folder from database first to verify permissions
+            # **BULLY!** Get physical folder path BEFORE database deletion
+            # (Once folder is deleted from DB, we can't look up its path anymore!)
+            query_user_id = user_id
+            query_user_role = current_user_role
+            if folder.collection_type == "team" and not user_id:
+                # For team folders, if no user_id provided, try admin context
+                query_user_id = ""
+                query_user_role = "admin"
+            
+            folder_path = await self.get_folder_physical_path(folder_id, user_id=query_user_id, user_role=query_user_role)
+            logger.info(f"📂 Physical path for folder {folder_id}: {folder_path}")
+            
+            # **CRITICAL FIX:** Try to delete the folder from database to verify permissions
             # This prevents physical deletion when RLS would block database deletion
             deletion_success = await self.document_repository.delete_folder(
                 folder_id,
@@ -1047,16 +1104,6 @@ class FolderService:
                 raise PermissionError(f"Permission denied: You do not have permission to delete this folder")
             
             logger.info(f"🗑️ Folder deleted from database: {folder_id}")
-            
-            # **ROOSEVELT FIX:** Get physical folder path AFTER database deletion succeeds
-            query_user_id = user_id
-            query_user_role = current_user_role
-            if folder.collection_type == "team" and not user_id:
-                # For team folders, if no user_id provided, try admin context
-                query_user_id = ""
-                query_user_role = "admin"
-            
-            folder_path = await self.get_folder_physical_path(folder_id, user_id=query_user_id, user_role=query_user_role)
             
             # **BULLY!** Delete physical directory from filesystem
             if folder_path and folder_path.exists():

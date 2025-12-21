@@ -439,12 +439,16 @@ class DocumentRepository:
             logger.debug(f"📄 Listing user documents for user_id: {user_id}, skip: {skip}, limit: {limit}")
             from services.database_manager.database_helpers import fetch_all
             
+            # Set RLS context for user documents query
+            rls_context = {'user_id': user_id, 'user_role': 'user'}
+            logger.debug(f"🔍 Using RLS context for list_user_documents: user_id={user_id}")
+            
             rows = await fetch_all("""
                 SELECT * FROM document_metadata 
                 WHERE user_id = $1
                 ORDER BY upload_date DESC 
                 LIMIT $2 OFFSET $3
-            """, user_id, limit, skip)
+            """, user_id, limit, skip, rls_context=rls_context)
             
             logger.debug(f"📄 Query returned {len(rows)} rows for user {user_id}")
             documents = [self._row_to_document_info(row) for row in rows]
@@ -1260,108 +1264,6 @@ class DocumentRepository:
                 "latest_date": None
             }
 
-    # === GLOBAL SUBMISSION WORKFLOW METHODS ===
-    
-    async def update_submission_status(
-        self,
-        document_id: str,
-        submission_status: str,
-        submitted_by: str,
-        submitted_at: datetime,
-        submission_reason: str = None
-    ):
-        """Update document submission status and metadata"""
-        try:
-            from services.database_manager.database_helpers import execute
-
-            await execute("""
-                UPDATE documents
-                SET
-                    submission_status = $1,
-                    submitted_by = $2,
-                    submitted_at = $3,
-                    submission_reason = $4,
-                    updated_at = $5
-                WHERE document_id = $6
-            """, submission_status, submitted_by, submitted_at, submission_reason, datetime.utcnow(), document_id)
-
-            logger.info(f"📝 Updated submission status for document {document_id}: {submission_status}")
-
-        except Exception as e:
-            logger.error(f"❌ Failed to update submission status for {document_id}: {e}")
-            raise
-
-    async def get_pending_submissions(self, skip: int = 0, limit: int = 50) -> List[Dict[str, Any]]:
-        """Get documents pending global approval"""
-        try:
-            from services.database_manager.database_helpers import fetch_all
-
-            rows = await fetch_all("""
-                SELECT
-                    document_id, filename, title, doc_type, category, tags, description,
-                    author, language, publication_date, upload_date, file_size, file_hash,
-                    status, chunk_count, entity_count, quality_ocr_confidence,
-                    quality_language_confidence, quality_vocabulary_score,
-                    quality_pattern_score, quality_overall_score,
-                    submission_status, submitted_by, submitted_at, submission_reason,
-                    reviewed_by, reviewed_at, review_comment, collection_type
-                FROM documents
-                WHERE submission_status = 'pending_approval'
-                ORDER BY submitted_at ASC
-                OFFSET $1 LIMIT $2
-            """, skip, limit)
-
-            return rows
-
-        except Exception as e:
-            logger.error(f"❌ Failed to get pending submissions: {e}")
-            raise
-
-    async def count_pending_submissions(self) -> int:
-        """Count documents pending global approval"""
-        try:
-            from services.database_manager.database_helpers import fetch_value
-
-            count = await fetch_value("""
-                SELECT COUNT(*) FROM documents
-                WHERE submission_status = 'pending_approval'
-            """)
-            return count or 0
-
-        except Exception as e:
-            logger.error(f"❌ Failed to count pending submissions: {e}")
-            raise
-
-    async def update_review_status(
-        self,
-        document_id: str,
-        submission_status: str,
-        reviewed_by: str,
-        reviewed_at: datetime,
-        review_comment: str = None,
-        collection_type: str = "user"
-    ):
-        """Update document review status after admin approval/rejection"""
-        try:
-            from services.database_manager.database_helpers import execute
-
-            await execute("""
-                UPDATE documents
-                SET
-                    submission_status = $1,
-                    reviewed_by = $2,
-                    reviewed_at = $3,
-                    review_comment = $4,
-                    collection_type = $5,
-                    updated_at = $6
-                WHERE document_id = $7
-            """, submission_status, reviewed_by, reviewed_at, review_comment, collection_type, datetime.utcnow(), document_id)
-
-            logger.info(f"📝 Updated review status for document {document_id}: {submission_status}")
-
-        except Exception as e:
-            logger.error(f"❌ Failed to update review status for {document_id}: {e}")
-            raise
 
     # ===== FOLDER OPERATIONS =====
     
@@ -1943,8 +1845,8 @@ class DocumentRepository:
             logger.error(f"❌ Failed to get subfolder count for folder {folder_id}: {e}")
             return 0
     
-    async def update_folder(self, folder_id: str, updates: Dict[str, Any]) -> bool:
-        """Update folder information"""
+    async def update_folder(self, folder_id: str, updates: Dict[str, Any], user_id: str = None, user_role: str = "user") -> bool:
+        """Update folder information with proper RLS context"""
         try:
             from services.database_manager.database_helpers import execute
             
@@ -1965,10 +1867,16 @@ class DocumentRepository:
             query = f"UPDATE document_folders SET {', '.join(set_clauses)} WHERE folder_id = ${param_count}"
             params.append(folder_id)
             
-            await execute(query, *params)
+            # Set RLS context for the update (required for RLS policy to allow update)
+            rls_context = {'user_id': user_id or '', 'role': user_role}
+            result = await execute(query, *params, rls_context=rls_context)
+            
+            logger.info(f"📝 Folder update query executed: {result}, folder_id: {folder_id}, user_id: {user_id}")
             return True
         except Exception as e:
             logger.error(f"❌ Failed to update folder {folder_id}: {e}")
+            import traceback
+            logger.error(f"❌ Traceback: {traceback.format_exc()}")
             return False
     
     async def update_folder_metadata(self, folder_id: str, category: str = None, tags: List[str] = None, inherit_tags: bool = None) -> bool:

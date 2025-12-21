@@ -36,8 +36,6 @@ import {
   updateUser,
   deleteUser,
   changePassword,
-  getPendingSubmissions,
-  reviewSubmission,
   
   // Folder methods
   getFolderTree,
@@ -114,8 +112,6 @@ class ApiService {
   updateUser = updateUser;
   deleteUser = deleteUser;
   changePassword = changePassword;
-  getPendingSubmissions = getPendingSubmissions;
-  reviewSubmission = reviewSubmission;
 
   // Folder methods
   getFolderTree = getFolderTree;
@@ -173,7 +169,6 @@ class ApiService {
   reprocessUserDocument = (documentId) => this.documents.reprocessUserDocument(documentId);
   updateDocument = (documentId, updates) => this.documents.updateDocument(documentId, updates);
   updateDocumentMetadata = (documentId, metadata) => this.documents.updateDocumentMetadata(documentId, metadata);
-  submitDocumentToGlobal = (documentId, reason) => this.documents.submitDocumentToGlobal(documentId, reason);
   getDocumentContent = (documentId) => this.documents.getDocumentContent(documentId);
   createDocument = (documentData) => this.documents.createDocument(documentData);
 

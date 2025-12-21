@@ -140,161 +140,6 @@ const ModelStatusDisplay = () => {
   );
 };
 
-// Pending Submissions Component for Admin
-const PendingSubmissions = () => {
-  const [pendingSubmissions, setPendingSubmissions] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
-
-  // Fetch pending submissions
-  const { data: submissionsData, isLoading, refetch } = useQuery(
-    'pendingSubmissions',
-    () => apiService.getPendingSubmissions(),
-    {
-      refetchInterval: 30000, // Refresh every 30 seconds
-      onSuccess: (data) => {
-        setPendingSubmissions(data.submissions || []);
-        setLoading(false);
-      },
-      onError: () => {
-        setLoading(false);
-      }
-    }
-  );
-
-  // Review submission mutation
-  const reviewMutation = useMutation(
-    ({ documentId, action, comment }) => apiService.reviewSubmission(documentId, action, comment),
-    {
-      onSuccess: (data) => {
-        refetch();
-        setSnackbar({
-          open: true,
-          message: `Document ${data.action}ed successfully!`,
-          severity: 'success'
-        });
-      },
-      onError: (error) => {
-        setSnackbar({
-          open: true,
-          message: `Failed to review submission: ${error.response?.data?.detail || error.message}`,
-          severity: 'error'
-        });
-      },
-    }
-  );
-
-  const handleApprove = (documentId, comment = '') => {
-    reviewMutation.mutate({ documentId, action: 'approve', comment });
-  };
-
-  const handleReject = (documentId, comment = '') => {
-    reviewMutation.mutate({ documentId, action: 'reject', comment });
-  };
-
-  if (isLoading) {
-    return (
-      <Card>
-        <CardContent sx={{ textAlign: 'center', py: 4 }}>
-          <CircularProgress />
-          <Typography variant="body1" sx={{ mt: 2 }}>
-            Loading pending submissions...
-          </Typography>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  return (
-    <Card>
-      <CardContent>
-        <Typography variant="h5" gutterBottom>
-          <Warning sx={{ mr: 1, verticalAlign: 'middle' }} />
-          Pending Global Submissions
-        </Typography>
-        <Typography variant="body2" color="text.secondary" paragraph>
-          Review user submissions for inclusion in the global knowledge base.
-        </Typography>
-
-        {pendingSubmissions.length === 0 ? (
-          <Alert severity="info">
-            No pending submissions at this time.
-          </Alert>
-        ) : (
-          <Grid container spacing={2}>
-            {pendingSubmissions.map((doc) => (
-              <Grid item xs={12} key={doc.document_id}>
-                <Paper variant="outlined" sx={{ p: 2 }}>
-                  <Grid container spacing={2} alignItems="center">
-                    <Grid item xs={12} md={6}>
-                      <Typography variant="h6">{doc.title || doc.filename}</Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        Submitted by: {doc.submitted_by}
-                      </Typography>
-                      <Typography variant="body2" color="text.secondary">
-                        Submitted: {new Date(doc.submitted_at).toLocaleString()}
-                      </Typography>
-                      {doc.submission_reason && (
-                        <Typography variant="body2" sx={{ mt: 1, fontStyle: 'italic' }}>
-                          Reason: {doc.submission_reason}
-                        </Typography>
-                      )}
-                    </Grid>
-                    <Grid item xs={12} md={3}>
-                      <Box display="flex" flexDirection="column" gap={1}>
-                        <Chip label={doc.doc_type.toUpperCase()} size="small" />
-                        <Chip label={`${(doc.file_size / 1024).toFixed(1)} KB`} size="small" variant="outlined" />
-                        {doc.category && <Chip label={doc.category} size="small" variant="outlined" />}
-                      </Box>
-                    </Grid>
-                    <Grid item xs={12} md={3}>
-                      <Box display="flex" flexDirection="column" gap={1}>
-                        <Button
-                          variant="contained"
-                          color="success"
-                          size="small"
-                          onClick={() => handleApprove(doc.document_id)}
-                          disabled={reviewMutation.isLoading}
-                        >
-                          Approve
-                        </Button>
-                        <Button
-                          variant="outlined"
-                          color="error"
-                          size="small"
-                          onClick={() => handleReject(doc.document_id)}
-                          disabled={reviewMutation.isLoading}
-                        >
-                          Reject
-                        </Button>
-                      </Box>
-                    </Grid>
-                  </Grid>
-                </Paper>
-              </Grid>
-            ))}
-          </Grid>
-        )}
-
-        {/* Snackbar for notifications */}
-        <Snackbar
-          open={snackbar.open}
-          autoHideDuration={6000}
-          onClose={() => setSnackbar({ ...snackbar, open: false })}
-          anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-        >
-          <Alert
-            onClose={() => setSnackbar({ ...snackbar, open: false })}
-            severity={snackbar.severity}
-            sx={{ width: '100%' }}
-          >
-            {snackbar.message}
-          </Alert>
-        </Snackbar>
-      </CardContent>
-    </Card>
-  );
-};
 
 const SettingsPage = () => {
   const queryClient = useQueryClient();
@@ -1073,8 +918,7 @@ const SettingsPage = () => {
     { label: 'Entertainment', icon: <Movie /> },
     ...(user?.role === 'admin' ? [
       { label: 'Database', icon: <DeleteSweep /> },
-      { label: 'User Management', icon: <Security /> },
-      { label: 'Pending Submissions', icon: <Warning /> }
+      { label: 'User Management', icon: <Security /> }
     ] : [])
   ];
 
@@ -2258,16 +2102,6 @@ const SettingsPage = () => {
         </motion.div>
       )}
 
-      {/* Pending Submissions Tab */}
-      {currentTab === 9 && user?.role === 'admin' && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-            >
-          <PendingSubmissions />
-            </motion.div>
-      )}
 
       {/* Confirmation Dialogs */}
       

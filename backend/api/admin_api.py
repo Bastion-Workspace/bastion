@@ -210,53 +210,6 @@ async def clear_qdrant(
         raise HTTPException(status_code=500, detail=f"Failed to clear Qdrant: {str(e)}")
 
 
-# ===== PENDING SUBMISSIONS ENDPOINTS =====
-
-@router.get("/pending-submissions")
-async def get_pending_submissions(
-    skip: int = 0,
-    limit: int = 50,
-    current_user: AuthenticatedUserResponse = Depends(require_admin())
-):
-    """Get list of documents pending global approval (admin only)"""
-    try:
-        logger.info(f"📋 Admin {current_user.username} viewing pending submissions")
-        
-        # Import the function from main.py to avoid code duplication
-        from main import get_pending_submissions as main_get_pending_submissions
-        
-        # Call the main function with the current user
-        return await main_get_pending_submissions(skip, limit, current_user)
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to get pending submissions: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/submissions/{document_id}/review")
-async def review_submission(
-    document_id: str,
-    request: dict,
-    current_user: AuthenticatedUserResponse = Depends(require_admin())
-):
-    """Admin approve or reject document submission to global collection"""
-    try:
-        logger.info(f"⚖️ Admin {current_user.username} reviewing submission {document_id}")
-        
-        # Import the function from main.py to avoid code duplication
-        from main import review_submission as main_review_submission
-        from models.api_models import ReviewSubmissionRequest
-        
-        # Convert dict to proper request object
-        review_request = ReviewSubmissionRequest(
-            action=request.get("action"),
-            comment=request.get("comment", "")
-        )
-        
-        # Call the main function with the current user
-        return await main_review_submission(document_id, review_request, current_user)
-        
-    except Exception as e:
         logger.error(f"❌ Failed to review submission: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 

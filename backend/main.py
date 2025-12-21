@@ -69,9 +69,6 @@ from models.api_models import (
     # Authentication models
     LoginRequest, LoginResponse, UserCreateRequest, UserUpdateRequest,
     PasswordChangeRequest, UserResponse, UsersListResponse, AuthenticatedUserResponse,
-    # Submission workflow models
-    SubmitToGlobalRequest, ReviewSubmissionRequest, SubmissionResponse, 
-    PendingSubmissionsResponse, ReviewResponse, SubmissionStatus,
     # Folder models
     DocumentFolder, FolderCreateRequest, FolderUpdateRequest, FolderMetadataUpdateRequest, 
     FolderTreeResponse, FolderContentsResponse
@@ -2298,165 +2295,6 @@ async def debug_folders(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ===== GLOBAL SUBMISSION WORKFLOW ENDPOINTS =====
-
-@app.post("/api/user/documents/{document_id}/submit", response_model=SubmissionResponse)
-async def submit_document_to_global(
-    document_id: str,
-    request: SubmitToGlobalRequest,
-    current_user: AuthenticatedUserResponse = Depends(get_current_user)
-):
-    """Submit user document for global collection approval"""
-    try:
-        logger.info(f"📤 User {current_user.username} submitting document {document_id} to global")
-        
-        # Get document from repository
-        document = await document_service.document_repository.get_by_id(document_id)
-        if not document:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        # Verify document is completed and ready for submission
-        if document.get('status') != 'completed':
-            raise HTTPException(status_code=400, detail="Document must be completed before submission")
-        
-        # Check if document is already submitted or approved
-        current_submission_status = document.get('submission_status', 'not_submitted')
-        if current_submission_status != 'not_submitted':
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Document already {current_submission_status}"
-            )
-        
-        # Update submission status and metadata
-        submission_time = datetime.utcnow()
-        await document_service.document_repository.update_submission_status(
-            document_id=document_id,
-            submission_status=SubmissionStatus.PENDING_APPROVAL,
-            submitted_by=current_user.user_id,
-            submitted_at=submission_time,
-            submission_reason=request.reason
-        )
-        
-        logger.info(f"✅ Document {document_id} submitted for approval by {current_user.username}")
-        
-        return SubmissionResponse(
-            document_id=document_id,
-            submission_status=SubmissionStatus.PENDING_APPROVAL,
-            message="Document submitted for global approval",
-            submitted_at=submission_time
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Failed to submit document: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/admin/submissions/pending", response_model=PendingSubmissionsResponse)
-async def get_pending_submissions(
-    skip: int = 0,
-    limit: int = 50,
-    current_user: AuthenticatedUserResponse = Depends(require_admin())
-):
-    """Get list of documents pending global approval (admin only)"""
-    try:
-        logger.info(f"📋 Admin {current_user.username} viewing pending submissions")
-        
-        # Get documents with submission_status = PENDING_APPROVAL
-        pending_docs = await document_service.document_repository.get_pending_submissions(skip, limit)
-        
-        # Convert to DocumentInfo objects
-        submissions = []
-        for doc in pending_docs:
-            # Create DocumentInfo object with all the submission metadata
-            doc_info = DocumentInfo(**doc)
-            submissions.append(doc_info)
-        
-        total_pending = await document_service.document_repository.count_pending_submissions()
-        
-        logger.info(f"📋 Found {len(submissions)} pending submissions")
-        
-        return PendingSubmissionsResponse(
-            submissions=submissions,
-            total=total_pending
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Failed to get pending submissions: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/admin/submissions/{document_id}/review", response_model=ReviewResponse)
-async def review_submission(
-    document_id: str,
-    request: ReviewSubmissionRequest,
-    current_user: AuthenticatedUserResponse = Depends(require_admin())
-):
-    """Admin approve or reject document submission to global collection"""
-    try:
-        action = request.action.lower()
-        logger.info(f"⚖️ Admin {current_user.username} {action}ing submission {document_id}")
-        
-        if action not in ['approve', 'reject']:
-            raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
-        
-        # Get document and verify it's pending approval
-        document = await document_service.document_repository.get_by_id(document_id)
-        if not document:
-            raise HTTPException(status_code=404, detail="Document not found")
-        
-        if document.get('submission_status') != 'pending_approval':
-            raise HTTPException(status_code=400, detail="Document is not pending approval")
-        
-        # Get the user who submitted this document
-        submitted_by = document.get('submitted_by')
-        if not submitted_by:
-            raise HTTPException(status_code=500, detail="Document missing submission metadata")
-        
-        moved_to_global = False
-        
-        if action == 'approve':
-            # Move vectors from user collection to global collection
-            logger.info(f"📦 Moving vectors for approved document {document_id} to global collection")
-            
-            move_success = await document_service.embedding_manager.move_document_vectors_to_global(
-                document_id=document_id,
-                source_user_id=submitted_by
-            )
-            
-            if not move_success:
-                raise HTTPException(status_code=500, detail="Failed to move document vectors to global collection")
-            
-            moved_to_global = True
-            logger.info(f"✅ Document {document_id} vectors successfully moved to global collection")
-        
-        # Update submission status and review metadata
-        new_status = SubmissionStatus.APPROVED if action == 'approve' else SubmissionStatus.REJECTED
-        review_time = datetime.utcnow()
-        
-        await document_service.document_repository.update_review_status(
-            document_id=document_id,
-            submission_status=new_status,
-            reviewed_by=current_user.user_id,
-            reviewed_at=review_time,
-            review_comment=request.comment,
-            collection_type="global" if action == 'approve' else "user"
-        )
-        
-        logger.info(f"✅ Admin {current_user.username} {action}ed document {document_id}")
-        
-        return ReviewResponse(
-            document_id=document_id,
-            action=action,
-            submission_status=new_status,
-            message=f"Document {action}ed successfully" + (f" and moved to global collection" if moved_to_global else ""),
-            moved_to_global=moved_to_global
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"❌ Failed to review submission: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/admin/clear-documents")
@@ -3575,13 +3413,17 @@ async def create_folder(
         
         # Create folder using FileManager for consistent WebSocket notifications
         # For team folders, admin_user_id should be the creator (for RLS context)
-        # For user/global folders, admin_user_id is only set if user is admin
+        # For user folders, admin_user_id should be the current user's ID (for validation)
+        # For global folders, admin_user_id is only set if user is admin
         final_admin_user_id = None
         if collection_type == "team":
             # Team folders: admin_user_id is the creator (for RLS context)
             final_admin_user_id = admin_user_id or current_user.user_id
-        elif current_user.role == "admin":
-            # Admin creating user/global folder
+        elif collection_type == "user":
+            # User folders: admin_user_id is the current user's ID (for validation in create_folder)
+            final_admin_user_id = current_user.user_id
+        elif current_user.role == "admin" and collection_type == "global":
+            # Admin creating global folder
             final_admin_user_id = current_user.user_id
         
         folder_request = FolderStructureRequest(

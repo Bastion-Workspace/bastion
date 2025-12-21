@@ -65,15 +65,6 @@ class DocumentCategory(str, Enum):
     OTHER = "other"
 
 
-class SubmissionStatus(str, Enum):
-    """Document submission status for global collection approval"""
-    NOT_SUBMITTED = "not_submitted"
-    PENDING_APPROVAL = "pending_approval"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    WITHDRAWN = "withdrawn"
-
-
 # === REQUEST MODELS ===
 
 class URLImportRequest(BaseModel):
@@ -126,18 +117,6 @@ class DocumentUpdateRequest(BaseModel):
     description: Optional[str] = Field(None, description="Document description")
     author: Optional[str] = Field(None, description="Document author")
     publication_date: Optional[date] = Field(None, description="Original publication date of the document")
-
-
-class SubmitToGlobalRequest(BaseModel):
-    """Request to submit document to global collection for approval"""
-    document_id: str = Field(..., description="Document ID to submit")
-    reason: Optional[str] = Field(None, max_length=500, description="Reason for submitting to global collection")
-
-
-class ReviewSubmissionRequest(BaseModel):
-    """Admin request to approve or reject a global submission"""
-    action: str = Field(..., description="Action: 'approve' or 'reject'")
-    comment: Optional[str] = Field(None, max_length=1000, description="Admin review comment")
 
 
 class BulkCategorizeRequest(BaseModel):
@@ -227,8 +206,8 @@ class DocumentInfo(BaseModel):
     folder_id: Optional[str] = Field(None, description="ID of folder containing this document (NULL for root documents)")
     team_id: Optional[str] = Field(None, description="ID of team this document belongs to (NULL for user/global documents)")
     
-    # Global submission workflow fields
-    submission_status: SubmissionStatus = Field(default=SubmissionStatus.NOT_SUBMITTED, description="Global submission status")
+    # Global submission workflow fields (deprecated - kept for database compatibility)
+    submission_status: Optional[str] = Field(default="not_submitted", description="Global submission status (deprecated)")
     submitted_by: Optional[str] = Field(None, description="User ID who submitted document for global approval")
     submitted_at: Optional[datetime] = Field(None, description="Submission timestamp")
     submission_reason: Optional[str] = Field(None, description="Reason for submitting to global collection")
@@ -370,27 +349,6 @@ class BulkOperationResponse(BaseModel):
     message: str = Field(..., description="Operation summary message")
 
 
-class SubmissionResponse(BaseModel):
-    """Response for document submission to global collection"""
-    document_id: str = Field(..., description="Document ID")
-    submission_status: SubmissionStatus = Field(..., description="New submission status")
-    message: str = Field(..., description="Status message")
-    submitted_at: Optional[datetime] = Field(None, description="Submission timestamp")
-
-
-class PendingSubmissionsResponse(BaseModel):
-    """Response for admin pending submissions list"""
-    submissions: List[DocumentInfo] = Field(..., description="List of pending submissions")
-    total: int = Field(..., description="Total number of pending submissions")
-
-
-class ReviewResponse(BaseModel):
-    """Response for admin review action"""
-    document_id: str = Field(..., description="Document ID")
-    action: str = Field(..., description="Review action taken")
-    submission_status: SubmissionStatus = Field(..., description="New submission status")
-    message: str = Field(..., description="Status message")
-    moved_to_global: Optional[bool] = Field(None, description="Whether document was moved to global collection")
 
 
 
