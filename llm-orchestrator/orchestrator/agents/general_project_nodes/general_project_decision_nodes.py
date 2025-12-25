@@ -180,16 +180,42 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 logger.info(f"Extracted {len(validated_decisions)} decision(s)")
                 all_decisions = existing_decisions + validated_decisions
                 return {
-                    "project_decisions": all_decisions
+                    "project_decisions": all_decisions,
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "response": state.get("response", {})
                 }
             
-            return {}
+            return {
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "response": state.get("response", {})
+            }
             
         except Exception as e:
             logger.error(f"Decision extraction failed: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
-            return {}
+            return {
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "response": state.get("response", {})
+            }
     
     async def verify_documentation_node(self, state) -> Dict[str, Any]:
         """
@@ -218,7 +244,15 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                         "completeness_score": 1.0,
                         "consistency_score": 1.0,
                         "reasoning": "No decisions to verify"
-                    }
+                    },
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "project_decisions": state.get("project_decisions", [])
                 }
             
             # Get recent decisions (last 5)
@@ -338,7 +372,15 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 # Continue with unvalidated dict - model change to Any should help, but if validation still fails, use raw dict
             
             return {
-                "documentation_verification_result": verification_dict
+                "documentation_verification_result": verification_dict,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "project_decisions": state.get("project_decisions", [])
             }
             
         except Exception as e:
@@ -354,7 +396,15 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     "completeness_score": 0.0,
                     "consistency_score": 0.0,
                     "reasoning": "Verification failed due to error"
-                }
+                },
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "project_decisions": state.get("project_decisions", [])
             }
 
 

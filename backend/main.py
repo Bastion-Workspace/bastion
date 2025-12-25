@@ -833,9 +833,17 @@ async def get_available_models():
 
 @app.get("/api/models/enabled")
 async def get_enabled_models():
-    """Get list of enabled model IDs"""
+    """Get list of enabled model IDs (excluding image generation model)"""
     try:
         enabled_models = await settings_service.get_enabled_models()
+        
+        # Filter out the image generation model if it's set
+        # This prevents it from appearing in the chat model dropdown
+        image_generation_model = await settings_service.get_image_generation_model()
+        if image_generation_model and image_generation_model in enabled_models:
+            enabled_models = [m for m in enabled_models if m != image_generation_model]
+            logger.debug(f"🔍 Filtered out image generation model '{image_generation_model}' from enabled models list")
+        
         return {"enabled_models": enabled_models}
 
     except Exception as e:

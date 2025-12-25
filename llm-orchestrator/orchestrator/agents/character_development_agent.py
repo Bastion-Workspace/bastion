@@ -820,7 +820,17 @@ class CharacterDevelopmentAgent(BaseAgent):
                     editor_operations.append(resolved_op)
             
             return {
-                "editor_operations": editor_operations
+                "editor_operations": editor_operations,
+                # Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "text": state.get("text", ""),
+                "filename": state.get("filename", "character.md"),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit")
             }
             
         except Exception as e:
@@ -830,7 +840,17 @@ class CharacterDevelopmentAgent(BaseAgent):
             return {
                 "editor_operations": [],
                 "error": str(e),
-                "task_status": "error"
+                "task_status": "error",
+                # Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "text": state.get("text", ""),
+                "filename": state.get("filename", "character.md"),
+                "frontmatter": state.get("frontmatter", {}),
+                "structured_edit": state.get("structured_edit")
             }
     
     async def _format_response_node(self, state: CharacterDevelopmentState) -> Dict[str, Any]:
@@ -907,6 +927,11 @@ class CharacterDevelopmentAgent(BaseAgent):
             }
             
             logger.info(f"📤 FORMAT_RESPONSE: Returning {len(editor_operations)} editor operation(s) at state level")
+            
+            # Verify operations have required fields
+            if editor_operations:
+                for i, op in enumerate(editor_operations):
+                    logger.info(f"🔍 Operation {i}: op_type={op.get('op_type')}, start={op.get('start')}, end={op.get('end')}, has_text={bool(op.get('text'))}, text_length={len(op.get('text', ''))}, text_preview={op.get('text', '')[:100] if op.get('text') else 'N/A'}")
             
             return {
                 "response": result,

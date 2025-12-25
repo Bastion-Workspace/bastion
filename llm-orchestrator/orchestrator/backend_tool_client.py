@@ -993,6 +993,125 @@ class BackendToolClient:
             logger.error(f"Unexpected error getting entity: {e}")
             return None
     
+    async def find_documents_by_entities(
+        self,
+        entity_names: List[str],
+        user_id: str = "system"
+    ) -> List[str]:
+        """
+        Find documents mentioning specific entities
+        
+        Args:
+            entity_names: List of entity names to search for
+            user_id: User ID for RLS filtering
+            
+        Returns:
+            List of document IDs (RLS filtered)
+        """
+        try:
+            await self._ensure_connected()
+            
+            request = tool_service_pb2.FindDocumentsByEntitiesRequest(
+                user_id=user_id,
+                entity_names=entity_names
+            )
+            
+            response = await self._stub.FindDocumentsByEntities(request)
+            
+            logger.info(f"Found {len(response.document_ids)} documents for entities (RLS filtered)")
+            return list(response.document_ids)
+            
+        except grpc.RpcError as e:
+            logger.error(f"FindDocumentsByEntities failed: {e.code()} - {e.details()}")
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error finding documents by entities: {e}")
+            return []
+
+    async def find_related_documents_by_entities(
+        self,
+        entity_names: List[str],
+        max_hops: int = 2,
+        user_id: str = "system"
+    ) -> List[str]:
+        """
+        Find documents via entity relationship traversal
+        
+        Args:
+            entity_names: Starting entity names
+            max_hops: Maximum graph traversal depth (1-2)
+            user_id: User ID for RLS filtering
+            
+        Returns:
+            List of document IDs (RLS filtered)
+        """
+        try:
+            await self._ensure_connected()
+            
+            request = tool_service_pb2.FindRelatedDocumentsByEntitiesRequest(
+                user_id=user_id,
+                entity_names=entity_names,
+                max_hops=max_hops
+            )
+            
+            response = await self._stub.FindRelatedDocumentsByEntities(request)
+            
+            logger.info(f"Found {len(response.document_ids)} related documents (RLS filtered)")
+            return list(response.document_ids)
+            
+        except grpc.RpcError as e:
+            logger.error(f"FindRelatedDocumentsByEntities failed: {e.code()} - {e.details()}")
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error finding related documents: {e}")
+            return []
+
+    async def find_co_occurring_entities(
+        self,
+        entity_names: List[str],
+        min_co_occurrences: int = 2,
+        user_id: str = "system"
+    ) -> List[Dict[str, Any]]:
+        """
+        Find entities that co-occur with given entities
+        
+        Args:
+            entity_names: Target entity names
+            min_co_occurrences: Minimum co-occurrence threshold
+            user_id: User ID (for logging/future use)
+            
+        Returns:
+            List of entity dicts with name, type, co_occurrence_count
+        """
+        try:
+            await self._ensure_connected()
+            
+            request = tool_service_pb2.FindCoOccurringEntitiesRequest(
+                user_id=user_id,
+                entity_names=entity_names,
+                min_co_occurrences=min_co_occurrences
+            )
+            
+            response = await self._stub.FindCoOccurringEntities(request)
+            
+            entities = []
+            for entity in response.entities:
+                entities.append({
+                    "name": entity.name,
+                    "type": entity.type,
+                    "co_occurrence_count": entity.co_occurrence_count
+                })
+            
+            logger.info(f"Found {len(entities)} co-occurring entities")
+            return entities
+            
+        except grpc.RpcError as e:
+            logger.error(f"FindCoOccurringEntities failed: {e.code()} - {e.details()}")
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error finding co-occurring entities: {e}")
+            return []
+    
     # ===== Web Operations =====
     
     async def search_web(

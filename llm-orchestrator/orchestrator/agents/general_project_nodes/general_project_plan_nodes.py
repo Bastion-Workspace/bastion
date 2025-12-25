@@ -44,14 +44,32 @@ class GeneralProjectPlanNodes:
             project_plan_doc_id = active_editor.get("document_id")
             if not project_plan_doc_id:
                 logger.info("No project plan document - skipping update")
-                return {}
+                return {
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "project_decisions": state.get("project_decisions", [])
+                }
             
             # Get current project plan content
             from orchestrator.tools.document_tools import get_document_content_tool
             current_content = await get_document_content_tool(project_plan_doc_id, user_id)
             if current_content.startswith("Error"):
                 logger.warning("Could not read project plan content - skipping update")
-                return {}
+                return {
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "project_decisions": state.get("project_decisions", [])
+                }
             
             # Build conversation summary (last 5-10 messages)
             conversation_summary = ""
@@ -153,11 +171,29 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             
             if not result_dict.get("should_update", False):
                 logger.info("LLM determined project plan update not needed")
-                return {}
+                return {
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "project_decisions": state.get("project_decisions", [])
+                }
             
             updates = result_dict.get("updates", [])
             if not updates:
-                return {}
+                return {
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "project_decisions": state.get("project_decisions", [])
+                }
             
             # Apply updates to project plan
             from orchestrator.tools.project_content_tools import propose_section_update, append_project_content
@@ -195,13 +231,30 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             
             return {
                 "project_plan_updated": True,
-                "updated_sections": updated_sections
+                "updated_sections": updated_sections,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "project_decisions": state.get("project_decisions", [])
             }
             
         except Exception as e:
             logger.error(f"Project plan update failed: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            return {}
+            return {
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "project_decisions": state.get("project_decisions", [])
+            }
 
 

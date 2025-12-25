@@ -5,7 +5,33 @@ All notable changes to Bastion AI Workspace will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2025-01-XX
+- Feature: Import generated images into the document library
+- Refactor: Simplify fiction agent
+- Fix: Prompt multiplication bloat in Fiction agent
+- Feature: ePub export (untested)
+- Feature: 'Cover' frontmatter type support in Fiction documents
+
 ## [Unreleased]
+- Feature: Added image import functionality for generated images - users can now import images directly into document library folders
+- Feature: Automatic cleanup of generated images when conversations are deleted - imported images are preserved, non-imported images are removed
+- Fix: Implemented "Smart Validation" for editor diffs to prevent invalidation during full-document syncs
+- Fix: Resolved race condition and network-sync related diff invalidation in the live editor
+- Fix: Resolved race condition where rapid acceptance of multiple live diffs caused remaining diffs to disappear
+- Fix: Prevented live edit diffs from disappearing when accepting multiple changes in rapid succession
+- Fix: Resolved frontend build error due to missing variable definition in MessagingContext
+- Fix: Resolved message duplication and unread count persistence issues in real-time chat
+- Fix: Resolved issue where new rooms and initial messages failed to appear for recipients in real-time
+- Fix: Resolved issue where user "offline" status failed to broadcast in real-time
+- Fix: Resolved issue where users remained "online" after logging out or closing their browser
+- Fix: Improved WebSocket headcount logic to correctly track multiple simultaneous connections per user
+- Fix: Resolved issue where unread message counts would reappear after a page refresh
+- Fix: Resolved issue with messaging presence indicators getting stuck or failing on refresh
+- Fix: Resolved issue where messaging notifications failed to update until the drawer was opened
+- Fix: Resolved circular RLS dependency in messaging system causing rooms to vanish on refresh
+- Fix: Corrected room display name calculation to correctly identify other participants
+- Feature: Added detailed logging for outline chapter extraction in fiction agent
+- Fix: Improved forward-looking outline context for new manuscripts in fiction generator
 - Refactor: Established standard agent handoff pattern using shared_memory for clean inter-agent data passing
 - Update: Simplified intent classification to trust LLM semantic understanding over pattern matching
 - Fix: Research agent now receives reference document context when delegated by reference agent

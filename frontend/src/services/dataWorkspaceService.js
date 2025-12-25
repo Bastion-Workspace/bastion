@@ -133,11 +133,17 @@ class DataWorkspaceService {
     return response.data;
   }
 
-  async updateTableCell(tableId, rowId, columnName, value) {
+  async updateTableCell(tableId, rowId, columnName, value, formula = null) {
     const response = await this.api.patch(`/tables/${tableId}/rows/${rowId}/cells`, {
       column_name: columnName,
-      value: value
+      value: value,
+      formula: formula
     });
+    return response.data;
+  }
+
+  async recalculateTable(tableId) {
+    const response = await this.api.post(`/tables/${tableId}/recalculate`);
     return response.data;
   }
 

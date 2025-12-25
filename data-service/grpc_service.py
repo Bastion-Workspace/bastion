@@ -504,7 +504,8 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
                     row_id=row['row_id'],
                     row_data_json=json.dumps(row['row_data']),
                     row_index=row['row_index'],
-                    row_color=row.get('row_color', '')
+                    row_color=row.get('row_color', ''),
+                    formula_data_json=json.dumps(row.get('formula_data', {}))
                 )
                 for row in data['rows']
             ]
@@ -545,7 +546,8 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
                 row_id=row['row_id'],
                 row_data_json=json.dumps(row['row_data']),
                 row_index=row.get('row_index', 0),
-                row_color=row.get('row_color', '')
+                row_color=row.get('row_color', ''),
+                formula_data_json=json.dumps(row.get('formula_data', {}))
             )
             
         except Exception as e:
@@ -570,7 +572,8 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
                 row_id=row['row_id'],
                 row_data_json=json.dumps(row['row_data']),
                 row_index=row.get('row_index', 0),
-                row_color=row.get('row_color', '')
+                row_color=row.get('row_color', ''),
+                formula_data_json=json.dumps(row.get('formula_data', {}))
             )
             
         except Exception as e:
@@ -580,24 +583,35 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             return data_service_pb2.RowResponse()
     
     async def UpdateCell(self, request, context):
-        """Update a single cell"""
+        """Update a single cell with optional formula"""
         try:
             value = json.loads(request.value_json)
+            formula = request.formula if request.formula else None
             
             row = await self.table_service.update_cell(
                 table_id=request.table_id,
                 row_id=request.row_id,
                 column_name=request.column_name,
                 value=value,
-                user_id=request.user_id if request.user_id else None
+                user_id=request.user_id if request.user_id else None,
+                formula=formula
             )
             
-            return data_service_pb2.RowResponse(
+            if not row:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details("Row not found")
+                return data_service_pb2.RowResponse()
+            
+            # Include formula_data in response if available
+            response = data_service_pb2.RowResponse(
                 row_id=row['row_id'],
                 row_data_json=json.dumps(row['row_data']),
                 row_index=row.get('row_index', 0),
-                row_color=row.get('row_color', '')
+                row_color=row.get('row_color', ''),
+                formula_data_json=json.dumps(row.get('formula_data', {}))
             )
+            
+            return response
             
         except Exception as e:
             logger.error(f"Failed to update cell: {e}")
@@ -631,6 +645,30 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return data_service_pb2.DeleteResponse(success=False, message=str(e))
+    
+    async def RecalculateTable(self, request, context):
+        """Recalculate all formulas in a table"""
+        try:
+            result = await self.table_service.recalculate_table(
+                table_id=request.table_id,
+                user_id=request.user_id if request.user_id else None
+            )
+            
+            return data_service_pb2.RecalculateTableResponse(
+                success=result.get('success', False),
+                cells_recalculated=result.get('cells_recalculated', 0),
+                error_message=result.get('error_message', '') or ''
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to recalculate table: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return data_service_pb2.RecalculateTableResponse(
+                success=False,
+                cells_recalculated=0,
+                error_message=str(e)
+            )
     
     # Query operations
     async def ExecuteSQLQuery(self, request, context):

@@ -138,7 +138,16 @@ class GeneralProjectSaveNodes:
             save_plan = state.get("save_plan", {})
             if not save_plan or not save_plan.get("routing"):
                 logger.info("No content to save")
-                return {}
+                return {
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "save_plan": state.get("save_plan")
+                }
             
             user_id = state.get("user_id", "")
             metadata = state.get("metadata", {})
@@ -471,7 +480,16 @@ summary: {file_summary}
                 "task_status": "complete",
                 "saved_files": saved_files,
                 "response": response,
-                "referenced_context": reloaded_context  # Update state with fresh context
+                "referenced_context": reloaded_context,  # Update state with fresh context
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "editing_mode": state.get("editing_mode", False),
+                "plan_edits": state.get("plan_edits"),
+                "editor_operations": state.get("editor_operations", [])
             }
             
         except Exception as e:
@@ -480,7 +498,17 @@ summary: {file_summary}
             logger.error(traceback.format_exc())
             return {
                 "task_status": "error",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "editing_mode": state.get("editing_mode", False),
+                "plan_edits": state.get("plan_edits"),
+                "editor_operations": state.get("editor_operations", [])
             }
 
 

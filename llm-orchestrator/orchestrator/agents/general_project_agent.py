@@ -524,7 +524,13 @@ class GeneralProjectAgent(BaseAgent):
                 "query_type": "general",
                 "search_needed": False,
                 "project_plan_action": None,
-                "query_is_project_related": has_project_plan
+                "query_is_project_related": has_project_plan,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
         
         try:
@@ -691,7 +697,13 @@ Return ONLY valid JSON:
                 "search_needed": result_dict.get("search_needed", False),
                 "project_plan_action": result_dict.get("project_plan_action"),
                 "query_is_project_related": query_is_project_related,
-                "query_intent": result_dict.get("query_intent", "action")  # Default to action for safety
+                "query_intent": result_dict.get("query_intent", "action"),  # Default to action for safety
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
             # If we did combined analysis, include information needs to skip separate node
@@ -719,7 +731,13 @@ Return ONLY valid JSON:
                 "query_type": "general",
                 "search_needed": False,
                 "project_plan_action": None,
-                "query_is_project_related": has_project_plan
+                "query_is_project_related": has_project_plan,
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _plan_execution_strategy_node(self, state: GeneralProjectState) -> Dict[str, Any]:
@@ -743,10 +761,23 @@ Return ONLY valid JSON:
                         "maintenance_items": [],
                         "priority": "medium",
                         "reasoning": "Query indicates potential documentation updates needed"
-                    }
+                    },
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
-            return {}
+            return {
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
             
         except Exception as e:
             logger.error(f"Execution planning failed: {e}")
@@ -766,7 +797,13 @@ Return ONLY valid JSON:
             if editor_preference == "ignore":
                 logger.info(f"Skipping project context - editor_preference is 'ignore'")
                 return {
-                    "referenced_context": {}
+                    "referenced_context": {},
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             active_editor = metadata.get("active_editor") or shared_memory.get("active_editor", {})
@@ -774,7 +811,13 @@ Return ONLY valid JSON:
             if not active_editor or active_editor.get("frontmatter", {}).get("type", "").lower() != "project":
                 logger.info(f"Skipping project context - no project plan open")
                 return {
-                    "referenced_context": {}
+                    "referenced_context": {},
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             # Load referenced files from frontmatter
@@ -814,13 +857,25 @@ Return ONLY valid JSON:
                 "referenced_context": referenced_context,
                 "editing_mode": editing_mode,
                 "editor_operations": [],
-                "plan_edits": None
+                "plan_edits": None,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
             logger.error(f"Context loading failed: {e}")
             return {
-                "referenced_context": {}
+                "referenced_context": {},
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     def _get_frontmatter_end(self, content: str) -> int:
@@ -932,7 +987,16 @@ Return ONLY valid JSON:
             if not plan_edits:
                 return {
                     "editor_operations": [],
-                    "task_status": "complete"
+                    "task_status": "complete",
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "editing_mode": state.get("editing_mode", False),
+                    "plan_edits": state.get("plan_edits")
                 }
             
             # Get editor content
@@ -945,7 +1009,16 @@ Return ONLY valid JSON:
                 return {
                     "editor_operations": [],
                     "task_status": "error",
-                    "error": "No editor content available"
+                    "error": "No editor content available",
+                    # ✅ CRITICAL: Preserve critical state keys even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "editing_mode": state.get("editing_mode", False),
+                    "plan_edits": state.get("plan_edits")
                 }
             
             frontmatter_end = self._get_frontmatter_end(editor_content)
@@ -1001,7 +1074,16 @@ Return ONLY valid JSON:
             
             return {
                 "editor_operations": editor_operations,
-                "task_status": "complete"
+                "task_status": "complete",
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "editing_mode": state.get("editing_mode", False),
+                "plan_edits": state.get("plan_edits")
             }
             
         except Exception as e:
@@ -1011,7 +1093,16 @@ Return ONLY valid JSON:
             return {
                 "editor_operations": [],
                 "task_status": "error",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "editing_mode": state.get("editing_mode", False),
+                "plan_edits": state.get("plan_edits")
             }
     
     async def _format_response_node(self, state: GeneralProjectState) -> Dict[str, Any]:
@@ -1051,7 +1142,13 @@ Return ONLY valid JSON:
             
             return {
                 "response": response,
-                "task_status": "complete"
+                "task_status": "complete",
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -1059,7 +1156,13 @@ Return ONLY valid JSON:
             return {
                 "response": {"response": "Error formatting response", "task_status": "error"},
                 "task_status": "error",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _perform_web_search_node(self, state: GeneralProjectState) -> Dict[str, Any]:
@@ -1120,14 +1223,32 @@ Return ONLY valid JSON:
             
             return {
                 "documents": all_documents,
-                "web_search_needed": False
+                "web_search_needed": False,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "search_queries": state.get("search_queries", []),
+                "segments": state.get("segments", [])
             }
             
         except Exception as e:
             logger.error(f"Web search failed: {e}")
             return {
                 "documents": state.get("documents", []),
-                "web_search_needed": False
+                "web_search_needed": False,
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "search_queries": state.get("search_queries", []),
+                "segments": state.get("segments", [])
             }
     
     async def _generate_response_node(self, state: GeneralProjectState) -> Dict[str, Any]:
@@ -1198,7 +1319,16 @@ Return ONLY valid JSON:
                     "response": response_text,
                     "query_type": query_type,
                     "confidence": 0.8
-                }
+                },
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "documents": state.get("documents", []),
+                "segments": state.get("segments", [])
             }
             
         except Exception as e:
@@ -1208,7 +1338,16 @@ Return ONLY valid JSON:
                     "task_status": "error",
                     "response": f"I encountered an error while generating a response: {str(e)}",
                     "error": str(e)
-                }
+                },
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "documents": state.get("documents", []),
+                "segments": state.get("segments", [])
             }
     
     def _build_general_project_prompt(self) -> str:

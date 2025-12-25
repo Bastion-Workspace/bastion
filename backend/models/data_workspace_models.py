@@ -117,6 +117,7 @@ class UpdateRowRequest(BaseModel):
 class UpdateCellRequest(BaseModel):
     column_name: str
     value: Any
+    formula: Optional[str] = None  # Formula string if cell contains formula
 
 
 # Import Models
@@ -291,4 +292,10 @@ class WorkspaceShareResponse(BaseModel):
     expires_at: Optional[str]
     created_at: str
     access_count: int
+
+
+class RecalculateTableResponse(BaseModel):
+    success: bool
+    cells_recalculated: int
+    error_message: Optional[str] = None
 
