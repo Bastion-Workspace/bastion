@@ -84,14 +84,16 @@ async def create_room(
             room_name=request.room_name
         )
         
-        # Broadcast new room to all participants
+        # Broadcast new room to all participants via their user-level sockets
+        # (This is more robust than broadcast_to_room because the room is new and no one is in it yet)
         ws_manager = get_websocket_manager()
-        await ws_manager.broadcast_to_room(room['room_id'], {
+        participant_ids = room.get('participant_ids', [])
+        await ws_manager.broadcast_to_users(participant_ids, {
             "type": "new_room",
             "room": room
         })
         
-        logger.info(f"📬 New room {room['room_id']} broadcast to participants")
+        logger.info(f"📬 New room {room['room_id']} broadcast to {len(participant_ids)} participants")
         
         return room
     
@@ -269,6 +271,24 @@ async def add_participant(
 # =====================
 # MESSAGE ENDPOINTS
 # =====================
+
+@router.post("/rooms/{room_id}/read")
+async def mark_room_as_read(
+    room_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Mark all messages in a room as read"""
+    try:
+        if not settings.MESSAGING_ENABLED:
+            raise HTTPException(status_code=503, detail="Messaging is not enabled")
+        
+        success = await messaging_service.mark_room_as_read(room_id, current_user.user_id)
+        return {"success": success}
+    
+    except Exception as e:
+        logger.error(f"❌ Failed to mark room as read: {e}")
+        raise HTTPException(status_code=500, detail="Failed to mark room as read")
+
 
 @router.get("/rooms/{room_id}/messages")
 async def get_room_messages(
@@ -768,9 +788,14 @@ async def websocket_room_endpoint(websocket: WebSocket, room_id: str):
         finally:
             # Cleanup
             await ws_manager.disconnect_from_room(websocket, room_id, user_id)
-            # Update presence to offline
-            await messaging_service.update_user_presence(user_id, status='offline')
-            await ws_manager.broadcast_presence_update(user_id, 'offline')
+            
+            # Only update presence to offline if NO OTHER connections exist for this user
+            if not ws_manager.is_user_connected(user_id):
+                await messaging_service.update_user_presence(user_id, status='offline')
+                await ws_manager.broadcast_presence_update(user_id, 'offline')
+                logger.info(f"🚩 User {user_id} now OFFLINE (all connections closed)")
+            else:
+                logger.info(f"📡 User {user_id} still has active connections, keeping ONLINE")
     
     except Exception as e:
         logger.error(f"❌ Room WebSocket error for room {room_id}: {e}")
@@ -826,14 +851,22 @@ async def websocket_user_endpoint(websocket: WebSocket):
         ws_manager = get_websocket_manager()
         user_rooms = await messaging_service.get_user_rooms(user_id=user_id, limit=100)
         
-        # Store user connection
+        # Store user connection in the global list
         if not hasattr(ws_manager, 'user_connections'):
             ws_manager.user_connections = {}
-        ws_manager.user_connections[user_id] = websocket
+        if user_id not in ws_manager.user_connections:
+            ws_manager.user_connections[user_id] = []
+        
+        if websocket not in ws_manager.user_connections[user_id]:
+            ws_manager.user_connections[user_id].append(websocket)
         
         # Connect to all user rooms for notifications
         for room in user_rooms:
             await ws_manager.connect_to_room(websocket, room['room_id'], user_id)
+        
+        # Update user presence to online and broadcast
+        await messaging_service.update_user_presence(user_id, status='online')
+        await ws_manager.broadcast_presence_update(user_id, 'online')
         
         logger.info(f"✅ User WebSocket connected to {len(user_rooms)} rooms for user: {user_id}")
         
@@ -850,11 +883,16 @@ async def websocket_user_endpoint(websocket: WebSocket):
             logger.info(f"💬 User WebSocket disconnected for user: {user_id}")
         finally:
             # Cleanup - disconnect from all rooms
-            if hasattr(ws_manager, 'user_connections'):
-                ws_manager.user_connections.pop(user_id, None)
-            
             for room in user_rooms:
                 await ws_manager.disconnect_from_room(websocket, room['room_id'], user_id)
+            
+            # Only update presence to offline if NO OTHER connections exist for this user
+            if not ws_manager.is_user_connected(user_id):
+                await messaging_service.update_user_presence(user_id, status='offline')
+                await ws_manager.broadcast_presence_update(user_id, 'offline')
+                logger.info(f"🚩 User {user_id} now OFFLINE (all connections closed)")
+            else:
+                logger.info(f"📡 User {user_id} still has active connections, keeping ONLINE")
     
     except Exception as e:
         logger.error(f"❌ User WebSocket error: {e}")

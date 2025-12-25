@@ -187,9 +187,27 @@ const LiveEditDiffPluginClass = class {
       if (documentId && documentPluginRegistry.has(documentId)) {
         const existingPlugin = documentPluginRegistry.get(documentId);
         console.log('🔍 Reusing existing plugin instance for document:', documentId, 'Registry size:', documentPluginRegistry.size);
-        // Update the view reference AND schedule decoration update for new view
+        
+        // Update the view reference
         existingPlugin.view = view;
-        existingPlugin.scheduleDecorationUpdate();
+        
+        // Ensure flag is initialized (for backward compatibility with existing instances)
+        if (existingPlugin.programmaticUpdateCounter === undefined) {
+          existingPlugin.programmaticUpdateCounter = 0;
+        }
+        if (existingPlugin.programmaticUpdateShieldTime === undefined) {
+          existingPlugin.programmaticUpdateShieldTime = 0;
+        }
+        
+        // ✅ FIX: Only schedule decoration update if there are operations AND decorations haven't been applied yet
+        // This prevents duplicate decorations when extension is recreated (e.g., tab switch, editor remount)
+        if (existingPlugin.operations.size > 0 && !existingPlugin.pendingUpdate) {
+          console.log('🔍 Scheduling decoration update for reused plugin (operations:', existingPlugin.operations.size, ')');
+          existingPlugin.scheduleDecorationUpdate();
+        } else if (existingPlugin.operations.size > 0) {
+          console.log('🔍 Skipping decoration update - already pending');
+        }
+        
         return existingPlugin;
       }
 
@@ -205,6 +223,10 @@ const LiveEditDiffPluginClass = class {
       this.updateTimeout = null; // Track pending timeout
       this.creationTime = Date.now(); // Track when this instance was created
       this.initialRender = true; // Track if this is the first decoration update
+      this.decorationsApplied = false; // Track if decorations have been applied for current operations
+      this.lastOperationsHash = ''; // Track hash of operations to detect changes
+      this.programmaticUpdateCounter = 0; // Track number of pending programmatic updates to skip invalidation
+      this.programmaticUpdateShieldTime = 0; // Timestamp until which invalidation is shielded
 
       // Only log in development mode
       if (process.env.NODE_ENV === 'development') {
@@ -222,7 +244,8 @@ const LiveEditDiffPluginClass = class {
         const savedDiffs = documentDiffStore.getDiffs(this.documentId);
         if (savedDiffs && savedDiffs.operations && Array.isArray(savedDiffs.operations) && savedDiffs.operations.length > 0) {
           console.log(`Restoring ${savedDiffs.operations.length} diffs for document ${this.documentId}`);
-          this.addOperations(savedDiffs.operations, savedDiffs.messageId);
+          // Pass skipSave=true to avoid re-saving operations that were just loaded from store
+          this.addOperations(savedDiffs.operations, savedDiffs.messageId, true);
         }
         
         // ✅ Subscribe to store changes to sync with other plugin instances
@@ -370,16 +393,42 @@ const LiveEditDiffPluginClass = class {
       const docLength = update.state.doc.length;
       const toRemove = [];
       let needsUpdate = false;
+      let hasAlreadyAdjustedOps = false;
+      
+      // Check if any operations were already adjusted by acceptOperation()
+      this.operations.forEach((op, id) => {
+        if (op.adjustedForAccept) {
+          hasAlreadyAdjustedOps = true;
+        }
+      });
       
       // Smart invalidation: Check if user manual edits overlap with pending diffs
-      if (update.changes && this.documentId) {
+      // CRITICAL: Skip invalidation when we're applying an accepted diff programmatically
+      // This prevents all other diffs from being invalidated when one diff is accepted
+      // We use both a counter and a temporal shield to handle race conditions and network syncs
+      const now = Date.now();
+      const isShielded = this.programmaticUpdateShieldTime > now;
+      const isProgrammaticUpdate = (this.programmaticUpdateCounter > 0) || isShielded;
+      
+      if (update.changes && this.documentId && !isProgrammaticUpdate) {
         update.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
           // User edited range: [fromA, toA]
           const editStart = fromA;
           const editEnd = toA;
           
-          // Invalidate overlapping diffs
+          // Debug logging for large edits that might be syncs
+          if (editEnd - editStart > 100 || (editStart === 0 && editEnd === update.startState.doc.length)) {
+            console.log(`🔍 Large edit detected [${editStart}-${editEnd}], docLength: ${update.startState.doc.length}. isProgrammaticUpdate: ${isProgrammaticUpdate}, counter: ${this.programmaticUpdateCounter}, shielded: ${isShielded}`);
+          }
+          
+          // Invalidate overlapping diffs (but skip operations that were adjusted by accept)
           this.operations.forEach((op, id) => {
+            // Skip overlap check for operations that were already adjusted by acceptOperation()
+            // These were already checked for overlap there
+            if (op.adjustedForAccept) {
+              return;
+            }
+            
             const opStart = op.from !== undefined ? op.from : (op.start !== undefined ? op.start : 0);
             const opEnd = op.to !== undefined ? op.to : (op.end !== undefined ? op.end : opStart);
             
@@ -387,7 +436,21 @@ const LiveEditDiffPluginClass = class {
             const overlaps = !(editEnd < opStart || editStart > opEnd);
             
             if (overlaps) {
-              console.log(`User edit [${editStart}-${editEnd}] overlaps diff [${opStart}-${opEnd}] - invalidating`);
+              // ✅ SMART VALIDATION: If it's a large edit (likely a full-document sync), 
+              // check if the original text still matches at the diff's position.
+              // If it matches, the diff is still valid - don't invalidate it!
+              const isLargeEdit = (editEnd - editStart > 500) || (editStart === 0 && editEnd === update.startState.doc.length);
+              if (isLargeEdit && op.original) {
+                const currentTextAtPos = update.state.doc.sliceString(opStart, opEnd);
+                if (currentTextAtPos === op.original) {
+                  if (process.env.NODE_ENV === 'development') {
+                    console.log(`🔍 Sync edit [${editStart}-${editEnd}] overlaps diff [${opStart}-${opEnd}] but content matches - keeping diff.`);
+                  }
+                  return; // Skip invalidation for this diff
+                }
+              }
+
+              console.log(`User edit [${editStart}-${editEnd}] overlaps diff [${opStart}-${opEnd}] - invalidating. Message: ${op.messageId}`);
               toRemove.push(id);
               // Also remove from centralized store
               documentDiffStore.removeDiff(this.documentId, id);
@@ -396,8 +459,17 @@ const LiveEditDiffPluginClass = class {
         });
       }
       
+      // Decrement the counter and update shield status after processing a document change
+      if (isProgrammaticUpdate) {
+        if (this.programmaticUpdateCounter > 0) {
+          this.programmaticUpdateCounter--;
+        }
+        console.log(`🔍 Programmatic update detected. Counter: ${this.programmaticUpdateCounter}, Shield active: ${this.programmaticUpdateShieldTime > now}`);
+      }
+      
       // Adjust positions for remaining operations based on text length changes
-      if (update.changes && this.operations.size > 0) {
+      // SKIP if operations were already adjusted by acceptOperation() to prevent double adjustment
+      if (update.changes && this.operations.size > 0 && !hasAlreadyAdjustedOps) {
         update.changes.iterChanges((fromA, toA, fromB, toB) => {
           const lenChange = (toB - fromB) - (toA - fromA);
           
@@ -419,6 +491,16 @@ const LiveEditDiffPluginClass = class {
               // This shouldn't happen due to overlap check above, but safety check
             }
           });
+        });
+      }
+      
+      // Clear the adjustedForAccept flag now that we've handled the change
+      if (hasAlreadyAdjustedOps) {
+        this.operations.forEach((op, id) => {
+          if (op.adjustedForAccept) {
+            delete op.adjustedForAccept;
+            needsUpdate = true;
+          }
         });
       }
       
@@ -456,6 +538,21 @@ const LiveEditDiffPluginClass = class {
         }
         needsUpdate = true;
       });
+      
+      // ✅ CRITICAL FIX: Save adjusted positions to store so they persist across tab switches
+      if (needsUpdate && this.documentId && this.operations.size > 0) {
+        const adjustedOperations = Array.from(this.operations.values());
+        const currentContent = update.state.doc.toString();
+        const messageId = this.currentMessageId;
+        
+        console.log('💾 Saving adjusted positions to documentDiffStore:', {
+          documentId: this.documentId,
+          operationsCount: adjustedOperations.length,
+          messageId
+        });
+        
+        documentDiffStore.setDiffs(this.documentId, adjustedOperations, messageId, currentContent);
+      }
       
       // Update decorations if any operations were adjusted or removed
       if (needsUpdate) {
@@ -495,7 +592,10 @@ const LiveEditDiffPluginClass = class {
     }
   }
   
-  addOperations(operations, messageId) {
+  addOperations(operations, messageId, skipSave = false) {
+    // ✅ FIX: Reset decorations applied flag when new operations are added
+    this.decorationsApplied = false;
+    
     // CRITICAL FIX: Clear operations from previous messages FIRST to ensure we have room
     // This must happen before the maxOperations check
     if (messageId && messageId !== this.currentMessageId) {
@@ -626,12 +726,15 @@ const LiveEditDiffPluginClass = class {
     });
     
     // ✅ Update the centralized store with operations that now have IDs
-    if (this.documentId && toAdd.length > 0) {
+    // Skip if this is a restoration from store (skipSave=true) to avoid unnecessary notifications
+    if (this.documentId && toAdd.length > 0 && !skipSave) {
       // Get current stored operations and update them with IDs
       const storedOperations = Array.from(this.operations.values());
       const currentContent = this.view.state.doc.toString();
       documentDiffStore.setDiffs(this.documentId, storedOperations, messageId, currentContent);
       console.log('✅ Updated centralized store with', storedOperations.length, 'operations (with IDs)');
+    } else if (skipSave) {
+      console.log('⏭️ Skipped store update (restoring from storage)');
     }
     
     this.scheduleDecorationUpdate();
@@ -639,15 +742,33 @@ const LiveEditDiffPluginClass = class {
   
   removeOperation(operationId) {
     this.operations.delete(operationId);
+    // ✅ FIX: Reset decorations applied flag when operations are removed
+    this.decorationsApplied = false;
     this.scheduleDecorationUpdate();
   }
   
   clearAllOperations() {
     this.operations.clear();
+    // ✅ FIX: Reset decorations applied flag when all operations are cleared
+    this.decorationsApplied = false;
+    this.lastOperationsHash = '';
     this.scheduleDecorationUpdate();
   }
   
+  _hashOperations() {
+    // Create a hash of current operations to detect changes
+    const opKeys = Array.from(this.operations.keys()).sort();
+    return opKeys.join(',');
+  }
+
   scheduleDecorationUpdate() {
+    // ✅ FIX: Check if decorations are already applied for current operations
+    const currentHash = this._hashOperations();
+    if (this.decorationsApplied && this.lastOperationsHash === currentHash) {
+      console.log('🔍 Skipping decoration update - already applied for these operations');
+      return;
+    }
+
     // Prevent multiple updates from being queued
     if (this.pendingUpdate) {
       return;
@@ -660,18 +781,14 @@ const LiveEditDiffPluginClass = class {
       clearTimeout(this.updateTimeout);
     }
 
-    // Use requestAnimationFrame for smoother updates, but immediate for initial render
-    if (this.initialRender) {
+    // ALWAYS use requestAnimationFrame to avoid re-entrancy issues
+    // This ensures we're not trying to update while CodeMirror is in an update cycle
+    this.updateTimeout = requestAnimationFrame(() => {
       this.pendingUpdate = false;
+      this.updateTimeout = null;
+      this.initialRender = false; // Clear initial render flag after first update
       this.applyDecorationUpdate();
-      this.initialRender = false;
-    } else {
-      this.updateTimeout = requestAnimationFrame(() => {
-        this.pendingUpdate = false;
-        this.updateTimeout = null;
-        this.applyDecorationUpdate();
-      });
-    }
+    });
   }
   
   applyDecorationUpdate() {
@@ -836,13 +953,25 @@ const LiveEditDiffPluginClass = class {
       
       // CRITICAL: Only dispatch if view is still valid
       if (this.view && !this.view.isDestroyed) {
-        this.view.dispatch({
-          effects: setLiveDiffDecorations.of(decorationSet)
+        // Use requestAnimationFrame to ensure we are outside of the current update cycle
+        // and Promise.resolve().then() as a fallback/additional layer of safety
+        requestAnimationFrame(() => {
+          if (this.view && !this.view.isDestroyed) {
+            this.view.dispatch({
+              effects: setLiveDiffDecorations.of(decorationSet)
+            });
+            
+            // ✅ FIX: Mark decorations as applied and save operations hash
+            this.decorationsApplied = true;
+            this.lastOperationsHash = this._hashOperations();
+            console.log('🔍 Decorations applied successfully, hash:', this.lastOperationsHash);
+          }
         });
       }
     } catch (e) {
       console.error('❌ Error applying decoration update:', e);
       this.decorations = Decoration.none;
+      this.decorationsApplied = false;
     }
   }
   
@@ -967,8 +1096,36 @@ const LiveEditDiffPluginClass = class {
       });
     }
     
-    // Remove overlapping operations (directly delete to avoid multiple updates)
-    toRemove.forEach(id => this.operations.delete(id));
+    // Remove overlapping operations from map and store
+    toRemove.forEach(id => {
+      this.operations.delete(id);
+      if (this.documentId) {
+        documentDiffStore.removeDiff(this.documentId, id);
+      }
+    });
+    
+    // CRITICAL: Save adjusted operations to store immediately
+    // This ensures they persist and have correct positions when document changes
+    if (this.documentId && this.operations.size > 0) {
+      const adjustedOperations = Array.from(this.operations.values());
+      const currentContent = this.view.state.doc.toString();
+      const messageId = this.currentMessageId;
+      
+      console.log('💾 Saving adjusted operations to store after accept:', {
+        documentId: this.documentId,
+        operationsCount: adjustedOperations.length,
+        messageId
+      });
+      
+      documentDiffStore.setDiffs(this.documentId, adjustedOperations, messageId, currentContent);
+    }
+    
+    // CRITICAL: Shield from invalidation for a short window to handle race conditions
+    // and network syncs that might consume the counter prematurely.
+    // Increased to 1500ms to handle slow network/server responses (503/502 errors).
+    this.programmaticUpdateShieldTime = Date.now() + 1500; 
+    this.programmaticUpdateCounter = (this.programmaticUpdateCounter || 0) + 1;
+    console.log(`🔍 Shielding invalidation for 1500ms. Counter: ${this.programmaticUpdateCounter}`);
     
     // CRITICAL: Update decorations IMMEDIATELY before applying the change
     // This removes the accepted operation from decorations to prevent invalid positions
@@ -985,6 +1142,7 @@ const LiveEditDiffPluginClass = class {
       }));
       
       // After document change, adjust remaining operations and update again
+      // The counter will be decremented in the update() method after processing
       setTimeout(() => {
         this.scheduleDecorationUpdate();
       }, 0);

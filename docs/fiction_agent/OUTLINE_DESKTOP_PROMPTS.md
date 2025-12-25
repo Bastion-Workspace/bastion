@@ -56,7 +56,10 @@ Precision requirements for revision blocks:
 ### Structural Rules (Enforced)
 - Chapters must use: `## Chapter [number]` (e.g., `## Chapter 1`, `## Chapter 2`)
 - Do not name chapters; only number them.
-- Each chapter includes a 3–5 sentence summary paragraph.
+- Each chapter includes a **BRIEF, HIGH-LEVEL** 3–5 sentence summary paragraph (NOT a detailed synopsis).
+  - The summary should be a quick overview of main events, not a chapter-by-chapter book
+  - Think of it as a "back of the book" description for this chapter - what happens in broad strokes?
+  - Details belong in beats, not in the summary paragraph
 - Major beats as main bullets `-` (max 8–10 per chapter).
 - Sub‑bullets use two spaces then `-` (up to 2 per main beat).
 - Focus on structural events: plot actions, reveals, conflicts, consequences; avoid dialogue/prose.

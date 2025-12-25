@@ -61,7 +61,7 @@ This document describes our gRPC-based microservices architecture for LLM orches
 │  │  Multi-Agent System (14 Specialized Agents)           │      │
 │  │  ┌─────────────────────────────────────────────┐      │      │
 │  │  │ Research: FullResearchAgent, ResearchAgent  │      │      │
-│  │  │ Content: PodcastScriptAgent, SubstackAgent  │      │      │
+│  │  │ Content: PodcastScriptAgent, ArticleWritingAgent  │      │      │
 │  │  │ Org-mode: OrgInboxAgent, OrgProjectAgent    │      │      │
 │  │  │ Tools: WeatherAgent, ImageGenerationAgent   │      │      │
 │  │  │ Data: RSSAgent, FactCheckingAgent           │      │      │
@@ -120,7 +120,7 @@ The LLM Orchestrator microservice implements a **multi-agent system** with speci
 
 **Content Creation Agents:**
 - `PodcastScriptAgent` - Generate podcast scripts from research
-- `SubstackAgent` - Process and analyze Substack newsletters
+- `ArticleWritingAgent` - Generate long-form articles and short-form content (tweets)
 
 **Org-mode Integration Agents:**
 - `OrgInboxAgent` - Manage org-mode inbox items (add, toggle, archive, schedule)

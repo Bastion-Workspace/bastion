@@ -12,7 +12,7 @@ from orchestrator.agents.image_generation_agent import ImageGenerationAgent, get
 # FactCheckingAgent removed - not actively used
 from orchestrator.agents.rss_agent import RSSAgent, get_rss_agent
 from orchestrator.agents.org_inbox_agent import OrgInboxAgent, get_org_inbox_agent
-from orchestrator.agents.substack_agent import SubstackAgent, get_substack_agent
+from orchestrator.agents.article_writing_agent import ArticleWritingAgent, get_article_writing_agent
 from orchestrator.agents.podcast_script_agent import PodcastScriptAgent, get_podcast_script_agent
 from orchestrator.agents.org_project_agent import OrgProjectAgent, get_org_project_agent
 from orchestrator.agents.entertainment_agent import EntertainmentAgent, get_entertainment_agent
@@ -47,8 +47,8 @@ __all__ = [
     'get_rss_agent',
     'OrgInboxAgent',
     'get_org_inbox_agent',
-    'SubstackAgent',
-    'get_substack_agent',
+    'ArticleWritingAgent',
+    'get_article_writing_agent',
     'PodcastScriptAgent',
     'get_podcast_script_agent',
     'OrgProjectAgent',

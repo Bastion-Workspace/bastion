@@ -1,5 +1,5 @@
 """
-Substack Agent
+Article Writing Agent
 LangGraph agent for long-form article and tweet generation
 Generates publication-ready content with research integration
 """
@@ -18,8 +18,8 @@ from orchestrator.utils.editor_operation_resolver import resolve_editor_operatio
 logger = logging.getLogger(__name__)
 
 
-class SubstackState(TypedDict):
-    """State for substack agent LangGraph workflow"""
+class ArticleWritingState(TypedDict):
+    """State for article writing agent LangGraph workflow"""
     query: str
     user_id: str
     metadata: Dict[str, Any]
@@ -43,9 +43,9 @@ class SubstackState(TypedDict):
     error: str
 
 
-class SubstackAgent(BaseAgent):
+class ArticleWritingAgent(BaseAgent):
     """
-    Substack Agent for long-form article and tweet generation
+    Article Writing Agent for long-form article and tweet generation
     
     Synthesizes multiple sources into cohesive, engaging content
     with optional research augmentation
@@ -53,13 +53,13 @@ class SubstackAgent(BaseAgent):
     """
     
     def __init__(self):
-        super().__init__("substack_agent")
+        super().__init__("article_writing_agent")
         self._grpc_client = None
-        logger.info("📝 Substack Agent ready!")
+        logger.info("📝 Article Writing Agent ready!")
     
     def _build_workflow(self, checkpointer) -> StateGraph:
-        """Build LangGraph workflow for substack agent"""
-        workflow = StateGraph(SubstackState)
+        """Build LangGraph workflow for article writing agent"""
+        workflow = StateGraph(ArticleWritingState)
         
         # Add nodes
         workflow.add_node("prepare_context", self._prepare_context_node)
@@ -100,7 +100,7 @@ class SubstackAgent(BaseAgent):
     def _build_system_prompt(self, persona: Optional[Dict[str, Any]] = None, editing_mode: bool = False) -> str:
         """Build article writing system prompt"""
         base = (
-            "You are a professional long-form article writer specializing in blog posts and Substack publications. "
+            "You are a professional long-form article writer specializing in blog posts and article publications. "
             "Your task is to synthesize multiple source materials into a cohesive, engaging article.\n\n"
         )
         
@@ -183,7 +183,7 @@ class SubstackAgent(BaseAgent):
         
         return base
     
-    async def _prepare_context_node(self, state: SubstackState) -> Dict[str, Any]:
+    async def _prepare_context_node(self, state: ArticleWritingState) -> Dict[str, Any]:
         """Prepare context: extract message and check editor type"""
         try:
             logger.info("📋 Preparing context for article generation...")
@@ -197,14 +197,20 @@ class SubstackAgent(BaseAgent):
             doc_type = str(frontmatter.get("type", "")).strip().lower()
             
             if doc_type not in ["substack", "blog"]:
-                logger.info(f"📝 Substack agent skipping: editor type is '{doc_type}', not 'substack' or 'blog'")
+                logger.info(f"📝 Article writing agent skipping: editor type is '{doc_type}', not 'substack' or 'blog'")
                 return {
                     "response": self._create_response(
                     success=True,
-                    response="Active editor is not a substack/blog document. Substack agent requires editor with type='substack' or type='blog'.",
+                    response="Active editor is not a substack/blog document. Article writing agent requires editor with type='substack' or type='blog'.",
                     skipped=True
                     ),
-                    "task_status": "skipped"
+                    "task_status": "skipped",
+                    # ✅ CRITICAL: Preserve state even on skip
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             # Get user message and editor content
@@ -235,7 +241,7 @@ class SubstackAgent(BaseAgent):
                 else:
                     editing_mode = len(editor_content.strip()) > 0
             
-            logger.info(f"📝 Substack agent mode: {'EDITING' if editing_mode else 'GENERATION'}")
+            logger.info(f"📝 Article writing agent mode: {'EDITING' if editing_mode else 'GENERATION'}")
             
             return {
                 "user_message": user_message,
@@ -244,7 +250,13 @@ class SubstackAgent(BaseAgent):
                 "tweet_mode": tweet_mode,
                 "editing_mode": editing_mode,
                 "editor_operations": [],
-                "structured_edit": None
+                "structured_edit": None,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -255,10 +267,16 @@ class SubstackAgent(BaseAgent):
                 "frontmatter": {},
                 "tweet_mode": False,
                 "error": str(e),
-                "task_status": "error"
+                "task_status": "error",
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
-    async def _extract_content_node(self, state: SubstackState) -> Dict[str, Any]:
+    async def _extract_content_node(self, state: ArticleWritingState) -> Dict[str, Any]:
         """Extract content sections and build content/task blocks"""
         try:
             logger.info("📝 Extracting content sections...")
@@ -302,7 +320,13 @@ class SubstackAgent(BaseAgent):
             return {
                 "content_block": content_block,
                 "system_prompt": system_prompt,
-                "task_block": task_block
+                "task_block": task_block,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -311,10 +335,16 @@ class SubstackAgent(BaseAgent):
                 "content_block": "",
                 "system_prompt": "",
                 "task_block": "",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
-    async def _generate_article_node(self, state: SubstackState) -> Dict[str, Any]:
+    async def _generate_article_node(self, state: ArticleWritingState) -> Dict[str, Any]:
         """Generate article using LLM"""
         try:
             editing_mode = state.get("editing_mode", False)
@@ -368,15 +398,21 @@ class SubstackAgent(BaseAgent):
             if editing_mode:
                 # Parse structured edit operations
                 structured_edit = self._parse_editing_response(content)
-                logger.info("✅ Substack Agent: Edit plan generation complete")
+                logger.info("✅ Article Writing Agent: Edit plan generation complete")
                 return {
                     "structured_edit": structured_edit,
-                    "task_status": "complete"
+                    "task_status": "complete",
+                    # ✅ CRITICAL: Preserve state for subsequent nodes
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             else:
                 # Parse structured response (generation mode)
                 article_text, metadata = self._parse_response(content, tweet_mode)
-                logger.info("✅ Substack Agent: Article generation complete")
+                logger.info("✅ Article Writing Agent: Article generation complete")
                 
                 result = self._create_response(
                     success=True,
@@ -388,7 +424,13 @@ class SubstackAgent(BaseAgent):
                     "response": result,
                     "article_text": article_text,
                     "metadata_result": metadata,
-                    "task_status": "complete"
+                    "task_status": "complete",
+                    # ✅ CRITICAL: Preserve state for subsequent nodes
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
         except Exception as e:
@@ -396,7 +438,13 @@ class SubstackAgent(BaseAgent):
             return {
                 "response": self._create_error_result(f"Article generation failed: {str(e)}"),
                 "task_status": "error",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
@@ -412,7 +460,7 @@ class SubstackAgent(BaseAgent):
             Dictionary with article response and metadata
         """
         try:
-            logger.info(f"📝 Substack Agent: Starting article generation: {query[:100]}...")
+            logger.info(f"📝 Article Writing Agent: Starting article generation: {query[:100]}...")
             
             # Extract user_id and shared_memory from metadata
             metadata = metadata or {}
@@ -443,7 +491,7 @@ class SubstackAgent(BaseAgent):
             shared_memory_merged.update(shared_memory)  # New data (including updated active_editor) takes precedence
             
             # Build initial state for LangGraph workflow
-            initial_state: SubstackState = {
+            initial_state: ArticleWritingState = {
                 "query": query,
                 "user_id": user_id,
                 "metadata": metadata,
@@ -489,7 +537,7 @@ class SubstackAgent(BaseAgent):
             return response
             
         except Exception as e:
-            logger.error(f"❌ Substack Agent ERROR: {e}")
+            logger.error(f"❌ Article Writing Agent ERROR: {e}")
             return self._create_error_result(f"Article generation failed: {str(e)}")
     
     def _extract_sections(
@@ -760,10 +808,10 @@ class SubstackAgent(BaseAgent):
         match = re.match(r'^---\s*\n[\s\S]*?\n---\s*\n', content)
         return match.end() if match else 0
     
-    async def _resolve_operations_node(self, state: SubstackState) -> Dict[str, Any]:
+    async def _resolve_operations_node(self, state: ArticleWritingState) -> Dict[str, Any]:
         """Resolve editor operations with progressive search"""
         try:
-            logger.info("📝 Resolving substack article operations...")
+            logger.info("📝 Resolving article operations...")
             
             editor_content = state.get("editor_content", "")
             structured_edit = state.get("structured_edit")
@@ -772,7 +820,13 @@ class SubstackAgent(BaseAgent):
                 return {
                     "editor_operations": [],
                     "error": "No operations to resolve",
-                    "task_status": "error"
+                    "task_status": "error",
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             fm_end_idx = self._get_frontmatter_end(editor_content)
@@ -823,7 +877,13 @@ class SubstackAgent(BaseAgent):
                     continue
             
             return {
-                "editor_operations": editor_operations
+                "editor_operations": editor_operations,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -833,10 +893,16 @@ class SubstackAgent(BaseAgent):
             return {
                 "editor_operations": [],
                 "error": str(e),
-                "task_status": "error"
+                "task_status": "error",
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
-    async def _format_response_node(self, state: SubstackState) -> Dict[str, Any]:
+    async def _format_response_node(self, state: ArticleWritingState) -> Dict[str, Any]:
         """Format final response with editor operations"""
         try:
             editing_mode = state.get("editing_mode", False)
@@ -857,7 +923,7 @@ class SubstackAgent(BaseAgent):
                 result = {
                     "response": response_text,
                     "task_status": "complete",
-                    "agent_type": "substack_agent"
+                    "agent_type": "article_writing_agent"
                 }
                 
                 # Add editor operations
@@ -872,14 +938,20 @@ class SubstackAgent(BaseAgent):
                     "response": {
                         "messages": [AIMessage(content=response_text)],
                         "agent_results": {
-                            "agent_type": "substack_agent",
+                            "agent_type": "article_writing_agent",
                             "is_complete": True,
                             "editor_operations": editor_operations,
                             "manuscript_edit": result.get("manuscript_edit")
                         },
                         "is_complete": True
                     },
-                    "task_status": "complete"
+                    "task_status": "complete",
+                    # ✅ CRITICAL: Preserve state (final node, but good practice)
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             else:
                 # Generation mode: return article text
@@ -891,7 +963,13 @@ class SubstackAgent(BaseAgent):
                 
                 return {
                     "response": result,
-                    "task_status": "complete"
+                    "task_status": "complete",
+                    # ✅ CRITICAL: Preserve state (final node, but good practice)
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
         except Exception as e:
@@ -899,7 +977,13 @@ class SubstackAgent(BaseAgent):
             return {
                 "response": self._create_error_result(f"Response formatting failed: {str(e)}"),
                 "task_status": "error",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     def _create_response(
@@ -913,7 +997,7 @@ class SubstackAgent(BaseAgent):
         return {
             "messages": [AIMessage(content=response)],
             "agent_results": {
-                "agent_type": "substack_agent",
+                "agent_type": "article_writing_agent",
                 "success": success,
                 "metadata": metadata or {},
                 "skipped": skipped,
@@ -924,11 +1008,11 @@ class SubstackAgent(BaseAgent):
     
     def _create_error_result(self, error_message: str) -> Dict[str, Any]:
         """Create standardized error result"""
-        logger.error(f"❌ Substack Agent error: {error_message}")
+        logger.error(f"❌ Article Writing Agent error: {error_message}")
         return {
             "messages": [AIMessage(content=f"Article generation failed: {error_message}")],
             "agent_results": {
-                "agent_type": "substack_agent",
+                "agent_type": "article_writing_agent",
                 "success": False,
                 "error": error_message,
                 "is_complete": True
@@ -938,13 +1022,13 @@ class SubstackAgent(BaseAgent):
 
 
 # Singleton instance
-_substack_agent_instance = None
+_article_writing_agent_instance = None
 
 
-def get_substack_agent() -> SubstackAgent:
-    """Get global substack agent instance"""
-    global _substack_agent_instance
-    if _substack_agent_instance is None:
-        _substack_agent_instance = SubstackAgent()
-    return _substack_agent_instance
+def get_article_writing_agent() -> ArticleWritingAgent:
+    """Get global article writing agent instance"""
+    global _article_writing_agent_instance
+    if _article_writing_agent_instance is None:
+        _article_writing_agent_instance = ArticleWritingAgent()
+    return _article_writing_agent_instance
 

@@ -269,9 +269,12 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 container = await get_service_container()
                 folder_service = container.folder_service
                 
-                # Skip PDFs - they don't have text content
-                if filename.lower().endswith('.pdf'):
-                    logger.info(f"GetDocumentContent: Skipping PDF content for {request.document_id}")
+                # Skip binary files (PDFs, images) - they don't have text content
+                image_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']
+                is_binary_file = filename.lower().endswith('.pdf') or any(filename.lower().endswith(ext) for ext in image_extensions)
+                
+                if is_binary_file:
+                    logger.info(f"GetDocumentContent: Skipping binary file content for {request.document_id} ({filename})")
                     full_content = ""
                 else:
                     try:

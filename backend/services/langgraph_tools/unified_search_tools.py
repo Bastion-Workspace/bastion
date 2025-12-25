@@ -406,23 +406,31 @@ class UnifiedSearchTools:
                 folder_id = getattr(document, 'folder_id', None)
                 collection_type = getattr(document, 'collection_type', 'user')
                 
-                # Try to get file path via folder service (handles new folder structure)
-                try:
-                    file_path_str = await folder_service.get_document_file_path(
-                        filename=filename,
-                        folder_id=folder_id,
-                        user_id=user_doc_id,
-                        collection_type=collection_type
-                    )
-                    file_path = Path(file_path_str)
-                    
-                    if file_path.exists():
-                        logger.info(f"✅ Found file via folder service: {file_path}")
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            full_content = f.read()
-                except Exception as folder_error:
-                    logger.warning(f"⚠️ Folder service lookup failed: {folder_error}")
-                    # Fall back to legacy search below
+                # Skip reading binary files (PDFs, images) - they don't have text content
+                image_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']
+                is_binary_file = filename.lower().endswith('.pdf') or any(filename.lower().endswith(ext) for ext in image_extensions)
+                
+                if is_binary_file:
+                    logger.info(f"⏭️ Skipping content load for binary file: {filename}")
+                    full_content = ""
+                else:
+                    # Try to get file path via folder service (handles new folder structure)
+                    try:
+                        file_path_str = await folder_service.get_document_file_path(
+                            filename=filename,
+                            folder_id=folder_id,
+                            user_id=user_doc_id,
+                            collection_type=collection_type
+                        )
+                        file_path = Path(file_path_str)
+                        
+                        if file_path.exists():
+                            logger.info(f"✅ Found file via folder service: {file_path}")
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                full_content = f.read()
+                    except Exception as folder_error:
+                        logger.warning(f"⚠️ Folder service lookup failed: {folder_error}")
+                        # Fall back to legacy search below
                 
                 # Fall back to legacy path search if folder service didn't work
                 upload_dir = Path(settings.UPLOAD_DIR)

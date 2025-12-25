@@ -34,6 +34,7 @@ import TeamInvitationMessage from './TeamInvitationMessage';
 
 const RoomChat = () => {
   const {
+    user,
     currentRoom,
     messages,
     sendMessage,
@@ -225,8 +226,9 @@ const RoomChat = () => {
 
   if (!currentRoom) return null;
 
+  const currentUserId = user?.user_id;
   const otherParticipants = currentRoom.participants?.filter(
-    p => p.user_id !== currentRoom.created_by
+    p => p.user_id !== currentUserId
   ) || [];
 
   return (
@@ -305,7 +307,7 @@ const RoomChat = () => {
               );
             }
 
-            const isOwn = message.sender_id === currentRoom.created_by;
+            const isOwn = message.sender_id === currentUserId;
             
             return (
               <Box

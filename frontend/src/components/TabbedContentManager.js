@@ -133,6 +133,26 @@ const TabbedContentManager = forwardRef((props, ref) => {
     };
 
     const closeTab = (tabId) => {
+        // Check if tab is a document and has unsaved content
+        const tab = tabs.find(t => t.id === tabId);
+        if (tab && tab.type === 'document' && tab.documentId) {
+            const unsavedKey = `unsaved_content_${tab.documentId}`;
+            const hasUnsaved = localStorage.getItem(unsavedKey) !== null;
+            
+            if (hasUnsaved) {
+                const confirmed = window.confirm(
+                    `"${tab.title}" has unsaved changes. Are you sure you want to close this tab? Your changes will be discarded.`
+                );
+                if (!confirmed) {
+                    return; // Don't close the tab
+                }
+                
+                // BULLY! Explicitly wipe the vault right here!
+                localStorage.removeItem(unsavedKey);
+                localStorage.removeItem(`discard_unsaved_${tab.documentId}`); // Just in case
+            }
+        }
+        
         setTabs(prevTabs => {
             const updatedTabs = prevTabs.filter(tab => tab.id !== tabId);
             

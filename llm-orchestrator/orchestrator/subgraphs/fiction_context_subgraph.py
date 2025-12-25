@@ -24,6 +24,9 @@ from orchestrator.utils.fiction_utilities import (
     find_chapter_ranges,
     locate_chapter_index,
     get_adjacent_chapters,
+    extract_chapter_outline,
+    extract_story_overview,
+    extract_book_map,
 )
 
 logger = logging.getLogger(__name__)
@@ -122,7 +125,6 @@ async def detect_chapter_mentions_node(state: Dict[str, Any]) -> Dict[str, Any]:
             logger.info("No current request - skipping chapter detection")
             return {
                 "explicit_primary_chapter": None,
-                "explicit_secondary_chapters": [],
                 # ✅ CRITICAL: Preserve all critical state keys
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
@@ -133,6 +135,8 @@ async def detect_chapter_mentions_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Regex patterns for chapter detection
         CHAPTER_PATTERNS = [
+            # Generation verbs + Chapter (HIGHEST PRIORITY - add first)
+            r'\b(?:Generate|Craft|Write|Create|Draft|Compose|Produce)\s+[Cc]hapter\s+(\d+)\b',
             # Action verbs + Chapter
             r'\b(?:Look over|Review|Check|Edit|Update|Revise|Modify|Address|Fix|Change)\s+[Cc]hapter\s+(\d+)\b',
             # Preposition + Chapter
@@ -140,14 +144,14 @@ async def detect_chapter_mentions_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # Chapter + verb
             r'\b[Cc]hapter\s+(\d+)\s+(?:needs|has|shows|contains|should|must|is|requires)',
             # Verb + in/at + Chapter
-            r'\b(?:address|fix|change|edit|update|revise|modify)\s+(?:in|at)\s+[Cc]hapter\s+(\d+)\b',
+            r'\b(?:address|fix|change|edit|update|revise|modify|generate|craft|write|create)\s+(?:in|at)\s+[Cc]hapter\s+(\d+)\b',
             # Chapter + punctuation + relative clause
             r'\b[Cc]hapter\s+(\d+)[:,]?\s+(?:where|when|that|which)',
         ]
         
         all_mentions = []
         for pattern in CHAPTER_PATTERNS:
-            matches = re.finditer(pattern, current_request)
+            matches = re.finditer(pattern, current_request, re.IGNORECASE)
             for match in matches:
                 chapter_num = int(match.group(1))
                 all_mentions.append({
@@ -168,15 +172,15 @@ async def detect_chapter_mentions_node(state: Dict[str, Any]) -> Dict[str, Any]:
         unique_mentions.sort(key=lambda x: x["position"])
         
         primary_chapter = None
-        secondary_chapters = []
         
         if unique_mentions:
             primary_chapter = unique_mentions[0]["chapter"]
-            secondary_chapters = [m["chapter"] for m in unique_mentions[1:]]
+            logger.info(f"📖 DETECTED CHAPTER MENTION: primary={primary_chapter}, from '{current_request}'")
+        else:
+            logger.info(f"📖 NO CHAPTER MENTIONS DETECTED in '{current_request}'")
         
         return {
             "explicit_primary_chapter": primary_chapter,
-            "explicit_secondary_chapters": secondary_chapters,
             "current_request": state.get("current_request", ""),  # Preserve from prepare_context
             "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
             "selection_start": state.get("selection_start", -1),
@@ -197,7 +201,6 @@ async def detect_chapter_mentions_node(state: Dict[str, Any]) -> Dict[str, Any]:
         logger.error(f"Failed to detect chapter mentions: {e}")
         return {
             "explicit_primary_chapter": None,
-            "explicit_secondary_chapters": [],
             "current_request": state.get("current_request", ""),  # Preserve even on error
             "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
             "selection_start": state.get("selection_start", -1),
@@ -230,7 +233,6 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Get explicit chapter mentions from query
         explicit_primary_chapter = state.get("explicit_primary_chapter")
-        explicit_secondary_chapters = state.get("explicit_secondary_chapters", [])
         
         # Find chapter ranges
         chapter_ranges = find_chapter_ranges(manuscript)
@@ -239,13 +241,15 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if len(chapter_ranges) == 0 and len(manuscript) > 0:
             logger.warning(f"CHAPTER DETECTION FAILED - Manuscript preview (first 500 chars): {repr(manuscript[:500])}")
         
-        # Priority system: explicit chapter > cursor position > default
+        # Priority system: explicit chapter > cursor position > smart default
         active_idx = -1
         current_chapter_number: Optional[int] = None
         detection_method = "unknown"
+        requested_chapter_number: Optional[int] = None  # For new chapter generation
         
-        # 1. Explicit chapter from query (highest priority)
+        # 1. Explicit chapter from query (highest priority - works even on empty files)
         if explicit_primary_chapter is not None:
+            # User explicitly requested a specific chapter
             for i, ch_range in enumerate(chapter_ranges):
                 if ch_range.chapter_number == explicit_primary_chapter:
                     active_idx = i
@@ -254,21 +258,44 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     break
             
             if active_idx == -1:
-                logger.warning(f"Explicit chapter {explicit_primary_chapter} not found in manuscript - falling back to cursor/default")
+                # Explicit chapter doesn't exist yet - this is a generation request
+                logger.info(f"Explicit chapter {explicit_primary_chapter} not found in manuscript - treating as new chapter generation request")
+                current_chapter_number = explicit_primary_chapter
+                requested_chapter_number = explicit_primary_chapter
+                detection_method = "explicit_new_chapter"
         
         # 2. Cursor position (if no explicit chapter and cursor is valid)
-        if active_idx == -1 and cursor_offset >= 0:
+        if active_idx == -1 and current_chapter_number is None and cursor_offset >= 0:
             active_idx = locate_chapter_index(chapter_ranges, cursor_offset)
             if active_idx != -1:
+                # Cursor is WITHIN a chapter
                 current_chapter_number = chapter_ranges[active_idx].chapter_number
                 detection_method = "cursor_position"
+            elif len(chapter_ranges) > 0 and cursor_offset >= chapter_ranges[-1].end:
+                # Cursor is AFTER all chapters - set to last existing chapter
+                # Let the LLM assess the request to determine if user wants next chapter or to work on last chapter
+                last_chapter = chapter_ranges[-1]
+                current_chapter_number = last_chapter.chapter_number
+                logger.info(f"Cursor at end of file (offset {cursor_offset} after last chapter ending at {last_chapter.end}) - setting to last existing Chapter {current_chapter_number}")
+                logger.info(f"   LLM will assess request to determine if user wants next chapter or to work on Chapter {current_chapter_number}")
+                detection_method = "cursor_after_all_chapters"
         
-        # 3. Default: entire manuscript (if no explicit chapter and invalid cursor)
-        if active_idx == -1:
-            detection_method = "default_entire_manuscript"
+        # 3. Smart default for empty or ambiguous files
+        if active_idx == -1 and current_chapter_number is None:
+            if len(chapter_ranges) == 0:
+                # Empty file or no chapters detected - default to Chapter 1
+                logger.info("Empty file or no chapters detected - defaulting to Chapter 1")
+                current_chapter_number = 1
+                requested_chapter_number = 1
+                detection_method = "empty_file_default"
+            else:
+                # Fallback to entire manuscript
+                detection_method = "default_entire_manuscript"
         
         prev_c, next_c = (None, None)
-        current_chapter_text = manuscript
+        # 🎯 ROOSEVELT FIX: Default to empty string for current chapter text if not found
+        # This prevents the "whole manuscript fallback" that blows up token counts
+        current_chapter_text = ""
         
         if active_idx != -1:
             current = chapter_ranges[active_idx]
@@ -282,6 +309,11 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
             if next_c and next_c.start == current.start:
                 logger.warning(f"Next chapter has same start as current chapter - likely last chapter bug. Setting next_c to None.")
                 next_c = None
+        else:
+            # Smart scouting for new chapter: get last chapter as prev context
+            if len(chapter_ranges) > 0:
+                prev_c = chapter_ranges[-1]
+                logger.info(f"New chapter generation detected - using last Chapter {prev_c.chapter_number} as continuity context")
         
         # Get adjacent chapter text
         prev_chapter_text = None
@@ -309,8 +341,18 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # chapter text may legitimately contain Markdown horizontal rules ("---").
         if active_idx != -1:
             context_current_chapter_text = current_chapter_text
+        elif not current_chapter_text:
+            # Generation mode - empty current chapter is correct
+            context_current_chapter_text = ""
         else:
             context_current_chapter_text = strip_frontmatter_block(current_chapter_text)
+        
+        # Log chapter detection results for debugging
+        logger.info(f"📖 CHAPTER DETECTION: method={detection_method}, current_chapter={current_chapter_number}, requested_chapter={requested_chapter_number}, active_idx={active_idx}")
+        if chapter_ranges:
+            logger.info(f"   Existing chapters: {[r.chapter_number for r in chapter_ranges]}, cursor_offset={cursor_offset}")
+        else:
+            logger.info(f"   No existing chapters found, cursor_offset={cursor_offset}")
         
         return {
             "chapter_ranges": chapter_ranges,
@@ -318,6 +360,7 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "working_chapter_index": active_idx,  # Also set for subgraph internal use
             "current_chapter_text": context_current_chapter_text,
             "current_chapter_number": current_chapter_number,
+            "requested_chapter_number": requested_chapter_number,  # NEW: For explicit chapter generation
             "prev_chapter_text": prev_chapter_text,
             "prev_chapter_number": prev_chapter_number,
             "next_chapter_text": next_chapter_text,
@@ -372,7 +415,8 @@ async def load_references_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Fiction reference configuration
         reference_config = {
-            "outline": ["outline"]
+            "outline": ["outline"],
+            "series": ["series"]
         }
         
         # Cascading: outline frontmatter has rules, style, characters
@@ -412,14 +456,45 @@ async def load_references_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if loaded_files.get("characters"):
             characters_bodies = [char_file.get("content", "") for char_file in loaded_files["characters"] if char_file.get("content")]
         
+        series_body = None
+        if loaded_files.get("series") and len(loaded_files["series"]) > 0:
+            series_body = loaded_files["series"][0].get("content")
+        
+        # Extract story overview and book map from outline
+        story_overview = None
+        book_map = None
+        if outline_body:
+            story_overview = extract_story_overview(outline_body)
+            if story_overview:
+                logger.info(f"Sending: outline.md -> Story Overview (Global narrative context)")
+            
+            book_map = extract_book_map(outline_body)
+            if book_map:
+                logger.info(f"Sending: outline.md -> Book Structure Map ({len(book_map)} chapters)")
+        
         # Extract current chapter outline if we have chapter number
         outline_current_chapter_text = None
         current_chapter_number = state.get("current_chapter_number")
         if outline_body and current_chapter_number:
-            chapter_pattern = rf"(?i)(?:^|\n)##?\s*(?:Chapter\s+)?{current_chapter_number}[:\s]*(.*?)(?=\n##?\s*(?:Chapter\s+)?\d+|\Z)"
-            match = re.search(chapter_pattern, outline_body, re.DOTALL)
-            if match:
-                outline_current_chapter_text = match.group(1).strip()
+            outline_current_chapter_text = extract_chapter_outline(outline_body, current_chapter_number)
+            if outline_current_chapter_text:
+                logger.info(f"Sending: outline.md -> Chapter {current_chapter_number} (DETECTED)")
+                logger.info(f"Extracted outline for Chapter {current_chapter_number} ({len(outline_current_chapter_text)} chars)")
+            else:
+                logger.info(f"Sending: outline.md -> Chapter {current_chapter_number} (NOT FOUND)")
+                logger.warning(f"Failed to extract outline for Chapter {current_chapter_number} - regex pattern did not match")
+                logger.warning(f"   This may indicate the outline format doesn't match expected pattern")
+                logger.warning(f"   Outline preview: {outline_body[:200]}...")
+                # DO NOT fall back to full outline - this would leak later chapters into earlier ones!
+        
+        # Extract previous chapter outline if we have previous chapter number
+        outline_prev_chapter_text = None
+        prev_chapter_number = state.get("prev_chapter_number")
+        if outline_body and prev_chapter_number:
+            outline_prev_chapter_text = extract_chapter_outline(outline_body, prev_chapter_number)
+            if outline_prev_chapter_text:
+                logger.info(f"Sending: outline.md -> Chapter {prev_chapter_number} (PREVIOUS)")
+                logger.info(f"Extracted outline for Chapter {prev_chapter_number} ({len(outline_prev_chapter_text)} chars)")
         
         has_references_value = bool(outline_body)
         
@@ -428,7 +503,11 @@ async def load_references_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "rules_body": rules_body,
             "style_body": style_body,
             "characters_bodies": characters_bodies,
+            "series_body": series_body,
+            "story_overview": story_overview,
+            "book_map": book_map,
             "outline_current_chapter_text": outline_current_chapter_text,
+            "outline_prev_chapter_text": outline_prev_chapter_text,
             "loaded_references": loaded_files,
             "has_references": has_references_value,
             "current_request": state.get("current_request", ""),  # Preserve from earlier nodes
@@ -451,7 +530,6 @@ async def load_references_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "next_chapter_text": state.get("next_chapter_text"),
             "next_chapter_number": state.get("next_chapter_number"),
             "explicit_primary_chapter": state.get("explicit_primary_chapter"),
-            "explicit_secondary_chapters": state.get("explicit_secondary_chapters", []),
             # ✅ CRITICAL: Preserve critical 5 keys for downstream nodes / parent agent
             "metadata": state.get("metadata", {}),
             "shared_memory": state.get("shared_memory", {}),
@@ -468,7 +546,11 @@ async def load_references_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "rules_body": None,
             "style_body": None,
             "characters_bodies": [],
+            "series_body": None,
+            "story_overview": None,
+            "book_map": None,
             "outline_current_chapter_text": None,
+            "outline_prev_chapter_text": None,
             "loaded_references": {},
             "has_references": False,
             "error": str(e),
@@ -492,7 +574,6 @@ async def load_references_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "next_chapter_text": state.get("next_chapter_text"),
             "next_chapter_number": state.get("next_chapter_number"),
             "explicit_primary_chapter": state.get("explicit_primary_chapter"),
-            "explicit_secondary_chapters": state.get("explicit_secondary_chapters", []),
             # ✅ CRITICAL: Preserve critical 5 keys
             "metadata": state.get("metadata", {}),
             "shared_memory": state.get("shared_memory", {}),
@@ -582,7 +663,9 @@ async def assess_reference_quality_node(state: Dict[str, Any]) -> Dict[str, Any]
             "rules_body": state.get("rules_body"),  # CRITICAL: Pass rules to parent!
             "style_body": state.get("style_body"),  # CRITICAL: Pass style to parent!
             "characters_bodies": state.get("characters_bodies", []),  # CRITICAL: Pass characters to parent!
+            "series_body": state.get("series_body"),  # CRITICAL: Pass series timeline to parent!
             "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+            "outline_prev_chapter_text": state.get("outline_prev_chapter_text"),
             "loaded_references": state.get("loaded_references", {}),
             # ✅ CRITICAL: Preserve chapter context for parent agent
             "chapter_ranges": state.get("chapter_ranges", []),
@@ -595,7 +678,6 @@ async def assess_reference_quality_node(state: Dict[str, Any]) -> Dict[str, Any]
             "next_chapter_text": state.get("next_chapter_text"),
             "next_chapter_number": state.get("next_chapter_number"),
             "explicit_primary_chapter": state.get("explicit_primary_chapter"),
-            "explicit_secondary_chapters": state.get("explicit_secondary_chapters", []),
             # ✅ CRITICAL: Preserve critical 5 keys
             "metadata": state.get("metadata", {}),
             "shared_memory": state.get("shared_memory", {}),
@@ -623,7 +705,9 @@ async def assess_reference_quality_node(state: Dict[str, Any]) -> Dict[str, Any]
             "rules_body": state.get("rules_body"),  # CRITICAL: Pass rules to parent!
             "style_body": state.get("style_body"),  # CRITICAL: Pass style to parent!
             "characters_bodies": state.get("characters_bodies", []),  # CRITICAL: Pass characters to parent!
+            "series_body": state.get("series_body"),  # CRITICAL: Pass series timeline to parent!
             "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+            "outline_prev_chapter_text": state.get("outline_prev_chapter_text"),
             "loaded_references": state.get("loaded_references", {}),
             # ✅ CRITICAL: Preserve chapter context even on error
             "chapter_ranges": state.get("chapter_ranges", []),
@@ -636,7 +720,6 @@ async def assess_reference_quality_node(state: Dict[str, Any]) -> Dict[str, Any]
             "next_chapter_text": state.get("next_chapter_text"),
             "next_chapter_number": state.get("next_chapter_number"),
             "explicit_primary_chapter": state.get("explicit_primary_chapter"),
-            "explicit_secondary_chapters": state.get("explicit_secondary_chapters", []),
             # ✅ CRITICAL: Preserve critical 5 keys
             "metadata": state.get("metadata", {}),
             "shared_memory": state.get("shared_memory", {}),

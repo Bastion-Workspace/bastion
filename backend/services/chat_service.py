@@ -347,8 +347,8 @@ class ChatService:
                     "https://openrouter.ai/api/v1/models",
                     headers={
                         "Authorization": f"Bearer {settings.OPENROUTER_API_KEY}",
-                        "HTTP-Referer": "https://plato-knowledge-base.local",
-                        "X-Title": "Plato Knowledge Base"
+                        "HTTP-Referer": settings.SITE_URL,
+                        "X-Title": "Bastion AI Workspace"
                     },
                     timeout=30.0
                 )

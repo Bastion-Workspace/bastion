@@ -28,7 +28,10 @@ async def export_epub(
                 "split_on_heading_levels": request.split_on_heading_levels,
                 "metadata": request.metadata,
                 "heading_alignments": request.heading_alignments,
+                "indent_paragraphs": request.indent_paragraphs,
+                "no_indent_first_paragraph": request.no_indent_first_paragraph,
             },
+            user_id=current_user.user_id,
         )
 
         title = request.metadata.get("title") if request.metadata else None

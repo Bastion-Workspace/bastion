@@ -435,6 +435,7 @@ const DataTableView = ({
         </Box>
       );
     } else if (column.type === 'INTEGER' || column.type === 'REAL') {
+      const isFormulaValue = isFormula(value);
       return (
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <TextField
@@ -449,14 +450,30 @@ const DataTableView = ({
                 }
               }
             }}
-            type="number"
+            type="text"
             size="small"
             fullWidth
             autoFocus={isEditingCell}
-            inputProps={{ step: column.type === 'REAL' ? 0.01 : 1 }}
+            placeholder={isFormulaValue ? "Enter formula (e.g., =A1+B1)" : "Enter number or formula (e.g., =A1+B1)"}
+            InputProps={{
+              startAdornment: isFormulaValue && !isEditingCell ? (
+                <FunctionsIcon fontSize="small" sx={{ color: 'primary.main', mr: 1 }} />
+              ) : null
+            }}
           />
           {isEditingCell && (
             <Box sx={{ display: 'flex', gap: 0.5 }}>
+              <Tooltip title="Enter formula">
+                <IconButton
+                  size="small"
+                  onClick={() => {
+                    const currentValue = editingData[column.name] || '';
+                    handleCellChange(column.name, currentValue.startsWith('=') ? currentValue : '=');
+                  }}
+                >
+                  <FunctionsIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
               <IconButton
                 size="small"
                 color="primary"

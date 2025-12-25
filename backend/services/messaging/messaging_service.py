@@ -121,12 +121,40 @@ class MessagingService:
                 
                 logger.info(f"✅ Created room {room_id} with {len(all_participants)} participants")
                 
+                # Get full participant details for response
+                participants = await conn.fetch("""
+                    SELECT 
+                        u.user_id, u.username, u.display_name, u.avatar_url
+                    FROM room_participants rp
+                    JOIN users u ON rp.user_id = u.user_id
+                    WHERE rp.room_id = $1
+                """, room_id)
+                
+                participant_list = [dict(p) for p in participants]
+                
+                # Set display_name for direct rooms
+                display_name = room_name
+                if room_type == 'direct' and not room_name:
+                    # Find the participant that isn't the creator
+                    other_participant = next((p for p in participant_list if p['user_id'] != creator_id), None)
+                    if other_participant:
+                        display_name = other_participant.get('display_name') or other_participant.get('username')
+                        logger.info(f"🏷️ Set direct room display_name to '{display_name}' (other participant)")
+                    else:
+                        logger.warning(f"⚠️ No other participant found for direct room {room_id}")
+                
+                if not display_name:
+                    display_name = 'Unnamed Room'
+                    logger.info(f"🏷️ Fallback display_name for room {room_id}: '{display_name}'")
+                
                 return {
                     "room_id": room_id,
                     "room_name": room_name,
                     "room_type": room_type,
                     "created_by": creator_id,
                     "participant_ids": all_participants,
+                    "participants": participant_list,
+                    "display_name": display_name,
                     "created_at": datetime.utcnow().isoformat()
                 }
         
@@ -187,14 +215,20 @@ class MessagingService:
                             WHERE rp.room_id = $1
                         """, room_dict['room_id'])
                         room_dict['participants'] = [dict(p) for p in participants]
+                        logger.info(f"👥 Room {room_dict['room_id']} has {len(room_dict['participants'])} visible participants")
                         
                         # For direct rooms without custom name, use other person's name
                         if room_dict['room_type'] == 'direct' and not room_dict['room_name']:
                             other_participant = [p for p in room_dict['participants'] if p['user_id'] != user_id]
                             if other_participant:
-                                room_dict['display_name'] = other_participant[0]['display_name'] or other_participant[0]['username']
+                                room_dict['display_name'] = other_participant[0].get('display_name') or other_participant[0].get('username') or 'Unknown User'
+                                logger.info(f"🏷️ Set direct room {room_dict['room_id']} display_name to '{room_dict['display_name']}'")
+                            else:
+                                room_dict['display_name'] = 'Unnamed Room'
+                                logger.warning(f"⚠️ No other participant found for direct room {room_dict['room_id']}")
                         else:
                             room_dict['display_name'] = room_dict['room_name'] or 'Unnamed Room'
+                            logger.info(f"🏷️ Room {room_dict['room_id']} display_name set to '{room_dict['display_name']}'")
                     
                     # Get unread count
                     unread_count = await conn.fetchval("""
@@ -909,6 +943,65 @@ class MessagingService:
         except Exception as e:
             logger.error(f"❌ Failed to get unread counts: {e}")
             return {}
+
+    async def get_room_participants(self, room_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all participants in a specific room
+        
+        Args:
+            room_id: Room UUID
+        
+        Returns:
+            List of participant dicts
+        """
+        await self._ensure_initialized()
+        
+        try:
+            async with self.db_pool.acquire() as conn:
+                # We use admin context here to bypass RLS since this is a system utility
+                await conn.execute("SELECT set_config('app.current_user_role', 'admin', false)")
+                
+                rows = await conn.fetch("""
+                    SELECT 
+                        u.user_id, u.username, u.display_name, u.avatar_url
+                    FROM room_participants rp
+                    JOIN users u ON rp.user_id = u.user_id
+                    WHERE rp.room_id = $1
+                """, room_id)
+                
+                return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"❌ Failed to get room participants: {e}")
+            return []
+
+    async def mark_room_as_read(self, room_id: str, user_id: str) -> bool:
+        """
+        Update the last_read_at timestamp for a user in a room
+        
+        Args:
+            room_id: Room UUID
+            user_id: User ID
+        
+        Returns:
+            True if successful
+        """
+        await self._ensure_initialized()
+        
+        try:
+            async with self.db_pool.acquire() as conn:
+                # Set user context for RLS
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                
+                result = await conn.execute("""
+                    UPDATE room_participants
+                    SET last_read_at = NOW()
+                    WHERE room_id = $1 AND user_id = $2
+                """, room_id, user_id)
+                
+                return result == "UPDATE 1"
+        except Exception as e:
+            logger.error(f"❌ Failed to mark room {room_id} as read for user {user_id}: {e}")
+            return False
 
 
 # Global messaging service instance

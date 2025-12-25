@@ -3,6 +3,7 @@ import CodeMirror from '@uiw/react-codemirror';
 import { EditorView, Decoration, keymap, ViewPlugin } from '@codemirror/view';
 import { EditorState, StateField, StateEffect } from '@codemirror/state';
 import { history, defaultKeymap, historyKeymap } from '@codemirror/commands';
+import { searchKeymap } from '@codemirror/search';
 import { foldGutter, foldKeymap } from '@codemirror/language';
 import { useTheme } from '../contexts/ThemeContext';
 import { Box, IconButton, Tooltip } from '@mui/material';
@@ -93,12 +94,15 @@ const orgDecorationsPlugin = ViewPlugin.fromClass(class {
 const createBaseTheme = (darkMode) => EditorView.baseTheme({
   '&': {
     backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+    color: darkMode ? '#d4d4d4' : '#212121',
   },
   '.cm-editor': {
     backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+    color: darkMode ? '#d4d4d4' : '#212121',
   },
   '.cm-scroller': {
     backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+    color: darkMode ? '#d4d4d4' : '#212121',
   },
   '.cm-content': { 
     fontFamily: 'monospace', 
@@ -106,6 +110,15 @@ const createBaseTheme = (darkMode) => EditorView.baseTheme({
     lineHeight: '1.5',
     backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
     color: darkMode ? '#d4d4d4' : '#212121'
+  },
+  '.cm-focused': {
+    backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+  },
+  '&.cm-focused': {
+    backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+  },
+  '.cm-editor.cm-focused': {
+    backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
   },
   '.cm-gutters': {
     backgroundColor: darkMode ? '#1e1e1e' : '#f5f5f5',
@@ -194,13 +207,45 @@ const OrgCMEditor = React.forwardRef(({ value, onChange, scrollToLine = null, sc
         }
       }
       return 'Current entry';
+    },
+    scrollToLine: (lineNum) => {
+      if (!editorRef.current?.view || !lineNum || lineNum < 1) return;
+      try {
+        const view = editorRef.current.view;
+        const line = view.state.doc.line(lineNum);
+        const pos = line.from;
+        
+        view.dispatch({
+          effects: EditorView.scrollIntoView(pos, { y: 'start', yMargin: 100 })
+        });
+        
+        // Add brief highlight effect
+        const lineElement = view.domAtPos(pos).node.parentElement?.closest('.cm-line');
+        if (lineElement) {
+          // Remove previous highlights
+          document.querySelectorAll('.org-current-heading').forEach(el => {
+            el.classList.remove('org-current-heading');
+          });
+          
+          // Add persistent highlight
+          lineElement.classList.add('org-current-heading');
+          
+          // Flash yellow briefly
+          lineElement.style.backgroundColor = '#fff3cd';
+          setTimeout(() => {
+            lineElement.style.backgroundColor = '';
+          }, 1000);
+        }
+      } catch (err) {
+        console.error('Error scrolling to line:', err);
+      }
     }
   }));
   
   const baseTheme = useMemo(() => createBaseTheme(darkMode), [darkMode]);
   const extensions = useMemo(() => [
     history(),
-    keymap.of([...defaultKeymap, ...historyKeymap, ...foldKeymap]),
+    keymap.of([...defaultKeymap, ...historyKeymap, ...foldKeymap, ...searchKeymap]),
     orgDecorationsPlugin,
     foldGutter(),
     baseTheme
@@ -356,7 +401,7 @@ const OrgCMEditor = React.forwardRef(({ value, onChange, scrollToLine = null, sc
   }, [onScrollChange]);
 
   return (
-    <Box sx={{ bgcolor: 'background.paper', p: 2, borderRadius: 1 }}>
+    <Box sx={{ bgcolor: darkMode ? '#1e1e1e' : '#ffffff', p: 2, borderRadius: 1 }}>
       <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
         <Tooltip title="Org-Mode Help: Headings (*, **, ***), TODO states (TODO/NEXT/WAITING/HOLD; DONE/CANCELLED), Checkboxes (- [ ] item, - [x] done), Properties (:PROPERTIES: ... :END:)">
           <IconButton 

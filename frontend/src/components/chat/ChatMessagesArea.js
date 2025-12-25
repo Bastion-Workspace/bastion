@@ -29,6 +29,7 @@ import { materialLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { markdownToPlainText, renderCitations, smartCopy } from '../../utils/chatUtils';
 import { useCapabilities } from '../../contexts/CapabilitiesContext';
 import EditorOpsPreviewModal from './EditorOpsPreviewModal';
+import FolderSelectionDialog from './FolderSelectionDialog';
 
 const ChatMessagesArea = () => {
   const theme = useTheme();
@@ -257,6 +258,9 @@ const ChatMessagesArea = () => {
   const [copiedMessageId, setCopiedMessageId] = useState(null);
   const [savingNoteFor, setSavingNoteFor] = useState(null);
   const [previewOpenFor, setPreviewOpenFor] = useState(null);
+  const [folderDialogOpen, setFolderDialogOpen] = useState(false);
+  const [imageToImport, setImageToImport] = useState(null);
+  const [importing, setImporting] = useState(false);
 
   const handleCopyMessage = async (message) => {
     try {
@@ -344,6 +348,42 @@ ${message.content}
     }
   };
 
+  const handleImportImage = (imageUrl) => {
+    setImageToImport(imageUrl);
+    setFolderDialogOpen(true);
+  };
+
+  const handleFolderSelect = async (folder) => {
+    if (!imageToImport || !folder) return;
+    
+    try {
+      setImporting(true);
+      
+      // Extract filename from URL if possible
+      const urlParts = imageToImport.split('/');
+      const filename = urlParts[urlParts.length - 1];
+      
+      const result = await apiService.importImage(
+        imageToImport,
+        filename,
+        folder.folder_id
+      );
+      
+      if (result && result.document_id) {
+        alert(`Image imported successfully to folder: ${folder.name}`);
+        setFolderDialogOpen(false);
+        setImageToImport(null);
+      } else {
+        throw new Error('Import failed - no document ID returned');
+      }
+    } catch (error) {
+      console.error('Failed to import image:', error);
+      alert(`Failed to import image: ${error.message || 'Unknown error'}`);
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const formatTimestamp = (timestamp) => {
     if (!timestamp) return '';
     
@@ -409,6 +449,79 @@ ${message.content}
       return Array.from(new Set(urls));
     } catch {
       return [];
+    }
+  };
+
+  // Convert static image URL to API endpoint for proper content-type headers
+  const getImageApiUrl = (url) => {
+    if (url.startsWith('/static/images/')) {
+      const filename = url.replace('/static/images/', '');
+      return `/api/images/${filename}`;
+    }
+    return url; // Return as-is for external URLs
+  };
+
+  // Open image in new tab with proper authentication
+  const handleOpenImage = async (url) => {
+    try {
+      const apiUrl = getImageApiUrl(url);
+      console.log('🖼️ Opening image:', { originalUrl: url, apiUrl });
+      
+      // For external URLs, open directly
+      if (!apiUrl.startsWith('/api/images/')) {
+        window.open(apiUrl, '_blank', 'noopener,noreferrer');
+        return;
+      }
+      
+      // For internal API URLs, fetch with authentication and create blob URL
+      const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+      if (!token) {
+        console.error('❌ No auth token available');
+        alert('Please log in to view images.');
+        return;
+      }
+      
+      // Construct full URL for fetch
+      const fetchUrl = `${window.location.origin}${apiUrl}`;
+      console.log('🖼️ Fetching image from:', fetchUrl);
+      
+      const response = await fetch(fetchUrl, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      
+      console.log('🖼️ Image fetch response:', { status: response.status, ok: response.ok, contentType: response.headers.get('Content-Type') });
+      
+      if (response.ok) {
+        const blob = await response.blob();
+        console.log('🖼️ Image blob created:', { size: blob.size, type: blob.type });
+        const blobUrl = URL.createObjectURL(blob);
+        console.log('🖼️ Blob URL created:', blobUrl);
+        
+        // Open in new tab - blob URLs display images instead of downloading
+        const newWindow = window.open(blobUrl, '_blank', 'noopener,noreferrer');
+        
+        if (!newWindow) {
+          URL.revokeObjectURL(blobUrl);
+          alert('Please allow popups to view images in a new tab.');
+          return;
+        }
+        
+        // Clean up blob URL after a delay (window should have loaded it)
+        setTimeout(() => {
+          // Revoke after window opens (give it time to load)
+          setTimeout(() => {
+            URL.revokeObjectURL(blobUrl);
+            console.log('🖼️ Blob URL revoked');
+          }, 2000);
+        }, 100);
+      } else {
+        const errorText = await response.text();
+        console.error('❌ Failed to load image:', { status: response.status, statusText: response.statusText, error: errorText });
+        alert(`Failed to load image: ${response.status} ${response.statusText}`);
+      }
+    } catch (error) {
+      console.error('❌ Error opening image:', error);
+      alert(`Failed to open image: ${error.message}`);
     }
   };
 
@@ -1131,32 +1244,30 @@ ${message.content}
                             component="img"
                             src={url}
                             alt="Generated image"
+                            onClick={() => handleOpenImage(url)}
                             sx={{
                               maxWidth: '100%',
                               height: 'auto',
                               borderRadius: 1,
-                              display: 'block'
+                              display: 'block',
+                              cursor: 'pointer'
                             }}
                           />
                           <Box mt={1} display="flex" gap={1}>
                             <Button
-                              component="a"
-                              href={url}
-                              target="_blank"
-                              rel="noopener noreferrer"
+                              onClick={() => handleOpenImage(url)}
                               size="small"
                               variant="contained"
                             >
                               Open
                             </Button>
                             <Button
-                              component="a"
-                              href={url}
-                              download
+                              onClick={() => handleImportImage(url)}
                               size="small"
                               variant="outlined"
+                              disabled={importing}
                             >
-                              Download
+                              Import
                             </Button>
                           </Box>
                         </Paper>
@@ -1312,6 +1423,16 @@ ${message.content}
           />
         );
       })()}
+
+      {/* Folder Selection Dialog for Image Import */}
+      <FolderSelectionDialog
+        open={folderDialogOpen}
+        onClose={() => {
+          setFolderDialogOpen(false);
+          setImageToImport(null);
+        }}
+        onSelect={handleFolderSelect}
+      />
 
       {/* ROOSEVELT'S "RETURN TO BOTTOM" CAVALRY BUTTON - Show when user has scrolled up */}
       {userHasScrolled && !shouldAutoScroll && (

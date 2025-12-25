@@ -52,40 +52,11 @@ async def load_file_by_path(
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to extract base path from canonical_path: {e}")
 
-            # If we only have a filename but no canonical path, try to resolve it
+            # If we only have a filename but no canonical path, we CANNOT resolve it without searching
+            # **ROOSEVELT FIX:** We TRUST the user's explicit path references. NEVER search for files!
             elif active_editor.get("filename") and not canonical_path:
-                logger.info(f"📄 Attempting to resolve canonical path for filename: {active_editor['filename']}")
-                try:
-                    # Try to find the document and get its canonical path
-                    client = await get_backend_tool_client()
-                    # Search for document by filename
-                    search_results = await client.search_documents_structured(
-                        query=active_editor['filename'],
-                        user_id=user_id,
-                        limit=5
-                    )
-
-                    # Find the exact match
-                    for result in search_results:
-                        doc_metadata = result.get('document', {})
-                        if doc_metadata.get('filename') == active_editor['filename']:
-                            # Get full document info to get canonical path
-                            doc_content = await client.get_document_content(
-                                document_id=doc_metadata.get('document_id'),
-                                user_id=user_id
-                            )
-                            if doc_content and 'canonical_path' in doc_content:
-                                resolved_path = doc_content['canonical_path']
-                                try:
-                                    from pathlib import Path
-                                    base_path = str(Path(resolved_path).parent)
-                                    logger.info(f"✅ Resolved base path for active editor: {base_path}")
-                                except Exception as e:
-                                    logger.warning(f"⚠️ Failed to extract base path from resolved path: {e}")
-                                break
-
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to resolve canonical path for active editor: {e}")
+                logger.warning(f"⚠️ Cannot resolve path for filename '{active_editor['filename']}' without searching. Skipping.")
+                return None
 
         # If no base path from active editor, try base_filename
         if not base_path and base_filename:
@@ -117,6 +88,14 @@ async def load_file_by_path(
         
         if not doc_info:
             logger.warning(f"⚠️ Could not find document by path: {ref_path} (base: {base_path})")
+            return None
+        
+        # 🎯 ROOSEVELT'S SECURITY CHECK: Ensure we aren't loading system files or logs
+        # Even if the path resolution found it, we MUST NOT let logs leak into prose context.
+        resolved_path = doc_info.get("resolved_path", "").lower()
+        system_dirs = ['/logs/', '\\logs\\', '/processed/', '\\processed\\', '/node_modules/', '\\node_modules\\']
+        if any(sys_dir in resolved_path for sys_dir in system_dirs):
+            logger.error(f"🚨 SECURITY BREACH PREVENTED: Attempted to load log/system file as reference: {resolved_path}")
             return None
         
         document_id = doc_info.get("document_id")

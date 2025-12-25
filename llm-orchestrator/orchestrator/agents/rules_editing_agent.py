@@ -140,6 +140,7 @@ class RulesEditingState(TypedDict):
     llm_response: str
     structured_edit: Optional[Dict[str, Any]]
     editor_operations: List[Dict[str, Any]]
+    failed_operations: List[Dict[str, Any]]
     response: Dict[str, Any]
     task_status: str
     error: str
@@ -193,6 +194,17 @@ class RulesEditingAgent(BaseAgent):
         return (
             "You are a MASTER UNIVERSE ARCHITECT for RULES documents (worldbuilding, series continuity). "
             "Persona disabled. Adhere strictly to frontmatter, project Rules, and Style.\n\n"
+            "**TERMINOLOGY GUIDELINES (CRITICAL)**:\n"
+            "- Define CONCEPTS and CONSTRAINTS, not IN-UNIVERSE FORMAL TERMS\n"
+            "- Use descriptive language that explains what happens\n"
+            "  GOOD: 'Vampires can transform into their natural state when threatened'\n"
+            "  BAD: 'Vampires enter their True Form when threatened'\n"
+            "- Document WHAT happens and the rules governing it, not formal capitalized terminology\n"
+            "  GOOD: 'Vampires enter a predatory hunting state with enhanced senses'\n"
+            "  BAD: 'Vampires enter Predatory Fugue with enhanced senses'\n"
+            "- Avoid creating formal terminology unless explicitly part of the user's request\n"
+            "- Rules should read like a technical manual, not like in-universe lore documents\n"
+            "- The fiction agent will use these rules as CONSTRAINTS, not as terms to include in prose\n\n"
             "**CRITICAL: WORK WITH AVAILABLE INFORMATION FIRST**\n"
             "Always start by working with what you know from the request, existing rules content, and references:\n"
             "- Make edits based on available information - don't wait for clarification\n"
@@ -903,6 +915,7 @@ class RulesEditingAgent(BaseAgent):
             revision_mode = current_request and any(k in current_request.lower() for k in ["revise", "revision", "tweak", "adjust", "polish", "tighten", "edit only"])
             
             editor_operations = []
+            failed_operations = []
             operations = structured_edit.get("operations", [])
             
             logger.info(f"Resolving {len(operations)} operation(s) from structured_edit")
@@ -975,6 +988,18 @@ class RulesEditingAgent(BaseAgent):
                         except Exception:
                             resolved_text = f"{needed_prefix}{resolved_text}"
                     
+                    # Check if resolution failed (-1, -1) - some cases might return this
+                    if resolved_start == -1 and resolved_end == -1:
+                        logger.error(f"❌ Operation resolution FAILED - original_text or anchor_text not found")
+                        failed_operations.append({
+                            "op_type": op.get("op_type", "edit"),
+                            "original_text": op.get("original_text"),
+                            "anchor_text": op.get("anchor_text"),
+                            "text": op.get("text", ""),
+                            "error": "Anchor or original text not found"
+                        })
+                        continue
+                    
                     # Calculate pre_hash
                     pre_slice = rules[resolved_start:resolved_end]
                     pre_hash = _slice_hash(pre_slice)
@@ -997,12 +1022,21 @@ class RulesEditingAgent(BaseAgent):
                     
                 except Exception as e:
                     logger.warning(f"Failed to resolve operation: {e}")
+                    # Collect failed operation
+                    failed_operations.append({
+                        "op_type": op.get("op_type", "edit"),
+                        "original_text": op.get("original_text"),
+                        "anchor_text": op.get("anchor_text"),
+                        "text": op.get("text", ""),
+                        "error": str(e)
+                    })
                     continue
             
             logger.info(f"Successfully resolved {len(editor_operations)} operation(s) out of {len(operations)}")
             
             return {
-                "editor_operations": editor_operations
+                "editor_operations": editor_operations,
+                "failed_operations": failed_operations
             }
             
         except Exception as e:
@@ -1063,6 +1097,29 @@ class RulesEditingAgent(BaseAgent):
                     response_text = preview if preview else "Edit plan ready."
             
             logger.info(f"Response formatting: {len(editor_operations)} operation(s), preview length: {len(preview)}, response_text: {response_text[:200]}...")
+            
+            # Add failed operations if present
+            failed_operations = state.get("failed_operations", [])
+            if failed_operations:
+                failed_section = "\n\n**⚠️ UNRESOLVED EDITS (Manual Action Required)**\n"
+                failed_section += "The following generated content could not be automatically placed in the rules. You can copy and paste these sections manually:\n\n"
+                
+                for i, op in enumerate(failed_operations, 1):
+                    op_type = op.get("op_type", "edit")
+                    error = op.get("error", "Anchor text not found")
+                    text = op.get("text", "")
+                    anchor = op.get("anchor_text") or op.get("original_text")
+                    
+                    failed_section += f"#### Unresolved Edit {i} ({op_type})\n"
+                    failed_section += f"- **Reason**: {error}\n"
+                    if anchor:
+                        failed_section += f"- **Intended near**:\n> {anchor[:200]}...\n"
+                    
+                    failed_section += "\n**Generated Content** (Scroll-safe):\n"
+                    failed_section += f"{text}\n\n"
+                    failed_section += "---\n"
+                
+                response_text = response_text + failed_section
             
             # Build response dict
             response_dict = {
@@ -1157,6 +1214,7 @@ class RulesEditingAgent(BaseAgent):
                 "llm_response": "",
                 "structured_edit": None,
                 "editor_operations": [],
+                "failed_operations": [],
                 "response": {},
                 "task_status": "",
                 "error": ""
@@ -1194,6 +1252,7 @@ class RulesEditingAgent(BaseAgent):
                 "task_status": task_status,
                 "agent_results": {
                     "editor_operations": response.get("editor_operations", []) if isinstance(response, dict) else [],
+                    "failed_operations": final_state.get("failed_operations", []),
                     "manuscript_edit": response.get("manuscript_edit") if isinstance(response, dict) else None
                 }
             }

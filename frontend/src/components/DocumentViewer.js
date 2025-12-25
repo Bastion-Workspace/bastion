@@ -9,7 +9,10 @@ import {
   Divider,
   IconButton,
   Tooltip,
-  TextField
+  TextField,
+  Select,
+  MenuItem,
+  FormControl
 } from '@mui/material';
 import {
   Description,
@@ -49,6 +52,12 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   const [error, setError] = useState(null);
   const [isEditing, setIsEditing] = useState(false);
   const [editContent, setEditContent] = useState('');
+  // Track actual server content to detect REAL changes
+  const [serverContent, setServerContent] = useState('');
+  // Ref to track latest editContent for cleanup (avoids stale closure issues)
+  const editContentRef = React.useRef('');
+  // Ref to track if the component is unmounting
+  const isUnmountingRef = React.useRef(false);
   const [saving, setSaving] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const { setEditorState } = useEditor();
@@ -56,12 +65,16 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [epubTitle, setEpubTitle] = useState('');
-  const [epubAuthor, setEpubAuthor] = useState('');
+  const [epubAuthorFirst, setEpubAuthorFirst] = useState('');
+  const [epubAuthorLast, setEpubAuthorLast] = useState('');
   const [epubLanguage, setEpubLanguage] = useState('en');
   const [includeToc, setIncludeToc] = useState(true);
   const [includeCover, setIncludeCover] = useState(true);
   const [splitOnHeadings, setSplitOnHeadings] = useState(true);
   const [splitLevels, setSplitLevels] = useState([1, 2]);
+  const [centerLevels, setCenterLevels] = useState([]);
+  const [indentParagraphs, setIndentParagraphs] = useState(true);
+  const [noIndentFirstParagraph, setNoIndentFirstParagraph] = useState(true);
   const contentBoxRef = React.useRef(null);
   const [backlinks, setBacklinks] = useState([]);
   const [loadingBacklinks, setLoadingBacklinks] = useState(false);
@@ -79,6 +92,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   const [tagSourceLine, setTagSourceLine] = useState(null);
   const [tagSourceHeading, setTagSourceHeading] = useState('');
   const orgEditorRef = React.useRef(null);
+  const markdownEditorRef = React.useRef(null);
   const [editingTitle, setEditingTitle] = useState(false);
   const [editingFilename, setEditingFilename] = useState(false);
   const [editedTitle, setEditedTitle] = useState('');
@@ -135,12 +149,14 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
           const response = await apiService.getDocumentContent(documentId);
           const docData = {
             ...response.metadata,
-            content: unsavedContent, // Use unsaved content instead of fetched
+            content: unsavedContent, // Use unsaved content for display
             chunk_count: response.chunk_count,
             total_length: response.total_length
           };
           setDocument(docData);
           setEditContent(unsavedContent);
+          // Store the actual server content separately
+          setServerContent(response.content || '');
           
           // Auto-enter edit mode if applicable (or preserve if already editing)
           const fname = (docData.filename || '').toLowerCase();
@@ -169,6 +185,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
       };
       setDocument(docData);
       setEditContent(response.content || '');
+      setServerContent(response.content || '');
       
       // Clear any stale unsaved content when we fetch fresh content
       if (forceRefresh) {
@@ -222,10 +239,13 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   useEffect(() => {
     if (!documentId || !isEditing || !editContent) return;
     
-    // Only save if content differs from saved document content
-    const savedContent = document?.content || '';
-    if (editContent === savedContent) {
-      // Content matches saved version, clear unsaved content
+    // Update ref with latest content
+    editContentRef.current = editContent;
+
+    // BULLY! Compare against ACTUAL server content, not the current state's content key
+    // This prevents premature clearing when we restore from localStorage on mount!
+    if (editContent === serverContent) {
+      // Content matches server version, clear unsaved content
       clearUnsavedContent(documentId);
       return;
     }
@@ -235,8 +255,42 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
       saveUnsavedContent(documentId, editContent);
     }, 500);
     
-    return () => clearTimeout(timeoutId);
-  }, [documentId, isEditing, editContent, document?.content]);
+    return () => {
+      clearTimeout(timeoutId);
+      
+      // BULLY! Only save in the cleanup if we are ACTUALLY unmounting
+      // This prevents saving on every single keystroke (which was causing race conditions)
+      // We rely on the unmount tracker effect (defined below) to set this flag.
+      if (!isUnmountingRef.current) return;
+
+      // CRITICAL FIX: Save immediately on unmount using ref to get latest content
+      // This prevents loss when switching tabs quickly (avoids stale closure)
+      const currentSavedContent = serverContent; // Use serverContent for final check
+      const latestContent = editContentRef.current;
+      
+      // BULLY! Only save if we actually have content and it differs from what's on disk
+      if (latestContent && latestContent !== currentSavedContent) {
+        // EXTRA PROTECTION: Don't overwrite unsaved changes with the original content 
+        // if the original content is significantly shorter (prevents accidental wipes during crashes)
+        const existingUnsaved = getUnsavedContent(documentId);
+        if (existingUnsaved && latestContent.length < existingUnsaved.length * 0.5 && latestContent.length < 500) {
+          console.warn('⚠️ ROOSEVELT: Refusing to overwrite longer unsaved content with much shorter content during unmount - possible race condition!');
+          return;
+        }
+        
+        console.log('Saving unsaved content on unmount for document:', documentId);
+        saveUnsavedContent(documentId, latestContent);
+      }
+    };
+  }, [documentId, isEditing, editContent, serverContent]);
+
+  // Track unmounting state - BULLY! Define this AFTER the save effect 
+  // so its cleanup runs BEFORE the save effect's cleanup!
+  useEffect(() => {
+    return () => {
+      isUnmountingRef.current = true;
+    };
+  }, []);
 
   // WebSocket listener for real-time document updates
   useEffect(() => {
@@ -426,6 +480,64 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
       console.error('❌ Error handling edit proposal:', err);
     }
   }, [documentId, isEditing, editContent, document]);
+
+  // Extract headers from document content for navigation dropdown
+  const headers = React.useMemo(() => {
+    if (!isEditing || !editContent || !document?.filename) return [];
+    
+    const fnameLower = document.filename.toLowerCase();
+    const lines = editContent.split('\n');
+    const extractedHeaders = [];
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      
+      if (fnameLower.endsWith('.md')) {
+        // Markdown headers: #, ##, ###
+        const match = line.match(/^(#{1,3})\s+(.+)$/);
+        if (match) {
+          const level = match[1].length;
+          const text = match[2].trim();
+          extractedHeaders.push({
+            level,
+            text,
+            lineNumber: i + 1
+          });
+        }
+      } else if (fnameLower.endsWith('.org')) {
+        // Org headers: *, **, ***
+        const match = line.match(/^(\*{1,3})\s+(TODO|NEXT|STARTED|WAITING|HOLD|DONE|CANCELED|CANCELLED)?\s*(.+)$/i);
+        if (match) {
+          const level = match[1].length;
+          const text = match[3]?.trim() || match[2]?.trim() || line.trim();
+          extractedHeaders.push({
+            level,
+            text,
+            lineNumber: i + 1
+          });
+        }
+      }
+    }
+    
+    return extractedHeaders;
+  }, [isEditing, editContent, document?.filename]);
+
+  // Handle header navigation
+  const handleHeaderNavigation = (lineNumber) => {
+    const fnameLower = (document?.filename || '').toLowerCase();
+    
+    if (fnameLower.endsWith('.md')) {
+      // Use markdown editor ref
+      if (markdownEditorRef.current?.scrollToLine) {
+        markdownEditorRef.current.scrollToLine(lineNumber);
+      }
+    } else if (fnameLower.endsWith('.org')) {
+      // Use org editor ref
+      if (orgEditorRef.current?.scrollToLine) {
+        orgEditorRef.current.scrollToLine(lineNumber);
+      }
+    }
+  };
 
   // Handle scrolling to specific line or heading
   useEffect(() => {
@@ -1063,6 +1175,70 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                   {document.filename}
                 </Typography>
                 
+                {/* Header Navigation Dropdown */}
+                {isEditing && headers.length > 0 && (
+                  <FormControl 
+                    size="small" 
+                    sx={{ 
+                      minWidth: 180,
+                      '& .MuiOutlinedInput-root': {
+                        fontSize: '0.75rem',
+                        height: '24px',
+                        '& .MuiSelect-select': {
+                          padding: '4px 32px 4px 8px',
+                          fontSize: '0.75rem'
+                        }
+                      }
+                    }}
+                  >
+                    <Select
+                      value=""
+                      displayEmpty
+                      renderValue={() => (
+                        <Typography variant="caption" color="text.secondary">
+                          Jump to header...
+                        </Typography>
+                      )}
+                      onChange={(e) => {
+                        const lineNumber = parseInt(e.target.value);
+                        if (lineNumber) {
+                          handleHeaderNavigation(lineNumber);
+                        }
+                      }}
+                      sx={{
+                        fontSize: '0.75rem',
+                        color: 'text.secondary',
+                        '& .MuiSelect-icon': {
+                          fontSize: '1rem'
+                        }
+                      }}
+                    >
+                      <MenuItem value="" disabled>
+                        <Typography variant="caption" color="text.secondary">
+                          Jump to header...
+                        </Typography>
+                      </MenuItem>
+                      {headers.map((header, idx) => {
+                        const fnameLower = (document?.filename || '').toLowerCase();
+                        const prefix = fnameLower.endsWith('.org') ? '*'.repeat(header.level) : '#'.repeat(header.level);
+                        return (
+                          <MenuItem key={idx} value={header.lineNumber}>
+                            <Typography 
+                              variant="caption" 
+                              sx={{ 
+                                pl: (header.level - 1) * 1.5,
+                                fontWeight: header.level === 1 ? 600 : header.level === 2 ? 500 : 400
+                              }}
+                            >
+                              {prefix} {header.text}
+                            </Typography>
+                          </MenuItem>
+                        );
+                      })}
+                    </Select>
+                  </FormControl>
+                )}
+                
                 {/* Word Count and Reading Time */}
                 {isEditing && editContent && (
                   <Typography 
@@ -1085,11 +1261,41 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                       const wordCount = textForCount.trim().split(/\s+/).filter(word => word.length > 0).length;
                       const readingTime = Math.max(1, Math.ceil(wordCount / 200)); // Average reading speed: 200 words/min
                       
+                      // Format last saved timestamp
+                      let lastSavedText = null;
+                      if (document.updated_at) {
+                        try {
+                          const updatedDate = new Date(document.updated_at);
+                          if (!isNaN(updatedDate.getTime())) {
+                            // Format as MM/DD/YYYY HH:MM:SS AM/PM
+                            const month = String(updatedDate.getMonth() + 1).padStart(2, '0');
+                            const day = String(updatedDate.getDate()).padStart(2, '0');
+                            const year = updatedDate.getFullYear();
+                            let hours = updatedDate.getHours();
+                            const minutes = String(updatedDate.getMinutes()).padStart(2, '0');
+                            const seconds = String(updatedDate.getSeconds()).padStart(2, '0');
+                            const ampm = hours >= 12 ? 'PM' : 'AM';
+                            hours = hours % 12;
+                            hours = hours ? hours : 12; // the hour '0' should be '12'
+                            const hoursStr = String(hours).padStart(2, '0');
+                            lastSavedText = `Last Saved: ${month}/${day}/${year} ${hoursStr}:${minutes}:${seconds} ${ampm}`;
+                          }
+                        } catch (e) {
+                          console.error('Failed to format updated_at:', e);
+                        }
+                      }
+                      
                       return (
                         <>
                           <span>{wordCount.toLocaleString()} words</span>
                           <span>•</span>
                           <span>{readingTime} min read</span>
+                          {lastSavedText && (
+                            <>
+                              <span>•</span>
+                              <span>{lastSavedText}</span>
+                            </>
+                          )}
                         </>
                       );
                     })()}
@@ -1197,7 +1403,12 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                         
                         // Save content
                         await apiService.updateDocumentContent(document.document_id, editContent);
-                        setDocument((prev) => prev ? { ...prev, content: editContent } : prev);
+                        // Update document state with new content and current timestamp
+                        const now = new Date().toISOString();
+                        setDocument((prev) => prev ? { ...prev, content: editContent, updated_at: now } : prev);
+                        
+                        // BULLY! Update serverContent too, as it's now officially on disk!
+                        setServerContent(editContent);
                         
                         // Clear unsaved content after successful save
                         clearUnsavedContent(documentId);
@@ -1226,8 +1437,40 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
             {isEditing && document.filename && fnameLower.endsWith('.md') && (
               <Tooltip title="Export as EPUB">
                 <IconButton size="small" onClick={() => {
-                  setEpubTitle((document.title || document.filename || '').replace(/\.[^.]+$/, ''));
-                  setEpubAuthor(document.author || '');
+                  // Parse frontmatter to pre-fill metadata
+                  const parsed = parseFrontmatter(editContent || document.content || '');
+                  const mergedFrontmatter = { ...(parsed.data || {}), ...(parsed.lists || {}) };
+                  
+                  // Pre-fill title from frontmatter or document
+                  setEpubTitle(mergedFrontmatter.title || mergedFrontmatter.Title || (document.title || document.filename || '').replace(/\.[^.]+$/, ''));
+                  
+                  // Pre-fill author fields from frontmatter
+                  if (mergedFrontmatter.author_first || mergedFrontmatter['Author First']) {
+                    setEpubAuthorFirst(mergedFrontmatter.author_first || mergedFrontmatter['Author First'] || '');
+                  } else {
+                    setEpubAuthorFirst('');
+                  }
+                  
+                  if (mergedFrontmatter.author_last || mergedFrontmatter['Author Last']) {
+                    setEpubAuthorLast(mergedFrontmatter.author_last || mergedFrontmatter['Author Last'] || '');
+                  } else {
+                    // Try to split existing author field if present
+                    const author = mergedFrontmatter.author || mergedFrontmatter.Author || document.author || '';
+                    if (author) {
+                      const parts = author.trim().split(/\s+/);
+                      if (parts.length >= 2) {
+                        setEpubAuthorFirst(parts[0]);
+                        setEpubAuthorLast(parts.slice(1).join(' '));
+                      } else {
+                        setEpubAuthorFirst(author);
+                        setEpubAuthorLast('');
+                      }
+                    } else {
+                      setEpubAuthorLast('');
+                    }
+                  }
+                  
+                  setEpubLanguage(mergedFrontmatter.language || mergedFrontmatter.Language || 'en');
                   setExportOpen(true);
                 }}>
                   <FileDownload fontSize="small" />
@@ -1312,6 +1555,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                 )
               ) : fnameLower.endsWith('.md') ? (
                 <MarkdownCMEditor 
+                  ref={markdownEditorRef}
                   value={editContent} 
                   onChange={setEditContent} 
                   filename={document.filename}
@@ -1465,22 +1709,62 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
         <DialogContent dividers>
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField label="Title" value={epubTitle} onChange={(e) => setEpubTitle(e.target.value)} fullWidth />
-            <TextField label="Author" value={epubAuthor} onChange={(e) => setEpubAuthor(e.target.value)} fullWidth />
+            <Stack direction="row" spacing={1}>
+              <TextField label="Author First" value={epubAuthorFirst} onChange={(e) => setEpubAuthorFirst(e.target.value)} fullWidth />
+              <TextField label="Author Last" value={epubAuthorLast} onChange={(e) => setEpubAuthorLast(e.target.value)} fullWidth />
+            </Stack>
             <TextField label="Language" value={epubLanguage} onChange={(e) => setEpubLanguage(e.target.value)} fullWidth />
             <FormGroup>
               <FormControlLabel control={<Checkbox checked={includeToc} onChange={(e) => setIncludeToc(e.target.checked)} />} label="Include Table of Contents" />
-              <FormControlLabel control={<Checkbox checked={includeCover} onChange={(e) => setIncludeCover(e.target.checked)} />} label="Include Cover (frontmatter 'cover' or first image)" />
-              <FormControlLabel control={<Checkbox checked={splitOnHeadings} onChange={(e) => setSplitOnHeadings(e.target.checked)} />} label="Split on Headings (H1/H2 by default)" />
+              <FormControlLabel control={<Checkbox checked={includeCover} onChange={(e) => setIncludeCover(e.target.checked)} />} label="Include Cover (from frontmatter 'cover' field)" />
+              <FormControlLabel control={<Checkbox checked={splitOnHeadings} onChange={(e) => setSplitOnHeadings(e.target.checked)} />} label="Split on Headings" />
             </FormGroup>
-            {/* Simple split level toggles H1-H6 */}
-            <Stack direction="row" spacing={1}>
-              {[1,2,3,4,5,6].map((lvl) => (
-                <FormControlLabel key={lvl} control={<Checkbox checked={splitLevels.includes(lvl)} onChange={(e) => {
-                  const checked = e.target.checked;
-                  setSplitLevels((prev) => checked ? Array.from(new Set([...prev, lvl])).sort((a,b)=>a-b) : prev.filter(v => v !== lvl));
-                }} />} label={`H${lvl}`} />
-              ))}
-            </Stack>
+            {/* Split level selection H1-H6 */}
+            <Box>
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>Split on Headers (starts new section):</Typography>
+              <Stack direction="row" spacing={1} flexWrap="wrap">
+                {[1,2,3,4,5,6].map((lvl) => (
+                  <FormControlLabel 
+                    key={lvl} 
+                    control={<Checkbox checked={splitLevels.includes(lvl)} onChange={(e) => {
+                      const checked = e.target.checked;
+                      setSplitLevels((prev) => checked ? Array.from(new Set([...prev, lvl])).sort((a,b)=>a-b) : prev.filter(v => v !== lvl));
+                    }} />} 
+                    label={`H${lvl}`} 
+                  />
+                ))}
+              </Stack>
+            </Box>
+            {/* Center level selection H1-H6 */}
+            <Box>
+              <Typography variant="subtitle2" sx={{ mb: 1 }}>Center Headers:</Typography>
+              <Stack direction="row" spacing={1} flexWrap="wrap">
+                {[1,2,3,4,5,6].map((lvl) => (
+                  <FormControlLabel 
+                    key={lvl} 
+                    control={<Checkbox checked={centerLevels.includes(lvl)} onChange={(e) => {
+                      const checked = e.target.checked;
+                      setCenterLevels((prev) => checked ? Array.from(new Set([...prev, lvl])).sort((a,b)=>a-b) : prev.filter(v => v !== lvl));
+                    }} />} 
+                    label={`H${lvl}`} 
+                  />
+                ))}
+              </Stack>
+            </Box>
+            {/* Paragraph formatting options */}
+            <FormGroup>
+              <FormControlLabel 
+                control={<Checkbox checked={indentParagraphs} onChange={(e) => setIndentParagraphs(e.target.checked)} />} 
+                label="Indent Paragraphs (traditional book style)" 
+              />
+              {indentParagraphs && (
+                <FormControlLabel 
+                  control={<Checkbox checked={noIndentFirstParagraph} onChange={(e) => setNoIndentFirstParagraph(e.target.checked)} />} 
+                  label="Don't indent first paragraph in each section" 
+                  sx={{ ml: 3 }}
+                />
+              )}
+            </FormGroup>
           </Stack>
         </DialogContent>
         <DialogActions>
@@ -1488,13 +1772,30 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
           <Button variant="contained" onClick={async () => {
             try {
               setExporting(true);
+              // Build heading alignments dict from centerLevels
+              const headingAlignments = {};
+              centerLevels.forEach(level => {
+                headingAlignments[level] = 'center';
+              });
+              
+              // Build author string from first/last
+              const authorFull = [epubAuthorFirst, epubAuthorLast].filter(Boolean).join(' ') || 'Unknown Author';
+              
               await exportService.exportMarkdownAsEpub(editContent || document.content || '', {
                 includeToc,
                 includeCover,
                 splitOnHeadings,
                 splitOnHeadingLevels: splitLevels,
-                metadata: { title: epubTitle || 'Untitled', author: epubAuthor || 'Unknown Author', language: epubLanguage || 'en' },
-                headingAlignments: {},
+                metadata: { 
+                  title: epubTitle || 'Untitled', 
+                  author: authorFull,
+                  author_first: epubAuthorFirst || '',
+                  author_last: epubAuthorLast || '',
+                  language: epubLanguage || 'en' 
+                },
+                headingAlignments: headingAlignments,
+                indentParagraphs: indentParagraphs,
+                noIndentFirstParagraph: noIndentFirstParagraph,
               });
               setExportOpen(false);
             } catch (e) {

@@ -59,7 +59,7 @@ from services.auth_service import auth_service
 
 from services.user_document_service import UserDocumentService
 from models.api_models import (
-    URLImportRequest, QueryRequest, DocumentListResponse, 
+    URLImportRequest, ImportImageRequest, QueryRequest, DocumentListResponse, 
     DocumentUploadResponse, DocumentStatus, QueryResponse, 
     QueryHistoryResponse, AvailableModelsResponse,
     ModelConfigRequest, DocumentFilterRequest, DocumentUpdateRequest,
@@ -464,6 +464,167 @@ images_path = Path(f"{settings.UPLOAD_DIR}/web_sources/images")
 images_path.mkdir(parents=True, exist_ok=True)
 app.mount("/static/images", StaticFiles(directory=str(images_path)), name="images")
 
+
+@app.get("/api/images/{filename:path}")
+async def serve_image(
+    filename: str,
+    request: Request,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """
+    Serve images with proper content-type headers for browser display.
+    Supports JPG, PNG, GIF, WEBP, and other image formats.
+    
+    SECURITY: Requires authentication and verifies user has access to the image
+    by checking if it's associated with a document the user owns or has access to.
+    """
+    import mimetypes
+    from urllib.parse import unquote
+    from fastapi import HTTPException
+    
+    try:
+        # URL decode the filename in case it's encoded
+        decoded_filename = unquote(filename)
+        
+        # Security: Prevent path traversal - get just the basename
+        safe_filename = os.path.basename(decoded_filename)
+        if not safe_filename or safe_filename in ('.', '..'):
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        
+        logger.info(f"🖼️ Serving image: {safe_filename} for user: {current_user.username}")
+        
+        # SECURITY: Check if this image is associated with a document
+        # If so, verify the user has access to that document
+        from services.database_manager.database_helpers import fetch_all
+        
+        # Search for documents with this filename
+        doc_query = """
+            SELECT document_id, user_id, collection_type, folder_id
+            FROM document_metadata
+            WHERE filename = $1
+            LIMIT 10
+        """
+        doc_rows = await fetch_all(doc_query, safe_filename)
+        
+        has_access = False
+        
+        if doc_rows:
+            # Image is associated with one or more documents - check access
+            for doc_row in doc_rows:
+                doc_id = doc_row.get('document_id')
+                if doc_id:
+                    try:
+                        # Check if user has access to this document
+                        doc_info = await check_document_access(doc_id, current_user, "read")
+                        if doc_info:
+                            has_access = True
+                            logger.info(f"✅ User {current_user.username} has access via document {doc_id}")
+                            break
+                    except HTTPException:
+                        # User doesn't have access to this document, continue checking others
+                        continue
+        
+        # If not found in documents, check if image is in a document_id subdirectory
+        # and verify access to that document
+        if not has_access:
+            # Construct file path
+            image_file_path = images_path / safe_filename
+            
+            # Check subdirectories (some images may be in document_id subdirectories)
+            if not image_file_path.exists():
+                found_path = False
+                for subdir in images_path.iterdir():
+                    if subdir.is_dir():
+                        potential_path = subdir / safe_filename
+                        if potential_path.exists():
+                            image_file_path = potential_path
+                            found_path = True
+                            # Check if subdirectory name is a document_id
+                            potential_doc_id = subdir.name
+                            try:
+                                doc_info = await check_document_access(potential_doc_id, current_user, "read")
+                                if doc_info:
+                                    has_access = True
+                                    logger.info(f"✅ User {current_user.username} has access via document_id subdirectory {potential_doc_id}")
+                                    break
+                            except HTTPException:
+                                # Not a valid document_id or no access, continue
+                                continue
+                
+                if not found_path:
+                    logger.warning(f"❌ Image not found: {safe_filename}")
+                    raise HTTPException(status_code=404, detail="Image not found")
+            else:
+                # Image is in root directory - for standalone generated images,
+                # we allow access if user is authenticated (generated images are
+                # typically shown in user's own conversations)
+                has_access = True
+                logger.info(f"✅ Allowing access to standalone generated image: {safe_filename}")
+        
+        if not has_access:
+            logger.warning(f"❌ Access denied: User {current_user.username} does not have access to image {safe_filename}")
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Construct file path if not already set
+        if 'image_file_path' not in locals():
+            image_file_path = images_path / safe_filename
+            if not image_file_path.exists():
+                # Check subdirectories
+                found = False
+                for subdir in images_path.iterdir():
+                    if subdir.is_dir():
+                        potential_path = subdir / safe_filename
+                        if potential_path.exists():
+                            image_file_path = potential_path
+                            found = True
+                            break
+                if not found:
+                    raise HTTPException(status_code=404, detail="Image not found")
+        
+        # SECURITY: Verify resolved path is within uploads directory
+        try:
+            uploads_base = Path(settings.UPLOAD_DIR).resolve()
+            image_file_path_resolved = image_file_path.resolve()
+            
+            if not str(image_file_path_resolved).startswith(str(uploads_base)):
+                logger.error(f"Path traversal attempt detected: {image_file_path_resolved}")
+                raise HTTPException(status_code=403, detail="Access denied")
+        except Exception as e:
+            logger.error(f"Path validation error: {e}")
+            raise HTTPException(status_code=403, detail="Access denied")
+        
+        # Determine media type from file extension
+        media_type, _ = mimetypes.guess_type(str(image_file_path))
+        if not media_type:
+            # Fallback: check common image extensions
+            ext = image_file_path.suffix.lower()
+            media_type_map = {
+                '.jpg': 'image/jpeg',
+                '.jpeg': 'image/jpeg',
+                '.png': 'image/png',
+                '.gif': 'image/gif',
+                '.webp': 'image/webp',
+                '.bmp': 'image/bmp',
+                '.svg': 'image/svg+xml',
+            }
+            media_type = media_type_map.get(ext, 'application/octet-stream')
+        
+        logger.info(f"✅ Serving image {safe_filename} with content-type: {media_type}")
+        
+        # Serve file with proper content-type
+        return FileResponse(
+            path=str(image_file_path),
+            filename=safe_filename,
+            media_type=media_type
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to serve image: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Include unified chat API routes
@@ -1263,11 +1424,122 @@ async def add_message_to_conversation(conversation_id: str, request: CreateMessa
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _cleanup_conversation_images(conversation_id: str, user_id: str):
+    """Extract and clean up generated images from a conversation before deletion"""
+    import re
+    from pathlib import Path
+    from services.database_manager.database_helpers import fetch_all
+    
+    try:
+        logger.info(f"🖼️ Extracting image URLs from conversation: {conversation_id}")
+        
+        # Get all messages from the conversation before deletion
+        messages = await fetch_all(
+            """
+            SELECT content, role 
+            FROM conversation_messages 
+            WHERE conversation_id = $1
+            ORDER BY created_at
+            """,
+            conversation_id
+        )
+        
+        if not messages:
+            logger.info(f"📭 No messages found for conversation {conversation_id}")
+            return
+        
+        # Extract image URLs from message content
+        image_urls = set()
+        image_pattern = re.compile(r'/static/images/(gen_[a-f0-9]+\.(?:png|jpg|jpeg|webp))')
+        
+        for message in messages:
+            content = message.get('content', '') or ''
+            if isinstance(content, str):
+                matches = image_pattern.findall(content)
+                for filename in matches:
+                    image_urls.add(f"/static/images/{filename}")
+        
+        if not image_urls:
+            logger.info(f"📭 No generated images found in conversation {conversation_id}")
+            return
+        
+        logger.info(f"🖼️ Found {len(image_urls)} unique image(s) in conversation")
+        
+        # Check which images have been imported into document library
+        # An imported image would have a document with doc_type='image' and file_path matching
+        images_path = Path(f"{settings.UPLOAD_DIR}/web_sources/images")
+        imported_images = set()
+        
+        for image_url in image_urls:
+            # Extract filename from URL
+            filename = image_url.replace('/static/images/', '')
+            
+            # Check if this image has been imported as a document
+            # We check by looking for documents with this filename
+            imported_docs = await fetch_all(
+                """
+                SELECT document_id, filename 
+                FROM document_metadata 
+                WHERE user_id = $1 
+                AND doc_type = 'image'
+                AND filename = $2
+                """,
+                user_id, filename
+            )
+            
+            if imported_docs:
+                logger.info(f"✅ Image {filename} has been imported - skipping deletion")
+                imported_images.add(image_url)
+            else:
+                logger.info(f"🗑️ Image {filename} not imported - will be deleted")
+        
+        # Delete only non-imported images
+        deleted_count = 0
+        for image_url in image_urls:
+            if image_url in imported_images:
+                continue  # Skip imported images
+            
+            filename = image_url.replace('/static/images/', '')
+            image_file_path = images_path / filename
+            
+            # Also check subdirectories (some images may be in document_id subdirectories)
+            if not image_file_path.exists():
+                found = False
+                for subdir in images_path.iterdir():
+                    if subdir.is_dir():
+                        potential_path = subdir / filename
+                        if potential_path.exists():
+                            image_file_path = potential_path
+                            found = True
+                            break
+                
+                if not found:
+                    logger.warning(f"⚠️ Image file not found: {filename}")
+                    continue
+            
+            try:
+                if image_file_path.exists():
+                    image_file_path.unlink()
+                    deleted_count += 1
+                    logger.info(f"🗑️ Deleted image file: {image_file_path}")
+            except Exception as e:
+                logger.error(f"❌ Failed to delete image file {image_file_path}: {e}")
+        
+        logger.info(f"✅ Cleaned up {deleted_count} image file(s) for conversation {conversation_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to cleanup conversation images: {e}")
+        # Don't raise - image cleanup failure shouldn't block conversation deletion
+
+
 @app.delete("/api/conversations/{conversation_id}")
 async def delete_conversation(conversation_id: str, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     """Delete a conversation and all its messages (LangGraph + legacy)"""
     try:
         logger.info(f"💬 Deleting conversation: {conversation_id} for user: {current_user.user_id}")
+        
+        # Step 0: Clean up generated images before deletion
+        await _cleanup_conversation_images(conversation_id, current_user.user_id)
         
         # ROOSEVELT'S DUAL DELETION: Delete from both LangGraph checkpoints AND legacy tables
         
@@ -1324,6 +1596,24 @@ async def delete_all_conversations(current_user: AuthenticatedUserResponse = Dep
         logger.info(f"💬 Deleting ALL conversations for user: {current_user.user_id}")
         
         # ROOSEVELT'S MASS DELETION: Delete from both LangGraph checkpoints AND legacy tables
+        
+        # Step 0: Clean up generated images from all conversations before deletion
+        from services.database_manager.database_helpers import fetch_all
+        
+        # Get all conversation IDs for this user before deletion
+        conversations = await fetch_all(
+            """
+            SELECT conversation_id 
+            FROM conversations 
+            WHERE user_id = $1
+            """,
+            current_user.user_id
+        )
+        
+        for conv in conversations:
+            conv_id = conv.get('conversation_id')
+            if conv_id:
+                await _cleanup_conversation_images(conv_id, current_user.user_id)
         
         # Step 1: Delete from LangGraph checkpoints
         import asyncpg
@@ -1994,6 +2284,91 @@ async def import_from_url(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/documents/import-image", response_model=DocumentUploadResponse)
+async def import_image(
+    request: ImportImageRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Import a generated image into the user's document library"""
+    try:
+        import aiofiles
+        from io import BytesIO
+        
+        logger.info(f"🖼️ User {current_user.username} importing image: {request.image_url}")
+        
+        # Extract filename from URL (e.g., /static/images/filename.png -> filename.png)
+        image_url = request.image_url
+        if image_url.startswith('/static/images/'):
+            filename_from_url = image_url.replace('/static/images/', '').split('/')[-1]
+        else:
+            # Fallback: try to extract filename from any path
+            filename_from_url = image_url.split('/')[-1]
+        
+        # Use provided filename or fall back to extracted filename
+        filename = request.filename or filename_from_url
+        if not filename:
+            raise HTTPException(status_code=400, detail="Could not determine filename from image URL")
+        
+        # Validate folder access if folder_id is provided
+        folder_id = request.folder_id
+        if folder_id:
+            folder = await folder_service.get_folder(folder_id, current_user.user_id)
+            if not folder:
+                raise HTTPException(status_code=404, detail="Folder not found or access denied")
+            
+            # For admin users, allow importing to global folders
+            if folder.collection_type == "global" and current_user.role != "admin":
+                raise HTTPException(status_code=403, detail="Only admins can import to global folders")
+        
+        # Read image file from static images directory
+        images_path = Path(f"{settings.UPLOAD_DIR}/web_sources/images")
+        image_file_path = images_path / filename_from_url
+        
+        # Also check subdirectories (some images may be in document_id subdirectories)
+        if not image_file_path.exists():
+            # Search in subdirectories
+            found = False
+            for subdir in images_path.iterdir():
+                if subdir.is_dir():
+                    potential_path = subdir / filename_from_url
+                    if potential_path.exists():
+                        image_file_path = potential_path
+                        found = True
+                        break
+            
+            if not found:
+                raise HTTPException(status_code=404, detail=f"Image file not found: {filename_from_url}")
+        
+        # Read the image file
+        async with aiofiles.open(image_file_path, 'rb') as f:
+            image_content = await f.read()
+        
+        # Create an UploadFile-like object from the image content
+        image_buffer = BytesIO(image_content)
+        image_buffer.seek(0)  # Ensure file pointer is at the start
+        image_file = UploadFile(
+            filename=filename,
+            file=image_buffer
+        )
+        
+        # Import the image using the document service
+        result = await document_service.upload_and_process(
+            image_file, 
+            doc_type='image', 
+            user_id=current_user.user_id, 
+            folder_id=folder_id
+        )
+        
+        logger.info(f"✅ Image imported successfully: {result.document_id}")
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Image import failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ===== USER DOCUMENT MANAGEMENT ENDPOINTS =====
 
 @app.post("/api/user/documents/upload", response_model=DocumentUploadResponse)
@@ -2554,6 +2929,20 @@ async def clear_qdrant(
                 qdrant_client.delete_collection(collection_name)
                 cleared_collections += 1
                 logger.info(f"🗑️ Deleted user collection: {collection_name}")
+            except Exception as e:
+                error_msg = f"Failed to delete collection {collection_name}: {str(e)}"
+                errors.append(error_msg)
+                logger.error(f"❌ {error_msg}")
+        
+        # Clear team collections (collections that start with 'team_')
+        team_collections = [name for name in collection_names if name.startswith('team_')]
+        logger.info(f"👥 Found {len(team_collections)} team collections to clear")
+        
+        for collection_name in team_collections:
+            try:
+                qdrant_client.delete_collection(collection_name)
+                cleared_collections += 1
+                logger.info(f"🗑️ Deleted team collection: {collection_name}")
             except Exception as e:
                 error_msg = f"Failed to delete collection {collection_name}: {str(e)}"
                 errors.append(error_msg)
@@ -4523,6 +4912,22 @@ async def get_document_content(
                     file_path = Path(file_path_str)
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to compute file path for PDF: {e}")
+            # Skip content loading for image files - they're binary and served via /api/images/ endpoint
+            elif filename and any(filename.lower().endswith(ext) for ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg']):
+                logger.info(f"🖼️ API: Skipping content load for image: {filename} (use /api/images/ endpoint instead)")
+                full_content = ""  # Empty content for images
+                content_source = "image_binary"
+                # Still compute file path for metadata
+                try:
+                    file_path_str = await folder_service.get_document_file_path(
+                        filename=filename,
+                        folder_id=folder_id,
+                        user_id=user_id,
+                        collection_type=collection_type
+                    )
+                    file_path = Path(file_path_str)
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to compute file path for image: {e}")
             elif filename:
                 # Try new folder structure first
                 try:
@@ -4635,6 +5040,20 @@ async def get_document_content(
             except Exception as e:
                 logger.warning(f"⚠️ Could not construct canonical_path: {e}")
         
+        # Get updated_at from database directly (not in DocumentInfo model)
+        updated_at = None
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            row = await fetch_one(
+                "SELECT updated_at FROM document_metadata WHERE document_id = $1",
+                doc_id,
+                rls_context={'user_id': '', 'user_role': 'admin'}
+            )
+            if row and row.get('updated_at'):
+                updated_at = row['updated_at'].isoformat() if hasattr(row['updated_at'], 'isoformat') else str(row['updated_at'])
+        except Exception as e:
+            logger.warning(f"⚠️ Could not fetch updated_at: {e}")
+        
         # Get metadata from document
         metadata = {
             "document_id": document.document_id,
@@ -4645,6 +5064,7 @@ async def get_document_content(
             "category": document.category.value if document.category else None,
             "tags": document.tags,
             "created_at": document.upload_date.isoformat() if document.upload_date else None,
+            "updated_at": updated_at,
             "status": document.status.value if document.status else None,
             "file_size": document.file_size,
             "language": document.language,

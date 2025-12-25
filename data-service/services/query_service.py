@@ -356,3 +356,4 @@ class QueryService:
         except Exception as e:
             logger.warning(f"Failed to log query: {e}")
 
+

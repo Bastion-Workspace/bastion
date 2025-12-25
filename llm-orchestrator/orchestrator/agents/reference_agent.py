@@ -200,7 +200,13 @@ class ReferenceAgent(BaseAgent):
                     "reference_content": "",
                     "referenced_files": {},
                     "document_type": "unknown",
-                    "error": "No active editor found. Please open a reference document with type: reference in frontmatter."
+                    "error": "No active editor found. Please open a reference document with type: reference in frontmatter.",
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             # Check if document type is "reference"
@@ -213,7 +219,13 @@ class ReferenceAgent(BaseAgent):
                     "reference_content": "",
                     "referenced_files": {},
                     "document_type": doc_type,
-                    "error": f"Document type is '{doc_type}', not 'reference'. Please open a document with type: reference in frontmatter."
+                    "error": f"Document type is '{doc_type}', not 'reference'. Please open a document with type: reference in frontmatter.",
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             # Get main reference content
@@ -243,7 +255,13 @@ class ReferenceAgent(BaseAgent):
             return {
                 "reference_content": reference_content,
                 "referenced_files": referenced_files,
-                "document_type": document_type
+                "document_type": document_type,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -252,7 +270,13 @@ class ReferenceAgent(BaseAgent):
                 "reference_content": "",
                 "referenced_files": {},
                 "document_type": "unknown",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _analyze_query_complexity_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
@@ -266,7 +290,13 @@ class ReferenceAgent(BaseAgent):
                 return {
                     "query_complexity": "simple_qa",
                     "needs_external_info": False,
-                    "error": "No reference content available"
+                    "error": "No reference content available",
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             # Use fast model for complexity analysis
@@ -379,7 +409,13 @@ Return ONLY valid JSON:
                 "needs_calculations": needs_calculations,
                 "calculation_type": calculation_type,
                 "needs_external_info": needs_external,
-                "research_query": research_query
+                "research_query": research_query,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -388,7 +424,13 @@ Return ONLY valid JSON:
                 "query_complexity": "simple_qa",
                 "query_relevance": 1.0,
                 "is_unrelated": False,
-                "needs_external_info": False
+                "needs_external_info": False,
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _handle_unrelated_query_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
@@ -434,7 +476,13 @@ Would you like to rephrase your question about the document, or would you prefer
                     "complexity_level": "unrelated_query",
                     "query_relevance": query_relevance,
                     "is_unrelated": True
-                }
+                },
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -444,7 +492,13 @@ Would you like to rephrase your question about the document, or would you prefer
                     "response": f"I couldn't process your query. Error: {str(e)}",
                     "complexity_level": "unrelated_query"
                 },
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _process_simple_qa_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
@@ -503,7 +557,13 @@ Return your response as natural language text (not JSON)."""
                 "analysis_results": {
                     "response": content,
                     "complexity_level": "simple_qa"
-                }
+                },
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -513,7 +573,13 @@ Return your response as natural language text (not JSON)."""
                     "response": f"Error processing query: {str(e)}",
                     "complexity_level": "simple_qa"
                 },
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _process_pattern_analysis_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
@@ -601,7 +667,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     "correlations": patterns_found.get("correlations", []),
                     "complexity_level": "pattern_analysis"
                 },
-                "patterns_found": patterns_found.get("patterns", [])
+                "patterns_found": patterns_found.get("patterns", []),
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -611,7 +683,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     "response": f"Error analyzing patterns: {str(e)}",
                     "complexity_level": "pattern_analysis"
                 },
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _process_insights_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
@@ -699,7 +777,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     "anomalies": insights.get("anomalies", []),
                     "recommendations": insights.get("recommendations", []),
                     "complexity_level": "insights"
-                }
+                },
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -709,7 +793,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     "response": f"Error generating insights: {str(e)}",
                     "complexity_level": "insights"
                 },
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _perform_calculations_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
@@ -798,7 +888,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 return {
                     "calculation_results": None,
                     "needs_calculations": False,
-                    "error": "Could not extract calculation request from query"
+                    "error": "Could not extract calculation request from query",
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             # Call appropriate math tool
@@ -828,7 +924,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 return {
                     "calculation_results": None,
                     "needs_calculations": False,
-                    "error": f"Unknown math tool: {tool_name}"
+                    "error": f"Unknown math tool: {tool_name}",
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             if calculation_result and calculation_result.get("success"):
@@ -839,7 +941,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             return {
                 "calculation_results": calculation_result,
                 "calculation_request": calc_request,
-                "needs_calculations": False  # Calculation completed
+                "needs_calculations": False,  # Calculation completed
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -847,7 +955,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             return {
                 "calculation_results": None,
                 "needs_calculations": False,
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _call_research_subgraph_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
@@ -862,7 +976,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 logger.warning("⚠️ Research query not provided")
                 return {
                     "research_results": None,
-                    "needs_external_info": False
+                    "needs_external_info": False,
+                    # ✅ CRITICAL: Preserve state even on early return
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             logger.info(f"📚 Calling research agent for: {research_query}")
@@ -923,7 +1043,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             
             return {
                 "research_results": research_result,
-                "needs_external_info": False  # Research completed
+                "needs_external_info": False,  # Research completed
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -931,7 +1057,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             return {
                 "research_results": None,
                 "needs_external_info": False,
-                "error": f"Research failed: {str(e)}"
+                "error": f"Research failed: {str(e)}",
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _synthesize_response_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
@@ -995,7 +1127,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             }
             
             return {
-                "response": response
+                "response": response,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -1005,7 +1143,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     "response": f"Error synthesizing response: {str(e)}",
                     "task_status": "error"
                 },
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _format_response_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
@@ -1026,7 +1170,11 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 "response": response,
                 "task_status": response.get("task_status", "complete"),
                 "messages": state.get("messages", []),
-                "shared_memory": state.get("shared_memory", {})
+                "shared_memory": state.get("shared_memory", {}),
+                # ✅ CRITICAL: Preserve state (final node, but good practice)
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -1037,7 +1185,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     "task_status": "error"
                 },
                 "task_status": "error",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     def _build_reference_prompt(self) -> str:

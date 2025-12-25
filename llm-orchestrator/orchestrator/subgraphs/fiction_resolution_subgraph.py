@@ -84,6 +84,7 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
                 logger.info("Question request with no structured_edit - returning empty operations (analysis in summary)")
                 return {
                     "editor_operations": [],
+                    "failed_operations": state.get("failed_operations", []),
                     "task_status": "complete",
                     "resolution_complete": True,
                     "metadata": state.get("metadata", {}),
@@ -103,6 +104,7 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
                 }
             return {
                 "editor_operations": [],
+                "failed_operations": state.get("failed_operations", []),
                 "error": "No operations to resolve",
                 "task_status": "error",
                 "resolution_complete": True,
@@ -126,6 +128,7 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
         if not isinstance(operations, list):
             return {
                 "editor_operations": [],
+                "failed_operations": state.get("failed_operations", []),
                 "error": "No operations to resolve",
                 "task_status": "error",
                 "resolution_complete": True,
@@ -151,6 +154,7 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
             logger.info("Question request with empty operations array - this is valid (analysis-only, no edits needed)")
             return {
                 "editor_operations": [],
+                "failed_operations": state.get("failed_operations", []),
                 "task_status": "complete",
                 "resolution_complete": True,
                 "metadata": state.get("metadata", {}),
@@ -203,6 +207,7 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
             "resolution_current_chapter_number": current_chapter_number,
             "resolution_requested_chapter_number": requested_chapter_number,
             "resolution_complete": False,
+            "failed_operations": state.get("failed_operations", []),
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
             "shared_memory": state.get("shared_memory", {}),
@@ -225,6 +230,7 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {
             "editor_operations": [],
+            "failed_operations": state.get("failed_operations", []),
             "error": str(e),
             "task_status": "error",
             "resolution_complete": True,
@@ -265,6 +271,7 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
         if not operations:
             return {
                 "resolved_operations": [],
+                "failed_operations": state.get("failed_operations", []),
                 "resolution_complete": True,
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
@@ -286,6 +293,7 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
             }
         
         editor_operations = []
+        failed_operations = []
         
         for i, op in enumerate(operations):
             # Resolve operation
@@ -308,7 +316,13 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
                         logger.error(f"❌ Operation {i+1} ({op_type}) is MISSING 'original_text' - this operation will fail!")
                         logger.error(f"   ⚠️ For {op_type} operations, you MUST provide 'original_text' with EXACT text from the manuscript")
                         logger.error(f"   💡 If this is NEW text to insert, use 'insert_after_heading' with 'anchor_text' instead")
-                        # Skip this operation - it can't be resolved
+                        # Add to failed operations
+                        failed_operations.append({
+                            "op_type": op_type,
+                            "original_text": original_text,
+                            "text": op_dict.get("text", ""),
+                            "error": "Missing original_text"
+                        })
                         continue
                 elif op_type in ("insert_after_heading", "insert_after"):
                     # Check if file is empty - if so, anchor_text is optional
@@ -321,7 +335,13 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
                         else:
                             logger.error(f"❌ Operation {i+1} ({op_type}) is MISSING 'anchor_text' - this operation will fail!")
                             logger.error(f"   ⚠️ For {op_type} operations in non-empty files, you MUST provide 'anchor_text' with EXACT text to insert after")
-                            # Skip this operation - it can't be resolved
+                            # Add to failed operations
+                            failed_operations.append({
+                                "op_type": op_type,
+                                "anchor_text": anchor_text,
+                                "text": op_dict.get("text", ""),
+                                "error": "Missing anchor_text"
+                            })
                             continue
                 
                 if original_text:
@@ -338,9 +358,19 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
                 
                 # Check if resolution failed (returned -1, -1)
                 if resolved_start == -1 and resolved_end == -1:
-                    logger.error(f"❌ Operation {i+1} resolution FAILED - original_text could not be found")
+                    logger.error(f"❌ Operation {i+1} resolution FAILED - original_text or anchor_text could not be found")
                     logger.error(f"   original_text: {repr(original_text[:200]) if original_text else 'None'}")
-                    logger.error(f"   This operation will be SKIPPED")
+                    logger.error(f"   anchor_text: {repr(anchor_text[:200]) if anchor_text else 'None'}")
+                    logger.error(f"   This operation will be SKIPPED but collected for the user")
+                    
+                    # Add to failed operations
+                    failed_operations.append({
+                        "op_type": op_type,
+                        "original_text": original_text,
+                        "anchor_text": anchor_text,
+                        "text": resolved_text or op_dict.get("text", ""),
+                        "error": "Anchor or original text not found"
+                    })
                     continue
                 
                 # Log resolution result - check if it resolved to cursor position when original_text should have been found
@@ -482,11 +512,20 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
                 original_text = op_dict.get('original_text') if isinstance(op_dict, dict) else None
                 logger.error(f"   Operation type: {op_type}, original_text: {repr(original_text[:100]) if original_text else 'None'}")
                 logger.error(f"   This operation will be SKIPPED - cannot safely place it without proper resolution")
+                # Add to failed operations
+                failed_operations.append({
+                    "op_type": op_type,
+                    "original_text": original_text,
+                    "anchor_text": op_dict.get("anchor_text"),
+                    "text": op_dict.get("text", ""),
+                    "error": str(e)
+                })
                 # Skip this operation - don't use fallback positioning as it's unreliable
                 continue
         
         return {
             "resolved_operations": editor_operations,
+            "failed_operations": failed_operations,
             "resolution_complete": False,
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
@@ -513,6 +552,7 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {
             "resolved_operations": [],
+            "failed_operations": state.get("failed_operations", []),
             "error": str(e),
             "task_status": "error",
             "resolution_complete": True,
@@ -561,6 +601,7 @@ async def validate_resolved_operations_node(state: Dict[str, Any]) -> Dict[str, 
         # All operations validated
         return {
             "validated_operations": resolved_operations,
+            "failed_operations": state.get("failed_operations", []),
             "resolution_complete": False,
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
@@ -587,6 +628,7 @@ async def validate_resolved_operations_node(state: Dict[str, Any]) -> Dict[str, 
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {
             "validated_operations": state.get("resolved_operations", []),
+            "failed_operations": state.get("failed_operations", []),
             "error": str(e),
             "task_status": "error",
             "resolution_complete": True,
@@ -616,9 +658,11 @@ async def finalize_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
         logger.info("Finalizing operations...")
         
         validated_operations = state.get("validated_operations", [])
+        failed_operations = state.get("failed_operations", [])
         
         return {
             "editor_operations": validated_operations,
+            "failed_operations": failed_operations,
             "resolution_complete": True,
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
@@ -645,6 +689,7 @@ async def finalize_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {
             "editor_operations": [],
+            "failed_operations": state.get("failed_operations", []),
             "error": str(e),
             "task_status": "error",
             "resolution_complete": True,

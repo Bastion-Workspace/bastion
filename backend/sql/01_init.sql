@@ -1989,6 +1989,24 @@ GRANT ALL PRIVILEGES ON message_attachments TO bastion_user;
 GRANT ALL PRIVILEGES ON room_encryption_keys TO bastion_user;
 GRANT ALL PRIVILEGES ON user_presence TO bastion_user;
 
+-- Helper function to break circular RLS dependencies
+-- This function runs with the privileges of the creator (postgres)
+-- and thus ignores RLS policies on the tables it queries.
+CREATE OR REPLACE FUNCTION check_room_membership(check_room_id UUID, check_user_id VARCHAR)
+RETURNS BOOLEAN AS $$
+BEGIN
+    RETURN EXISTS (
+        SELECT 1 FROM room_participants
+        WHERE room_id = check_room_id 
+        AND user_id = check_user_id
+    ) OR EXISTS (
+        SELECT 1 FROM chat_rooms
+        WHERE room_id = check_room_id
+        AND created_by = check_user_id
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
 -- Enable RLS on messaging tables
 ALTER TABLE chat_rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE room_participants ENABLE ROW LEVEL SECURITY;
@@ -1998,14 +2016,11 @@ ALTER TABLE message_attachments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE room_encryption_keys ENABLE ROW LEVEL SECURITY;
 ALTER TABLE user_presence ENABLE ROW LEVEL SECURITY;
 
--- RLS policies for chat_rooms: users can only see rooms they're participants in
+-- RLS policies for chat_rooms
 CREATE POLICY chat_rooms_select_policy ON chat_rooms
     FOR SELECT USING (
-        room_id IN (
-            SELECT room_id FROM room_participants 
-            WHERE user_id = current_setting('app.current_user_id', true)::varchar
-        )
-        OR current_setting('app.current_user_role', true) = 'admin'
+        check_room_membership(room_id, current_setting('app.current_user_id', false)::varchar)
+        OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 CREATE POLICY chat_rooms_insert_policy ON chat_rooms
@@ -2016,39 +2031,27 @@ CREATE POLICY chat_rooms_insert_policy ON chat_rooms
 
 CREATE POLICY chat_rooms_update_policy ON chat_rooms
     FOR UPDATE USING (
-        -- Allow if user is a participant in the room
-        room_id IN (
-            SELECT room_id FROM room_participants 
-            WHERE user_id = current_setting('app.current_user_id', false)::varchar
-        )
-        -- OR if user is admin
+        check_room_membership(room_id, current_setting('app.current_user_id', false)::varchar)
         OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 CREATE POLICY chat_rooms_delete_policy ON chat_rooms
     FOR DELETE USING (
-        -- Allow room creator to delete
         created_by = current_setting('app.current_user_id', false)::varchar
-        -- OR any participant can delete
-        OR room_id IN (
-            SELECT room_id FROM room_participants 
-            WHERE user_id = current_setting('app.current_user_id', false)::varchar
-        )
-        -- OR admin can delete
+        OR check_room_membership(room_id, current_setting('app.current_user_id', false)::varchar)
         OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 -- RLS policies for room_participants
 CREATE POLICY room_participants_select_policy ON room_participants
     FOR SELECT USING (
-        -- User can see their own participation records
-        user_id = current_setting('app.current_user_id', false)::varchar
+        check_room_membership(room_id, current_setting('app.current_user_id', false)::varchar)
         OR current_setting('app.current_user_role', false) = 'admin'
     );
 
 CREATE POLICY room_participants_insert_policy ON room_participants
     FOR INSERT WITH CHECK (
-        -- Allow if current user is creator of the room
+        -- Allow if current user is creator of the room (can add any participant, including themselves)
         room_id IN (
             SELECT room_id FROM chat_rooms 
             WHERE created_by = current_setting('app.current_user_id', false)::varchar
@@ -2059,6 +2062,16 @@ CREATE POLICY room_participants_insert_policy ON room_participants
             WHERE user_id = current_setting('app.current_user_id', false)::varchar
         )
         -- OR if current user is admin
+        OR current_setting('app.current_user_role', false) = 'admin'
+    );
+
+CREATE POLICY room_participants_update_policy ON room_participants
+    FOR UPDATE USING (
+        user_id = current_setting('app.current_user_id', false)::varchar
+        OR current_setting('app.current_user_role', false) = 'admin'
+    )
+    WITH CHECK (
+        user_id = current_setting('app.current_user_id', false)::varchar
         OR current_setting('app.current_user_role', false) = 'admin'
     );
 

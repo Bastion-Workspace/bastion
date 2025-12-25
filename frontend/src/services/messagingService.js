@@ -122,6 +122,16 @@ class MessagingService {
     }
   }
 
+  async markAsRead(roomId) {
+    try {
+      const response = await apiService.post(`/api/messaging/rooms/${roomId}/read`);
+      return response;
+    } catch (error) {
+      console.error('❌ Failed to mark room as read:', error);
+      throw error;
+    }
+  }
+
   async sendMessage(roomId, content, messageType = 'text', metadata = null) {
     try {
       const response = await apiService.post(`/api/messaging/rooms/${roomId}/messages`, {
@@ -284,13 +294,19 @@ class MessagingService {
   // =====================
 
   connectToRoom(roomId, onMessage, onPresenceUpdate) {
+    // Don't connect if roomId is null or invalid
+    if (!roomId || roomId === 'null') {
+      console.log('💬 Skipping WebSocket connection for invalid roomId');
+      return;
+    }
+    
     // Don't reconnect if already connected
     if (this.wsConnections.has(roomId)) {
       console.log(`💬 Already connected to room ${roomId}`);
       return;
     }
 
-    const token = localStorage.getItem('auth_token');
+    const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
     if (!token) {
       console.error('❌ No auth token available for WebSocket');
       return;
@@ -444,32 +460,24 @@ class MessagingService {
   // User-level WebSocket for notifications across all rooms
   connectUserWebSocket() {
     if (this.userWebSocket) {
-      if (process.env.NODE_ENV === 'development') {
-        console.log('💬 User WebSocket already connected');
-      }
+      console.log('💬 User WebSocket already connected');
       return;
     }
 
-    const token = localStorage.getItem('token');
+    const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
     if (!token) {
       // Only log errors, not warnings about missing tokens
-      if (process.env.NODE_ENV === 'development') {
-        console.error('❌ No token available for user WebSocket');
-      }
+      console.error('❌ No token available for user WebSocket');
       return;
     }
 
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/messaging/ws/user?token=${token}`;
     
-    if (process.env.NODE_ENV === 'development') {
-      console.log('💬 Connecting user WebSocket...');
-    }
+    console.log('💬 Connecting user WebSocket...');
     const ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
-      if (process.env.NODE_ENV === 'development') {
-        console.log('✅ User WebSocket connected');
-      }
+      console.log('✅ User WebSocket connected');
       this.userWebSocket = ws;
       this.userWebSocketReconnectAttempts = 0; // Reset on successful connection
       
@@ -533,9 +541,7 @@ class MessagingService {
       this.userWebSocketReconnectAttempts++;
       
       // Only log reconnection attempts in development
-      if (process.env.NODE_ENV === 'development') {
-        console.log(`💬 User WebSocket disconnected, reconnecting in ${delay}ms (attempt ${this.userWebSocketReconnectAttempts})...`);
-      }
+      console.log(`💬 User WebSocket disconnected, reconnecting in ${delay}ms (attempt ${this.userWebSocketReconnectAttempts})...`);
       
       // Attempt reconnection after delay
       setTimeout(() => {
@@ -545,9 +551,7 @@ class MessagingService {
     
     ws.onerror = (error) => {
       // Only log errors in development to reduce console noise
-      if (process.env.NODE_ENV === 'development') {
-        console.error('❌ User WebSocket error:', error);
-      }
+      console.error('❌ User WebSocket error:', error);
     };
   }
 

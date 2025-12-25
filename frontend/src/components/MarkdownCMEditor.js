@@ -1,9 +1,10 @@
-import React, { useMemo, useEffect, useState, useRef } from 'react';
+import React, { useMemo, useEffect, useState, useRef, forwardRef, useImperativeHandle } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { EditorView, keymap, Decoration, ViewPlugin } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { history, defaultKeymap, historyKeymap } from '@codemirror/commands';
+import { searchKeymap } from '@codemirror/search';
 import { useEditor } from '../contexts/EditorContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { parseFrontmatter as parseMarkdownFrontmatter } from '../utils/frontmatterUtils';
@@ -17,12 +18,15 @@ import { editorSuggestionService } from '../services/editor/EditorSuggestionServ
 const createMdTheme = (darkMode) => EditorView.baseTheme({
   '&': {
     backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+    color: darkMode ? '#d4d4d4' : '#212121',
   },
   '.cm-editor': {
     backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+    color: darkMode ? '#d4d4d4' : '#212121',
   },
   '.cm-scroller': {
     backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+    color: darkMode ? '#d4d4d4' : '#212121',
   },
   '.cm-content': { 
     fontFamily: 'monospace', 
@@ -32,6 +36,15 @@ const createMdTheme = (darkMode) => EditorView.baseTheme({
     overflowWrap: 'anywhere',
     backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
     color: darkMode ? '#d4d4d4' : '#212121'
+  },
+  '.cm-focused': {
+    backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+  },
+  '&.cm-focused': {
+    backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
+  },
+  '.cm-editor.cm-focused': {
+    backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
   },
   '.cm-gutters': {
     backgroundColor: darkMode ? '#1e1e1e' : '#f5f5f5',
@@ -182,7 +195,7 @@ function buildFrontmatter(data) {
   return `---\n${lines.join('\n')}\n---\n`;
 }
 
-export default function MarkdownCMEditor({ value, onChange, filename, canonicalPath, documentId, initialScrollPosition = 0, onScrollChange }) {
+const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath, documentId, initialScrollPosition = 0, onScrollChange }, ref) => {
   const { darkMode } = useTheme();
   
   // Refs for scroll position preservation
@@ -191,6 +204,33 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
   const shouldRestoreScrollRef = useRef(false);
   const scrollCallbackTimeoutRef = useRef(null);
   const hasRestoredInitialScrollRef = useRef(false);
+
+  // Expose scrollToLine method to parent via ref
+  useImperativeHandle(ref, () => ({
+    scrollToLine: (lineNum) => {
+      if (!editorViewRef.current || !lineNum || lineNum < 1) return;
+      try {
+        const view = editorViewRef.current;
+        const line = view.state.doc.line(lineNum);
+        const pos = line.from;
+        
+        view.dispatch({
+          effects: EditorView.scrollIntoView(pos, { y: 'start', yMargin: 100 })
+        });
+        
+        // Add brief highlight effect
+        const lineElement = view.domAtPos(pos).node.parentElement?.closest('.cm-line');
+        if (lineElement) {
+          lineElement.style.backgroundColor = '#fff3cd';
+          setTimeout(() => {
+            lineElement.style.backgroundColor = '';
+          }, 1000);
+        }
+      } catch (err) {
+        console.error('Error scrolling to line:', err);
+      }
+    }
+  }));
   
   const [suggestionsEnabled, setSuggestionsEnabled] = useState(() => {
     try {
@@ -251,7 +291,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
   }, [documentId]);
   const extensions = useMemo(() => [
     history(),
-    keymap.of([...defaultKeymap, ...historyKeymap]),
+    keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
     markdown({ base: markdownLanguage }),
     EditorView.lineWrapping,
     mdTheme,
@@ -447,49 +487,72 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filename, canonicalPath, documentId]);
 
-  // Watch for frontmatter changes in content and update cache
+  // Watch for content changes and update cache (CRITICAL for fresh content after edits)
+  // Debounced to avoid excessive updates during typing
   useEffect(() => {
     const fullText = (value || '').replace(/\r\n/g, '\n');
     const { data, lists } = parseFrontmatter(fullText);
     const mergedFrontmatter = { ...data, ...lists };
     
-    // Compare with cached frontmatter to detect changes
+    // Compare with cached content to detect changes (not just frontmatter)
     const cachedFrontmatter = window.__last_editor_frontmatter || {};
-    const frontmatterChanged = JSON.stringify(mergedFrontmatter) !== JSON.stringify(cachedFrontmatter);
+    const cachedContent = window.__last_editor_content || '';
     
-    if (frontmatterChanged) {
-      // Update window cache
-      window.__last_editor_frontmatter = mergedFrontmatter;
-      
-      // Update React context
-      const payload = {
-        isEditable: true,
-        filename: filename || 'untitled.md',
-        language: 'markdown',
-        content: fullText,
-        contentLength: fullText.length,
-        frontmatter: mergedFrontmatter,
-        cursorOffset: -1,
-        selectionStart: -1,
-        selectionEnd: -1,
-        canonicalPath: canonicalPath || null,
-      };
-      
-      setEditorState(payload);
-      
-      // Update localStorage cache so ChatSidebar picks up changes immediately
-      try {
-        localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
-        console.log('✅ Frontmatter updated in cache:', {
-          oldType: cachedFrontmatter.type,
-          newType: mergedFrontmatter.type,
-          filename: payload.filename
-        });
-      } catch (e) {
-        console.error('Failed to update editor_ctx_cache:', e);
+    const frontmatterChanged = JSON.stringify(mergedFrontmatter) !== JSON.stringify(cachedFrontmatter);
+    const contentChanged = fullText !== cachedContent;
+    
+    // Update cache if EITHER frontmatter OR content changed
+    // This ensures we catch chapter additions, saves, and all other content changes
+    if (frontmatterChanged || contentChanged) {
+      // Debounce updates to avoid excessive writes during typing (300ms)
+      if (window.__editor_content_update_timer) {
+        clearTimeout(window.__editor_content_update_timer);
       }
+      
+      window.__editor_content_update_timer = setTimeout(() => {
+        // Update window caches
+        window.__last_editor_frontmatter = mergedFrontmatter;
+        window.__last_editor_content = fullText;
+        
+        // Update React context
+        const payload = {
+          isEditable: true,
+          filename: filename || 'untitled.md',
+          language: 'markdown',
+          content: fullText,
+          contentLength: fullText.length,
+          frontmatter: mergedFrontmatter,
+          cursorOffset: -1,
+          selectionStart: -1,
+          selectionEnd: -1,
+          canonicalPath: canonicalPath || null,
+          documentId: documentId || null,
+        };
+        
+        setEditorState(payload);
+        
+        // Update localStorage cache so ChatSidebar picks up changes immediately
+        try {
+          localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
+          console.log('✅ Editor cache updated:', {
+            frontmatterChanged,
+            contentChanged,
+            contentLength: fullText.length,
+            filename: payload.filename
+          });
+        } catch (e) {
+          console.error('Failed to update editor_ctx_cache:', e);
+        }
+      }, 300); // 300ms debounce
     }
-  }, [value, filename, canonicalPath]);
+    
+    // Cleanup: clear timeout on unmount or when deps change
+    return () => {
+      if (window.__editor_content_update_timer) {
+        clearTimeout(window.__editor_content_update_timer);
+      }
+    };
+  }, [value, filename, canonicalPath, documentId, setEditorState]);
 
   // Removed floating Accept listener; no longer needed
 
@@ -610,6 +673,35 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
           if (onChange) {
             onChange(nextText);
             console.log('✅ onChange called with new text');
+            
+            // CRITICAL: Force immediate cache update after operations (bypass debounce)
+            // This ensures chat messages sent immediately after accepting diffs use fresh content
+            try {
+              const { data, lists } = parseFrontmatter(nextText);
+              const mergedFrontmatter = { ...data, ...lists };
+              
+              const payload = {
+                isEditable: true,
+                filename: filename || 'untitled.md',
+                language: 'markdown',
+                content: nextText,
+                contentLength: nextText.length,
+                frontmatter: mergedFrontmatter,
+                cursorOffset: -1,
+                selectionStart: -1,
+                selectionEnd: -1,
+                canonicalPath: canonicalPath || null,
+                documentId: documentId || null,
+              };
+              
+              localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
+              console.log('💾 IMMEDIATE cache update after operation apply:', {
+                contentLength: nextText.length,
+                filename: payload.filename
+              });
+            } catch (err) {
+              console.error('Failed to immediate update cache:', err);
+            }
           } else {
             console.warn('⚠️ onChange callback is not defined');
           }
@@ -769,7 +861,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
   const updateEntry = (idx, field, val) => setFmEntries(prev => prev.map((e, i) => i === idx ? { ...e, [field]: val } : e));
 
   return (
-    <Box sx={{ bgcolor: 'background.paper', p: 2, borderRadius: 1 }}>
+    <Box sx={{ bgcolor: darkMode ? '#1e1e1e' : '#ffffff', p: 2, borderRadius: 1 }}>
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
         <FormControlLabel control={<Switch size="small" checked={suggestionsEnabled} onChange={(e) => setSuggestionsEnabled(!!e.target.checked)} />} label={<Typography variant="caption">Predictive Suggestions</Typography>} />
         <Tooltip title="Edit frontmatter (stored invisibly at top as YAML)">
@@ -921,6 +1013,10 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
       </Box>
     </Box>
   );
-}
+});
+
+MarkdownCMEditor.displayName = 'MarkdownCMEditor';
+
+export default MarkdownCMEditor;
 
 

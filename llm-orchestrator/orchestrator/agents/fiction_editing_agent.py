@@ -16,15 +16,12 @@ from pydantic import ValidationError, BaseModel, Field
 
 from .base_agent import BaseAgent, TaskStatus
 from orchestrator.models.editor_models import EditorOperation, ManuscriptEdit
-from orchestrator.models.continuity_models import ContinuityState
-from orchestrator.services.fiction_continuity_tracker import FictionContinuityTracker
 from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
 from orchestrator.subgraphs import (
     build_context_preparation_subgraph,
     build_validation_subgraph,
     build_generation_subgraph,
     build_resolution_subgraph,
-    build_book_generation_subgraph,
 )
 from orchestrator.utils.fiction_utilities import (
     ChapterRange,
@@ -39,8 +36,8 @@ from orchestrator.utils.fiction_utilities import (
     normalize_for_overlap_check as _normalize_for_overlap_check,
     looks_like_outline_copied as _looks_like_outline_copied,
     extract_chapter_number_from_request as _extract_chapter_number_from_request,
-    extract_chapter_range_from_request as _extract_chapter_range_from_request,
     ensure_chapter_heading as _ensure_chapter_heading,
+    extract_chapter_outline,
     extract_character_name as _extract_character_name,
     detect_chapter_heading_at_position as _detect_chapter_heading_at_position,
     strip_chapter_heading_from_text as _strip_chapter_heading_from_text,
@@ -106,7 +103,9 @@ class FictionEditingState(TypedDict):
     rules_body: Optional[str]
     style_body: Optional[str]
     characters_bodies: List[str]
+    series_body: Optional[str]
     outline_current_chapter_text: Optional[str]
+    outline_prev_chapter_text: Optional[str]
     has_references: bool  # CRITICAL: Flag from subgraph indicating if references were loaded
     current_request: str
     requested_chapter_number: Optional[int]
@@ -115,6 +114,7 @@ class FictionEditingState(TypedDict):
     llm_response: str
     structured_edit: Optional[Dict[str, Any]]
     editor_operations: List[Dict[str, Any]]
+    failed_operations: List[Dict[str, Any]]
     response: Dict[str, Any]
     task_status: str
     error: str
@@ -126,25 +126,13 @@ class FictionEditingState(TypedDict):
     reference_warnings: List[str]
     reference_guidance: str
     consistency_warnings: List[str]
-    # Multi-chapter generation fields
-    is_multi_chapter: bool
-    chapter_range: Optional[Tuple[int, int]]  # (start, end) inclusive
-    current_generation_chapter: Optional[int]  # Current chapter being generated in multi-chapter mode
-    generated_chapters: Dict[int, str]  # Map of chapter_number -> generated text for continuity
-    # Whole-book generation field
-    is_whole_book_generation: bool  # Full automated book generation mode
     # Outline sync detection
     outline_sync_analysis: Optional[Dict[str, Any]]      # Analysis of outline vs manuscript discrepancies
     outline_needs_sync: bool  # Whether manuscript needs updates to match outline
     # Question answering
     request_type: str  # "question" | "edit_request" | "hybrid" | "unknown"
-    # Continuity tracking
-    continuity_state: Optional[Dict[str, Any]]  # Serialized ContinuityState
-    continuity_document_id: Optional[str]  # Document ID of .continuity.json
-    continuity_violations: List[Dict[str, Any]]  # Detected violations
     # Explicit chapter detection from user query
     explicit_primary_chapter: Optional[int]  # Primary chapter to edit (from query)
-    explicit_secondary_chapters: List[int]  # Secondary chapters for context (from query)
 
 
 # ============================================
@@ -180,35 +168,6 @@ def _get_structured_edit(state: "FictionEditingState") -> Optional[ManuscriptEdi
         return None
 
 
-def _get_continuity_state(state: "FictionEditingState") -> Optional[ContinuityState]:
-    """
-    Safely extract and validate continuity_state from state as ContinuityState model.
-    
-    Returns None if continuity_state is missing or invalid.
-    Provides type-safe access to ContinuityState fields.
-    """
-    continuity_dict = state.get("continuity_state")
-    if not continuity_dict:
-        return None
-    
-    if isinstance(continuity_dict, ContinuityState):
-        # Already a model (shouldn't happen in state, but handle gracefully)
-        return continuity_dict
-    
-    if not isinstance(continuity_dict, dict):
-        logger.warning(f"continuity_state is not a dict: {type(continuity_dict)}")
-        return None
-    
-    try:
-        return ContinuityState(**continuity_dict)
-    except ValidationError as e:
-        logger.error(f"Failed to validate continuity_state as ContinuityState: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error converting continuity_state to ContinuityState: {e}")
-        return None
-
-
 # ============================================
 # Fiction Editing Agent
 # ============================================
@@ -225,7 +184,6 @@ class FictionEditingAgent(BaseAgent):
     def __init__(self):
         super().__init__("fiction_editing_agent")
         self._grpc_client = None
-        self._continuity_tracker = FictionContinuityTracker(llm_factory=self._get_llm)
         logger.info("Fiction Editing Agent ready!")
     
     def _build_workflow(self, checkpointer) -> StateGraph:
@@ -237,8 +195,7 @@ class FictionEditingAgent(BaseAgent):
         validation_subgraph = build_validation_subgraph(
             checkpointer,
             llm_factory=self._get_llm,
-            get_datetime_context=self._get_datetime_context,
-            continuity_tracker=self._continuity_tracker
+            get_datetime_context=self._get_datetime_context
         )
         generation_subgraph = build_generation_subgraph(
             checkpointer,
@@ -246,12 +203,6 @@ class FictionEditingAgent(BaseAgent):
             get_datetime_context=self._get_datetime_context
         )
         resolution_subgraph = build_resolution_subgraph(checkpointer)
-        book_generation_subgraph = build_book_generation_subgraph(
-            checkpointer,
-            llm_factory=self._get_llm,
-            get_datetime_context=self._get_datetime_context,
-            continuity_tracker=self._continuity_tracker
-        )
         
         # Phase 1: Context preparation (now a subgraph)
         workflow.add_node("context_preparation", context_subgraph)
@@ -261,9 +212,7 @@ class FictionEditingAgent(BaseAgent):
         workflow.add_node("detect_mode", self._detect_mode_and_intent_node)
         workflow.add_node("detect_request_type", self._detect_request_type_node)
         
-        # Phase 3: Multi-chapter loop control
-        workflow.add_node("check_multi_chapter", self._check_multi_chapter_node)
-        workflow.add_node("prepare_chapter_context", self._prepare_chapter_context_node)
+        # Phase 3: Generation preparation
         workflow.add_node("prepare_generation", self._prepare_generation_node)
         
         # Phase 4: Generation (now a subgraph)
@@ -275,11 +224,7 @@ class FictionEditingAgent(BaseAgent):
         
         # Phase 6: Resolution (now a subgraph) and response
         workflow.add_node("resolve_operations", resolution_subgraph)
-        workflow.add_node("accumulate_chapter", self._accumulate_chapter_node)
         workflow.add_node("format_response", self._format_response_node)
-        
-        # Phase 7: Whole-book generation (new subgraph)
-        workflow.add_node("book_generation", book_generation_subgraph)
         
         # Entry point
         workflow.set_entry_point("context_preparation")
@@ -305,60 +250,23 @@ class FictionEditingAgent(BaseAgent):
             }
         )
         
-        # Route based on whole-book mode or normal mode
-        workflow.add_conditional_edges(
-            "detect_request_type",
-            self._route_generation_mode,
-            {
-                "whole_book": "book_generation",  # NEW: Whole-book path
-                "normal": "check_multi_chapter"    # EXISTING: Normal path
-            }
-        )
-        
-        # Single chapter: prepare generation before calling subgraph
-        workflow.add_conditional_edges(
-            "check_multi_chapter",
-            self._route_multi_chapter,
-            {
-                "multi_chapter_loop": "prepare_chapter_context",
-                "single_chapter": "prepare_generation"
-            }
-        )
+        # Route to generation preparation (always single chapter)
+        workflow.add_edge("detect_request_type", "prepare_generation")
         
         # After prepare_generation, go to generation subgraph
         workflow.add_edge("prepare_generation", "generate_edit_plan")
         
-        # Shared flow: both single and multi-chapter go through generation pipeline
+        # Generation pipeline flow
         workflow.add_edge("generate_edit_plan", "validation")
         workflow.add_edge("validation", "resolve_operations")
         
         # Simple path: skip validation, go straight to resolution
         workflow.add_edge("generate_simple_edit", "resolve_operations")
         
-        # Route after resolve_operations: simple path skips, full path continues
-        workflow.add_conditional_edges(
-            "resolve_operations",
-            self._route_after_resolve,
-            {
-                "format_response": "format_response",  # Simple path: skip
-                "accumulate_chapter": "accumulate_chapter"  # Multi-chapter: accumulate
-            }
-        )
-        
-        # For multi-chapter: loop back to prepare_chapter_context if more chapters needed
-        workflow.add_conditional_edges(
-            "accumulate_chapter",
-            self._route_after_accumulate,
-            {
-                "next_chapter": "prepare_chapter_context",  # More chapters - loop back
-                "format_response": "format_response"  # All done
-            }
-        )
+        # Route after resolve_operations: always to format_response
+        workflow.add_edge("resolve_operations", "format_response")
         
         workflow.add_edge("format_response", END)
-        
-        # Whole-book subgraph returns to format_response
-        workflow.add_edge("book_generation", "format_response")
         
         return workflow.compile(checkpointer=checkpointer)
     
@@ -391,6 +299,11 @@ class FictionEditingAgent(BaseAgent):
             "  - Verify all world-building elements (magic systems, technology, physics) align with universe rules\n"
             "  - Ensure plot events and character actions don't violate established universe constraints\n"
             "  - Check timeline and events are consistent with universe history\n\n"
+            "- **SERIES TIMELINE (if provided)**: Use for cross-book continuity and timeline consistency\n"
+            "  - Reference major events from previous books when relevant to current narrative\n"
+            "  - Ensure timeline consistency (character ages, years, historical events)\n"
+            "  - Maintain continuity with established series events\n"
+            "  - Example: If series timeline says 'Franklin died in 1962 (Book 12)', characters in later books know this\n\n"
             "**IMPORTANT**: Maintain originality and do not copy from references. Adhere strictly to the project's Style Guide and Rules above all else.\n\n"
             "=== CREATIVE VARIATION TO AVOID REPETITION ===\n\n"
             "**Vary descriptions and phrasing while maintaining consistency:**\n\n"
@@ -682,8 +595,7 @@ class FictionEditingAgent(BaseAgent):
             if not current_request:
                 logger.info("No current request - skipping chapter detection")
                 return {
-                    "explicit_primary_chapter": None,
-                    "explicit_secondary_chapters": []
+                    "explicit_primary_chapter": None
                 }
             
             import re
@@ -726,29 +638,21 @@ class FictionEditingAgent(BaseAgent):
             unique_mentions.sort(key=lambda x: x["position"])
             
             primary_chapter = None
-            secondary_chapters = []
             
             if unique_mentions:
                 # First mention is primary (what to edit)
                 primary_chapter = unique_mentions[0]["chapter"]
-                # Additional mentions are secondary (for context)
-                secondary_chapters = [m["chapter"] for m in unique_mentions[1:]]
-                
-                if secondary_chapters:
-                    logger.info(f"   Secondary (context): Chapters {secondary_chapters}")
             else:
                 logger.info("   No explicit chapter mentions found in query")
             
             return {
-                "explicit_primary_chapter": primary_chapter,
-                "explicit_secondary_chapters": secondary_chapters
+                "explicit_primary_chapter": primary_chapter
             }
             
         except Exception as e:
             logger.error(f"Failed to detect chapter mentions: {e}")
             return {
-                "explicit_primary_chapter": None,
-                "explicit_secondary_chapters": []
+                "explicit_primary_chapter": None
             }
     
     async def _validate_fiction_type_node(self, state: FictionEditingState) -> Dict[str, Any]:
@@ -798,6 +702,7 @@ class FictionEditingAgent(BaseAgent):
                 "rules_body": state.get("rules_body"),
                 "style_body": state.get("style_body"),
                 "characters_bodies": state.get("characters_bodies", []),
+                "series_body": state.get("series_body"),
                 "outline_current_chapter_text": state.get("outline_current_chapter_text"),
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
@@ -1168,12 +1073,8 @@ class FictionEditingAgent(BaseAgent):
             current_chapter_text = state.get("current_chapter_text", "")
             outline_current_chapter_text = state.get("outline_current_chapter_text")
             
-            # Check for multi-chapter request first
-            chapter_range = _extract_chapter_range_from_request(current_request)
-            is_multi_chapter = chapter_range is not None
-            
-            # Extract requested chapter number from user request (for single chapter)
-            requested_chapter_number = _extract_chapter_number_from_request(current_request) if not is_multi_chapter else None
+            # Extract requested chapter number from user request (single chapter only)
+            requested_chapter_number = _extract_chapter_number_from_request(current_request)
             
             # Detect creative freedom keywords
             creative_keywords = [
@@ -1239,8 +1140,6 @@ class FictionEditingAgent(BaseAgent):
                 "creative_freedom_requested": creative_freedom_requested or mode == "enhancement",
                 "mode_guidance": mode_guidance,
                 "requested_chapter_number": requested_chapter_number,
-                "is_multi_chapter": is_multi_chapter,
-                "chapter_range": chapter_range,
                 # ✅ CRITICAL: Preserve manuscript context!
                 "current_chapter_text": state.get("current_chapter_text", ""),
                 "current_chapter_number": state.get("current_chapter_number"),
@@ -1260,6 +1159,7 @@ class FictionEditingAgent(BaseAgent):
                 "rules_body": state.get("rules_body"),
                 "style_body": state.get("style_body"),
                 "characters_bodies": state.get("characters_bodies", []),
+                "series_body": state.get("series_body"),
                 "outline_current_chapter_text": state.get("outline_current_chapter_text"),
                 # ✅ CRITICAL: Preserve critical 5 keys!
                 "metadata": state.get("metadata", {}),
@@ -1276,8 +1176,6 @@ class FictionEditingAgent(BaseAgent):
                 "creative_freedom_requested": False,
                 "mode_guidance": "",
                 "requested_chapter_number": None,
-                "is_multi_chapter": False,
-                "chapter_range": None,
                 # ✅ CRITICAL: Preserve even on error!
                 "current_chapter_text": state.get("current_chapter_text", ""),
                 "current_chapter_number": state.get("current_chapter_number"),
@@ -1301,51 +1199,7 @@ class FictionEditingAgent(BaseAgent):
                 logger.warning("No current request found - defaulting to edit_request")
                 return {
                     "request_type": "edit_request",
-                    "is_whole_book_generation": False,
                     # ✅ CRITICAL: Preserve metadata even in early return!
-                    "metadata": state.get("metadata", {}),
-                    "user_id": state.get("user_id", "system"),
-                    "shared_memory": state.get("shared_memory", {}),
-                    "messages": state.get("messages", []),
-                    "query": state.get("query", ""),
-                }
-            
-            # Check for whole-book generation patterns FIRST (before LLM call)
-            whole_book_patterns = [
-                "generate entire book",
-                "generate full book",
-                "generate whole book",
-                "generate complete manuscript",
-                "book generation mode",
-                "write the full book"
-            ]
-            is_whole_book = any(pattern in current_request.lower() for pattern in whole_book_patterns)
-            
-            if is_whole_book:
-                return {
-                    "request_type": "edit_request",  # Still an edit request, just whole-book mode
-                    "is_whole_book_generation": True,
-                    # ✅ CRITICAL: Preserve manuscript context!
-                    "current_chapter_text": state.get("current_chapter_text", ""),
-                    "current_chapter_number": state.get("current_chapter_number"),
-                    "prev_chapter_text": state.get("prev_chapter_text"),
-                    "prev_chapter_number": state.get("prev_chapter_number"),
-                    "next_chapter_text": state.get("next_chapter_text"),
-                    "next_chapter_number": state.get("next_chapter_number"),
-                    "manuscript": state.get("manuscript", ""),
-                    "filename": state.get("filename", ""),
-                    "chapter_ranges": state.get("chapter_ranges", []),
-                    "current_request": state.get("current_request", ""),
-                    "selection_start": state.get("selection_start", -1),
-                    "selection_end": state.get("selection_end", -1),
-                    "cursor_offset": state.get("cursor_offset", -1),
-                    # ✅ CRITICAL: Preserve reference context!
-                    "outline_body": state.get("outline_body"),
-                    "rules_body": state.get("rules_body"),
-                    "style_body": state.get("style_body"),
-                    "characters_bodies": state.get("characters_bodies", []),
-                    "outline_current_chapter_text": state.get("outline_current_chapter_text"),
-                    # ✅ CRITICAL: Preserve critical 5 keys!
                     "metadata": state.get("metadata", {}),
                     "user_id": state.get("user_id", "system"),
                     "shared_memory": state.get("shared_memory", {}),
@@ -1422,7 +1276,6 @@ class FictionEditingAgent(BaseAgent):
                 
                 return {
                     "request_type": request_type,
-                    "is_whole_book_generation": False,  # Normal mode
                     # ✅ CRITICAL: Preserve manuscript context!
                     "current_chapter_text": state.get("current_chapter_text", ""),
                     "current_chapter_number": state.get("current_chapter_number"),
@@ -1456,7 +1309,6 @@ class FictionEditingAgent(BaseAgent):
                 logger.warning("Defaulting to edit_request due to parse error")
                 return {
                     "request_type": "edit_request",
-                    "is_whole_book_generation": False,
                     # ✅ CRITICAL: Preserve even on error!
                     "current_chapter_text": state.get("current_chapter_text", ""),
                     "current_chapter_number": state.get("current_chapter_number"),
@@ -1477,7 +1329,6 @@ class FictionEditingAgent(BaseAgent):
             # Default to edit_request on error
             return {
                 "request_type": "edit_request",
-                "is_whole_book_generation": False,
                 # ✅ CRITICAL: Preserve even on error!
                 "current_chapter_text": state.get("current_chapter_text", ""),
                 "current_chapter_number": state.get("current_chapter_number"),
@@ -1498,12 +1349,6 @@ class FictionEditingAgent(BaseAgent):
         request_type = state.get("request_type", "edit_request")
         return "edit_request"  # Both question and edit_request go to edit path
     
-    def _route_generation_mode(self, state: FictionEditingState) -> str:
-        """Route to whole-book generation or normal generation path"""
-        if state.get("is_whole_book_generation", False):
-            return "whole_book"
-        return "normal"
-    
     async def _answer_question_node(self, state: FictionEditingState) -> Dict[str, Any]:
         """Answer user questions about the manuscript, references, or general information"""
         try:
@@ -1517,6 +1362,7 @@ class FictionEditingAgent(BaseAgent):
             style_body = state.get("style_body")
             rules_body = state.get("rules_body")
             characters_bodies = state.get("characters_bodies", [])
+            series_body = state.get("series_body")
             outline_body = state.get("outline_body")
             outline_current_chapter_text = state.get("outline_current_chapter_text")
             
@@ -1560,6 +1406,11 @@ class FictionEditingAgent(BaseAgent):
                 rules_summary = rules_body[:1000] + "..." if len(rules_body) > 1000 else rules_body
                 context_parts.append(f"{rules_summary}\n\n")
             
+            if series_body:
+                context_parts.append("=== SERIES TIMELINE (SUMMARY) ===\n")
+                series_summary = series_body[:1000] + "..." if len(series_body) > 1000 else series_body
+                context_parts.append(f"{series_summary}\n\n")
+            
             if characters_bodies:
                 context_parts.append(f"=== CHARACTER PROFILES ({len(characters_bodies)} character(s)) ===\n")
                 context_parts.append("**NOTE**: Each character profile below is for a DIFFERENT character with distinct traits and dialogue patterns.\n\n")
@@ -1573,11 +1424,7 @@ class FictionEditingAgent(BaseAgent):
             if outline_current_chapter_text or (outline_body and chapter_number_to_show):
                 outline_text_for_question = outline_current_chapter_text
                 if not outline_text_for_question and outline_body and chapter_number_to_show:
-                    import re
-                    chapter_pattern = rf"(?i)(?:^|\n)##?\s*(?:Chapter\s+)?{chapter_number_to_show}[:\s]*(.*?)(?=\n##?\s*(?:Chapter\s+)?\d+|\Z)"
-                    match = re.search(chapter_pattern, outline_body, re.DOTALL)
-                    if match:
-                        outline_text_for_question = match.group(1).strip()
+                    outline_text_for_question = extract_chapter_outline(outline_body, chapter_number_to_show)
 
                 if outline_text_for_question:
                     context_parts.append("=== STORY OUTLINE: PLOT STRUCTURE & STORY BEATS ===\n")
@@ -1667,176 +1514,6 @@ class FictionEditingAgent(BaseAgent):
                 "query": state.get("query", ""),
             }
     
-    async def _check_multi_chapter_node(self, state: FictionEditingState) -> Dict[str, Any]:
-        """Check if this is a multi-chapter generation request and initialize state"""
-        try:
-            is_multi_chapter = state.get("is_multi_chapter", False)
-            chapter_range = state.get("chapter_range")
-            
-            if is_multi_chapter and chapter_range:
-                start_ch, end_ch = chapter_range
-                # Initialize multi-chapter state
-                return {
-                    "is_multi_chapter": True,
-                    "chapter_range": chapter_range,
-                    "current_generation_chapter": start_ch,
-                    "generated_chapters": {},
-                    # ✅ CRITICAL: Preserve manuscript context!
-                    "current_chapter_text": state.get("current_chapter_text", ""),
-                    "current_chapter_number": state.get("current_chapter_number"),
-                    "prev_chapter_text": state.get("prev_chapter_text"),
-                    "prev_chapter_number": state.get("prev_chapter_number"),
-                    "next_chapter_text": state.get("next_chapter_text"),
-                    "next_chapter_number": state.get("next_chapter_number"),
-                    "manuscript": state.get("manuscript", ""),
-                    "filename": state.get("filename", ""),
-                    "chapter_ranges": state.get("chapter_ranges", []),
-                    "current_request": state.get("current_request", ""),
-                    "selection_start": state.get("selection_start", -1),
-                    "selection_end": state.get("selection_end", -1),
-                    "cursor_offset": state.get("cursor_offset", -1),
-                    # ✅ CRITICAL: Preserve reference context!
-                    "outline_body": state.get("outline_body"),
-                    "rules_body": state.get("rules_body"),
-                    "style_body": state.get("style_body"),
-                    "characters_bodies": state.get("characters_bodies", []),
-                    "outline_current_chapter_text": state.get("outline_current_chapter_text"),
-                    # ✅ CRITICAL: Preserve critical 5 keys!
-                    "metadata": state.get("metadata", {}),
-                    "user_id": state.get("user_id", "system"),
-                    "shared_memory": state.get("shared_memory", {}),
-                    "messages": state.get("messages", []),
-                    "query": state.get("query", ""),
-                }
-            else:
-                return {
-                    "is_multi_chapter": False,
-                    "current_generation_chapter": None,
-                    "generated_chapters": {},
-                    # ✅ CRITICAL: Preserve manuscript context!
-                    "current_chapter_text": state.get("current_chapter_text", ""),
-                    "current_chapter_number": state.get("current_chapter_number"),
-                    "prev_chapter_text": state.get("prev_chapter_text"),
-                    "prev_chapter_number": state.get("prev_chapter_number"),
-                    "next_chapter_text": state.get("next_chapter_text"),
-                    "next_chapter_number": state.get("next_chapter_number"),
-                    "manuscript": state.get("manuscript", ""),
-                    "filename": state.get("filename", ""),
-                    "chapter_ranges": state.get("chapter_ranges", []),
-                    "current_request": state.get("current_request", ""),
-                    "selection_start": state.get("selection_start", -1),
-                    "selection_end": state.get("selection_end", -1),
-                    "cursor_offset": state.get("cursor_offset", -1),
-                    # ✅ CRITICAL: Preserve reference context!
-                    "outline_body": state.get("outline_body"),
-                    "rules_body": state.get("rules_body"),
-                    "style_body": state.get("style_body"),
-                    "characters_bodies": state.get("characters_bodies", []),
-                    "outline_current_chapter_text": state.get("outline_current_chapter_text"),
-                    # ✅ CRITICAL: Preserve critical 5 keys!
-                    "metadata": state.get("metadata", {}),
-                    "user_id": state.get("user_id", "system"),
-                    "shared_memory": state.get("shared_memory", {}),
-                    "messages": state.get("messages", []),
-                    "query": state.get("query", ""),
-                }
-        except Exception as e:
-            logger.error(f"Multi-chapter check failed: {e}")
-            return {
-                "is_multi_chapter": False,
-                "current_generation_chapter": None,
-                "generated_chapters": {},
-                # ✅ CRITICAL: Preserve even on error!
-                "current_chapter_text": state.get("current_chapter_text", ""),
-                "current_chapter_number": state.get("current_chapter_number"),
-                "manuscript": state.get("manuscript", ""),
-                "filename": state.get("filename", ""),
-                "chapter_ranges": state.get("chapter_ranges", []),
-                "metadata": state.get("metadata", {}),
-                "user_id": state.get("user_id", "system"),
-                "shared_memory": state.get("shared_memory", {}),
-                "messages": state.get("messages", []),
-                "query": state.get("query", ""),
-            }
-    
-    def _route_multi_chapter(self, state: FictionEditingState) -> str:
-        """Route to multi-chapter loop or single chapter generation"""
-        if state.get("is_multi_chapter", False):
-            return "multi_chapter_loop"
-        return "single_chapter"
-    
-    async def _prepare_chapter_context_node(self, state: FictionEditingState) -> Dict[str, Any]:
-        """Prepare context for current chapter in multi-chapter generation loop"""
-        try:
-            current_ch = state.get("current_generation_chapter")
-            chapter_range = state.get("chapter_range")
-            generated_chapters = state.get("generated_chapters", {})
-            manuscript = state.get("manuscript", "")
-            chapter_ranges = state.get("chapter_ranges", [])
-            
-            if not current_ch or not chapter_range:
-                return {"error": "Invalid multi-chapter state", "task_status": "error"}
-            
-            start_ch, end_ch = chapter_range
-            
-            # Get previous chapter text from generated chapters or manuscript
-            prev_chapter_text = None
-            if current_ch > start_ch:
-                # Previous chapter was just generated
-                prev_chapter_text = generated_chapters.get(current_ch - 1)
-            elif current_ch == start_ch and start_ch > 1:
-                # First chapter in range, but previous chapters exist in manuscript
-                for r in chapter_ranges:
-                    if r.chapter_number == current_ch - 1:
-                        prev_chapter_text = _strip_frontmatter_block(manuscript[r.start:r.end])
-                        break
-            
-            # Get next chapter text from manuscript (if exists)
-            next_chapter_text = None
-            # Find current chapter range to ensure we don't accidentally use it as "next"
-            current_chapter_range = None
-            for r in chapter_ranges:
-                if r.chapter_number == current_ch:
-                    current_chapter_range = r
-                    break
-            
-            # Only get next chapter if it's actually different from current
-            for r in chapter_ranges:
-                if r.chapter_number == current_ch + 1:
-                    # Defensive check: ensure next chapter is actually different from current
-                    if current_chapter_range and r.start == current_chapter_range.start:
-                        logger.warning(f"⚠️ Next chapter {r.chapter_number} has same start as current chapter {current_ch} - likely bug. Skipping.")
-                        next_chapter_text = None
-                    else:
-                        next_chapter_text = _strip_frontmatter_block(manuscript[r.start:r.end])
-                        break
-            
-            # Extract outline for current chapter
-            outline_body = state.get("outline_body")
-            outline_current_chapter_text = None
-            if outline_body and current_ch:
-                chapter_pattern = rf"(?i)(?:^|\n)##?\s*(?:Chapter\s+)?{current_ch}[:\s]*(.*?)(?=\n##?\s*(?:Chapter\s+)?\d+|\Z)"
-                match = re.search(chapter_pattern, outline_body, re.DOTALL)
-                if match:
-                    outline_current_chapter_text = match.group(1).strip()
-            
-            # Update state for current chapter generation
-            return {
-                "current_chapter_number": current_ch,
-                "requested_chapter_number": current_ch,
-                "current_chapter_text": "",  # Empty for new generation
-                "prev_chapter_text": prev_chapter_text,
-                "next_chapter_text": next_chapter_text,
-                "outline_current_chapter_text": outline_current_chapter_text
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to prepare chapter context: {e}")
-            return {
-                "error": str(e),
-                "task_status": "error"
-            }
-    
     async def _prepare_generation_node(self, state: FictionEditingState) -> Dict[str, Any]:
         """Prepare generation state: set system_prompt and datetime_context for generation subgraph"""
         try:
@@ -1870,6 +1547,7 @@ class FictionEditingAgent(BaseAgent):
                 "rules_body": state.get("rules_body"),
                 "style_body": state.get("style_body"),
                 "characters_bodies": state.get("characters_bodies", []),
+                "series_body": state.get("series_body"),
                 "outline_current_chapter_text": state.get("outline_current_chapter_text"),
                 # ✅ CRITICAL: Preserve critical 5 keys!
                 "metadata": state.get("metadata", {}),
@@ -1896,105 +1574,9 @@ class FictionEditingAgent(BaseAgent):
                 "query": state.get("query", ""),
             }
     
-    async def _accumulate_chapter_node(self, state: FictionEditingState) -> Dict[str, Any]:
-        """Accumulate generated chapter and update state for next iteration"""
-        try:
-            current_ch = state.get("current_generation_chapter")
-            chapter_range = state.get("chapter_range")
-            generated_chapters = state.get("generated_chapters", {})
-            editor_operations = state.get("editor_operations", [])
-            
-            if not current_ch or not chapter_range:
-                return {}
-            
-            # Extract generated text from operations
-            generated_text = "\n\n".join([
-                op.get("text", "").strip()
-                for op in editor_operations
-                if op.get("text", "").strip()
-            ]).strip()
-            
-            if generated_text:
-                generated_chapters[current_ch] = generated_text
-                logger.info(f"Accumulated Chapter {current_ch} ({len(generated_text)} chars)")
-            
-            # Determine next chapter number for continuation
-            start_ch, end_ch = chapter_range
-            next_ch = None
-            if current_ch < end_ch:
-                next_ch = current_ch + 1
-            
-            return {
-                "generated_chapters": generated_chapters,
-                "current_generation_chapter": next_ch  # Update to next chapter or None if done
-            }
-            
-        except Exception as e:
-            logger.error(f"Failed to accumulate chapter: {e}")
-            return {}
-    
-    def _route_chapter_completion(self, state: FictionEditingState) -> str:
-        """Check if more chapters need to be generated"""
-        current_ch = state.get("current_generation_chapter")
-        chapter_range = state.get("chapter_range")
-        
-        if not chapter_range:
-            return "complete"
-        
-        start_ch, end_ch = chapter_range
-        
-        if current_ch and current_ch < end_ch:
-            # More chapters to generate - continue loop
-            return "next_chapter"
-        
-        return "complete"
-    
     def _route_after_resolve(self, state: FictionEditingState) -> str:
-        """Route after resolve_operations: simple path skips, full path continues"""
-        # Check if we came from simple path
-        is_simple = state.get("is_simple_request", False)
-        
-        if is_simple:
-            # Simple path: skip everything, go straight to format
-            return "format_response"
-        
-        # Full path: check if multi-chapter
-        if state.get("is_multi_chapter", False):
-            return "accumulate_chapter"
-        
-        # Single chapter: go to format (continuity already updated in validation subgraph)
+        """Route after resolve_operations: always to format_response"""
         return "format_response"
-    
-    def _route_after_accumulate(self, state: FictionEditingState) -> str:
-        """Route after accumulate_chapter: check if more chapters needed"""
-        current_ch = state.get("current_generation_chapter")
-        chapter_range = state.get("chapter_range")
-        
-        if chapter_range:
-            start_ch, end_ch = chapter_range
-            # If current_ch is set and <= end_ch, we have more chapters to generate
-            if current_ch is not None and current_ch <= end_ch:
-                logger.info(f"More chapters to generate: current={current_ch}, end={end_ch}")
-                return "next_chapter"
-        
-        logger.info("All chapters generated - formatting response")
-        return "format_response"
-    
-    def _route_after_continuity_update(self, state: FictionEditingState) -> str:
-        """Route after update_continuity: single goes to format, multi checks if more chapters needed"""
-        if state.get("is_multi_chapter", False):
-            # Check if more chapters needed
-            current_ch = state.get("current_generation_chapter")
-            chapter_range = state.get("chapter_range")
-            
-            if chapter_range:
-                start_ch, end_ch = chapter_range
-                if current_ch and current_ch < end_ch:
-                    return "next_chapter"
-            
-            return "format_response"  # Multi-chapter complete
-        else:
-            return "format_response"  # Single chapter - go to format
     
     # _generate_edit_plan_node removed - now handled by generation_subgraph
     # Functionality moved to: orchestrator/subgraphs/fiction_generation_subgraph.py
@@ -2039,8 +1621,6 @@ class FictionEditingAgent(BaseAgent):
             structured_edit = _get_structured_edit(state)
             # editor_operations already extracted above
             task_status = state.get("task_status", "complete")
-            is_multi_chapter = state.get("is_multi_chapter", False)
-            generated_chapters = state.get("generated_chapters", {})
             request_type = state.get("request_type", "")
             
             if task_status == "error":
@@ -2082,11 +1662,6 @@ class FictionEditingAgent(BaseAgent):
                     else:
                         response_text = "Analysis complete."
             # Build response text for edit requests - use summary, not full text
-            elif is_multi_chapter and generated_chapters:
-                # Multi-chapter: brief summary only
-                response_text = f"Generated {len(generated_chapters)} chapters."
-                if structured_edit and structured_edit.summary:
-                    response_text = f"{structured_edit.summary}\n\n{response_text}"
             else:
                 # Single chapter: use summary from structured_edit, not full text
                 if structured_edit and structured_edit.summary:
@@ -2151,6 +1726,32 @@ class FictionEditingAgent(BaseAgent):
                 warnings_section = "\n\n**⚠️ Validation Notices:**\n" + "\n".join(all_warnings)
                 response_text = response_text + warnings_section
             
+            # Add failed operations if present
+            failed_operations = state.get("failed_operations", [])
+            if failed_operations:
+                failed_section = "\n\n**⚠️ UNRESOLVED EDITS (Manual Action Required)**\n"
+                failed_section += "The following generated content could not be automatically placed in the manuscript. You can copy and paste these sections manually:\n\n"
+                
+                for i, op in enumerate(failed_operations, 1):
+                    op_type = op.get("op_type", "edit")
+                    error = op.get("error", "Anchor text not found")
+                    text = op.get("text", "")
+                    anchor = op.get("anchor_text") or op.get("original_text")
+                    
+                    failed_section += f"#### Unresolved Edit {i} ({op_type})\n"
+                    failed_section += f"- **Reason**: {error}\n"
+                    if anchor:
+                        # Use a blockquote for the anchor to keep it distinct but readable
+                        failed_section += f"- **Intended near**:\n> {anchor[:200]}...\n"
+                    
+                    failed_section += "\n**Generated Content** (Scroll-safe):\n"
+                    # Use a standard markdown block for the content, which usually handles wrapping better in sidebars
+                    # than nested JSON or complex pre tags.
+                    failed_section += f"{text}\n\n"
+                    failed_section += "---\n"
+                
+                response_text = response_text + failed_section
+            
             # Build response with editor operations
             response = {
                 "response": response_text,
@@ -2159,43 +1760,8 @@ class FictionEditingAgent(BaseAgent):
                 "timestamp": datetime.now().isoformat()
             }
             
-            # For multi-chapter, combine all operations from all chapters
-            if is_multi_chapter and generated_chapters:
-                # Build combined operations for all chapters
-                all_operations = []
-                chapter_range = state.get("chapter_range")
-                if chapter_range:
-                    start_ch, end_ch = chapter_range
-                    for ch_num in range(start_ch, end_ch + 1):
-                        ch_text = generated_chapters.get(ch_num, "")
-                        if ch_text:
-                            # Create operation for this chapter
-                            all_operations.append({
-                                "op_type": "insert_after_heading",
-                                "text": ch_text,
-                                "chapter_index": ch_num - 1  # 0-indexed
-                            })
-                
-                if all_operations:
-                    response["editor_operations"] = all_operations
-                    filename = state.get("filename", "manuscript.md")
-                    if structured_edit:
-                        response["manuscript_edit"] = {
-                            "target_filename": structured_edit.target_filename or filename,
-                            "scope": "multi_chapter",
-                            "summary": f"Generated chapters {start_ch}-{end_ch}",
-                            "safety": structured_edit.safety or "medium",
-                            "operations": all_operations
-                        }
-                    else:
-                        response["manuscript_edit"] = {
-                            "target_filename": filename,
-                            "scope": "multi_chapter",
-                            "summary": f"Generated chapters {start_ch}-{end_ch}",
-                            "safety": "medium",
-                        "operations": all_operations
-                    }
-            elif editor_operations:
+            # Include editor operations when present
+            if editor_operations:
                 # Always include editor_operations when present
                 response["editor_operations"] = editor_operations
                 if structured_edit:
@@ -2293,7 +1859,7 @@ class FictionEditingAgent(BaseAgent):
                 # These fields should be loaded FRESH every turn from files, not accumulated
                 # This prevents sending Chapter 1 content multiple times!
                 heavy_fields_to_clear = [
-                    "outline_body", "rules_body", "style_body", "characters_bodies",
+                    "outline_body", "rules_body", "style_body", "characters_bodies", "series_body",
                     "outline_current_chapter_text", "loaded_references",
                     # Also clear manuscript content (will be refreshed from active_editor)
                     "manuscript", "current_chapter_text", "prev_chapter_text", "next_chapter_text",
@@ -2308,9 +1874,26 @@ class FictionEditingAgent(BaseAgent):
                 if cleared_count > 0:
                     logger.info(f"🧹 Cleared {cleared_count} heavy reference fields from checkpointed shared_memory (will reload fresh)")
             
+            # CRITICAL: Ensure user_chat_model is in BOTH metadata and shared_memory, prioritizing NEW values
+            # This ensures _get_llm() can find it in metadata first (which takes precedence)
+            # Priority: new metadata > new shared_memory > checkpoint shared_memory
+            user_chat_model = None
+            if "user_chat_model" in metadata:
+                user_chat_model = metadata["user_chat_model"]
+            elif "user_chat_model" in shared_memory:
+                user_chat_model = shared_memory["user_chat_model"]
+            elif existing_shared_memory and "user_chat_model" in existing_shared_memory:
+                user_chat_model = existing_shared_memory["user_chat_model"]
+            
             # Merge shared_memory: start with checkpoint, then update with NEW data (so new active_editor overwrites old)
             shared_memory_merged = existing_shared_memory.copy()
             shared_memory_merged.update(shared_memory)  # New data (including updated active_editor) takes precedence
+            
+            # Ensure user_chat_model is in both places with the correct (newest) value
+            if user_chat_model:
+                metadata["user_chat_model"] = user_chat_model
+                shared_memory_merged["user_chat_model"] = user_chat_model
+                logger.debug(f"🎯 ENSURED user_chat_model in both metadata and shared_memory: {user_chat_model}")
             
             # Extract active_editor from shared_memory for direct state access
             active_editor = shared_memory_merged.get("active_editor", {}) or {}
@@ -2345,6 +1928,7 @@ class FictionEditingAgent(BaseAgent):
                 "rules_body": None,
                 "style_body": None,
                 "characters_bodies": [],
+                "series_body": None,
                 "outline_current_chapter_text": None,
                 "current_request": "",
                 "requested_chapter_number": None,
@@ -2352,6 +1936,7 @@ class FictionEditingAgent(BaseAgent):
                 "llm_response": "",
                 "structured_edit": None,
                 "editor_operations": [],
+                "failed_operations": [],
                 "response": {},
                 "task_status": "",
                 "error": "",
@@ -2363,13 +1948,6 @@ class FictionEditingAgent(BaseAgent):
                 "reference_warnings": [],
                 "reference_guidance": "",
                 "consistency_warnings": [],
-                # Multi-chapter generation fields
-                "is_multi_chapter": False,
-                "chapter_range": None,
-                "current_generation_chapter": None,
-                "generated_chapters": {},
-                # Whole-book generation field
-                "is_whole_book_generation": False,
                 # Outline sync detection
                 "outline_sync_analysis": None,
                 "outline_needs_sync": False
@@ -2391,10 +1969,12 @@ class FictionEditingAgent(BaseAgent):
                     "agent_results": {}
                 }
             
-            # Get editor_operations from response dict OR directly from state (defensive)
+            # Get editor_operations and failed_operations
             editor_ops_from_response = response.get("editor_operations", []) if isinstance(response, dict) else []
             editor_ops_from_state = result_state.get("editor_operations", [])
             editor_operations = editor_ops_from_response or editor_ops_from_state
+            
+            failed_ops = result_state.get("failed_operations", [])
             
             if editor_ops_from_state and not editor_ops_from_response:
                 logger.warning(f"⚠️ Process: editor_operations missing from response dict but present in state - using state")
@@ -2407,6 +1987,7 @@ class FictionEditingAgent(BaseAgent):
                 "task_status": task_status,
                 "agent_results": {
                     "editor_operations": editor_operations,
+                    "failed_operations": failed_ops,
                     "manuscript_edit": response.get("manuscript_edit") if isinstance(response, dict) else None
                 }
             }

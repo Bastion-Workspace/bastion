@@ -5,6 +5,7 @@ import { StateField, StateEffect } from '@codemirror/state';
 const addSuggestion = StateEffect.define();
 const removeSuggestion = StateEffect.define();
 const clearAllSuggestions = StateEffect.define();
+const setSuggestions = StateEffect.define();
 
 // Theme for suggestion styling
 const suggestionTheme = EditorView.baseTheme({
@@ -112,6 +113,9 @@ const suggestionField = StateField.define({
     decorations = decorations.map(tr.changes);
     
     for (const effect of tr.effects) {
+      if (effect.is(setSuggestions)) {
+        return effect.value;
+      }
       if (effect.is(clearAllSuggestions)) {
         return Decoration.none;
       }
@@ -177,6 +181,10 @@ const inlineEditSuggestionsPlugin = ViewPlugin.fromClass(class {
     if (update.docChanged && this.suggestions.size > 0) {
       const currentDoc = update.state.doc;
       this.suggestions.forEach((suggestion, id) => {
+        // Map positions to keep them in sync with document changes
+        suggestion.from = update.changes.mapPos(suggestion.from);
+        suggestion.to = update.changes.mapPos(suggestion.to);
+
         try {
           const currentText = currentDoc.sliceString(suggestion.from, suggestion.to);
           // If original text still matches, user is continuing elsewhere - auto-accept
@@ -197,8 +205,6 @@ const inlineEditSuggestionsPlugin = ViewPlugin.fromClass(class {
         }
       });
     }
-    
-    this.updateDecorations();
   }
   
   addSuggestion(suggestionId, from, to, original, suggested, proposalId, onAccept, onReject) {
@@ -283,7 +289,7 @@ const inlineEditSuggestionsPlugin = ViewPlugin.fromClass(class {
     });
     
     this.view.dispatch({
-      effects: suggestionField.reconfigure(Decoration.set(decos))
+      effects: setSuggestions.of(Decoration.set(decos))
     });
   }
   

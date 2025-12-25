@@ -2009,27 +2009,12 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                             logger.info(f"🔌 Found project plan document_id from documents list: {project_plan_document_id}")
                             break
                 
-                # Fallback: try to get from file_path or filename and search
+                # Fallback: try to get from file_path or filename - BUT DO NOT SEARCH
+                # **ROOSEVELT FIX:** We TRUST the user's explicit path references. NEVER search for files!
                 if not project_plan_document_id or project_plan_document_id == "active_editor":
                     filename = active_editor.get("filename", "") or active_editor.get("file_path", "")
                     if filename:
-                        logger.info(f"🔌 Project plan open but no document_id - searching by filename: {filename}")
-                        try:
-                            # Search for document by filename
-                            search_result = await search_documents_structured(
-                                query=filename,
-                                limit=5,
-                                user_id=user_id
-                            )
-                            if search_result.get("total_count", 0) > 0:
-                                # Find exact match by filename
-                                for result in search_result.get("results", []):
-                                    if result.get("filename", "").endswith(filename) or filename in result.get("filename", ""):
-                                        project_plan_document_id = result.get("document_id")
-                                        logger.info(f"🔌 Found project plan document_id via search: {project_plan_document_id}")
-                                        break
-                        except Exception as e:
-                            logger.warning(f"⚠️ Could not search for document by filename: {e}")
+                        logger.warning(f"🔌 Project plan open but no document_id. Cannot resolve '{filename}' without searching. Skipping fallback.")
             
             # Pass project plan info and query relevance to metadata for response generation
             metadata = metadata.copy() if metadata else {}

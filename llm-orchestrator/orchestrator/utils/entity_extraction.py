@@ -100,3 +100,4 @@ def extract_entities_from_search_results(
         logger.error(f"Entity extraction from results failed: {e}")
         return []
 
+

@@ -20,6 +20,7 @@ from orchestrator.utils.fiction_utilities import (
     ChapterRange,
     find_chapter_ranges,
     strip_frontmatter_block as _strip_frontmatter_block,
+    extract_chapter_outline,
 )
 from orchestrator.subgraphs.fiction_generation_subgraph import build_generation_subgraph
 from orchestrator.subgraphs.fiction_validation_subgraph import build_validation_subgraph
@@ -348,11 +349,17 @@ async def orchestrate_chapter_generation_node(
         # Extract outline section for current chapter
         outline_body = state.get("outline_body", "")
         outline_current_chapter_text = None
-        if outline_body:
-            chapter_pattern = rf"(?i)(?:^|\n)##?\s*(?:Chapter\s+)?{current_ch}[:\s]*(.*?)(?=\n##?\s*(?:Chapter\s+)?\d+|\Z)"
-            match = re.search(chapter_pattern, outline_body, re.DOTALL)
-            if match:
-                outline_current_chapter_text = match.group(1).strip()
+        if outline_body and current_ch:
+            outline_current_chapter_text = extract_chapter_outline(outline_body, current_ch)
+            if outline_current_chapter_text:
+                logger.info(f"Sending: outline.md -> Chapter {current_ch} (CURRENT TARGET)")
+                logger.info(f"Extracted outline for Chapter {current_ch} ({len(outline_current_chapter_text)} chars)")
+            else:
+                logger.info(f"Sending: outline.md -> Chapter {current_ch} (NOT FOUND)")
+                logger.warning(f"Failed to extract outline for Chapter {current_ch} - regex pattern did not match")
+                logger.warning(f"   This may indicate the outline format doesn't match expected pattern")
+                logger.warning(f"   Outline preview: {outline_body[:200]}...")
+                # DO NOT fall back to full outline - this would leak later chapters into earlier ones!
         
         # Get system prompt and datetime context (need to build them)
         # For now, we'll let the generation subgraph build them
@@ -552,107 +559,6 @@ Return JSON list: [{{"chapter": N, "issue": "...", "severity": "minor|moderate|m
         }
 
 
-async def validate_continuity_coherence_node(state: Dict[str, Any], llm_factory) -> Dict[str, Any]:
-    """Validate continuity coherence across all generated chapters"""
-    try:
-        logger.info("🔍 Validating continuity coherence...")
-        
-        generated_chapters = state.get("generated_chapters", {})
-        characters_bodies = state.get("characters_bodies", [])
-        rules_body = state.get("rules_body")
-        
-        if not generated_chapters:
-            return {
-                "continuity_issues": [],
-                "metadata": state.get("metadata", {}),
-                "user_id": state.get("user_id", "system"),
-                "shared_memory": state.get("shared_memory", {}),
-                "messages": state.get("messages", []),
-                "query": state.get("query", ""),
-            }
-        
-        # Build manuscript text (sample first 5 chapters)
-        chapter_texts = []
-        for ch_num in sorted(generated_chapters.keys())[:5]:
-            chapter_texts.append(f"=== Chapter {ch_num} ===\n{generated_chapters[ch_num]}")
-        
-        manuscript_sample = "\n\n".join(chapter_texts)
-        
-        characters_text = "\n\n".join([f"=== Character {i+1} ===\n{char}" for i, char in enumerate(characters_bodies[:3])])
-        
-        # Use fast model
-        from orchestrator.config import FAST_MODEL
-        llm = llm_factory(temperature=0.1, state={**state, "user_chat_model": FAST_MODEL})
-        
-        prompt = f"""You are checking continuity across a generated book.
-
-CHARACTER PROFILES:
-{characters_text[:3000] if characters_text else "No character profiles"}
-
-UNIVERSE RULES:
-{rules_body[:2000] if rules_body else "No universe rules"}
-
-MANUSCRIPT SAMPLE:
-{manuscript_sample[:10000]}
-
-TASK: Identify continuity errors:
-- Character inconsistencies (age, appearance, backstory contradictions)
-- Plot holes or dropped threads
-- Timeline issues
-- Rule violations
-
-Return JSON list: [{{"type": "character|plot|timeline|rule", "chapters": [N, M], "issue": "..."}}]
-"""
-        
-        messages = [
-            SystemMessage(content="You are a continuity validator. Return only valid JSON."),
-            HumanMessage(content=prompt)
-        ]
-        
-        response = await llm.ainvoke(messages)
-        content = response.content if hasattr(response, 'content') else str(response)
-        
-        # Parse JSON response
-        try:
-            if '```json' in content:
-                match = re.search(r'```json\s*\n(.*?)\n```', content, re.DOTALL)
-                if match:
-                    content = match.group(1).strip()
-            elif '```' in content:
-                match = re.search(r'```\s*\n(.*?)\n```', content, re.DOTALL)
-                if match:
-                    content = match.group(1).strip()
-            
-            continuity_issues = json.loads(content)
-            if not isinstance(continuity_issues, list):
-                continuity_issues = []
-        except Exception as e:
-            logger.warning(f"Failed to parse continuity validation response: {e}")
-            continuity_issues = []
-        
-        logger.info(f"🔍 Found {len(continuity_issues)} continuity issues")
-        
-        return {
-            "continuity_issues": continuity_issues,
-            "metadata": state.get("metadata", {}),
-            "user_id": state.get("user_id", "system"),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", ""),
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to validate continuity: {e}")
-        return {
-            "continuity_issues": [],
-            "metadata": state.get("metadata", {}),
-            "user_id": state.get("user_id", "system"),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", ""),
-        }
-
-
 async def validate_outline_alignment_node(state: Dict[str, Any], llm_factory) -> Dict[str, Any]:
     """Validate outline alignment - check if generated content matches outline"""
     try:
@@ -749,7 +655,6 @@ async def compile_validation_report_node(state: Dict[str, Any]) -> Dict[str, Any
         logger.info("📊 Compiling validation report...")
         
         style_issues = state.get("style_issues", [])
-        continuity_issues = state.get("continuity_issues", [])
         outline_alignment = state.get("outline_alignment", {})
         generated_chapters = state.get("generated_chapters", {})
         frontmatter = state.get("frontmatter", {})
@@ -764,20 +669,11 @@ async def compile_validation_report_node(state: Dict[str, Any]) -> Dict[str, Any
         user_id = state.get("user_id", "system")
         
         if not document_id:
-            # Try to get from filename
+            # Try to get from filename - BUT DO NOT SEARCH
+            # **ROOSEVELT FIX:** We TRUST the user's explicit path references. NEVER search for files!
             filename = state.get("filename", "")
             if filename:
-                # Search for document by filename
-                results = await search_documents_structured(
-                    query=filename,
-                    user_id=user_id,
-                    limit=5
-                )
-                for result in results:
-                    doc_metadata = result.get('document', {})
-                    if doc_metadata.get('filename') == filename:
-                        document_id = doc_metadata.get('document_id')
-                        break
+                logger.warning(f"⚠️ No document_id found for '{filename}'. Cannot resolve without searching. Skipping write.")
         
         # Write directly to document
         if document_id:
@@ -797,12 +693,11 @@ async def compile_validation_report_node(state: Dict[str, Any]) -> Dict[str, Any
             logger.warning("⚠️ No document_id found - cannot write manuscript")
         
         # Compile validation report
-        total_issues = len(style_issues) + len(continuity_issues)
+        total_issues = len(style_issues)
         coverage = outline_alignment.get("coverage", 0.0)
         
         validation_report = {
             "style_issues": style_issues,
-            "continuity_issues": continuity_issues,
             "outline_alignment": outline_alignment,
             "total_issues": total_issues,
             "coverage": coverage,
@@ -851,15 +746,12 @@ async def compile_validation_report_node(state: Dict[str, Any]) -> Dict[str, Any
         
         response_text += f"\n**Validation Summary:**\n"
         response_text += f"- Style Consistency: {len(style_issues)} issues found\n"
-        response_text += f"- Continuity: {len(continuity_issues)} issues found\n"
         response_text += f"- Outline Alignment: {coverage:.0%} coverage\n"
         
         if total_issues > 0:
             response_text += f"\n**Issues Detected:** {total_issues} total\n"
             if style_issues:
                 response_text += f"  - Style issues: {len(style_issues)}\n"
-            if continuity_issues:
-                response_text += f"  - Continuity issues: {len(continuity_issues)}\n"
         
         return {
             "validation_report": validation_report,
@@ -904,8 +796,7 @@ async def compile_validation_report_node(state: Dict[str, Any]) -> Dict[str, Any
 def build_book_generation_subgraph(
     checkpointer,
     llm_factory,
-    get_datetime_context,
-    continuity_tracker
+    get_datetime_context
 ):
     """
     Build the whole-book generation subgraph.
@@ -914,7 +805,6 @@ def build_book_generation_subgraph(
         checkpointer: LangGraph checkpointer for state persistence
         llm_factory: Function to get LLM instance
         get_datetime_context: Function to get datetime context string
-        continuity_tracker: FictionContinuityTracker instance
     
     Returns:
         Compiled StateGraph subgraph
@@ -930,8 +820,7 @@ def build_book_generation_subgraph(
     validation_subgraph = build_validation_subgraph(
         checkpointer,
         llm_factory,
-        get_datetime_context,
-        continuity_tracker
+        get_datetime_context
     )
     
     # Add nodes
@@ -955,14 +844,10 @@ def build_book_generation_subgraph(
     async def validate_style_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
         return await validate_style_consistency_node(state, llm_factory)
     
-    async def validate_continuity_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
-        return await validate_continuity_coherence_node(state, llm_factory)
-    
     async def validate_outline_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
         return await validate_outline_alignment_node(state, llm_factory)
     
     workflow.add_node("validate_style", validate_style_wrapper)
-    workflow.add_node("validate_continuity", validate_continuity_wrapper)
     workflow.add_node("validate_outline", validate_outline_wrapper)
     workflow.add_node("compile_report", compile_validation_report_node)
     
@@ -989,8 +874,7 @@ def build_book_generation_subgraph(
     )
     
     # Validation flow
-    workflow.add_edge("validate_style", "validate_continuity")
-    workflow.add_edge("validate_continuity", "validate_outline")
+    workflow.add_edge("validate_style", "validate_outline")
     workflow.add_edge("validate_outline", "compile_report")
     workflow.add_edge("compile_report", END)
     

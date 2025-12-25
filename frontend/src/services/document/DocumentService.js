@@ -50,6 +50,14 @@ class DocumentService extends ApiServiceBase {
     return this.post('/api/documents/import-url', { url });
   }
 
+  importImage = async (imageUrl, filename = null, folderId = null) => {
+    return this.post('/api/documents/import-image', {
+      image_url: imageUrl,
+      filename: filename,
+      folder_id: folderId
+    });
+  }
+
   deleteDocument = async (documentId) => {
     return this.delete(`/api/documents/${documentId}`);
   }

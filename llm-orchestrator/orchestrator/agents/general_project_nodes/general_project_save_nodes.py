@@ -56,55 +56,10 @@ class GeneralProjectSaveNodes:
                 except Exception as e:
                     logger.warning(f"Failed to lookup document_id from canonical_path: {e}")
             
-            # Fallback: search for project_plan.md document
+            # Fallback: search for project_plan.md document - DISABLED
+            # **ROOSEVELT FIX:** We TRUST the user's explicit path references. NEVER search for files!
             if not doc_id:
-                try:
-                    from orchestrator.tools.document_tools import search_documents_structured, get_document_content_tool
-                    logger.info("Active editor missing - searching for project_plan.md document")
-                    
-                    search_result = await search_documents_structured(
-                        query="project_plan.md",
-                        limit=10,
-                        user_id=user_id
-                    )
-                    
-                    documents = search_result.get("results", [])
-                    logger.info(f"Found {len(documents)} potential project_plan documents from search")
-                    
-                    for doc in documents:
-                        filename = doc.get("filename", "").lower()
-                        candidate_doc_id = doc.get("document_id")
-                        
-                        if not candidate_doc_id:
-                            continue
-                        
-                        if "project_plan" in filename or filename.endswith("project_plan.md"):
-                            logger.info(f"Checking candidate: {filename} ({candidate_doc_id})")
-                            
-                            try:
-                                full_content = await get_document_content_tool(candidate_doc_id, user_id)
-                                
-                                if full_content and not full_content.startswith("Error"):
-                                    if "type: project" in full_content[:500].lower():
-                                        doc_id = candidate_doc_id
-                                        logger.info(f"✅ Found project_plan document with type:project: {doc_id}")
-                                        break
-                            except Exception as e:
-                                logger.warning(f"Failed to check document {candidate_doc_id}: {e}")
-                                continue
-                    
-                    if not doc_id:
-                        # Fallback to any project_plan.md if no type:project frontmatter found
-                        for doc in documents:
-                            candidate_doc_id = doc.get("document_id")
-                            filename = doc.get("filename", "").lower()
-                            if candidate_doc_id and filename == "project_plan.md":
-                                doc_id = candidate_doc_id
-                                logger.info(f"No type:project frontmatter found - using any project_plan.md: {doc_id}")
-                                break
-                
-                except Exception as e:
-                    logger.warning(f"Failed to search for project_plan document: {e}")
+                logger.warning("Active editor missing - cannot resolve project_plan.md without searching. Skipping.")
             
             logger.info(f"Routing to project_plan (document_id: {doc_id})")
         else:

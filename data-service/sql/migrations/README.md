@@ -55,3 +55,4 @@ docker exec -i bastion-postgres-data psql -U data_user -d data_workspace < migra
 
 **Note:** These migrations are kept for historical reference and updating existing databases. New databases created from `01_init.sql` already include all features.
 
+

@@ -278,6 +278,7 @@ class OutlineEditingState(TypedDict):
     structured_edit: Optional[Dict[str, Any]]
     clarification_request: Optional[Dict[str, Any]]
     editor_operations: List[Dict[str, Any]]
+    failed_operations: List[Dict[str, Any]]
     response: Dict[str, Any]
     task_status: str
     error: str
@@ -351,8 +352,13 @@ class OutlineEditingAgent(BaseAgent):
             "**CRITICAL: WORK WITH AVAILABLE INFORMATION FIRST**\n"
             "Always start by working with what you know from the request, existing outline content, and references:\n"
             "- Make edits based on available information - don't wait for clarification\n"
-            "- Use context from rules, style guide, and character profiles to inform your work\n"
+            "- Use context from rules, style guide, character profiles, and series timeline to inform your work\n"
             "- Add or revise content based on reasonable inferences from the request\n"
+            "- **SERIES TIMELINE (if provided)**: Use for cross-book continuity and timeline consistency\n"
+            "  - Reference major events from previous books when relevant to current outline\n"
+            "  - Ensure timeline consistency (character ages, years, historical events)\n"
+            "  - Maintain continuity with established series events\n"
+            "  - Example: If series timeline says 'Franklin died in 1962 (Book 12)', ensure later books reflect this\n\n"
             "- **FOR EMPTY FILES**: When the outline is empty (only frontmatter), ASK QUESTIONS FIRST before creating content\n"
             "  * Don't create the entire outline structure at once\n"
             "  * Ask about story genre, main characters, key plot points, or chapter count\n"
@@ -369,6 +375,14 @@ class OutlineEditingAgent(BaseAgent):
             "**HOW TO ASK QUESTIONS**: Include operations for work you CAN do, then add questions/suggestions in the summary field.\n"
             "For empty files, it's acceptable to return a clarification request with questions instead of operations.\n"
             "DO NOT return empty operations array for edit requests - always provide edits OR ask questions.\n\n"
+            "**HANDLING QUESTIONS THAT DON'T REQUIRE EDITS**:\n"
+            "- If the user is asking a question that can be answered WITHOUT making edits to the outline\n"
+            "- Examples: \"What unresolved plot points do we have?\", \"Give me a list of...\", \"Show me...\", \"Analyze...\", \"What chapters...\"\n"
+            "- OR if the user explicitly says \"don't edit\", \"no edits\", \"just answer\", \"only analyze\", or similar phrases\n"
+            "- THEN return a ManuscriptEdit with an EMPTY operations array ([]) and put your complete answer in the summary field\n"
+            "- The summary should contain the full answer to the user's question (e.g., bullet points, analysis, recommendations, lists)\n"
+            "- This allows you to provide information, analysis, or recommendations without making any edits to the outline\n"
+            "- **Be flexible**: If a question can be answered without edits, use 0 operations and put the answer in summary\n\n"
             "OUTLINE STRUCTURE:\n"
             "# Overall Synopsis (high-level story summary - major elements only)\n"
             "# Notes (rules, themes, worldbuilding)\n"
@@ -377,11 +391,19 @@ class OutlineEditingAgent(BaseAgent):
             "  The outline should only have brief character references (name + role), not full profiles.\n"
             "  Do NOT copy character descriptions, backstories, or traits into the outline.\n"
             "## Chapter N (with summary paragraph + bullet point beats)\n\n"
+            "CHAPTER SUMMARY REQUIREMENTS (CRITICAL):\n"
+            "- Each chapter MUST have a BRIEF, HIGH-LEVEL summary paragraph (3-5 sentences MAXIMUM)\n"
+            "- The summary should be a QUICK OVERVIEW of the chapter's main events, NOT a detailed synopsis\n"
+            "- Think of it as a \"back of the book\" description for this chapter - what happens in broad strokes?\n"
+            "- DO NOT write lengthy, detailed chapter-by-chapter synopses - keep summaries concise and focused\n"
+            "- The summary should capture the ESSENCE of the chapter, not every plot detail (details go in beats)\n"
+            "- If your summary exceeds 5 sentences, it's too detailed - trim it down to the core story elements\n\n"
             "BEAT FORMATTING:\n"
             "- Every beat MUST start with '- ' (dash space)\n"
-            "- Beats are specific plot events/actions\n"
-            "- Use as many beats as needed\n"
-            "- Each chapter needs: (1) 3-5 sentence summary paragraph AND (2) detailed beats\n\n"
+            "- Beats are specific plot events/actions (THIS is where details belong)\n"
+            "- Use as many beats as needed to cover the chapter's plot points\n"
+            "- Each chapter needs: (1) BRIEF 3-5 sentence summary paragraph AND (2) detailed beats\n"
+            "- **CRITICAL**: The summary is BRIEF and HIGH-LEVEL; the beats are DETAILED\n\n"
             "OPERATIONS:\n\n"
             "**1. replace_range - CHANGING EXISTING TEXT**:\n"
             "- Use this when modifying, rewriting, or continuing text that ALREADY EXISTS in the outline\n"
@@ -401,7 +423,13 @@ class OutlineEditingAgent(BaseAgent):
             "  * Omit the 'anchor_text' field entirely - the system will insert after frontmatter automatically\n"
             "  * Example for empty file: {\"op_type\": \"insert_after_heading\", \"text\": \"## Chapter 1\\n\\n[content]\"}\n"
             "- **For files with content**: You MUST provide 'anchor_text' with EXACT text from outline to insert after\n"
-            "- For new chapters: anchor_text = last line of previous chapter\n"
+            "- ⚠️ **CRITICAL FOR NEW CHAPTERS**: When adding a NEW chapter (e.g., \"Create Chapter 7\"):\n"
+            "  * anchor_text MUST be the LAST LINE of the PREVIOUS chapter (Chapter 6 in this example)\n"
+            "  * DO NOT use the chapter heading (\"## Chapter 6\") as anchor_text - this will insert BETWEEN the heading and content!\n"
+            "  * Find the actual last line of text in Chapter 6 (could be a beat, summary sentence, etc.)\n"
+            "  * Example: If Chapter 6 ends with \"- Fleet coordinates the rescue operation\", use that EXACT line as anchor_text\n"
+            "  * This ensures Chapter 7 is inserted AFTER all of Chapter 6's content, not in the middle of it\n"
+            "- For adding beats to existing chapter: anchor_text = LAST existing beat of that chapter\n"
             "- For truly new beats (no overlap): anchor_text = last existing beat or chapter heading\n"
             "- **ONLY use this if your generated content is 100% new** (no existing beats included)\n"
             "- ⚠️ CRITICAL WARNING: When adding beats to existing chapter, if chapter already has beats:\n"
@@ -413,7 +441,11 @@ class OutlineEditingAgent(BaseAgent):
             "- ⚠️ If chapter has NO beats yet (empty), THEN you can use chapter heading as anchor\n"
             "- ⚠️ **NEVER use anchor_text that references context headers** - Text like '=== CURRENT OUTLINE ===' or 'File: filename.md' does NOT exist in the file\n\n"
             "**3. delete_range - REMOVING CONTENT**:\n"
-            "- Provide original_text (exact text to remove)\n\n"
+            "- Provide original_text (exact text to remove)\n"
+            "- ⚠️ **CRITICAL**: Only use delete_range when you are CERTAIN the exact text exists in the file\n"
+            "- ⚠️ **NEVER delete entire chapters** unless explicitly requested - if you need to replace content, use replace_range instead\n"
+            "- ⚠️ If you can't find the exact text to delete, DO NOT use delete_range - the operation will fail or delete the wrong content\n"
+            "- When in doubt: use replace_range to replace content rather than delete_range to remove it\n\n"
             "**DECISION RULE**:\n"
             "**STEP 1: Check what exists in the target chapter/section**\n"
             "- Does the chapter already have beats? How many?\n"
@@ -564,7 +596,8 @@ class OutlineEditingAgent(BaseAgent):
             reference_config = {
                 "style": ["style"],
                 "rules": ["rules"],
-                "characters": ["characters", "character_*"]  # Support both list and individual keys
+                "characters": ["characters", "character_*"],  # Support both list and individual keys
+                "series": ["series"]
             }
             
             # Use unified loader (no cascade_config - outline loads directly)
@@ -613,6 +646,12 @@ class OutlineEditingAgent(BaseAgent):
                         characters_qualities.append(char_quality)
                         characters_warnings.extend(char_warnings)
             
+            series_body = None
+            if loaded_files.get("series") and len(loaded_files["series"]) > 0:
+                series_body = loaded_files["series"][0].get("content", "")
+                if series_body:
+                    series_body = _strip_frontmatter_block(series_body)
+            
             # Calculate average character quality
             avg_character_quality = sum(characters_qualities) / len(characters_qualities) if characters_qualities else 0.0
             
@@ -634,6 +673,7 @@ class OutlineEditingAgent(BaseAgent):
                 "rules_body": rules_body,
                 "style_body": style_body,
                 "characters_bodies": characters_bodies,
+                "series_body": series_body,
                 "reference_quality": {
                     "style": style_quality,
                     "rules": rules_quality,
@@ -1577,18 +1617,25 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             
             # Add "WORK FIRST" guidance and cross-reference instructions (like character agent)
             context_parts.append(
-                "\n=== EDIT REQUEST: WORK WITH AVAILABLE INFORMATION ===\n"
-                "The user wants you to add or revise outline content.\n\n"
+                "\n=== USER REQUEST: ANALYZE AND RESPOND APPROPRIATELY ===\n"
+                "Analyze the user's request to determine if it requires edits or just an answer.\n\n"
                 "**YOUR APPROACH**:\n"
-                "1. **FOR EMPTY FILES**: If the outline is empty, ASK QUESTIONS FIRST before creating content\n"
+                "1. **QUESTIONS THAT DON'T REQUIRE EDITS**:\n"
+                "   - If the user is asking for information, analysis, lists, or recommendations\n"
+                "   - AND you can answer without modifying the outline\n"
+                "   - THEN return 0 operations with your complete answer in the summary field\n"
+                "   - Examples: \"What unresolved plot points?\", \"Give me a list of...\", \"Analyze the structure\"\n"
+                "2. **EDIT REQUESTS**:\n"
+                "   - If the user wants to add, change, or modify content\n"
+                "   - THEN generate operations to make those edits\n"
+                "3. **FOR EMPTY FILES**: If the outline is empty, ASK QUESTIONS FIRST before creating content\n"
                 "   - Don't create the entire outline structure at once\n"
                 "   - Ask about story basics: genre, main characters, key plot points, chapter count\n"
                 "   - Build incrementally - create one section at a time based on user responses\n"
-                "2. **FOR FILES WITH CONTENT**: Make edits based on the request and available context (outline file, rules, style, characters)\n"
-                "3. **USE INFERENCE**: Make reasonable inferences from the request - but ask if starting from scratch\n"
-                "4. **ASK ALONG THE WAY**: If you need specific details, include questions in the summary AFTER describing the work you've done\n"
-                "5. **NEVER EMPTY OPERATIONS FOR EDIT REQUESTS**: Always provide operations OR ask questions (clarification request)\n"
-                "6. **CHARACTER INFORMATION**: Keep character details in character profiles, not in the outline!\n"
+                "4. **FOR FILES WITH CONTENT**: Make edits based on the request and available context (outline file, rules, style, characters)\n"
+                "5. **USE INFERENCE**: Make reasonable inferences from the request - but ask if starting from scratch\n"
+                "6. **ASK ALONG THE WAY**: If you need specific details, include questions in the summary AFTER describing the work you've done\n"
+                "7. **CHARACTER INFORMATION**: Keep character details in character profiles, not in the outline!\n"
                 "   - Outline should only have brief character references (name + role)\n"
                 "   - Do NOT copy character descriptions, backstories, or traits into the outline\n\n"
                 "CRITICAL: CHECK FOR DUPLICATES FIRST\n"
@@ -1614,11 +1661,47 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             # Build request with instructions
             request_with_instructions = ""
             if current_request:
-                request_with_instructions = f"""=== USER REQUEST ===
+                # Check if this is a question that doesn't require edits
+                current_request_lower = current_request.lower()
+                is_question_no_edit = (
+                    # Explicit "don't edit" phrases
+                    any(phrase in current_request_lower for phrase in [
+                        "don't edit", "dont edit", "no edit", "no edits", "just answer", "only analyze",
+                        "don't change", "dont change", "no changes", "just tell me", "just show me"
+                    ]) or
+                    # Question words/phrases that typically don't require edits
+                    any(phrase in current_request_lower for phrase in [
+                        "what are", "what is", "what do", "what does", "what have", "what has",
+                        "show me", "give me", "tell me", "list", "analyze", "assess", "evaluate",
+                        "how many", "which", "where are", "when do", "who are"
+                    ]) and not any(phrase in current_request_lower for phrase in [
+                        "add", "create", "update", "change", "modify", "revise", "edit", "generate"
+                    ])
+                )
+                
+                if is_question_no_edit:
+                    request_with_instructions = f"""=== USER REQUEST ===
+{current_request}
+
+**IMPORTANT: This appears to be a question that can be answered WITHOUT making edits to the outline.**
+
+Analyze the request:
+- If the user is asking for information, analysis, lists, or recommendations that don't require changing the outline
+- Then return a ManuscriptEdit with:
+  - operations: [] (empty array - no edits needed)
+  - summary: Your complete answer to the user's question (e.g., bullet points, analysis, recommendations, lists)
+
+- If the question DOES require edits to answer properly, then generate operations as normal
+
+Be flexible - if you can answer the question without edits, use 0 operations and put the full answer in the summary field."""
+                else:
+                    request_with_instructions = f"""=== USER REQUEST ===
 {current_request}
 
 Generate ManuscriptEdit JSON with operations to fulfill the user's request.
-Use replace_range for changing existing content, insert_after_heading for adding new content, delete_range for removing content."""
+Use replace_range for changing existing content, insert_after_heading for adding new content, delete_range for removing content.
+
+**NOTE**: If this request is actually a question that can be answered without edits, return 0 operations and put your answer in the summary field."""
                 if is_empty_file:
                     request_with_instructions += """
 
@@ -1708,7 +1791,13 @@ Since this file is empty (only frontmatter), follow these rules:
                         "agent_type": "outline_editing_agent",
                         "shared_memory": shared_memory_out
                     },
-                    "task_status": "incomplete"
+                    "task_status": "incomplete",
+                    # ✅ CRITICAL: Preserve state for subsequent nodes
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": shared_memory_out,
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             # Otherwise, parse as ManuscriptEdit with Pydantic validation
@@ -1824,7 +1913,13 @@ Since this file is empty (only frontmatter), follow these rules:
                         "llm_response": content,
                         "structured_edit": None,
                         "error": error_msg,
-                        "task_status": "error"
+                        "task_status": "error",
+                        # ✅ CRITICAL: Preserve state even on error
+                        "metadata": state.get("metadata", {}),
+                        "user_id": state.get("user_id", "system"),
+                        "shared_memory": state.get("shared_memory", {}),
+                        "messages": state.get("messages", []),
+                        "query": state.get("query", "")
                     }
                     
             except json.JSONDecodeError as e:
@@ -1833,7 +1928,13 @@ Since this file is empty (only frontmatter), follow these rules:
                     "llm_response": content,
                     "structured_edit": None,
                     "error": f"Failed to parse JSON: {str(e)}",
-                    "task_status": "error"
+                    "task_status": "error",
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             except Exception as e:
                 logger.error(f"Failed to parse structured edit: {e}")
@@ -1843,7 +1944,13 @@ Since this file is empty (only frontmatter), follow these rules:
                     "llm_response": content,
                     "structured_edit": None,
                     "error": f"Failed to parse edit plan: {str(e)}",
-                    "task_status": "error"
+                    "task_status": "error",
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             if structured_edit is None:
@@ -1851,18 +1958,28 @@ Since this file is empty (only frontmatter), follow these rules:
                     "llm_response": content,
                     "structured_edit": None,
                     "error": "Failed to produce a valid Outline edit plan. Ensure ONLY raw JSON ManuscriptEdit with operations is returned.",
-                    "task_status": "error"
+                    "task_status": "error",
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             # Check if this is a question with no operations - generate conversational answer
             operations = structured_edit.get("operations", [])
             if len(operations) == 0:
-                # Check if user request looks like a question
+                # Check if user request looks like a question or "don't edit" request
                 current_request = state.get("current_request", "").lower()
                 is_question = any(keyword in current_request for keyword in [
                     "?", "how", "what", "why", "when", "where", "who", "which",
                     "assess", "evaluate", "review", "analyze", "check", "examine",
-                    "tell me", "explain", "describe", "summarize", "looks like", "looking"
+                    "tell me", "explain", "describe", "summarize", "looks like", "looking",
+                    "give me", "show me", "list", "what are", "what is", "recommend"
+                ]) or any(phrase in current_request for phrase in [
+                    "don't edit", "dont edit", "no edit", "no edits", "just answer", "only analyze",
+                    "don't change", "dont change", "no changes", "just tell me", "just show me"
                 ])
                 
                 if is_question:
@@ -1874,23 +1991,42 @@ Since this file is empty (only frontmatter), follow these rules:
                         structured_edit["summary"] = answer
                         structured_edit["is_question_answer"] = True
                 else:
-                    # Edit request with no operations - this is an error!
-                    # The LLM should have generated operations for edit requests
-                    logger.error("⚠️ Edit request detected but no operations generated - this should not happen!")
-                    logger.error(f"   Request: {current_request[:200]}")
-                    logger.error(f"   Summary: {structured_edit.get('summary', '')[:200]}")
-                    # Force an error response
-                    return {
-                        "llm_response": content,
-                        "structured_edit": None,
-                        "error": "Edit request received but no operations were generated. Please try rephrasing your request or be more specific about what you want to add or change.",
-                        "task_status": "error"
-                    }
+                    # Check if summary contains a substantial answer (might be a "don't edit" request that wasn't caught)
+                    summary = structured_edit.get("summary", "")
+                    if summary and len(summary) > 100:
+                        # Summary is substantial - treat as answer even if keyword detection didn't match
+                        logger.info("No operations but substantial summary found - treating as answer")
+                        structured_edit["is_question_answer"] = True
+                    else:
+                        # Edit request with no operations and no substantial summary - this is an error!
+                        # The LLM should have generated operations for edit requests
+                        logger.error("⚠️ Edit request detected but no operations generated - this should not happen!")
+                        logger.error(f"   Request: {current_request[:200]}")
+                        logger.error(f"   Summary: {summary[:200] if summary else 'None'}")
+                        # Force an error response
+                        return {
+                            "llm_response": content,
+                            "structured_edit": None,
+                            "error": "Edit request received but no operations were generated. Please try rephrasing your request or be more specific about what you want to add or change.",
+                            "task_status": "error",
+                            # ✅ CRITICAL: Preserve state even on error
+                            "metadata": state.get("metadata", {}),
+                            "user_id": state.get("user_id", "system"),
+                            "shared_memory": state.get("shared_memory", {}),
+                            "messages": state.get("messages", []),
+                            "query": state.get("query", "")
+                        }
             
             return {
                 "llm_response": content,
                 "structured_edit": structured_edit,
-                "system_prompt": system_prompt
+                "system_prompt": system_prompt,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -1901,7 +2037,13 @@ Since this file is empty (only frontmatter), follow these rules:
                 "llm_response": "",
                 "structured_edit": None,
                 "error": str(e),
-                "task_status": "error"
+                "task_status": "error",
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _resolve_operations_node(self, state: OutlineEditingState) -> Dict[str, Any]:
@@ -1931,7 +2073,57 @@ Since this file is empty (only frontmatter), follow these rules:
             is_empty_file = not body_only.strip()
             
             editor_operations = []
+            failed_operations = state.get("failed_operations", []) or []
             operations = structured_edit.get("operations", [])
+            
+            # Auto-correct anchor_text for new chapter insertions
+            # If anchor_text is a chapter heading, find the last line of that chapter instead
+            if body_only:
+                # Find chapter ranges in the full outline (with frontmatter offset)
+                chapter_ranges_full = find_chapter_ranges(outline)
+                chapter_ranges_body = find_chapter_ranges(body_only)
+                existing_chapter_numbers = {ch.chapter_number for ch in chapter_ranges_body if ch.chapter_number is not None}
+                
+                for op in operations:
+                    op_type = op.get("op_type", "")
+                    anchor_text = op.get("anchor_text", "")
+                    op_text = op.get("text", "")
+                    
+                    # Check if this is inserting a new chapter after an existing chapter heading
+                    if op_type == "insert_after_heading" and anchor_text:
+                        # Check if anchor_text is a chapter heading
+                        chapter_match = re.match(r'^##\s+Chapter\s+(\d+)', anchor_text.strip())
+                        if chapter_match:
+                            anchor_chapter_num = int(chapter_match.group(1))
+                            # Check if the text being inserted is a new chapter
+                            text_chapter_match = re.search(r'##\s+Chapter\s+(\d+)', op_text)
+                            if text_chapter_match:
+                                new_chapter_num = int(text_chapter_match.group(1))
+                                # If new chapter number is higher than anchor chapter, this is a new chapter insertion
+                                if new_chapter_num > anchor_chapter_num:
+                                    # Find the last line of the anchor chapter in the FULL outline
+                                    anchor_chapter = None
+                                    for ch in chapter_ranges_full:
+                                        if ch.chapter_number == anchor_chapter_num:
+                                            anchor_chapter = ch
+                                            break
+                                    
+                                    if anchor_chapter:
+                                        # Get the last non-empty line of this chapter from the full outline
+                                        chapter_content = outline[anchor_chapter.start:anchor_chapter.end]
+                                        lines = chapter_content.split('\n')
+                                        last_line = None
+                                        for line in reversed(lines):
+                                            stripped = line.strip()
+                                            if stripped and not stripped.startswith('## Chapter'):
+                                                last_line = line.rstrip()
+                                                break
+                                        
+                                        if last_line:
+                                            logger.info(f"🔧 Auto-correcting anchor_text for new Chapter {new_chapter_num}")
+                                            logger.info(f"   Old anchor_text (chapter heading): {anchor_text[:100]}...")
+                                            logger.info(f"   New anchor_text (last line of Chapter {anchor_chapter_num}): {last_line[:100]}...")
+                                            op["anchor_text"] = last_line
             
             for op in operations:
                 # Sanitize op text
@@ -2014,6 +2206,39 @@ Since this file is empty (only frontmatter), follow these rules:
                     
                     logger.info(f"Resolved {op.get('op_type')} [{resolved_start}:{resolved_end}] confidence={resolved_confidence:.2f}")
                     
+                    # Validate delete_range operations - reject if they can't find exact matches
+                    op_type = op.get("op_type", "")
+                    if op_type == "delete_range":
+                        original_text = op.get("original_text", "")
+                        # If original_text is large (>1000 chars) and confidence is low, this is dangerous
+                        if len(original_text) > 1000 and resolved_confidence < 0.8:
+                            logger.error(f"⚠️ REJECTING delete_range operation: Large deletion ({len(original_text)} chars) with low confidence ({resolved_confidence:.2f})")
+                            logger.error(f"   This could delete the wrong content! Original text preview: {original_text[:200]}...")
+                            # Add to failed operations
+                            failed_operations = state.get("failed_operations", [])
+                            failed_operations.append({
+                                "op_type": op_type,
+                                "original_text": original_text,
+                                "text": "",
+                                "error": f"Large deletion with low confidence ({resolved_confidence:.2f})"
+                            })
+                            # Skip this operation - don't add it to editor_operations
+                            continue
+                        # If confidence is very low (<0.6), reject regardless of size
+                        if resolved_confidence < 0.6:
+                            logger.error(f"⚠️ REJECTING delete_range operation: Very low confidence ({resolved_confidence:.2f}) - exact match not found")
+                            logger.error(f"   Original text preview: {original_text[:200]}...")
+                            # Add to failed operations
+                            failed_operations = state.get("failed_operations", [])
+                            failed_operations.append({
+                                "op_type": op_type,
+                                "original_text": original_text,
+                                "text": "",
+                                "error": f"Very low confidence ({resolved_confidence:.2f})"
+                            })
+                            # Skip this operation
+                            continue
+                    
                     # Calculate pre_hash
                     pre_slice = outline[resolved_start:resolved_end]
                     pre_hash = _slice_hash(pre_slice)
@@ -2060,7 +2285,14 @@ Since this file is empty (only frontmatter), follow these rules:
                     editor_operations.append(resolved_op)
             
             return {
-                "editor_operations": editor_operations
+                "editor_operations": editor_operations,
+                "failed_operations": failed_operations,
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -2069,8 +2301,15 @@ Since this file is empty (only frontmatter), follow these rules:
             logger.error(f"Traceback: {traceback.format_exc()}")
             return {
                 "editor_operations": [],
+                "failed_operations": state.get("failed_operations", []),
                 "error": str(e),
-                "task_status": "error"
+                "task_status": "error",
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def _format_response_node(self, state: OutlineEditingState) -> Dict[str, Any]:
@@ -2088,19 +2327,33 @@ Since this file is empty (only frontmatter), follow these rules:
             if not editor_operations and structured_edit:
                 is_question_answer = structured_edit.get("is_question_answer", False)
                 summary = structured_edit.get("summary", "")
+                current_request = state.get("current_request", "").lower()
+                
+                # Check if this is a "don't edit" request or question
+                is_dont_edit_request = any(phrase in current_request for phrase in [
+                    "don't edit", "dont edit", "no edit", "no edits", "just answer", "only analyze",
+                    "don't change", "dont change", "no changes", "just tell me", "just show me"
+                ])
                 
                 # Check if summary is a real answer (not just a generic summary)
-                if is_question_answer or (summary and len(summary) > 50 and not summary.startswith("Assessment of")):
-                    logger.info("Returning question response (no operations needed)")
+                # Also check if it's a "don't edit" request - summary should be used as the answer
+                if is_question_answer or is_dont_edit_request or (summary and len(summary) > 50 and not summary.startswith("Assessment of")):
+                    logger.info("Returning question/analysis response (no operations needed)")
                     return {
                         "response": {
-                            "response": summary,
+                            "response": summary if summary else "Analysis complete (no operations generated).",
                             "task_status": "complete",
                             "agent_type": "outline_editing_agent",
                             "timestamp": datetime.now().isoformat()
                         },
                         "task_status": "complete",
-                        "editor_operations": []  # No operations for pure questions
+                        "editor_operations": [],  # No operations for pure questions/analysis
+                        # ✅ CRITICAL: Preserve state (final node, but good practice)
+                        "metadata": state.get("metadata", {}),
+                        "user_id": state.get("user_id", "system"),
+                        "shared_memory": state.get("shared_memory", {}),
+                        "messages": state.get("messages", []),
+                        "query": state.get("query", "")
                     }
             
             # If we have a clarification request, it was already formatted in generate_edit_plan
@@ -2108,7 +2361,13 @@ Since this file is empty (only frontmatter), follow these rules:
                 response = state.get("response", {})
                 return {
                     "response": response,
-                    "task_status": "incomplete"
+                    "task_status": "incomplete",
+                    # ✅ CRITICAL: Preserve state (final node, but good practice)
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             if task_status == "error":
@@ -2119,7 +2378,13 @@ Since this file is empty (only frontmatter), follow these rules:
                         "task_status": "error",
                         "agent_type": "outline_editing_agent"
                     },
-                    "task_status": "error"
+                    "task_status": "error",
+                    # ✅ CRITICAL: Preserve state (final node, but good practice)
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
             # Build response text with summary and preview
@@ -2130,15 +2395,37 @@ Since this file is empty (only frontmatter), follow these rules:
                 if op.get("text", "").strip()
             ]).strip()
             
+            # Add failed operations if present
+            failed_operations = state.get("failed_operations", [])
+            failed_content = ""
+            if failed_operations:
+                failed_content = "\n\n**⚠️ UNRESOLVED EDITS (Manual Action Required)**\n"
+                failed_content += "The following generated content could not be automatically placed in the outline. You can copy and paste these sections manually:\n\n"
+                
+                for i, op in enumerate(failed_operations, 1):
+                    op_type = op.get("op_type", "edit")
+                    error = op.get("error", "Anchor text not found")
+                    text = op.get("text", "")
+                    anchor = op.get("anchor_text") or op.get("original_text")
+                    
+                    failed_content += f"#### Unresolved Edit {i} ({op_type})\n"
+                    failed_content += f"- **Reason**: {error}\n"
+                    if anchor:
+                        failed_content += f"- **Intended near**:\n> {anchor[:200]}...\n"
+                    
+                    failed_content += "\n**Generated Content** (Scroll-safe):\n"
+                    failed_content += f"{text}\n\n"
+                    failed_content += "---\n"
+            
             # Always include summary if available; optionally add preview
             if summary and generated_preview:
-                response_text = f"{summary}\n\n---\n\n{generated_preview}"
+                response_text = f"{summary}\n\n---\n\n{generated_preview}{failed_content}"
             elif summary:
-                response_text = summary
+                response_text = f"{summary}{failed_content}"
             elif generated_preview:
-                response_text = generated_preview
+                response_text = f"{generated_preview}{failed_content}"
             else:
-                response_text = "Edit plan ready."
+                response_text = "Edit plan ready." + failed_content
             
             # Build response with editor operations
             response = {
@@ -2172,14 +2459,26 @@ Since this file is empty (only frontmatter), follow these rules:
             
             return {
                 "response": response,
-                "task_status": task_status
+                "task_status": task_status,
+                # ✅ CRITICAL: Preserve state (final node, but good practice)
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
             logger.error(f"Failed to format response: {e}")
             return {
                 "response": self._create_error_response(str(e)),
-                "task_status": "error"
+                "task_status": "error",
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
@@ -2245,6 +2544,7 @@ Since this file is empty (only frontmatter), follow these rules:
                 "structured_edit": None,
                 "clarification_request": None,
                 "editor_operations": [],
+                "failed_operations": [],
                 "response": {},
                 "task_status": "",
                 "error": "",
@@ -2292,6 +2592,7 @@ Since this file is empty (only frontmatter), follow these rules:
                 "task_status": task_status,
                 "agent_results": {
                     "editor_operations": response.get("editor_operations", []),
+                    "failed_operations": result_state.get("failed_operations", []),
                     "manuscript_edit": response.get("manuscript_edit")
                 }
             }

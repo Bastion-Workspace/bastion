@@ -10,7 +10,7 @@ import logging
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -208,74 +208,6 @@ def extract_chapter_number_from_request(request: str) -> Optional[int]:
     return None
 
 
-def extract_chapter_range_from_request(request: str) -> Optional[Tuple[int, int]]:
-    """
-    Extract chapter range from user request.
-    Returns (start_chapter, end_chapter) inclusive, or None if not a range request.
-    
-    Examples:
-    - "generate the first few chapters" -> (1, 3)  # Default: first 3
-    - "generate chapters 1-3" -> (1, 3)
-    - "generate chapters 1 through 5" -> (1, 5)
-    - "generate the first 5 chapters" -> (1, 5)
-    - "generate chapter 1" -> None (single chapter, use extract_chapter_number_from_request)
-    """
-    if not request:
-        return None
-    
-    request_lower = request.lower()
-    
-    # Pattern 1: Explicit range "chapters 1-3" or "chapters 1 through 5"
-    range_patterns = [
-        r'(?:chapters?|ch\.?)\s+(\d+)\s*[-–—]\s*(\d+)',  # "chapters 1-3"
-        r'(?:chapters?|ch\.?)\s+(\d+)\s+through\s+(\d+)',  # "chapters 1 through 5"
-        r'(?:chapters?|ch\.?)\s+(\d+)\s+to\s+(\d+)',  # "chapters 1 to 5"
-    ]
-    for pattern in range_patterns:
-        match = re.search(pattern, request_lower)
-        if match:
-            try:
-                start = int(match.group(1))
-                end = int(match.group(2))
-                if start <= end:
-                    return (start, end)
-            except (ValueError, IndexError):
-                continue
-    
-    # Pattern 2: "first N chapters" or "first few chapters"
-    first_patterns = [
-        r'first\s+(\d+)\s+chapters?',  # "first 5 chapters"
-        r'first\s+few\s+chapters?',  # "first few chapters" -> default to 3
-    ]
-    for pattern in first_patterns:
-        match = re.search(pattern, request_lower)
-        if match:
-            try:
-                if match.group(1):
-                    count = int(match.group(1))
-                    return (1, count)
-                else:
-                    # "first few" -> default to 3 chapters
-                    return (1, 3)
-            except (ValueError, IndexError):
-                if 'few' in request_lower:
-                    return (1, 3)
-    
-    # Pattern 3: "chapters N through M" (alternative wording)
-    through_pattern = r'chapter\s+(\d+)\s+through\s+chapter\s+(\d+)'
-    match = re.search(through_pattern, request_lower)
-    if match:
-        try:
-            start = int(match.group(1))
-            end = int(match.group(2))
-            if start <= end:
-                return (start, end)
-        except (ValueError, IndexError):
-            pass
-    
-    return None
-
-
 # ============================================
 # Heading Manipulation Utilities
 # ============================================
@@ -349,4 +281,130 @@ def strip_chapter_heading_from_text(text: str) -> Tuple[str, bool]:
         remaining = stripped[match.end():].lstrip('\n')
         return remaining, True
     return text, False
+
+
+# ============================================
+# Outline Extraction Utilities
+# ============================================
+
+def extract_chapter_outline(outline_body: str, chapter_identifier: Union[int, str]) -> Optional[str]:
+    """
+    Extract outline section for a specific chapter number or special section name.
+    
+    Args:
+        outline_body: Full outline text
+        chapter_identifier: Chapter number (int) or special section name (str) like "Introduction", "Prologue", "Epilogue"
+        
+    Returns:
+        Chapter outline text if found, None otherwise
+    """
+    if not outline_body or not chapter_identifier:
+        return None
+    
+    # Handle special section names (Introduction, Prologue, Epilogue)
+    if isinstance(chapter_identifier, str):
+        # Match special section headers: ## Introduction, ## Prologue, ## Epilogue
+        # Case-insensitive, with optional colon and title
+        special_pattern = rf"(?i)(?:^|\n)##?\s*\b{re.escape(chapter_identifier)}\b[:\s]*(.*?)(?=\n##?\s*(?:Chapter\s+)?\b\d+\b|\n##?\s*\b(?:Introduction|Prologue|Epilogue)\b|\Z)"
+        match = re.search(special_pattern, outline_body, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+        return None
+    
+    # Handle numbered chapters: ## Chapter N or ## N
+    # Improved regex: Match chapter header with word boundaries to avoid partial matches
+    chapter_number = chapter_identifier
+    chapter_pattern = rf"(?i)(?:^|\n)##?\s*(?:Chapter\s+)?\b{chapter_number}\b[:\s]*(.*?)(?=\n##?\s*(?:Chapter\s+)?\b\d+\b|\n##?\s*\b(?:Introduction|Prologue|Epilogue)\b|\Z)"
+    match = re.search(chapter_pattern, outline_body, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def extract_story_overview(outline_body: str) -> Optional[str]:
+    """
+    Extract story overview/synopsis from outline (content before first chapter header).
+    
+    Chapter headers include both numbered chapters (## Chapter 1, ## 1) and special sections
+    (## Introduction, ## Prologue, ## Epilogue). The overview is everything before the first
+    of any of these.
+    
+    Args:
+        outline_body: Full outline text
+        
+    Returns:
+        Story overview text if found, None otherwise
+    """
+    if not outline_body:
+        return None
+    
+    # Find the first chapter-like header (numbered chapter OR special section)
+    # Pattern matches: ## Chapter N, ## N, ## Introduction, ## Prologue, ## Epilogue
+    first_chapter_pattern = r"(?i)(?:^|\n)##?\s*(?:Chapter\s+)?\b\d+\b|\n##?\s*\b(?:Introduction|Prologue|Epilogue)\b"
+    match = re.search(first_chapter_pattern, outline_body)
+    
+    if match:
+        # Extract everything before the first chapter header
+        overview = outline_body[:match.start()].strip()
+        return overview if overview else None
+    
+    # If no chapter headers found, return the entire outline as overview
+    return outline_body.strip() if outline_body.strip() else None
+
+
+def extract_book_map(outline_body: str) -> List[Tuple[Union[int, str], str]]:
+    """
+    Extract a map of all chapters and their headers from the outline.
+    
+    Includes both numbered chapters (## Chapter 1, ## 1) and special sections
+    (## Introduction, ## Prologue, ## Epilogue).
+    
+    Args:
+        outline_body: Full outline text
+        
+    Returns:
+        List of (chapter_identifier, header_text) tuples where identifier is either
+        an int (for numbered chapters) or str (for special sections like "Introduction").
+        Special sections come first, then numbered chapters sorted by number.
+    """
+    if not outline_body:
+        return []
+    
+    book_map = []
+    
+    # First, find all numbered chapters: ## Chapter N or ## N
+    numbered_pattern = r"(?i)(?:^|\n)(##?\s*(?:Chapter\s+)?(\d+)\b[:\s]*(.*?))(?=\n|$)"
+    numbered_matches = re.finditer(numbered_pattern, outline_body, re.MULTILINE)
+    
+    for match in numbered_matches:
+        chapter_num_str = match.group(2)
+        header_text = match.group(1).strip()
+        try:
+            chapter_num = int(chapter_num_str)
+            book_map.append((chapter_num, header_text))
+        except (ValueError, IndexError):
+            continue
+    
+    # Then, find special sections: ## Introduction, ## Prologue, ## Epilogue
+    special_pattern = r"(?i)(?:^|\n)(##?\s*\b(Introduction|Prologue|Epilogue)\b[:\s]*(.*?))(?=\n|$)"
+    special_matches = re.finditer(special_pattern, outline_body, re.MULTILINE)
+    
+    for match in special_matches:
+        section_name = match.group(2)  # "Introduction", "Prologue", or "Epilogue"
+        header_text = match.group(1).strip()
+        book_map.append((section_name, header_text))
+    
+    # Sort: special sections first (in order: Introduction, Prologue, Epilogue), then numbered chapters
+    def sort_key(item):
+        identifier, _ = item
+        if isinstance(identifier, str):
+            # Special sections: Introduction=0, Prologue=1, Epilogue=2, others=3
+            order_map = {"Introduction": 0, "Prologue": 1, "Epilogue": 2}
+            return (0, order_map.get(identifier, 3))
+        else:
+            # Numbered chapters come after special sections
+            return (1, identifier)
+    
+    book_map.sort(key=sort_key)
+    return book_map
 

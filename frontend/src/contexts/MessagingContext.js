@@ -21,7 +21,9 @@ export const useMessaging = () => {
 };
 
 export const MessagingProvider = ({ children }) => {
-  const { user, isAuthenticated } = useAuth();
+  const { user, isAuthenticated, loading: authLoading } = useAuth();
+  
+  console.log('💬 MessagingProvider Render:', { isAuthenticated, user: user?.user_id, authLoading });
   
   // State
   const [rooms, setRooms] = useState([]);
@@ -43,18 +45,50 @@ export const MessagingProvider = ({ children }) => {
   const [error, setError] = useState(null);
   
   const presenceUpdateInterval = useRef(null);
+  const processedMessageIds = useRef(new Set()); // BULLY! De-duplication ledger station!
 
   // =====================
   // ROOM OPERATIONS
   // =====================
 
   const loadRooms = useCallback(async () => {
-    if (!isAuthenticated) return;
+    if (!isAuthenticated) {
+      console.log('💬 Skipping loadRooms - not authenticated');
+      return;
+    }
     
     try {
       setIsLoading(true);
+      console.log('🔄 BULLY! Loading messaging rooms...');
       const userRooms = await messagingService.getUserRooms();
+      console.log(`✅ Loaded ${userRooms.length} rooms:`, userRooms);
       setRooms(userRooms);
+      
+      // Load initial presence for all participants in all rooms
+      const participantIds = new Set();
+      userRooms.forEach(room => {
+        room.participants?.forEach(p => {
+          if (p.user_id !== user?.user_id) {
+            participantIds.add(p.user_id);
+          }
+        });
+      });
+      
+      if (participantIds.size > 0) {
+        console.log(`🔍 BULLY! Fetching initial presence for ${participantIds.size} participants...`);
+        // We can fetch them individually or if there's a bulk endpoint use that
+        // For now, let's fetch them in parallel
+        Promise.all(Array.from(participantIds).map(id => messagingService.getUserPresence(id)))
+          .then(presences => {
+            const presenceMap = {};
+            presences.forEach(p => {
+              if (p) presenceMap[p.user_id] = p;
+            });
+            setPresence(prev => ({ ...prev, ...presenceMap }));
+            console.log('✅ Initial presence loaded');
+          })
+          .catch(err => console.error('❌ Failed to load initial presence:', err));
+      }
       
       // Update unread counts
       const counts = {};
@@ -151,6 +185,10 @@ export const MessagingProvider = ({ children }) => {
   // =====================
 
   const loadMessages = useCallback(async (roomId, beforeMessageId = null) => {
+    if (!roomId || roomId === 'null') {
+      return;
+    }
+    
     try {
       const response = await messagingService.getRoomMessages(roomId, 50, beforeMessageId);
       
@@ -276,6 +314,10 @@ export const MessagingProvider = ({ children }) => {
   }, [isAuthenticated]);
 
   const loadRoomPresence = useCallback(async (roomId) => {
+    if (!roomId || roomId === 'null') {
+      return;
+    }
+    
     try {
       const roomPresence = await messagingService.getRoomPresence(roomId);
       
@@ -357,6 +399,11 @@ export const MessagingProvider = ({ children }) => {
     
     setCurrentRoomId(roomId);
     
+    // Only proceed if roomId is valid
+    if (!roomId) {
+      return;
+    }
+    
     // Load messages if not already loaded
     if (!messages[roomId]) {
       loadMessages(roomId);
@@ -418,8 +465,13 @@ export const MessagingProvider = ({ children }) => {
   // =====================
   // COMPUTED VALUES
   // =====================
-
-  const totalUnreadCount = Object.values(unreadCounts).reduce((sum, count) => sum + count, 0);
+  
+  const unreadCountValues = Object.values(unreadCounts);
+  const totalUnreadCount = unreadCountValues.reduce((sum, count) => sum + count, 0);
+  
+  if (totalUnreadCount > 0) {
+    console.log(`📊 totalUnreadCount updated: ${totalUnreadCount} across ${unreadCountValues.length} rooms`);
+  }
 
   const currentRoom = rooms.find(r => r.room_id === currentRoomId);
 
@@ -431,28 +483,31 @@ export const MessagingProvider = ({ children }) => {
 
   // Load rooms on mount/auth change
   useEffect(() => {
-    if (isAuthenticated) {
+    console.log(`💬 MessagingProvider Auth Effect: isAuthenticated=${isAuthenticated}, user=${user?.user_id}`);
+    if (isAuthenticated && user) {
       loadRooms();
-    } else {
+    } else if (!isAuthenticated) {
       // Clear state on logout
+      console.log('💬 Clearing messaging state (not authenticated)');
       setRooms([]);
       setMessages({});
       setPresence({});
       setUnreadCounts({});
       setCurrentRoomId(null);
     }
-  }, [isAuthenticated, loadRooms]);
+  }, [isAuthenticated, user, loadRooms]);
 
   // Connect user WebSocket for global notifications
   useEffect(() => {
-    if (isAuthenticated) {
+    if (isAuthenticated && user) {
+      console.log('💬 Initializing User WebSocket connection...');
       messagingService.connectUserWebSocket();
       
       return () => {
         messagingService.disconnectUserWebSocket();
       };
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, user]);
 
   // Update presence on mount and periodically
   useEffect(() => {
@@ -490,10 +545,13 @@ export const MessagingProvider = ({ children }) => {
     return unregister;
   }, []);
 
-  // Register room update handler
+  // Register room update handler - stable registration
   useEffect(() => {
+    if (!isAuthenticated) return;
+    
+    console.log('💬 Registering global room update handler');
     const unregister = messagingService.registerRoomUpdateHandler((updateData) => {
-      console.log('💬 Room update received:', updateData);
+      console.log('💬 Room update received via WebSocket:', updateData);
       
       if (updateData.type === 'room_updated') {
         // Room name changed
@@ -510,38 +568,71 @@ export const MessagingProvider = ({ children }) => {
         const message = updateData.message;
         const roomId = message.room_id;
         
+        // De-duplication check: Skip if we've already processed this message ID
+        if (processedMessageIds.current.has(message.message_id)) {
+          console.log(`💬 Skipping duplicate message ${message.message_id}`);
+          return;
+        }
+        processedMessageIds.current.add(message.message_id);
+        
+        console.log(`💬 New message received via WebSocket for room ${roomId}:`, message);
+        
         // Update room timestamp
         setRooms(prev => {
+          if (prev.length === 0) {
+            console.warn(`⚠️ Received new message for room ${roomId} but local rooms list is empty! Initial load might still be in progress.`);
+            return prev;
+          }
+          
           const updated = prev.map(room =>
             room.room_id === roomId
               ? { ...room, last_message_at: message.created_at }
               : room
           ).sort((a, b) => new Date(b.last_message_at) - new Date(a.last_message_at));
           
-          // Flash tab notification if not current room and not muted
-          if (roomId !== currentRoomId) {
-            const room = updated.find(r => r.room_id === roomId);
-            const notificationSettings = room?.notification_settings || {};
-            if (!notificationSettings.muted) {
-              tabNotificationManager.startFlashing('New message');
-            }
+          const roomFound = updated.some(r => r.room_id === roomId);
+          if (!roomFound) {
+            console.warn(`⚠️ Received new message for unknown room ${roomId}!`);
           }
           
           return updated;
         });
         
-        // Increment unread count if not current room
-        if (roomId !== currentRoomId) {
-          setUnreadCounts(prev => ({
+        // Handle unread counts and message stream
+        if (roomId === currentRoomIdRef.current) {
+          // If in the current room, add to messages and mark as read on backend
+          setMessages(prev => ({
             ...prev,
-            [roomId]: (prev[roomId] || 0) + 1
+            [roomId]: [...(prev[roomId] || []), message]
           }));
+          
+          // Signal backend that we've read this message immediately
+          messagingService.markAsRead(roomId).catch(err => console.error('❌ Failed to mark room as read:', err));
+        } else {
+          // If not in the current room, just increment unread count
+          setUnreadCounts(prev => {
+            const newCounts = {
+              ...prev,
+              [roomId]: (prev[roomId] || 0) + 1
+            };
+            console.log(`📊 Updated unread counts for room ${roomId}: ${newCounts[roomId]}`);
+            return newCounts;
+          });
+          
+          // Flash tab notification
+          tabNotificationManager.startFlashing('New message');
         }
       }
     });
     
     return unregister;
-  }, [loadRooms, currentRoomId]);
+  }, [isAuthenticated, loadRooms]); // currentRoomId removed from dependencies
+
+  // Keep a ref to currentRoomId for the stable WebSocket handler
+  const currentRoomIdRef = useRef(currentRoomId);
+  useEffect(() => {
+    currentRoomIdRef.current = currentRoomId;
+  }, [currentRoomId]);
 
   // Register new room handler
   useEffect(() => {
@@ -563,6 +654,7 @@ export const MessagingProvider = ({ children }) => {
 
   const value = {
     // State
+    user,
     rooms,
     currentRoomId,
     currentRoom,

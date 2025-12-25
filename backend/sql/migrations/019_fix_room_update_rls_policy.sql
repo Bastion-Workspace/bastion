@@ -29,3 +29,4 @@ CREATE POLICY chat_rooms_update_policy ON chat_rooms
 
 
 
+

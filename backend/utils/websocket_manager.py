@@ -411,18 +411,23 @@ class WebSocketManager:
                 "user_id": user_id
             })
             
-            # Also track by user_id for presence updates
+            # Also track by user_id for presence updates - ALWAYS AS A LIST
+            if not hasattr(self, 'user_connections'):
+                self.user_connections = {}
+                
             if user_id not in self.user_connections:
                 self.user_connections[user_id] = []
-            self.user_connections[user_id].append(websocket)
+            
+            if websocket not in self.user_connections[user_id]:
+                self.user_connections[user_id].append(websocket)
             
             logger.info(f"💬 WebSocket connected to room {room_id} for user {user_id}")
             logger.info(f"📊 Active room connections: {len(self.room_connections)}")
-            logger.info(f"📊 Connections for this room: {len(self.room_connections[room_id])}")
+            logger.info(f"📊 Connections for this user: {len(self.user_connections[user_id])}")
         except Exception as e:
             logger.error(f"❌ Failed to connect WebSocket to room {room_id}: {e}")
             raise
-    
+
     async def disconnect_from_room(self, websocket: WebSocket, room_id: str, user_id: str):
         """
         Disconnect a WebSocket from a chat room
@@ -444,11 +449,42 @@ class WebSocketManager:
                 del self.room_connections[room_id]
                 logger.info(f"🧹 Cleaned up empty room {room_id}")
         
+        # Also remove from user_connections - handle list correctly
+        if hasattr(self, 'user_connections') and user_id in self.user_connections:
+            if isinstance(self.user_connections[user_id], list):
+                self.user_connections[user_id] = [
+                    ws for ws in self.user_connections[user_id]
+                    if ws != websocket
+                ]
+                if not self.user_connections[user_id]:
+                    del self.user_connections[user_id]
+                    logger.info(f"🧹 No more active connections for user {user_id}")
+            elif self.user_connections[user_id] == websocket:
+                del self.user_connections[user_id]
+                logger.info(f"🧹 No more active connections for user {user_id}")
+
         # Also remove from active connections
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
         
         logger.info(f"💬 WebSocket disconnected from room {room_id} for user {user_id}")
+
+    def is_user_connected(self, user_id: str) -> bool:
+        """Check if a user has any active WebSocket connections"""
+        # 1. Check global user-level connections list
+        if hasattr(self, 'user_connections') and user_id in self.user_connections:
+            conns = self.user_connections[user_id]
+            if isinstance(conns, list) and len(conns) > 0:
+                return True
+            elif not isinstance(conns, list) and conns:
+                return True
+        
+        # 2. Fallback: Check all room connections as a safety measure
+        for connections in self.room_connections.values():
+            if any(conn["user_id"] == user_id for conn in connections):
+                return True
+            
+        return False
     
     async def broadcast_to_room(
         self, 
@@ -464,56 +500,73 @@ class WebSocketManager:
             message: Message data to broadcast
             exclude_user_id: Optional user ID to exclude (e.g., message sender)
         """
-        if room_id not in self.room_connections:
-            logger.debug(f"📡 No active connections for room {room_id}")
-            return
-        
-        broken_connections = []
-        sent_count = 0
-        
-        for conn_info in self.room_connections[room_id]:
-            websocket = conn_info["websocket"]
-            user_id = conn_info["user_id"]
+        # 1. Deliver to everyone actively watching this room
+        sent_to_room = 0
+        if room_id in self.room_connections:
+            broken_connections = []
+            for conn_info in self.room_connections[room_id]:
+                websocket = conn_info["websocket"]
+                user_id = conn_info["user_id"]
+                
+                if exclude_user_id and user_id == exclude_user_id:
+                    continue
+                
+                try:
+                    await websocket.send_json(message)
+                    sent_to_room += 1
+                except Exception as e:
+                    logger.error(f"❌ Failed to send message to user {user_id} in room {room_id}: {e}")
+                    broken_connections.append(conn_info)
             
-            # Skip excluded user if specified
-            if exclude_user_id and user_id == exclude_user_id:
-                continue
-            
+            for conn_info in broken_connections:
+                if conn_info in self.room_connections[room_id]:
+                    self.room_connections[room_id].remove(conn_info)
+
+        # 2. For new messages, also deliver to the global user-level WebSockets of all participants
+        # This ensures unread counts update even if the room isn't open
+        sent_to_users = 0
+        if message.get("type") == "new_message":
             try:
-                await websocket.send_json(message)
-                sent_count += 1
+                from services.messaging.messaging_service import messaging_service
+                # We need the participant list to know who to notify globally
+                # (Ideally we'd have this in the message or state, but fetching from DB is safest for now)
+                participants = await messaging_service.get_room_participants(room_id)
+                participant_ids = [p['user_id'] for p in participants]
+                
+                for p_id in participant_ids:
+                    if exclude_user_id and p_id == exclude_user_id:
+                        continue
+                    
+                    # Skip if they already received it via the room connection
+                    # (Simple check: if they have an active room connection, we skip the global one to avoid duplicates)
+                    if room_id in self.room_connections and any(c["user_id"] == p_id for c in self.room_connections[room_id]):
+                        continue
+                        
+                    if hasattr(self, 'user_connections') and p_id in self.user_connections:
+                        connections = self.user_connections[p_id]
+                        for websocket in (connections if isinstance(connections, list) else [connections]):
+                            try:
+                                await websocket.send_json(message)
+                                sent_to_users += 1
+                            except:
+                                pass
             except Exception as e:
-                logger.error(f"❌ Failed to send message to user {user_id} in room {room_id}: {e}")
-                broken_connections.append(conn_info)
-        
-        # Clean up broken connections
-        for conn_info in broken_connections:
-            if conn_info in self.room_connections[room_id]:
-                self.room_connections[room_id].remove(conn_info)
-        
-        if sent_count > 0:
-            logger.info(f"✅ Broadcast message to {sent_count} users in room {room_id}")
+                logger.error(f"❌ Failed to broadcast new message globally: {e}")
+
+        if sent_to_room > 0 or sent_to_users > 0:
+            logger.info(f"✅ Broadcast message type '{message.get('type')}' to {sent_to_room} room and {sent_to_users} user connections")
         else:
             logger.debug(f"📡 No recipients for broadcast in room {room_id}")
     
     async def broadcast_presence_update(self, user_id: str, status: str, status_message: str = None):
         """
-        Broadcast user presence update to all relevant rooms
+        Broadcast user presence update to all relevant rooms and interested participants
         
         Args:
             user_id: User whose presence changed
             status: New status ('online', 'offline', 'away')
             status_message: Optional status message
         """
-        # Find all rooms this user is in
-        rooms_with_user = []
-        for room_id, connections in self.room_connections.items():
-            if any(conn["user_id"] == user_id for conn in connections):
-                rooms_with_user.append(room_id)
-        
-        if not rooms_with_user:
-            return
-        
         presence_message = {
             "type": "presence_update",
             "user_id": user_id,
@@ -521,12 +574,63 @@ class WebSocketManager:
             "status_message": status_message,
             "timestamp": datetime.utcnow().isoformat()
         }
+
+        # Find all rooms this user belongs to (from DB to include rooms they just left)
+        # We use the messaging_service to get the rooms
+        try:
+            from services.messaging.messaging_service import messaging_service
+            user_rooms = await messaging_service.get_user_rooms(user_id=user_id, limit=100, include_participants=False)
+            room_ids = [r['room_id'] for r in user_rooms]
+            
+            # 1. Broadcast to all active room connections for these rooms
+            for room_id in room_ids:
+                if room_id in self.room_connections:
+                    await self.broadcast_to_room(room_id, presence_message)
+            
+            # 2. Broadcast to all active user-level connections
+            # Since we don't want to spam everyone, we only broadcast to those who share a room
+            # but for simplicity and to ensure it works, we can broadcast to all active user connections
+            # who are NOT the user themselves.
+            if hasattr(self, 'user_connections'):
+                for other_user_id, connections in self.user_connections.items():
+                    if other_user_id == user_id:
+                        continue
+                    
+                    for websocket in (connections if isinstance(connections, list) else [connections]):
+                        try:
+                            await websocket.send_json(presence_message)
+                        except:
+                            pass
+
+            logger.info(f"✅ Broadcast presence update for user {user_id} ({status}) to all active connections")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to broadcast presence update: {e}")
+
+    async def broadcast_to_users(self, user_ids: List[str], message: Dict[str, Any]):
+        """
+        Broadcast a message to the user-level WebSockets of specific users
         
-        # Broadcast to all rooms where this user is a participant
-        for room_id in rooms_with_user:
-            await self.broadcast_to_room(room_id, presence_message)
+        Args:
+            user_ids: List of user IDs to notify
+            message: Message data to broadcast
+        """
+        if not hasattr(self, 'user_connections'):
+            return
+            
+        sent_count = 0
+        for user_id in user_ids:
+            if user_id in self.user_connections:
+                connections = self.user_connections[user_id]
+                for websocket in (connections if isinstance(connections, list) else [connections]):
+                    try:
+                        await websocket.send_json(message)
+                        sent_count += 1
+                    except:
+                        pass
         
-        logger.info(f"✅ Broadcast presence update for user {user_id} to {len(rooms_with_user)} rooms")
+        if sent_count > 0:
+            logger.info(f"✅ Broadcast message type '{message.get('type')}' to {sent_count} user connections")
 
     def get_connection_count(self) -> int:
         """Get the number of active connections"""

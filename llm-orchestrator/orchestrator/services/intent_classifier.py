@@ -84,7 +84,7 @@ def infer_action_from_agent(agent_name: str) -> Optional[str]:
         "org_inbox_agent": "management",
         "org_project_agent": "management",
         "website_crawler_agent": "management",
-        "substack_agent": "generation",
+        "article_writing_agent": "generation",
         "podcast_script_agent": "generation",
         "email_agent": "generation",
         "data_formatting_agent": "modification",
@@ -721,7 +721,7 @@ class IntentClassifier:
 			agents_requiring_web_search = {
 				'research_agent',  # Always needs web search for research
 				'site_crawl_agent',  # Always needs web search for crawling
-				'substack_agent',  # Has built-in research capability
+				'article_writing_agent',  # Has built-in research capability
 			}
 			
 			# Electronics agent may need web search for component research
@@ -1280,7 +1280,7 @@ Every query has a PRIMARY action intent that determines routing behavior:
   - TRIGGERS: "create podcast", "generate script", "do you see script", "write podcast episode"
   - AVOID: general podcast questions without editor context
 
-- **substack_agent**
+- **article_writing_agent**
   - ACTION INTENTS: observation, generation, modification
   - USE FOR: Generate long-form articles OR tweet-sized posts, view article content (type: substack/blog editors)
   - HAS BUILT-IN RESEARCH: Can automatically research topics and incorporate findings
@@ -1297,7 +1297,7 @@ Every query has a PRIMARY action intent that determines routing behavior:
   - AVOID: 
     * Document-specific queries (use content_analysis_agent): "summarize file X", "our document called Y"
     * Document comparison (use content_analysis_agent): "compare documents", "find conflicts"
-    * Article generation (use substack_agent)
+    * Article generation (use article_writing_agent)
     * Observation queries (use chat_agent)
 
 - **chat_agent**
@@ -1436,7 +1436,7 @@ ROUTING HINTS FOR PROJECT CAPTURE:
 **STRICT OUTPUT FORMAT - JSON ONLY (NO MARKDOWN, NO EXPLANATION):**
 You MUST respond with a single JSON object matching this schema:
 {{
-  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|style_editing_agent|data_formatting_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_inbox_agent|org_project_agent|website_crawler_agent|podcast_script_agent|substack_agent|entertainment_agent|weather_agent|electronics_agent",
+  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|style_editing_agent|data_formatting_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_inbox_agent|org_project_agent|website_crawler_agent|podcast_script_agent|article_writing_agent|entertainment_agent|weather_agent|electronics_agent",
   "action_intent": "observation|generation|modification|analysis|query|management",
   "permission_required": false,
   "confidence": 0.0,
@@ -1665,7 +1665,7 @@ You MUST respond with a single JSON object matching this schema:
 			agents_requiring_web_search = {
 				'research_agent',
 				'site_crawl_agent',
-				'substack_agent',
+				'article_writing_agent',
 			}
 			
 			# Electronics agent may need web search
@@ -1761,7 +1761,7 @@ You MUST respond with a single JSON object matching this schema:
 			agents_requiring_web_search = {
 				'research_agent',
 				'site_crawl_agent',
-				'substack_agent',
+				'article_writing_agent',
 			}
 			
 			electronics_needs_web = (

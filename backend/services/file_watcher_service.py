@@ -40,7 +40,19 @@ class DocumentFileHandler(FileSystemEventHandler):
         """
         path_lower = path.lower()
         
-        # **BULLY!** NEVER ignore directories - only filter files!
+        # **BULLY!** Ignore sensitive system and log directories!
+        # This prevents "log leakage" into the vector database
+        ignored_dirs = [
+            '/logs/', '\\logs\\', 
+            '/processed/', '\\processed\\',
+            '/node_modules/', '\\node_modules\\',
+            '/.git/', '\\.git\\',
+            '/.cursor/', '\\.cursor\\'
+        ]
+        if any(ignored in path_lower for ignored in ignored_dirs):
+            return True
+
+        # **BULLY!** NEVER ignore other directories - only filter files!
         if is_directory:
             # Ignore hidden directories
             if '/.~' in path or '\\.~' in path:

@@ -3,7 +3,7 @@ Fiction Agent Subgraphs
 
 Reusable subgraphs for fiction editing workflows:
 - Context Preparation: Chapter detection, reference loading, scope analysis
-- Validation: Continuity tracking, outline sync, consistency checks
+- Validation: Outline sync, consistency checks
 - Generation: Context assembly, prompt building, LLM calls, output validation
 - Resolution: Operation resolution with progressive search, validation, finalization
 """

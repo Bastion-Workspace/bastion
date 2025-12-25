@@ -73,6 +73,13 @@ class URLImportRequest(BaseModel):
     content_type: str = Field(default="auto", description="Content type hint")
 
 
+class ImportImageRequest(BaseModel):
+    """Request to import a generated image into the document library"""
+    image_url: str = Field(..., description="URL path to the image (e.g., /static/images/filename.png)")
+    filename: Optional[str] = Field(None, description="Optional filename for the imported image")
+    folder_id: Optional[str] = Field(None, description="Target folder ID for the imported image")
+
+
 class QueryRequest(BaseModel):
     """Natural language query request"""
     query: str = Field(..., description="Natural language query")
@@ -740,3 +747,5 @@ class EpubExportRequest(BaseModel):
     split_on_heading_levels: List[int] = Field(default_factory=lambda: [1, 2], description="Heading levels to split on (1-6)")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Metadata such as title, author, language, cover")
     heading_alignments: Dict[int, str] = Field(default_factory=dict, description="Per-heading alignment: {level: left|center|right|justify}")
+    indent_paragraphs: bool = Field(default=True, description="Indent paragraphs (traditional book style)")
+    no_indent_first_paragraph: bool = Field(default=True, description="Don't indent first paragraph in each section")

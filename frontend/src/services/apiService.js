@@ -58,6 +58,7 @@ class ApiService {
   uploadUserDocument = (file, userId) => this.documents.uploadUserDocument(file, userId);
   uploadMultipleDocuments = (files) => this.documents.uploadMultipleDocuments(files);
   importFromUrl = (url) => this.documents.importFromUrl(url);
+  importImage = (imageUrl, filename, folderId) => this.documents.importImage(imageUrl, filename, folderId);
   deleteDocument = (documentId) => this.documents.deleteDocument(documentId);
   reprocessDocument = (documentId) => this.documents.reprocessDocument(documentId);
   reprocessUserDocument = (documentId) => this.documents.reprocessUserDocument(documentId);

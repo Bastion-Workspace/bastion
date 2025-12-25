@@ -128,3 +128,4 @@ const FormulaBar = ({
 
 export default FormulaBar;
 
+

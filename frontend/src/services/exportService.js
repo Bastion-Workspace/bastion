@@ -1296,6 +1296,8 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
       split_on_heading_levels: Array.isArray(options.splitOnHeadingLevels) ? options.splitOnHeadingLevels : [1, 2],
       metadata: options.metadata || {},
       heading_alignments: options.headingAlignments || {},
+      indent_paragraphs: options.indentParagraphs !== false,
+      no_indent_first_paragraph: options.noIndentFirstParagraph !== false,
     };
 
     // Direct fetch to receive blob

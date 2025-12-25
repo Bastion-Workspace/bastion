@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # CORS - Allow all origins for development and reverse proxies
     CORS_ORIGINS: List[str] = ["*"]
     
+    # Site URL Configuration
+    SITE_URL: str = "http://localhost:3051"  # Base URL for HTTP-Referer headers and external links
+    
     # Database URLs
     DATABASE_URL: str = "postgresql://bastion_user:bastion_secure_password@localhost:5432/bastion_knowledge_base"
     QDRANT_URL: str = "http://localhost:6333"

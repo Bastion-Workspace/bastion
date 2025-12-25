@@ -20,7 +20,7 @@ from orchestrator.agents import (
     # FactCheckingAgent removed - not actively used
     get_rss_agent,
     get_org_inbox_agent,
-    get_substack_agent,
+    get_article_writing_agent,
     get_podcast_script_agent,
     get_org_project_agent,
     get_entertainment_agent,
@@ -69,7 +69,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         # FactCheckingAgent removed - not actively used
         self.rss_agent = None
         self.org_inbox_agent = None
-        self.substack_agent = None
+        self.article_writing_agent = None
         self.podcast_script_agent = None
         self.org_project_agent = None
         self.entertainment_agent = None
@@ -132,8 +132,8 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             self.org_inbox_agent = get_org_inbox_agent()
             agents_loaded += 1
         
-        if self.substack_agent is None:
-            self.substack_agent = get_substack_agent()
+        if self.article_writing_agent is None:
+            self.article_writing_agent = get_article_writing_agent()
             agents_loaded += 1
         
         if self.podcast_script_agent is None:
@@ -2412,27 +2412,27 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="system"
                 )
             
-            elif agent_type == "substack":
+            elif agent_type in ["substack", "article_writing"]:  # Support both for backward compatibility
                 yield orchestrator_pb2.ChatChunk(
                     type="status",
-                    message="Substack agent generating article...",
+                    message="Article writing agent generating article...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="substack_agent"
+                    agent_name="article_writing_agent"
                 )
                 
                 # Build metadata with shared_memory (STANDARD PATTERN)
                 shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
                 
-                substack_metadata = {
+                article_writing_metadata = {
                     "user_id": request.user_id,
                     "conversation_id": request.conversation_id,
                     "shared_memory": shared_memory,
                     **{k: v for k, v in metadata.items() if k != "shared_memory"}
                 }
                 
-                result = await self.substack_agent.process(
+                result = await self.article_writing_agent.process(
                     query=request.query,
-                    metadata=substack_metadata,
+                    metadata=article_writing_metadata,
                     messages=messages
                 )
                 
@@ -2456,13 +2456,13 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                         type="editor_operations",
                         message=json.dumps(editor_ops_data),
                         timestamp=datetime.now().isoformat(),
-                        agent_name="substack_agent"
+                        agent_name="article_writing_agent"
                     )
                     yield orchestrator_pb2.ChatChunk(
                         type="content",
                         message=response_text,
                         timestamp=datetime.now().isoformat(),
-                        agent_name="substack_agent"
+                        agent_name="article_writing_agent"
                     )
                 else:
                     # Generation mode: send content normally
@@ -2470,7 +2470,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                         type="content",
                         message=response_text,
                         timestamp=datetime.now().isoformat(),
-                        agent_name="substack_agent"
+                        agent_name="article_writing_agent"
                     )
                 
                 yield orchestrator_pb2.ChatChunk(

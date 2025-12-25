@@ -31,3 +31,4 @@ CREATE POLICY chat_rooms_delete_policy ON chat_rooms
 
 
 
+

@@ -36,6 +36,7 @@ import RenameRoomModal from './RenameRoomModal';
 import AddParticipantModal from './AddParticipantModal';
 
 const MessagingDrawer = () => {
+  const { user } = useMessaging();
   const {
     isDrawerOpen,
     toggleDrawer,
@@ -178,7 +179,10 @@ const MessagingDrawer = () => {
             </ListItem>
           ) : (
             rooms.map((room) => {
-              const otherUser = room.participants?.find(p => p.user_id !== room.created_by);
+              // Find the other participant (the one who isn't the current user)
+              // We use user?.user_id for current user context, falling back to room.created_by if needed
+              const currentUserId = user?.user_id;
+              const otherUser = room.participants?.find(p => p.user_id !== currentUserId);
               const displayName = room.display_name || room.room_name || 'Unnamed Room';
               const userStatus = otherUser ? getUserPresence(otherUser.user_id) : 'offline';
               const isTeamRoom = !!room.team_id;

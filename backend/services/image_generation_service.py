@@ -85,8 +85,8 @@ class ImageGenerationService:
             # Attempt OpenRouter images endpoint first; fallback to responses API if needed
             headers = {
                 "Authorization": f"Bearer {api_key}",
-                "HTTP-Referer": "https://codex.local",
-                "X-Title": "Codex Image Generation",
+                "HTTP-Referer": settings.SITE_URL,
+                "X-Title": "Bastion Image Generation",
                 "Content-Type": "application/json",
             }
 
