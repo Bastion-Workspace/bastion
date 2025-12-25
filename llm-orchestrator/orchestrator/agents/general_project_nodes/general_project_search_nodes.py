@@ -114,7 +114,14 @@ class GeneralProjectSearchNodes:
             logger.info(f"Information needs analyzed: {len(result_dict.get('information_gaps', []))} gaps identified")
             
             return {
-                "information_needs": result_dict
+                "information_needs": result_dict,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {})
             }
             
         except Exception as e:
@@ -129,7 +136,14 @@ class GeneralProjectSearchNodes:
                     "detail_level": "detailed",
                     "related_sections": [],
                     "search_focus": query
-                }
+                },
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {})
             }
     
     async def generate_project_aware_queries_node(self, state) -> Dict[str, Any]:
@@ -210,7 +224,15 @@ class GeneralProjectSearchNodes:
             return {
                 "search_queries": search_queries,
                 "query_expansion_used": result_dict.get("query_expansion_used", False),
-                "search_retry_count": search_retry_count
+                "search_retry_count": search_retry_count,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "information_needs": state.get("information_needs", {})
             }
             
         except Exception as e:
@@ -218,7 +240,15 @@ class GeneralProjectSearchNodes:
             # Fallback to simple query
             return {
                 "search_queries": [{"query": query, "priority": 1, "focus": "General search"}],
-                "query_expansion_used": False
+                "query_expansion_used": False,
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "information_needs": state.get("information_needs", {})
             }
     
     async def search_content_node(self, state) -> Dict[str, Any]:
@@ -304,7 +334,15 @@ class GeneralProjectSearchNodes:
                 "documents": documents,
                 "segments": segments_list,
                 "web_search_explicit": is_explicit_web_request,
-                "documents_found_count": len(documents)
+                "documents_found_count": len(documents),
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "search_queries": state.get("search_queries", [])
             }
         except Exception as e:
             logger.error(f"Search content failed: {e}")
@@ -315,7 +353,15 @@ class GeneralProjectSearchNodes:
                 "segments": [],
                 "web_search_explicit": False,
                 "documents_found_count": 0,
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "search_queries": state.get("search_queries", [])
             }
     
     async def assess_result_quality_node(self, state) -> Dict[str, Any]:
@@ -472,7 +518,18 @@ Return ONLY valid JSON:
             logger.info(f"Search quality assessment: score={quality_score:.2f}, needs_web={result_dict.get('needs_web_search')}, re_search={result_dict.get('should_re_search')}")
             
             return {
-                "search_quality_assessment": result_dict
+                "search_quality_assessment": result_dict,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "documents": state.get("documents", []),
+                "segments": state.get("segments", []),
+                "search_queries": state.get("search_queries", []),
+                "search_retry_count": state.get("search_retry_count", 0)
             }
             
         except Exception as e:
@@ -486,7 +543,18 @@ Return ONLY valid JSON:
                     "should_re_search": False,
                     "reasoning": "Assessment failed, defaulting to web search",
                     "missing_information": []
-                }
+                },
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "documents": state.get("documents", []),
+                "segments": state.get("segments", []),
+                "search_queries": state.get("search_queries", []),
+                "search_retry_count": state.get("search_retry_count", 0)
             }
 
 

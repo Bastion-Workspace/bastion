@@ -33,10 +33,13 @@ import {
   MoreVert as MoreVertIcon,
   FilterList as FilterIcon,
   ArrowUpward as ArrowUpwardIcon,
-  ArrowDownward as ArrowDownwardIcon
+  ArrowDownward as ArrowDownwardIcon,
+  Functions as FunctionsIcon,
+  Refresh as RefreshIcon
 } from '@mui/icons-material';
 
 import dataWorkspaceService from '../../services/dataWorkspaceService';
+import FormulaBar from './FormulaBar';
 
 const DataTableView = ({ 
   tableId, 
@@ -59,6 +62,8 @@ const DataTableView = ({
   const [rowToDelete, setRowToDelete] = useState(null);
   const [sortColumn, setSortColumn] = useState(null);
   const [sortDirection, setSortDirection] = useState('asc'); // 'asc' or 'desc'
+  const [selectedCell, setSelectedCell] = useState(null); // { rowId, columnName, rowIndex, columnIndex }
+  const [recalculating, setRecalculating] = useState(false);
 
   useEffect(() => {
     if (tableId) {
@@ -75,6 +80,12 @@ const DataTableView = ({
       const response = await dataWorkspaceService.getTableData(tableId, offset, rowsPerPage);
       
       let loadedRows = response.rows || [];
+      
+      // Ensure formula_data exists for each row
+      loadedRows = loadedRows.map(row => ({
+        ...row,
+        formula_data: row.formula_data || {}
+      }));
       
       // Apply client-side sorting if a sort column is set
       if (sortColumn) {
@@ -151,21 +162,91 @@ const DataTableView = ({
   const handleCellDoubleClick = (row, column) => {
     if (readOnly || editingRow) return; // Don't allow cell edit if already editing row
     
+    const columnIndex = schema.columns.findIndex(c => c.name === column.name);
+    setSelectedCell({
+      rowId: row.row_id,
+      columnName: column.name,
+      rowIndex: row.row_index,
+      columnIndex: columnIndex
+    });
+    
     setEditingCell({ rowId: row.row_id, columnName: column.name });
-    setEditingData({ [column.name]: row.row_data[column.name] });
+    const cellValue = row.row_data[column.name];
+    const formula = row.formula_data && row.formula_data[column.name] ? row.formula_data[column.name] : null;
+    setEditingData({ [column.name]: formula || cellValue });
+  };
+  
+  const handleCellClick = (row, column) => {
+    if (readOnly) return;
+    
+    const columnIndex = schema.columns.findIndex(c => c.name === column.name);
+    setSelectedCell({
+      rowId: row.row_id,
+      columnName: column.name,
+      rowIndex: row.row_index,
+      columnIndex: columnIndex
+    });
+  };
+  
+  const isFormula = (value) => {
+    return typeof value === 'string' && value.trim().startsWith('=');
+  };
+  
+  const getCellFormula = (row, columnName) => {
+    return row.formula_data && row.formula_data[columnName] ? row.formula_data[columnName] : null;
+  };
+  
+  const handleFormulaSave = async (formula) => {
+    if (!selectedCell) return;
+    
+    try {
+      const isFormulaValue = isFormula(formula);
+      await dataWorkspaceService.updateTableCell(
+        tableId,
+        selectedCell.rowId,
+        selectedCell.columnName,
+        isFormulaValue ? null : formula,
+        isFormulaValue ? formula : null
+      );
+      
+      await loadData();
+      if (onDataChange) onDataChange();
+    } catch (err) {
+      console.error('Failed to save formula:', err);
+      setError(err.message || 'Failed to save formula');
+    }
+  };
+  
+  const handleRecalculate = async () => {
+    try {
+      setRecalculating(true);
+      setError(null);
+      await dataWorkspaceService.recalculateTable(tableId);
+      await loadData();
+      if (onDataChange) onDataChange();
+    } catch (err) {
+      console.error('Failed to recalculate:', err);
+      setError(err.message || 'Failed to recalculate formulas');
+    } finally {
+      setRecalculating(false);
+    }
   };
 
   const handleSaveCellEdit = async (rowId, columnName) => {
     try {
-      await dataWorkspaceService.updateTableCell(tableId, rowId, columnName, editingData[columnName]);
+      const value = editingData[columnName];
+      const formulaValue = isFormula(value) ? value : null;
+      const actualValue = isFormula(value) ? null : value;
       
-      // Update local state
-      const updatedRows = rows.map(row => 
-        row.row_id === rowId 
-          ? { ...row, row_data: { ...row.row_data, [columnName]: editingData[columnName] } }
-          : row
+      await dataWorkspaceService.updateTableCell(
+        tableId,
+        rowId,
+        columnName,
+        actualValue,
+        formulaValue
       );
-      setRows(updatedRows);
+      
+      await loadData();
       setEditingCell(null);
       setEditingData({});
       
@@ -278,7 +359,9 @@ const DataTableView = ({
     const isEditingRow = editingRow === row.row_id;
     const isEditingCell = editingCell?.rowId === row.row_id && editingCell?.columnName === column.name;
     const isEditing = isEditingRow || isEditingCell;
+    const cellFormula = getCellFormula(row, column.name);
     const value = isEditing ? editingData[column.name] : row.row_data[column.name];
+    const hasFormula = cellFormula !== null;
     
     if (!isEditing) {
       let displayValue = value;
@@ -292,18 +375,23 @@ const DataTableView = ({
       
       return (
         <Box
+          onClick={() => handleCellClick(row, column)}
           onDoubleClick={() => handleCellDoubleClick(row, column)}
           sx={{
             cursor: readOnly ? 'default' : 'pointer',
             minHeight: 24,
             display: 'flex',
             alignItems: 'center',
+            gap: 0.5,
             '&:hover': readOnly ? {} : {
               backgroundColor: 'action.hover',
               borderRadius: 0.5
             }
           }}
         >
+          {hasFormula && (
+            <FunctionsIcon fontSize="small" sx={{ color: 'primary.main', fontSize: 16 }} />
+          )}
           <Typography 
             variant="body2" 
             sx={{ 
@@ -446,8 +534,25 @@ const DataTableView = ({
     );
   }
 
+  const getSelectedCellFormula = () => {
+    if (!selectedCell) return null;
+    const row = rows.find(r => r.row_id === selectedCell.rowId);
+    if (!row || !row.formula_data) return null;
+    return row.formula_data[selectedCell.columnName] || null;
+  };
+
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      {/* Formula Bar */}
+      {!readOnly && (
+        <FormulaBar
+          selectedCell={selectedCell}
+          formula={getSelectedCellFormula()}
+          onSave={handleFormulaSave}
+          onCancel={() => setSelectedCell(null)}
+        />
+      )}
+      
       {/* Toolbar */}
       <Box sx={{ p: 2, display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: 1, borderColor: 'divider' }}>
         <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
@@ -460,16 +565,29 @@ const DataTableView = ({
             </Typography>
           )}
         </Box>
-        {!readOnly && (
-          <Button
-            variant="contained"
-            startIcon={<AddIcon />}
-            onClick={handleAddRow}
-            size="small"
-          >
-            Add Row
-          </Button>
-        )}
+        <Box sx={{ display: 'flex', gap: 1 }}>
+          {!readOnly && (
+            <>
+              <Button
+                variant="outlined"
+                startIcon={<RefreshIcon />}
+                onClick={handleRecalculate}
+                size="small"
+                disabled={recalculating}
+              >
+                {recalculating ? 'Recalculating...' : 'Recalculate'}
+              </Button>
+              <Button
+                variant="contained"
+                startIcon={<AddIcon />}
+                onClick={handleAddRow}
+                size="small"
+              >
+                Add Row
+              </Button>
+            </>
+          )}
+        </Box>
       </Box>
 
       {/* Data Table */}

@@ -24,6 +24,7 @@ from .gap_analysis_subgraph import build_gap_analysis_subgraph
 from .web_research_subgraph import build_web_research_subgraph
 from .assessment_subgraph import build_assessment_subgraph
 from .full_document_analysis_subgraph import build_full_document_analysis_subgraph
+from .entity_relationship_subgraph import build_entity_relationship_subgraph
 
 __all__ = [
     "build_context_preparation_subgraph",
@@ -39,6 +40,7 @@ __all__ = [
     "build_gap_analysis_subgraph",
     "build_web_research_subgraph",
     "build_assessment_subgraph",
-    "build_full_document_analysis_subgraph"
+    "build_full_document_analysis_subgraph",
+    "build_entity_relationship_subgraph"
 ]
 

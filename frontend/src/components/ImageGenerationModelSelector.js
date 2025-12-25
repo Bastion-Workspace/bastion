@@ -13,7 +13,10 @@ const ImageGenerationModelSelector = ({ enabledModels, modelsData, modelsLoading
     'imageGenerationModelSetting',
     async () => {
       const cat = await apiService.settings.getSettingsByCategory('llm');
-      return cat?.settings?.image_generation_model?.value || '';
+      // API returns {category, settings: {image_generation_model: "value"}, count}
+      // settings is a flat dict where keys map directly to values
+      const value = cat?.settings?.image_generation_model;
+      return value || '';
     },
     {
       onSuccess: (value) => setSelectedImageModel(value || '')

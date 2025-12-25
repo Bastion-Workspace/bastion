@@ -1474,11 +1474,12 @@ Example for "How should I structure a research paper?":
             
             # Log what we have for synthesis
             round1_content_len = len(round1_results.get("search_results", "")) if round1_results else 0
+            round1_entity_len = len(round1_results.get("entity_graph_results", "")) if round1_results else 0
             round2_content_len = len(round2_results.get("gap_results", "")) if round2_results else 0
             web1_content_len = len(web_round1_results.get("content", "")) if web_round1_results else 0
             web2_content_len = len(web_round2_results.get("content", "")) if web_round2_results else 0
             full_doc_content_len = len(full_doc_synthesis) if full_doc_synthesis else 0
-            logger.info(f"📊 Synthesis node received: round1={round1_content_len} chars, round2={round2_content_len} chars, web1={web1_content_len} chars, web2={web2_content_len} chars, full_doc={full_doc_content_len} chars")
+            logger.info(f"📊 Synthesis node received: round1={round1_content_len} chars, round1_entity={round1_entity_len} chars, round2={round2_content_len} chars, web1={web1_content_len} chars, web2={web2_content_len} chars, full_doc={full_doc_content_len} chars")
             
             logger.info("Synthesizing final response from all sources")
             
@@ -1489,7 +1490,14 @@ Example for "How should I structure a research paper?":
                 context_parts.append(f"CACHED RESEARCH:\n{cached_context}")
             
             if round1_results:
-                context_parts.append(f"LOCAL SEARCH ROUND 1:\n{round1_results.get('search_results', '')[:20000]}")
+                local_content = round1_results.get('search_results', '')
+                entity_graph_content = round1_results.get('entity_graph_results', '')  # NEW
+                
+                if local_content:
+                    context_parts.append(f"LOCAL SEARCH ROUND 1:\n{local_content[:20000]}")
+                
+                if entity_graph_content:  # NEW
+                    context_parts.append(f"ENTITY GRAPH SEARCH (Knowledge Graph):\n{entity_graph_content[:15000]}")
             
             if round2_results:
                 context_parts.append(f"LOCAL SEARCH ROUND 2:\n{round2_results.get('gap_results', '')[:20000]}")

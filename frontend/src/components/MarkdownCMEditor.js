@@ -508,6 +508,17 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
     };
   }, []);
 
+  // Clean up decorations on unmount to prevent duplicates
+  useEffect(() => {
+    return () => {
+      // Clear any pending decoration updates
+      if (window.__decorationCleanupTimeout) {
+        clearTimeout(window.__decorationCleanupTimeout);
+        window.__decorationCleanupTimeout = null;
+      }
+    };
+  }, []);
+
   // ROOSEVELT'S EDITOR OPS APPLY: Listen for editor operations and apply to content with optimistic concurrency
   useEffect(() => {
     // Simple undo stack for apply batches
@@ -838,6 +849,7 @@ export default function MarkdownCMEditor({ value, onChange, filename, canonicalP
       {/* Memoize update listener to avoid reconfiguring extensions on every render */}
       {useMemo(() => (
         <CodeMirror
+        key={documentId || 'no-doc'}  // ✅ Stable key prevents recreation
         value={value}
         height="100%"
         basicSetup={false}

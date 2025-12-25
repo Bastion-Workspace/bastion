@@ -8,9 +8,11 @@
 
 class DocumentDiffStore {
   constructor() {
+    // Get current user from localStorage (set by auth system)
+    const currentUser = localStorage.getItem('user_id') || 'anonymous';
     this.diffs = {}; // { [documentId]: { operations: [], messageId, timestamp, contentHash } }
     this.listeners = new Set();
-    this.storageKey = 'document_diffs_store';
+    this.storageKey = `document_diffs_store_${currentUser}`; // ✅ User-specific storage
     this.loadFromStorage();
   }
 
@@ -70,21 +72,52 @@ class DocumentDiffStore {
    * @param {string} operationId - Operation ID to remove
    */
   removeDiff(documentId, operationId) {
-    if (!documentId || !operationId) return;
+    console.log('🔍 removeDiff called:', { documentId, operationId });
+    
+    if (!documentId || !operationId) {
+      console.warn('⚠️ removeDiff: Missing documentId or operationId');
+      return;
+    }
 
     const docDiffs = this.diffs[documentId];
-    if (!docDiffs || !Array.isArray(docDiffs.operations)) return;
+    if (!docDiffs || !Array.isArray(docDiffs.operations)) {
+      console.warn('⚠️ removeDiff: No diffs found for document:', documentId);
+      return;
+    }
+
+    console.log('🔍 removeDiff: Current operations:', docDiffs.operations.length, 
+                'Operations:', docDiffs.operations.map(op => ({
+                  operationId: op.operationId,
+                  id: op.id,
+                  start: op.start,
+                  end: op.end,
+                  fallbackId: op.start + '-' + op.end
+                })));
 
     const initialLength = docDiffs.operations.length;
     docDiffs.operations = docDiffs.operations.filter(op => {
       // Operation ID can be in various formats
       const opId = op.operationId || op.id || op.start + '-' + op.end;
-      return opId !== operationId && String(opId) !== String(operationId);
+      const matches = opId === operationId || String(opId) === String(operationId);
+      console.log('🔍 Checking operation:', { opId, operationId, matches });
+      return !matches;
     });
 
+    console.log('🔍 removeDiff: After filter:', docDiffs.operations.length, 'removed:', initialLength - docDiffs.operations.length);
+
     if (docDiffs.operations.length !== initialLength) {
+      // ✅ If no operations left, clear the entire document entry
+      if (docDiffs.operations.length === 0) {
+        console.log('🗑️ No diffs remaining for document, clearing entry:', documentId);
+        delete this.diffs[documentId];
+      }
+      
       this.saveToStorage();
       this.notify(documentId, 'remove');
+      
+      console.log('✅ Removed diff, remaining count:', docDiffs.operations.length);
+    } else {
+      console.warn('⚠️ removeDiff: No operations were removed! operationId not found:', operationId);
     }
   }
 
@@ -199,6 +232,7 @@ class DocumentDiffStore {
   subscribe(callback) {
     if (typeof callback === 'function') {
       this.listeners.add(callback);
+      console.log('📝 DocumentDiffStore: Listener subscribed, total listeners:', this.listeners.size);
     }
   }
 
@@ -208,6 +242,7 @@ class DocumentDiffStore {
    */
   unsubscribe(callback) {
     this.listeners.delete(callback);
+    console.log('📝 DocumentDiffStore: Listener unsubscribed, total listeners:', this.listeners.size);
   }
 
   /**
@@ -216,6 +251,13 @@ class DocumentDiffStore {
    * @param {string} changeType - Type of change: 'set', 'clear', 'remove', 'invalidate'
    */
   notify(documentId, changeType) {
+    console.log('📢 DocumentDiffStore: Notifying listeners', { 
+      documentId, 
+      changeType, 
+      listenerCount: this.listeners.size,
+      remainingDiffs: this.diffs[documentId]?.operations?.length || 0
+    });
+    
     this.listeners.forEach(callback => {
       try {
         callback(documentId, changeType);

@@ -112,6 +112,18 @@ AGENT_CAPABILITIES = {
         'keywords': [],
         'context_boost': 0
     },
+    'image_generation_agent': {
+        'domains': ['general', 'image', 'visual', 'art'],
+        'actions': ['generation'],
+        'editor_types': [],
+        'keywords': [
+            'create image', 'generate image', 'generate picture', 'draw', 'visualize',
+            'image', 'picture', 'photo', 'photography', 'create a picture',
+            'make an image', 'generate a photo', 'create a photo', 'draw a picture',
+            'create an image', 'make a picture', 'generate an image', 'create picture'
+        ],
+        'context_boost': 0
+    },
     'site_crawl_agent': {
         'domains': ['research', 'web', 'information'],
         'actions': ['query'],
@@ -241,7 +253,8 @@ def detect_domain(
                 'weather_agent': 'weather',
                 'research_agent': 'general',
                 'site_crawl_agent': 'general',
-                'reference_agent': 'general'
+                'reference_agent': 'general',
+                'image_generation_agent': 'general'
             }
             domain = agent_domain_map.get(last_agent)
             if domain:
@@ -373,7 +386,14 @@ def route_within_domain(
             # Conversational statements, greetings, checking status → chat_agent
             return 'chat_agent'
         elif action_intent == 'generation':
-            # For generation without editor context, default to chat_agent
+            # Check for image generation keywords first
+            image_keywords = ['create image', 'generate image', 'generate picture', 'draw', 'visualize',
+                            'image', 'picture', 'photo', 'photography', 'create a picture',
+                            'make an image', 'generate a photo', 'create a photo', 'draw a picture',
+                            'create an image', 'make a picture', 'generate an image', 'create picture']
+            if any(kw in query_lower for kw in image_keywords):
+                return 'image_generation_agent'
+            # For other generation without editor context, default to chat_agent
             # general_project_agent should only be selected via capability matching when editor is active
             return 'chat_agent'
         elif action_intent == 'modification':

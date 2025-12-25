@@ -12,7 +12,8 @@ from models.data_workspace_models import (
     ExecuteImportRequest, ImportJobResponse,
     TableDataResponse, InsertRowRequest, UpdateRowRequest, UpdateCellRequest,
     ShareWorkspaceRequest, WorkspaceShareResponse,
-    SQLQueryRequest, NaturalLanguageQueryRequest, QueryResultResponse
+    SQLQueryRequest, NaturalLanguageQueryRequest, QueryResultResponse,
+    RecalculateTableResponse
 )
 from models.api_models import AuthenticatedUserResponse
 from utils.auth_middleware import get_current_user
@@ -134,7 +135,11 @@ async def get_workspace(
             raise HTTPException(status_code=403, detail="Access denied")
         
         client = get_grpc_client()
-        workspace = await client.get_workspace(workspace_id)
+        workspace = await client.get_workspace(
+            workspace_id,
+            user_id=current_user.user_id,
+            user_team_ids=user_team_ids
+        )
         if not workspace:
             raise HTTPException(status_code=404, detail="Workspace not found")
         return workspace
@@ -201,7 +206,11 @@ async def delete_workspace(
             raise HTTPException(status_code=403, detail="Admin access required")
         
         client = get_grpc_client()
-        success = await client.delete_workspace(workspace_id)
+        success = await client.delete_workspace(
+            workspace_id,
+            user_id=current_user.user_id,
+            user_team_ids=user_team_ids
+        )
         if not success:
             raise HTTPException(status_code=404, detail="Workspace not found")
         return {"success": True, "message": "Workspace deleted successfully"}
@@ -455,7 +464,7 @@ async def list_tables(
     """List all tables in a database (requires read permission)"""
     try:
         # Verify workspace read access via database lookup
-        workspace_id = await get_workspace_for_database(database_id, current_user, client)
+        workspace_id = await get_workspace_for_database(database_id, current_user)
         
         client = get_grpc_client()
         user_team_ids = await _get_user_team_ids(current_user.user_id)
@@ -480,7 +489,7 @@ async def get_table(
     """Get a single table (requires read permission)"""
     try:
         # Verify workspace read access via table lookup
-        workspace_id = await get_workspace_for_table(table_id, current_user, client)
+        workspace_id = await get_workspace_for_table(table_id, current_user)
         
         client = get_grpc_client()
         user_team_ids = await _get_user_team_ids(current_user.user_id)
@@ -538,7 +547,7 @@ async def get_table_data(
     """Get table data with pagination (requires read permission)"""
     try:
         # Verify workspace read access via table lookup
-        workspace_id = await get_workspace_for_table(table_id, current_user, client)
+        workspace_id = await get_workspace_for_table(table_id, current_user)
         
         client = get_grpc_client()
         user_team_ids = await _get_user_team_ids(current_user.user_id)
@@ -609,13 +618,19 @@ async def update_table_cell(
     request: UpdateCellRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Update a single cell in a row"""
+    """Update a single cell in a row with optional formula"""
     try:
+        # Verify workspace write access via table lookup
+        workspace_id = await get_workspace_for_table(table_id, current_user)
+        await require_workspace_permission(workspace_id, 'write', current_user)
+        
         client = get_grpc_client()
         result = await client.update_table_cell(
-            table_id, row_id, request.column_name, request.value, current_user.user_id
+            table_id, row_id, request.column_name, request.value, current_user.user_id, request.formula
         )
         return result
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to update cell: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -642,6 +657,27 @@ async def delete_table_row(
         raise
     except Exception as e:
         logger.error(f"Failed to delete row: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/tables/{table_id}/recalculate", response_model=RecalculateTableResponse)
+async def recalculate_table(
+    table_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Manually trigger recalculation of all formulas in table (requires write permission)"""
+    try:
+        # Verify workspace write access via table lookup
+        workspace_id = await get_workspace_for_table(table_id, current_user)
+        await require_workspace_permission(workspace_id, 'write', current_user)
+        
+        client = get_grpc_client()
+        result = await client.recalculate_table(table_id, current_user.user_id)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to recalculate table: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

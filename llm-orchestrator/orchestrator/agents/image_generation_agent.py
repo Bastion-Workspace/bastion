@@ -102,7 +102,14 @@ class ImageGenerationAgent(BaseAgent):
             
             return {
                 "prompt": user_prompt,
-                "generation_params": generation_params
+                "generation_params": generation_params,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "persona": state.get("persona")
             }
             
         except Exception as e:
@@ -110,7 +117,14 @@ class ImageGenerationAgent(BaseAgent):
             return {
                 "prompt": "",
                 "generation_params": {},
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "persona": state.get("persona")
             }
     
     async def _generate_image_node(self, state: ImageGenerationState) -> Dict[str, Any]:
@@ -122,7 +136,14 @@ class ImageGenerationAgent(BaseAgent):
             if not prompt:
                 return {
                     "response": self._create_error_result("No prompt provided for image generation"),
-                    "task_status": "error"
+                    "task_status": "error",
+                    # ✅ CRITICAL: Preserve critical state keys even on early return
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "persona": state.get("persona")
                 }
             
             generation_params = state.get("generation_params", {})
@@ -135,13 +156,15 @@ class ImageGenerationAgent(BaseAgent):
             logger.info(f"🎨 Generating {num_images} image(s) with prompt: {prompt[:100]}...")
             
             # Call GenerateImage gRPC method
+            user_id = state.get("user_id", "system")
             tool_result_json = await grpc_client.generate_image(
                 prompt=prompt,
                 size=generation_params.get("size", "1024x1024"),
                 format=generation_params.get("format", "png"),
                 seed=generation_params.get("seed"),
                 num_images=num_images,
-                negative_prompt=generation_params.get("negative_prompt")
+                negative_prompt=generation_params.get("negative_prompt"),
+                user_id=user_id
             )
             
             tool_result = json.loads(tool_result_json) if isinstance(tool_result_json, str) else tool_result_json
@@ -151,7 +174,14 @@ class ImageGenerationAgent(BaseAgent):
                 logger.error(f"❌ Image generation failed: {error_msg}")
                 return {
                     "response": self._create_error_result(f"Image generation failed: {error_msg}"),
-                    "task_status": "error"
+                    "task_status": "error",
+                    # ✅ CRITICAL: Preserve critical state keys even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "persona": state.get("persona")
                 }
             
             # Extract image URLs from result
@@ -189,7 +219,14 @@ class ImageGenerationAgent(BaseAgent):
                 "is_complete": True,
                 "shared_memory": state.get("shared_memory", {})
                 },
-                "task_status": "complete"
+                "task_status": "complete",
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "persona": state.get("persona")
             }
         
         except Exception as e:
@@ -197,7 +234,14 @@ class ImageGenerationAgent(BaseAgent):
             return {
                 "response": self._create_error_result(f"Image generation failed: {str(e)}"),
                 "task_status": "error",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve critical state keys even on exception
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "persona": state.get("persona")
             }
     
     async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
@@ -242,6 +286,9 @@ class ImageGenerationAgent(BaseAgent):
             shared_memory_merged = shared_memory.copy()
             shared_memory_merged.update(existing_shared_memory)
             
+            # Extract persona from metadata or shared_memory
+            persona = metadata.get("persona") or shared_memory_merged.get("persona")
+            
             # Build initial state for LangGraph workflow
             initial_state: ImageGenerationState = {
                 "query": query,
@@ -249,7 +296,7 @@ class ImageGenerationAgent(BaseAgent):
                 "metadata": metadata,
                 "messages": conversation_messages,
                 "shared_memory": shared_memory_merged,
-                "persona": state.get("persona"),
+                "persona": persona,
                 "prompt": "",
                 "generation_params": {},
                 "response": {},

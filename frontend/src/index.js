@@ -55,16 +55,16 @@ const DynamicThemeProvider = ({ children }) => {
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
-  <React.StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <CustomThemeProvider>
-        <DynamicThemeProvider>
-          <BrowserRouter>
-            <ViewportFix />
-            <App />
-          </BrowserRouter>
-        </DynamicThemeProvider>
-      </CustomThemeProvider>
-    </QueryClientProvider>
-  </React.StrictMode>
+  // ❌ REMOVED React.StrictMode: Causes double-mounting which duplicates CodeMirror diff decorations
+  // StrictMode is useful in development but causes issues with CodeMirror plugins that manage global state
+  <QueryClientProvider client={queryClient}>
+    <CustomThemeProvider>
+      <DynamicThemeProvider>
+        <BrowserRouter>
+          <ViewportFix />
+          <App />
+        </BrowserRouter>
+      </DynamicThemeProvider>
+    </CustomThemeProvider>
+  </QueryClientProvider>
 );

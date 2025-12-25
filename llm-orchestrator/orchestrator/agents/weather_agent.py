@@ -139,7 +139,13 @@ class WeatherAgent(BaseAgent):
                 "query": user_message,
                 "user_preferences": user_preferences,
                 "communication_style": communication_style,
-                "detail_level": detail_level
+                "detail_level": detail_level,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "persona": state.get("persona")
             }
             
         except Exception as e:
@@ -149,7 +155,13 @@ class WeatherAgent(BaseAgent):
                 "user_preferences": {},
                 "communication_style": "casual",
                 "detail_level": "moderate",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "persona": state.get("persona")
             }
     
     async def _analyze_request_node(self, state: WeatherState) -> Dict[str, Any]:
@@ -167,7 +179,17 @@ class WeatherAgent(BaseAgent):
             weather_request = await analyzer.analyze_weather_request(query, shared_memory)
             
             return {
-                "weather_request": weather_request
+                "weather_request": weather_request,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "persona": state.get("persona"),
+                "user_preferences": state.get("user_preferences", {}),
+                "communication_style": state.get("communication_style", "professional"),
+                "detail_level": state.get("detail_level", "moderate")
             }
             
         except Exception as e:
@@ -177,7 +199,17 @@ class WeatherAgent(BaseAgent):
                     "success": False,
                     "error": str(e)
                 },
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "persona": state.get("persona"),
+                "user_preferences": state.get("user_preferences", {}),
+                "communication_style": state.get("communication_style", "professional"),
+                "detail_level": state.get("detail_level", "moderate")
             }
     
     def _route_from_analysis(self, state: WeatherState) -> str:
@@ -213,7 +245,18 @@ class WeatherAgent(BaseAgent):
                 analyzer.update_shared_memory(shared_memory, weather_request, weather_data, self.agent_type)
             
             return {
-                "weather_data": weather_data
+                "weather_data": weather_data,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "persona": state.get("persona"),
+                "user_preferences": state.get("user_preferences", {}),
+                "communication_style": state.get("communication_style", "professional"),
+                "detail_level": state.get("detail_level", "moderate"),
+                "weather_request": state.get("weather_request", {})
             }
             
         except Exception as e:
@@ -223,7 +266,18 @@ class WeatherAgent(BaseAgent):
                     "success": False,
                     "error": str(e)
                 },
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "persona": state.get("persona"),
+                "user_preferences": state.get("user_preferences", {}),
+                "communication_style": state.get("communication_style", "professional"),
+                "detail_level": state.get("detail_level", "moderate"),
+                "weather_request": state.get("weather_request", {})
             }
     
     async def _generate_response_node(self, state: WeatherState) -> Dict[str, Any]:
@@ -249,7 +303,14 @@ class WeatherAgent(BaseAgent):
                 )
                 return {
                     "response": self._create_response(error_response, is_complete=False),
-                    "task_status": "error"
+                    "task_status": "error",
+                    # ✅ CRITICAL: Preserve critical state keys even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "persona": state.get("persona")
                 }
             
             # Check if location clarification is needed
@@ -257,7 +318,14 @@ class WeatherAgent(BaseAgent):
                 clarification_response = "Where would you like weather for? Please provide a city name, state, or ZIP code."
                 return {
                     "response": self._create_response(clarification_response, is_complete=False),
-                    "task_status": "incomplete"
+                    "task_status": "incomplete",
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "persona": state.get("persona")
                 }
             
             # Check for weather data errors
@@ -268,7 +336,14 @@ class WeatherAgent(BaseAgent):
                 )
                 return {
                     "response": self._create_response(error_response, is_complete=False),
-                    "task_status": "error"
+                    "task_status": "error",
+                    # ✅ CRITICAL: Preserve critical state keys even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "persona": state.get("persona")
                 }
             
             # Get LLM-enhanced intelligent recommendations
@@ -318,7 +393,13 @@ class WeatherAgent(BaseAgent):
                 "recommendations": recommendations,
                 "collaboration_data": collaboration_data,
                 "task_status": "complete",
-                "shared_memory": shared_memory
+                "shared_memory": shared_memory,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "persona": state.get("persona")
             }
             
         except Exception as e:
@@ -329,7 +410,14 @@ class WeatherAgent(BaseAgent):
             return {
                 "response": self._create_response(error_response, is_complete=False),
                 "task_status": "error",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve critical state keys even on exception
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "persona": state.get("persona")
             }
     
     async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:

@@ -41,7 +41,17 @@ class GeneralProjectMaintenanceNodes:
             
             if not maintenance_items and not inconsistencies:
                 logger.info("No maintenance operations needed")
-                return {}
+                return {
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "documentation_maintenance_plan": state.get("documentation_maintenance_plan"),
+                    "documentation_verification_result": state.get("documentation_verification_result")
+                }
             
             # Combine maintenance items from plan and inconsistencies from verification
             all_maintenance_ops = []
@@ -153,15 +163,44 @@ class GeneralProjectMaintenanceNodes:
                 logger.info(f"Executed {len(executed_ops)} maintenance operation(s)")
                 return {
                     "maintenance_executed": True,
-                    "operations": executed_ops
+                    "operations": executed_ops,
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "documentation_maintenance_plan": state.get("documentation_maintenance_plan"),
+                    "documentation_verification_result": state.get("documentation_verification_result")
                 }
             
-            return {}
+            return {
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "documentation_maintenance_plan": state.get("documentation_maintenance_plan"),
+                "documentation_verification_result": state.get("documentation_verification_result")
+            }
             
         except Exception as e:
             logger.error(f"Maintenance execution failed: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
-            return {}
+            return {
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "documentation_maintenance_plan": state.get("documentation_maintenance_plan"),
+                "documentation_verification_result": state.get("documentation_verification_result")
+            }
 
 

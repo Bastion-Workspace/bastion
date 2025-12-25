@@ -1282,10 +1282,8 @@ export const ChatSidebarProvider = ({ children }) => {
                     });
                     window.dispatchEvent(event);
                     
-                    // Save to centralized store
-                    if (documentId) {
-                      documentDiffStore.setDiffs(documentId, ops, streamingMessage.id, editorCtx?.content || '');
-                    }
+                    // ❌ REMOVED: Don't save to store here - let plugin handle it AFTER generating stable IDs!
+                    // The plugin will call documentDiffStore.setDiffs() in addOperations() after creating operationId
                     
                     console.log('✅ ChatSidebarContext: editorOperationsLive event dispatched');
                   } else {
@@ -1356,10 +1354,8 @@ export const ChatSidebarProvider = ({ children }) => {
                       });
                       window.dispatchEvent(event);
                       
-                      // Save to centralized store
-                      if (documentId) {
-                        documentDiffStore.setDiffs(documentId, ops, streamingMessage.id, editorCtx?.content || '');
-                      }
+                      // ❌ REMOVED: Don't save to store here - let plugin handle it AFTER generating stable IDs!
+                      // The plugin will call documentDiffStore.setDiffs() in addOperations() after creating operationId
                       
                       // Clean up accumulator
                       delete window.__editor_ops_accumulator;

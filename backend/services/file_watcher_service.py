@@ -1697,6 +1697,118 @@ class FileWatcherService:
             import traceback
             traceback.print_exc()
     
+    async def _cleanup_missing_files(self, uploads_dir):
+        """
+        Clean up document records for files that no longer exist on disk.
+        
+        This ensures database stays in sync with filesystem during startup.
+        Respects RLS by using admin context to query all accessible documents.
+        """
+        try:
+            from pathlib import Path
+            logger.info("🧹 Cleaning up missing files from database...")
+            
+            cleaned_count = 0
+            checked_count = 0
+            error_count = 0
+            
+            # Query all documents with admin context (respects RLS - gets user docs and global docs)
+            from services.database_manager.database_helpers import fetch_all
+            
+            # Use admin context to see all user documents and global documents
+            # (Team documents are excluded unless admin is a member, which is correct for privacy)
+            rls_context = {'user_id': '', 'user_role': 'admin'}
+            
+            # Get all documents (with pagination to handle large datasets)
+            limit = 1000
+            offset = 0
+            total_checked = 0
+            
+            while True:
+                rows = await fetch_all("""
+                    SELECT document_id, filename, user_id, folder_id, collection_type, team_id
+                    FROM document_metadata 
+                    ORDER BY upload_date DESC 
+                    LIMIT $1 OFFSET $2
+                """, limit, offset, rls_context=rls_context)
+                
+                if not rows:
+                    break
+                
+                logger.info(f"🔍 Checking batch: {len(rows)} documents (offset: {offset})")
+                
+                for row in rows:
+                    checked_count += 1
+                    total_checked += 1
+                    
+                    document_id = row.get('document_id')
+                    filename = row.get('filename')
+                    user_id = row.get('user_id')
+                    folder_id = row.get('folder_id')
+                    collection_type = row.get('collection_type', 'user')
+                    team_id = row.get('team_id')
+                    
+                    if not filename:
+                        logger.warning(f"⚠️ Document {document_id} has no filename - skipping")
+                        continue
+                    
+                    try:
+                        # Reconstruct filesystem path using folder service
+                        file_path = await self.folder_service.get_document_file_path(
+                            filename=filename,
+                            folder_id=folder_id,
+                            user_id=user_id,
+                            collection_type=collection_type,
+                            team_id=team_id
+                        )
+                        
+                        # Check if file exists on disk
+                        if not file_path.exists():
+                            logger.info(f"🗑️ File missing on disk: {file_path}")
+                            logger.info(f"🗑️ Deleting from database: {filename} ({document_id})")
+                            
+                            # Delete from vector store
+                            try:
+                                await self.document_service.embedding_manager.delete_document_chunks(document_id, user_id)
+                            except Exception as e:
+                                logger.warning(f"⚠️ Failed to delete embeddings for {document_id}: {e}")
+                            
+                            # Delete from database with proper user context
+                            success = await self.document_service.document_repository.delete(document_id, user_id)
+                            if success:
+                                cleaned_count += 1
+                                logger.info(f"✅ Deleted orphaned document: {filename} ({document_id})")
+                            else:
+                                logger.warning(f"⚠️ Failed to delete document {document_id} from database")
+                                error_count += 1
+                        else:
+                            logger.debug(f"✅ File exists: {file_path}")
+                    
+                    except Exception as e:
+                        logger.error(f"❌ Error checking document {document_id}: {e}")
+                        error_count += 1
+                        import traceback
+                        traceback.print_exc()
+                
+                # Check if we've processed all documents
+                if len(rows) < limit:
+                    break
+                
+                offset += limit
+            
+            logger.info(f"🧹 FILE CLEANUP COMPLETE!")
+            logger.info(f"   📊 Documents checked: {checked_count}")
+            logger.info(f"   🗑️ Orphaned documents removed: {cleaned_count}")
+            logger.info(f"   ❌ Errors: {error_count}")
+            
+            if cleaned_count > 0:
+                logger.info(f"   ✅ {cleaned_count} orphaned documents cleaned up!")
+            
+        except Exception as e:
+            logger.error(f"❌ File cleanup failed: {e}")
+            import traceback
+            traceback.print_exc()
+    
     async def _perform_startup_scan(self):
         """
         **ROOSEVELT'S STARTUP CAVALRY CHARGE!**
@@ -1782,6 +1894,9 @@ class FileWatcherService:
             
             # **BULLY!** Now clean up folders that no longer exist on disk!
             await self._cleanup_missing_folders(uploads_dir)
+            
+            # **BULLY!** Now clean up files that no longer exist on disk!
+            await self._cleanup_missing_files(uploads_dir)
             
         except Exception as e:
             logger.error(f"❌ Startup scan failed: {e}")

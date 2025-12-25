@@ -25,6 +25,9 @@ service ToolService {
   // Entity operations
   rpc SearchEntities(EntitySearchRequest) returns (EntitySearchResponse);
   rpc GetEntity(EntityRequest) returns (EntityResponse);
+  rpc FindDocumentsByEntities(FindDocumentsByEntitiesRequest) returns (FindDocumentsByEntitiesResponse);
+  rpc FindRelatedDocumentsByEntities(FindRelatedDocumentsByEntitiesRequest) returns (FindRelatedDocumentsByEntitiesResponse);
+  rpc FindCoOccurringEntities(FindCoOccurringEntitiesRequest) returns (FindCoOccurringEntitiesResponse);
   
   // Weather operations
   rpc GetWeatherData(WeatherRequest) returns (WeatherResponse);
@@ -286,6 +289,44 @@ message EntityRequest {
 message EntityResponse {
   Entity entity = 1;
   repeated string related_documents = 2;
+}
+
+// Entity relationship search messages
+message FindDocumentsByEntitiesRequest {
+  string user_id = 1;
+  repeated string entity_names = 2;
+}
+
+message FindDocumentsByEntitiesResponse {
+  repeated string document_ids = 1;
+  int32 total_count = 2;
+}
+
+message FindRelatedDocumentsByEntitiesRequest {
+  string user_id = 1;
+  repeated string entity_names = 2;
+  int32 max_hops = 3;
+}
+
+message FindRelatedDocumentsByEntitiesResponse {
+  repeated string document_ids = 1;
+  int32 total_count = 2;
+}
+
+message FindCoOccurringEntitiesRequest {
+  string user_id = 1;
+  repeated string entity_names = 2;
+  int32 min_co_occurrences = 3;
+}
+
+message EntityInfo {
+  string name = 1;
+  string type = 2;
+  int32 co_occurrence_count = 3;
+}
+
+message FindCoOccurringEntitiesResponse {
+  repeated EntityInfo entities = 1;
 }
 
 // Weather Messages

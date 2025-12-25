@@ -923,6 +923,115 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             logger.error(f"GetEntity error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Get entity failed: {str(e)}")
     
+    async def FindDocumentsByEntities(
+        self,
+        request: tool_service_pb2.FindDocumentsByEntitiesRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.FindDocumentsByEntitiesResponse:
+        """Find documents mentioning specific entities"""
+        try:
+            logger.info(f"FindDocumentsByEntities: user={request.user_id}, entities={list(request.entity_names)}")
+            
+            # Get knowledge graph service
+            from services.knowledge_graph_service import KnowledgeGraphService
+            kg_service = KnowledgeGraphService()
+            await kg_service.initialize()
+            
+            # Query knowledge graph (RLS enforced at document retrieval)
+            document_ids = await kg_service.find_documents_by_entities(
+                list(request.entity_names)
+            )
+            
+            # Filter by user permissions (RLS check)
+            doc_repo = self._get_document_repo()
+            accessible_doc_ids = []
+            for doc_id in document_ids:
+                doc = await doc_repo.get_document_by_id(document_id=doc_id, user_id=request.user_id)
+                if doc:  # User has access
+                    accessible_doc_ids.append(doc_id)
+            
+            logger.info(f"Found {len(accessible_doc_ids)} accessible documents (filtered from {len(document_ids)} total)")
+            
+            return tool_service_pb2.FindDocumentsByEntitiesResponse(
+                document_ids=accessible_doc_ids,
+                total_count=len(accessible_doc_ids)
+            )
+            
+        except Exception as e:
+            logger.error(f"FindDocumentsByEntities failed: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Entity search failed: {str(e)}")
+
+    async def FindRelatedDocumentsByEntities(
+        self,
+        request: tool_service_pb2.FindRelatedDocumentsByEntitiesRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.FindRelatedDocumentsByEntitiesResponse:
+        """Find documents via related entities (1-2 hop traversal)"""
+        try:
+            logger.info(f"FindRelatedDocumentsByEntities: user={request.user_id}, entities={list(request.entity_names)}, hops={request.max_hops}")
+            
+            from services.knowledge_graph_service import KnowledgeGraphService
+            kg_service = KnowledgeGraphService()
+            await kg_service.initialize()
+            
+            # Query with relationship traversal
+            document_ids = await kg_service.find_related_documents_by_entities(
+                list(request.entity_names),
+                max_hops=request.max_hops or 2
+            )
+            
+            # RLS filtering
+            doc_repo = self._get_document_repo()
+            accessible_doc_ids = []
+            for doc_id in document_ids:
+                doc = await doc_repo.get_document_by_id(document_id=doc_id, user_id=request.user_id)
+                if doc:
+                    accessible_doc_ids.append(doc_id)
+            
+            logger.info(f"Found {len(accessible_doc_ids)} related documents accessible to user")
+            
+            return tool_service_pb2.FindRelatedDocumentsByEntitiesResponse(
+                document_ids=accessible_doc_ids,
+                total_count=len(accessible_doc_ids)
+            )
+            
+        except Exception as e:
+            logger.error(f"FindRelatedDocumentsByEntities failed: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Related entity search failed: {str(e)}")
+
+    async def FindCoOccurringEntities(
+        self,
+        request: tool_service_pb2.FindCoOccurringEntitiesRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.FindCoOccurringEntitiesResponse:
+        """Find entities that co-occur with given entities"""
+        try:
+            logger.info(f"FindCoOccurringEntities: entities={list(request.entity_names)}")
+            
+            from services.knowledge_graph_service import KnowledgeGraphService
+            kg_service = KnowledgeGraphService()
+            await kg_service.initialize()
+            
+            co_occurring = await kg_service.find_co_occurring_entities(
+                list(request.entity_names),
+                min_co_occurrences=request.min_co_occurrences or 2
+            )
+            
+            # Convert to proto
+            entities = []
+            for entity in co_occurring:
+                entities.append(tool_service_pb2.EntityInfo(
+                    name=entity["name"],
+                    type=entity["type"],
+                    co_occurrence_count=entity["co_occurrence_count"]
+                ))
+            
+            return tool_service_pb2.FindCoOccurringEntitiesResponse(entities=entities)
+            
+        except Exception as e:
+            logger.error(f"FindCoOccurringEntities failed: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Co-occurrence search failed: {str(e)}")
+    
     # ===== Weather Operations =====
     
     async def GetWeatherData(

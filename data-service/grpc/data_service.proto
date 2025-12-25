@@ -27,6 +27,7 @@ service DataService {
   rpc UpdateRow(UpdateRowRequest) returns (RowResponse);
   rpc UpdateCell(UpdateCellRequest) returns (RowResponse);
   rpc DeleteRow(DeleteRowRequest) returns (DeleteResponse);
+  rpc RecalculateTable(RecalculateTableRequest) returns (RecalculateTableResponse);
   
   // Import operations
   rpc PreviewImport(PreviewImportRequest) returns (PreviewImportResponse);
@@ -229,6 +230,7 @@ message UpdateCellRequest {
   string column_name = 3;
   string value_json = 4;
   string user_id = 5;
+  string formula = 6;  // Optional formula string (e.g., "=A1+B1")
 }
 
 message DeleteRowRequest {
@@ -263,6 +265,7 @@ message RowResponse {
   string row_data_json = 2;
   int32 row_index = 3;
   string row_color = 4;
+  string formula_data_json = 5;  // Optional formula data JSON
 }
 
 // ==================== Import Messages ====================
@@ -428,6 +431,18 @@ message StylingRulesResponse {
 message StyledDataResponse {
   string styled_data_json = 1;
   repeated StylingRuleResponse applied_rules = 2;
+}
+
+// ==================== Formula Messages ====================
+message RecalculateTableRequest {
+  string table_id = 1;
+  string user_id = 2;
+}
+
+message RecalculateTableResponse {
+  bool success = 1;
+  int32 cells_recalculated = 2;
+  string error_message = 3;
 }
 
 

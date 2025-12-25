@@ -325,6 +325,45 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 logger.error(f"Local search error: {e}")
                 return {"error": str(e), "search_results": ""}
         
+        async def entity_graph_search_task():
+            """NEW: Entity relationship search via knowledge graph"""
+            try:
+                logger.info("Round 1 Entity Graph: Starting parallel entity search")
+                
+                # Get or build entity relationship subgraph
+                from orchestrator.subgraphs import build_entity_relationship_subgraph
+                
+                # Build subgraph (no checkpointer needed for this subgraph)
+                entity_sg = build_entity_relationship_subgraph(checkpointer=None)
+                
+                # Prepare state for entity subgraph
+                # NOTE: vector_results will be empty on first call, but that's OK
+                # Entity extraction will use query text
+                entity_state = {
+                    "query": query,
+                    "vector_results": [],  # Will be populated after vector search in future iteration
+                    "user_id": shared_memory.get("user_id", "system"),
+                    "metadata": state.get("metadata", {}),
+                    "shared_memory": shared_memory,
+                    "messages": state.get("messages", [])
+                }
+                
+                # Run subgraph (no config needed since no checkpointer)
+                result = await entity_sg.ainvoke(entity_state)
+                
+                logger.info(f"Entity graph search complete: {result.get('kg_document_count', 0)} documents")
+                
+                return result
+                
+            except Exception as e:
+                logger.error(f"Entity graph search error: {e}")
+                return {
+                    "kg_documents": [],
+                    "kg_formatted_results": "",
+                    "kg_success": False,
+                    "error": str(e)
+                }
+        
         async def web_search_task():
             """Web search task"""
             try:
@@ -416,9 +455,10 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 logger.error(f"Web search error: {e}")
                 return {"error": str(e), "content": ""}
         
-        # Execute searches in parallel
-        local_result, web_result = await asyncio.gather(
+        # Execute all THREE searches in parallel
+        local_result, entity_result, web_result = await asyncio.gather(
             local_search_task(),
+            entity_graph_search_task(),  # NEW
             web_search_task(),
             return_exceptions=True
         )
@@ -428,11 +468,15 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
             logger.error(f"Local search exception: {local_result}")
             local_result = {"error": str(local_result), "search_results": ""}
         
+        if isinstance(entity_result, Exception):
+            logger.error(f"Entity graph search exception: {entity_result}")
+            entity_result = {"error": str(entity_result), "kg_formatted_results": "", "kg_success": False}
+        
         if isinstance(web_result, Exception):
             logger.error(f"Web search exception: {web_result}")
             web_result = {"error": str(web_result), "content": ""}
         
-        logger.info(f"Parallel search complete: local={bool(local_result.get('search_results'))}, web={bool(web_result.get('content'))}")
+        logger.info(f"Parallel search complete: local={bool(local_result.get('search_results'))}, entity={bool(entity_result.get('kg_success'))}, web={bool(web_result.get('content'))}")
         
         # Build sources list
         sources_found = []
@@ -444,6 +488,18 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     "source": "local"
                 })
         
+        # NEW: Entity graph sources
+        if entity_result and not isinstance(entity_result, Exception) and entity_result.get("kg_success"):
+            kg_count = entity_result.get("kg_document_count", 0)
+            if kg_count > 0:
+                kg_docs = entity_result.get("kg_documents", [])
+                for doc in kg_docs[:5]:
+                    sources_found.append({
+                        "type": "document",
+                        "document_id": doc.get("document_id"),
+                        "source": "knowledge_graph"
+                    })
+        
         if web_result.get("content"):
             urls = re.findall(r'URL: (https?://[^\s]+)', web_result.get("content", ""))
             for url in urls[:5]:
@@ -453,19 +509,43 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     "source": "web"
                 })
         
+        # Combine results
+        combined_findings = {}
+        
+        # Local results
+        if local_result and not isinstance(local_result, Exception):
+            combined_findings["local_results"] = local_result.get("search_results", "")
+        
+        # NEW: Entity graph results
+        if entity_result and not isinstance(entity_result, Exception) and entity_result.get("kg_success"):
+            kg_formatted = entity_result.get("kg_formatted_results", "")
+            kg_count = entity_result.get("kg_document_count", 0)
+            
+            if kg_formatted:
+                combined_findings["entity_graph_results"] = kg_formatted
+                logger.info(f"Added {kg_count} knowledge graph documents to Round 1 results")
+        
+        # Web results
+        if web_result and not isinstance(web_result, Exception):
+            combined_findings["web_results"] = web_result.get("content", "")
+        
         # Log what we're returning
-        local_content_len = len(local_result.get("search_results", ""))
-        web_content_len = len(web_result.get("content", ""))
-        logger.info(f"📊 Round 1 parallel search complete: local={local_content_len} chars, web={web_content_len} chars, sources={len(sources_found)}")
+        local_content_len = len(local_result.get("search_results", "")) if local_result else 0
+        entity_content_len = len(entity_result.get("kg_formatted_results", "")) if entity_result and not isinstance(entity_result, Exception) else 0
+        web_content_len = len(web_result.get("content", "")) if web_result else 0
+        logger.info(f"📊 Round 1 parallel search complete: local={local_content_len} chars, entity={entity_content_len} chars, web={web_content_len} chars, sources={len(sources_found)}")
         
         return {
-            "round1_results": local_result,
-            "web_round1_results": web_result,
-            "sources_found": sources_found,
-            "research_findings": {
-                "local_results": local_result.get("search_results", ""),
-                "web_results": web_result.get("content", "")
+            "round1_results": {
+                "search_results": local_result.get("search_results", "") if local_result else "",
+                "entity_graph_results": entity_result.get("kg_formatted_results", "") if entity_result and not isinstance(entity_result, Exception) else "",  # NEW
+                "documents_found": local_result.get("documents_found", 0) if local_result else 0,
+                "kg_documents_found": entity_result.get("kg_document_count", 0) if entity_result and not isinstance(entity_result, Exception) else 0,  # NEW
+                "round1_document_ids": local_result.get("round1_document_ids", []) if local_result else []
             },
+            "web_round1_results": web_result if web_result else {},
+            "sources_found": sources_found,
+            "research_findings": combined_findings,
             "query": query,  # Preserve query in state
             "expanded_queries": expanded_queries,  # Preserve expanded queries in state
             # CRITICAL: Preserve metadata for user model selection

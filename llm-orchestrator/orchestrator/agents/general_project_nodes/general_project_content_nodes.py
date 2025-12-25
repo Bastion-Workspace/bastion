@@ -38,7 +38,17 @@ class GeneralProjectContentNodes:
             
             if not response_text or len(response_text.strip()) < 50:
                 logger.info("No substantial content to extract")
-                return {"save_plan": None}
+                return {
+                    "save_plan": None,
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "response": state.get("response", {})
+                }
             
             # Get available files from referenced context
             available_files = []
@@ -336,13 +346,31 @@ class GeneralProjectContentNodes:
                     logger.info(f"Route {i}: {route.get('content_type')} -> {route.get('target_file')} ({route.get('section')})")
             
             return {
-                "save_plan": save_plan
+                "save_plan": save_plan,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "response": state.get("response", {})
             }
             
         except Exception as e:
             logger.error(f"Content extraction and routing failed: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            return {"save_plan": None}
+            return {
+                "save_plan": None,
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "response": state.get("response", {})
+            }
 
 

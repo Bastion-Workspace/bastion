@@ -335,7 +335,8 @@ class DataWorkspaceGRPCClient:
                         'row_id': row.row_id,
                         'row_data': json.loads(row.row_data_json),
                         'row_index': row.row_index,
-                        'row_color': row.row_color if row.row_color else None
+                        'row_color': row.row_color if row.row_color else None,
+                        'formula_data': json.loads(row.formula_data_json) if hasattr(row, 'formula_data_json') and row.formula_data_json else {}
                     }
                     for row in response.rows
                 ],
@@ -490,16 +491,18 @@ class DataWorkspaceGRPCClient:
         row_id: str,
         column_name: str,
         value: Any,
-        user_id: str
+        user_id: str,
+        formula: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Update a single cell"""
+        """Update a single cell with optional formula"""
         try:
             request = data_service_pb2.UpdateCellRequest(
                 table_id=table_id,
                 row_id=row_id,
                 column_name=column_name,
                 value_json=json.dumps(value),
-                user_id=user_id
+                user_id=user_id,
+                formula=formula or ""
             )
             
             response = await self.stub.UpdateCell(request)
@@ -661,6 +664,29 @@ class DataWorkspaceGRPCClient:
             }
         except grpc.RpcError as e:
             logger.error(f"gRPC error executing NL query: {e}")
+            raise
+    
+    async def recalculate_table(
+        self,
+        table_id: str,
+        user_id: str
+    ) -> Dict[str, Any]:
+        """Recalculate all formulas in a table"""
+        try:
+            request = data_service_pb2.RecalculateTableRequest(
+                table_id=table_id,
+                user_id=user_id
+            )
+            
+            response = await self.stub.RecalculateTable(request)
+            
+            return {
+                'success': response.success,
+                'cells_recalculated': response.cells_recalculated,
+                'error_message': response.error_message if response.error_message else None
+            }
+        except grpc.RpcError as e:
+            logger.error(f"gRPC error recalculating table: {e}")
             raise
 
 

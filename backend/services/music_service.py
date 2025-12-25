@@ -97,9 +97,11 @@ class MusicService:
             encrypted_password = self._encrypt_password(password, salt)
             
             # Check if config exists for this user and service type
+            rls_context = {"user_id": user_id}
             existing = await fetch_one(
                 "SELECT id FROM music_service_configs WHERE user_id = $1 AND service_type = $2",
-                user_id, service_type
+                user_id, service_type,
+                rls_context=rls_context
             )
             
             if existing:
@@ -109,7 +111,8 @@ class MusicService:
                     SET server_url = $1, username = $2, encrypted_password = $3, 
                         salt = $4, auth_type = $5, service_name = $6, updated_at = NOW()
                     WHERE user_id = $7 AND service_type = $8""",
-                    server_url, username, encrypted_password, salt, auth_type, service_name, user_id, service_type
+                    server_url, username, encrypted_password, salt, auth_type, service_name, user_id, service_type,
+                    rls_context=rls_context
                 )
             else:
                 # Insert new config
@@ -117,7 +120,8 @@ class MusicService:
                     """INSERT INTO music_service_configs 
                     (user_id, server_url, username, encrypted_password, salt, auth_type, service_type, service_name, created_at, updated_at)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())""",
-                    user_id, server_url, username, encrypted_password, salt, auth_type, service_type, service_name
+                    user_id, server_url, username, encrypted_password, salt, auth_type, service_type, service_name,
+                    rls_context=rls_context
                 )
             
             logger.info(f"Saved music service config for user {user_id} (service: {service_type})")
@@ -129,6 +133,7 @@ class MusicService:
     async def get_config(self, user_id: str, service_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get music service configuration (without password)"""
         try:
+            rls_context = {"user_id": user_id}
             if service_type:
                 # Get specific service config
                 row = await fetch_one(
@@ -140,7 +145,8 @@ class MusicService:
                        (SELECT total_playlists FROM music_cache_metadata WHERE user_id = $1 AND service_type = $2) as total_playlists,
                        (SELECT total_tracks FROM music_cache_metadata WHERE user_id = $1 AND service_type = $2) as total_tracks
                        FROM music_service_configs WHERE user_id = $1 AND service_type = $2""",
-                    user_id, service_type
+                    user_id, service_type,
+                    rls_context=rls_context
                 )
             else:
                 # Get first active config (backward compatibility)
@@ -154,7 +160,8 @@ class MusicService:
                        (SELECT total_tracks FROM music_cache_metadata WHERE user_id = $1 LIMIT 1) as total_tracks
                        FROM music_service_configs WHERE user_id = $1 AND (is_active IS NULL OR is_active = TRUE)
                        ORDER BY created_at LIMIT 1""",
-                    user_id
+                    user_id,
+                    rls_context=rls_context
                 )
             
             if not row:
@@ -182,13 +189,15 @@ class MusicService:
     async def get_user_sources(self, user_id: str) -> List[Dict[str, Any]]:
         """Get all configured media sources for a user"""
         try:
+            rls_context = {"user_id": user_id}
             rows = await fetch_all(
                 """SELECT server_url, username, auth_type, service_type, service_name, is_active,
                    created_at, updated_at
                    FROM music_service_configs 
                    WHERE user_id = $1 AND (is_active IS NULL OR is_active = TRUE)
                    ORDER BY created_at""",
-                user_id
+                user_id,
+                rls_context=rls_context
             )
             
             sources = []
@@ -212,12 +221,14 @@ class MusicService:
     async def get_credentials(self, user_id: str, service_type: Optional[str] = None) -> Optional[Dict[str, str]]:
         """Get decrypted credentials for music service API calls"""
         try:
+            rls_context = {"user_id": user_id}
             if service_type:
                 row = await fetch_one(
                     """SELECT server_url, username, encrypted_password, auth_type, service_type 
                     FROM music_service_configs 
                     WHERE user_id = $1 AND service_type = $2 AND (is_active IS NULL OR is_active = TRUE)""",
-                    user_id, service_type
+                    user_id, service_type,
+                    rls_context=rls_context
                 )
             else:
                 # Get first active config (backward compatibility)
@@ -226,7 +237,8 @@ class MusicService:
                     FROM music_service_configs 
                     WHERE user_id = $1 AND (is_active IS NULL OR is_active = TRUE)
                     ORDER BY created_at LIMIT 1""",
-                    user_id
+                    user_id,
+                    rls_context=rls_context
                 )
             
             if not row:
@@ -248,26 +260,30 @@ class MusicService:
     async def delete_config(self, user_id: str, service_type: Optional[str] = None) -> bool:
         """Delete music service configuration and cache"""
         try:
+            rls_context = {"user_id": user_id}
             if service_type:
                 # Delete specific service
                 await execute(
                     "DELETE FROM music_service_configs WHERE user_id = $1 AND service_type = $2",
-                    user_id, service_type
+                    user_id, service_type,
+                    rls_context=rls_context
                 )
                 await execute(
                     "DELETE FROM music_cache WHERE user_id = $1 AND service_type = $2",
-                    user_id, service_type
+                    user_id, service_type,
+                    rls_context=rls_context
                 )
                 await execute(
                     "DELETE FROM music_cache_metadata WHERE user_id = $1 AND service_type = $2",
-                    user_id, service_type
+                    user_id, service_type,
+                    rls_context=rls_context
                 )
                 logger.info(f"Deleted music service config for user {user_id} (service: {service_type})")
             else:
                 # Delete all services (backward compatibility)
-                await execute("DELETE FROM music_service_configs WHERE user_id = $1", user_id)
-                await execute("DELETE FROM music_cache WHERE user_id = $1", user_id)
-                await execute("DELETE FROM music_cache_metadata WHERE user_id = $1", user_id)
+                await execute("DELETE FROM music_service_configs WHERE user_id = $1", user_id, rls_context=rls_context)
+                await execute("DELETE FROM music_cache WHERE user_id = $1", user_id, rls_context=rls_context)
+                await execute("DELETE FROM music_cache_metadata WHERE user_id = $1", user_id, rls_context=rls_context)
                 logger.info(f"Deleted all music service configs for user {user_id}")
             return True
         except Exception as e:
@@ -340,18 +356,22 @@ class MusicService:
             if not client:
                 return {"success": False, "error": f"Unsupported service type: {service_type}"}
             
+            rls_context = {"user_id": user_id}
+            
             # Update sync status (per-service)
             await execute(
                 """INSERT INTO music_cache_metadata (user_id, service_type, sync_status, updated_at)
                 VALUES ($1, $2, 'syncing', NOW())
                 ON CONFLICT (user_id, service_type) DO UPDATE SET sync_status = 'syncing', updated_at = NOW()""",
-                user_id, service_type
+                user_id, service_type,
+                rls_context=rls_context
             )
             
             # Clear existing cache for this service
             await execute(
                 "DELETE FROM music_cache WHERE user_id = $1 AND service_type = $2",
-                user_id, service_type
+                user_id, service_type,
+                rls_context=rls_context
             )
             
             logger.info(f"Starting cache refresh for user {user_id} using {service_type} service")
@@ -399,7 +419,8 @@ class MusicService:
                     album.get("title", ""),
                     album.get("artist", ""),
                     album.get("cover_art_id"),
-                    json.dumps(album.get("metadata", {}))
+                    json.dumps(album.get("metadata", {})),
+                    rls_context=rls_context
                 )
                 album_count += 1
             
@@ -416,7 +437,8 @@ class MusicService:
                     service_type,
                     artist.get("id", ""),
                     artist.get("name", ""),
-                    json.dumps(artist.get("metadata", {}))
+                    json.dumps(artist.get("metadata", {})),
+                    rls_context=rls_context
                 )
                 artist_count += 1
             
@@ -433,7 +455,8 @@ class MusicService:
                     service_type,
                     playlist.get("id", ""),
                     playlist.get("name", ""),
-                    json.dumps(playlist.get("metadata", {}))
+                    json.dumps(playlist.get("metadata", {})),
+                    rls_context=rls_context
                 )
                 playlist_count += 1
             
@@ -465,7 +488,8 @@ class MusicService:
                             track.get("duration"),
                             track.get("track_number"),
                             track.get("cover_art_id"),
-                            json.dumps(track.get("metadata", {}))
+                            json.dumps(track.get("metadata", {})),
+                            rls_context=rls_context
                         )
                         track_count += 1
                 except Exception as e:
@@ -480,7 +504,8 @@ class MusicService:
                 ON CONFLICT (user_id, service_type) DO UPDATE SET
                 last_sync_at = NOW(), sync_status = 'completed', 
                 total_albums = $3, total_artists = $4, total_playlists = $5, total_tracks = $6, updated_at = NOW()""",
-                user_id, service_type, album_count, artist_count, playlist_count, track_count
+                user_id, service_type, album_count, artist_count, playlist_count, track_count,
+                rls_context=rls_context
             )
             
             logger.info(f"Cache refresh completed: {album_count} albums, {artist_count} artists, {playlist_count} playlists, {track_count} tracks")
@@ -497,11 +522,13 @@ class MusicService:
             error_trace = traceback.format_exc()
             logger.error(f"Failed to refresh cache: {e}")
             logger.error(f"Traceback: {error_trace}")
+            rls_context = {"user_id": user_id}
             await execute(
                 """INSERT INTO music_cache_metadata (user_id, service_type, sync_status, sync_error, updated_at)
                 VALUES ($1, $2, 'failed', $3, NOW())
                 ON CONFLICT (user_id, service_type) DO UPDATE SET sync_status = 'failed', sync_error = $3, updated_at = NOW()""",
-                user_id, service_type, str(e)
+                user_id, service_type, str(e),
+                rls_context=rls_context
             )
             return {"success": False, "error": str(e)}
     
@@ -554,6 +581,7 @@ class MusicService:
                 return result
             else:
                 # For albums, try cache first, then fall back to live API if no cached tracks
+                rls_context = {"user_id": user_id}
                 if service_type:
                     tracks_raw = await fetch_all(
                         """SELECT item_id as id, title, artist, album, duration, track_number, 
@@ -561,7 +589,8 @@ class MusicService:
                         FROM music_cache 
                         WHERE user_id = $1 AND service_type = $2 AND cache_type = 'track' AND parent_id = $3
                         ORDER BY track_number, title""",
-                        user_id, service_type, parent_id
+                        user_id, service_type, parent_id,
+                        rls_context=rls_context
                     )
                 else:
                     tracks_raw = await fetch_all(
@@ -570,7 +599,8 @@ class MusicService:
                         FROM music_cache 
                         WHERE user_id = $1 AND cache_type = 'track' AND parent_id = $2
                         ORDER BY track_number, title""",
-                        user_id, parent_id
+                        user_id, parent_id,
+                        rls_context=rls_context
                     )
                 
                 # If no cached tracks found, fetch live from API
@@ -629,11 +659,13 @@ class MusicService:
         """Generate authenticated stream URL for a track"""
         try:
             # If service_type is not provided, look up the track in cache to determine service_type
+            rls_context = {"user_id": user_id}
             if not service_type:
                 track_data = await fetch_one(
                     """SELECT service_type, metadata_json as metadata FROM music_cache 
                     WHERE user_id = $1 AND cache_type = 'track' AND item_id = $2""",
-                    user_id, track_id
+                    user_id, track_id,
+                    rls_context=rls_context
                 )
                 if track_data:
                     service_type = track_data.get("service_type")
@@ -670,7 +702,8 @@ class MusicService:
                 track_data = await fetch_one(
                     """SELECT metadata_json as metadata FROM music_cache 
                     WHERE user_id = $1 AND service_type = $2 AND cache_type = 'track' AND item_id = $3""",
-                    user_id, service_type, track_id
+                    user_id, service_type, track_id,
+                    rls_context=rls_context
                 )
                 if track_data and track_data.get("metadata"):
                     metadata = track_data["metadata"]
@@ -819,12 +852,14 @@ class MusicService:
             
             logger.info(f"Getting library for user {user_id}, service_type: {service_type}")
             
+            rls_context = {"user_id": user_id}
             albums_raw = await fetch_all(
                 """SELECT item_id as id, title, artist, cover_art_id, metadata_json as metadata
                 FROM music_cache 
                 WHERE user_id = $1 AND service_type = $2 AND cache_type = 'album'
                 ORDER BY title""",
-                user_id, service_type
+                user_id, service_type,
+                rls_context=rls_context
             )
             
             # Parse JSON strings back to dicts
@@ -843,7 +878,8 @@ class MusicService:
                 FROM music_cache 
                 WHERE user_id = $1 AND service_type = $2 AND cache_type = 'artist'
                 ORDER BY title""",
-                user_id, service_type
+                user_id, service_type,
+                rls_context=rls_context
             )
             
             # Parse JSON strings back to dicts
@@ -862,7 +898,8 @@ class MusicService:
                 FROM music_cache 
                 WHERE user_id = $1 AND service_type = $2 AND cache_type = 'playlist'
                 ORDER BY title""",
-                user_id, service_type
+                user_id, service_type,
+                rls_context=rls_context
             )
             
             # Parse JSON strings back to dicts
@@ -878,7 +915,8 @@ class MusicService:
             
             metadata = await fetch_one(
                 "SELECT last_sync_at FROM music_cache_metadata WHERE user_id = $1 AND service_type = $2",
-                user_id, service_type
+                user_id, service_type,
+                rls_context=rls_context
             )
             
             return {
@@ -895,18 +933,21 @@ class MusicService:
         """Get albums for a specific artist/author"""
         """Get albums for a specific artist"""
         try:
+            rls_context = {"user_id": user_id}
             # First, get the artist name from the artist ID
             if service_type:
                 artist = await fetch_one(
                     """SELECT title as name FROM music_cache 
                     WHERE user_id = $1 AND service_type = $2 AND cache_type = 'artist' AND item_id = $3""",
-                    user_id, service_type, artist_id
+                    user_id, service_type, artist_id,
+                    rls_context=rls_context
                 )
             else:
                 artist = await fetch_one(
                     """SELECT title as name FROM music_cache 
                     WHERE user_id = $1 AND cache_type = 'artist' AND item_id = $2""",
-                    user_id, artist_id
+                    user_id, artist_id,
+                    rls_context=rls_context
                 )
             
             if not artist:
@@ -927,7 +968,8 @@ class MusicService:
                     FROM music_cache 
                     WHERE user_id = $1 AND service_type = $2 AND cache_type = 'album' AND LOWER(artist) = LOWER($3)
                     ORDER BY title""",
-                    user_id, service_type, artist_name
+                    user_id, service_type, artist_name,
+                    rls_context=rls_context
                 )
             else:
                 albums_raw = await fetch_all(
@@ -935,7 +977,8 @@ class MusicService:
                     FROM music_cache 
                     WHERE user_id = $1 AND cache_type = 'album' AND LOWER(artist) = LOWER($2)
                     ORDER BY title""",
-                    user_id, artist_name
+                    user_id, artist_name,
+                    rls_context=rls_context
                 )
             
             logger.info(f"Found {len(albums_raw)} albums for artist '{artist_name}'")
@@ -963,11 +1006,13 @@ class MusicService:
                 # For non-Audiobookshelf services, return empty (no series concept)
                 return []
             
+            rls_context = {"user_id": user_id}
             # Get the author name from the author ID
             artist = await fetch_one(
                 """SELECT title as name FROM music_cache 
                 WHERE user_id = $1 AND service_type = $2 AND cache_type = 'artist' AND item_id = $3""",
-                user_id, service_type, author_id
+                user_id, service_type, author_id,
+                rls_context=rls_context
             )
             
             if not artist:
@@ -984,7 +1029,8 @@ class MusicService:
                 FROM music_cache 
                 WHERE user_id = $1 AND service_type = $2 AND cache_type = 'album' AND artist = $3
                 ORDER BY title""",
-                user_id, service_type, author_name
+                user_id, service_type, author_name,
+                rls_context=rls_context
             )
             
             # Extract unique series from albums
@@ -1147,13 +1193,15 @@ class MusicService:
             if service_type != "audiobookshelf":
                 return []
             
+            rls_context = {"user_id": user_id}
             # Get all albums by this author
             albums_raw = await fetch_all(
                 """SELECT item_id as id, title, artist, cover_art_id, metadata_json as metadata
                 FROM music_cache 
                 WHERE user_id = $1 AND service_type = $2 AND cache_type = 'album' AND artist = $3
                 ORDER BY title""",
-                user_id, service_type, author_name
+                user_id, service_type, author_name,
+                rls_context=rls_context
             )
             
             # Filter albums that belong to this series

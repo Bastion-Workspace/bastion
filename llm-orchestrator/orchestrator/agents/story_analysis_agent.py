@@ -109,7 +109,12 @@ class StoryAnalysisAgent(BaseAgent):
             return {
                 "active_editor": active_editor,
                 "manuscript_content": manuscript,
-                "query": query or "Please provide a comprehensive analysis of this manuscript."
+                "query": query or "Please provide a comprehensive analysis of this manuscript.",
+                # Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", [])
             }
             
         except Exception as e:
@@ -120,7 +125,12 @@ class StoryAnalysisAgent(BaseAgent):
                 "response": {
                     "task_status": TaskStatus.ERROR.value,
                     "response": f"Failed to prepare context: {str(e)}"
-                }
+                },
+                # Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", [])
             }
     
     async def _analyze_content_node(self, state: StoryAnalysisState) -> Dict[str, Any]:
@@ -200,7 +210,14 @@ class StoryAnalysisAgent(BaseAgent):
             content = self._unwrap_json_response(content)
             
             return {
-                "analysis_result": content
+                "analysis_result": content,
+                # Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "active_editor": state.get("active_editor", {}),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -208,7 +225,14 @@ class StoryAnalysisAgent(BaseAgent):
             return {
                 "analysis_result": "",
                 "error": str(e),
-                "task_status": "error"
+                "task_status": "error",
+                # Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "active_editor": state.get("active_editor", {}),
+                "query": state.get("query", "")
             }
     
     async def _format_response_node(self, state: StoryAnalysisState) -> Dict[str, Any]:
@@ -251,7 +275,13 @@ class StoryAnalysisAgent(BaseAgent):
             return {
                 "response": response_dict,
                 "task_status": "complete",
-                **updated_state
+                # Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": updated_state.get("messages", state.get("messages", [])),
+                "active_editor": state.get("active_editor", {}),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
@@ -262,7 +292,14 @@ class StoryAnalysisAgent(BaseAgent):
                     "response": f"Failed to format response: {str(e)}"
                 },
                 "task_status": "error",
-                "error": str(e)
+                "error": str(e),
+                # Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "active_editor": state.get("active_editor", {}),
+                "query": state.get("query", "")
             }
     
     def _unwrap_json_response(self, content: str) -> str:

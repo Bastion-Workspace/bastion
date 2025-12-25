@@ -1621,12 +1621,17 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                             "operations": editor_operations,
                             "manuscript_edit": manuscript_edit
                         }
+                        logger.info(f"✅ Sending {len(editor_operations)} editor_operations to frontend (first op: {editor_operations[0] if editor_operations else None})")
+                        logger.info(f"🔍 Editor operations data structure: operations_count={len(editor_operations)}, has_manuscript_edit={bool(manuscript_edit)}")
+                        if editor_operations:
+                            logger.info(f"🔍 First operation details: op_type={editor_operations[0].get('op_type') if editor_operations else 'none'}, start={editor_operations[0].get('start') if editor_operations else 'none'}, end={editor_operations[0].get('end') if editor_operations else 'none'}, has_text={bool(editor_operations[0].get('text')) if editor_operations else False}, text_preview={editor_operations[0].get('text', '')[:100] if editor_operations and editor_operations[0].get('text') else 'N/A'}")
                         yield orchestrator_pb2.ChatChunk(
                             type="editor_operations",
                             message=json.dumps(editor_ops_data),
                             timestamp=datetime.now().isoformat(),
                             agent_name="character_development_agent"
                         )
+                        logger.info(f"✅ Sent editor_operations chunk to frontend (type='editor_operations', message_length={len(json.dumps(editor_ops_data))})")
                         yield orchestrator_pb2.ChatChunk(
                             type="complete",
                             message="Character edit plan ready",
@@ -2277,11 +2282,27 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 )
                 
                 # Extract response text from nested structure
-                response_obj = result.get("response", {})
-                if isinstance(response_obj, dict):
-                    response_text = response_obj.get("response", "Story analysis complete")
+                # result is the response dict from process() which contains {"task_status": ..., "response": analysis_text, ...}
+                logger.info(f"🔍 Story analysis result structure: type={type(result)}, is_dict={isinstance(result, dict)}, keys={list(result.keys()) if isinstance(result, dict) else 'N/A'}")
+                
+                if isinstance(result, dict):
+                    # The result dict has a "response" key containing the actual analysis text
+                    response_text = result.get("response", "")
+                    if isinstance(response_text, dict):
+                        # If response is nested, extract the actual text
+                        response_text = response_text.get("response", "Story analysis complete")
+                    elif not response_text:
+                        # Fallback to structured_response if available
+                        structured = result.get("structured_response", {})
+                        response_text = structured.get("analysis_text", "Story analysis complete")
+                    
+                    logger.info(f"🔍 Story analysis response extraction: response_text length={len(response_text) if response_text else 0}, preview={response_text[:200] if response_text else 'EMPTY'}")
                 else:
-                    response_text = str(response_obj) if response_obj else "Story analysis complete"
+                    response_text = str(result) if result else "Story analysis complete"
+                    logger.warning(f"🔍 Story analysis result is not a dict: {type(result)}")
+                
+                if not response_text or response_text == "Story analysis complete":
+                    logger.warning(f"⚠️ Story analysis response is empty or default - result keys: {list(result.keys()) if isinstance(result, dict) else 'not a dict'}")
                 
                 yield orchestrator_pb2.ChatChunk(
                     type="content",

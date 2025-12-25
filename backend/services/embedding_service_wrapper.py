@@ -341,6 +341,22 @@ class EmbeddingServiceWrapper:
         except Exception as e:
             logger.error(f"Failed to store embeddings with metadata for {'team ' + team_id if team_id else ('user ' + user_id if user_id else 'system')}: {e}")
             raise
+    
+    async def close(self):
+        """Clean up resources"""
+        try:
+            if self.vector_service_client and hasattr(self.vector_service_client, 'close'):
+                await self.vector_service_client.close()
+                logger.info("Vector Service client closed")
+            
+            if self.vector_store and hasattr(self.vector_store, 'close'):
+                await self.vector_store.close()
+                logger.info("Vector Store Service closed")
+            
+            self._initialized = False
+            logger.info("Embedding Service Wrapper closed")
+        except Exception as e:
+            logger.warning(f"Error closing Embedding Service Wrapper: {e}")
 
 
 # Singleton instance

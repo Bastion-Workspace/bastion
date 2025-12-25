@@ -56,12 +56,18 @@ const TabbedContentManager = forwardRef((props, ref) => {
     // Subscribe to diff store changes for badge updates
     useEffect(() => {
         const handleDiffChange = (documentId, changeType) => {
+            console.log('🔔 TabbedContentManager: Diff change notification', { documentId, changeType, tabsCount: tabs.length });
+            
             // Find all tabs with this documentId
             const matchingTabs = tabs.filter(t => t.type === 'document' && t.documentId === documentId);
+            
+            console.log('🔔 TabbedContentManager: Found matching tabs:', matchingTabs.length);
             
             matchingTabs.forEach(tab => {
                 const diffs = documentDiffStore.getDiffs(documentId);
                 const diffCount = diffs && Array.isArray(diffs.operations) ? diffs.operations.length : 0;
+                
+                console.log('🔔 TabbedContentManager: Updating tab badge', { tabId: tab.id, diffCount });
                 
                 setTabDiffCounts(prev => ({
                     ...prev,
