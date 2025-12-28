@@ -207,30 +207,6 @@ const FileTreeSidebar = ({
           if (update.type === 'document_status_update') {
             console.log('🔄 Received document status update:', update);
             
-            // Remove from processing files list if status is completed (check by both documentId and filename)
-            if (update.status === 'completed' || update.status === 'failed') {
-              setProcessingFiles(prev => {
-                const filtered = prev.filter(f => {
-                  // Remove if documentId matches OR filename matches
-                  const matchesId = f.documentId === update.document_id;
-                  const matchesFilename = update.filename && f.filename === update.filename;
-                  return !(matchesId || matchesFilename);
-                });
-                
-                if (filtered.length < prev.length) {
-                  const removedFile = prev.find(f => 
-                    f.documentId === update.document_id || 
-                    (update.filename && f.filename === update.filename)
-                  );
-                  if (removedFile && update.status === 'completed') {
-                    showToast(`✅ "${removedFile.filename}" processing completed!`, 'success');
-                  }
-                }
-                
-                return filtered;
-              });
-            }
-            
             // Update specific folder contents when document status changes - REAL-TIME!
             if (update.folder_id) {
               console.log(`📁 Real-time status update for folder ${update.folder_id}`);
@@ -242,35 +218,42 @@ const FileTreeSidebar = ({
                     // Ensure documents have normalized status field (create new object to trigger re-render)
                     const normalizedContents = {
                       ...contents,
-                      documents: contents.documents?.map(doc => {
-                        // Update status if this is the document we're updating
-                        if (doc.document_id === update.document_id) {
-                          return {
-                            ...doc,
-                            status: update.status,
-                            processing_status: update.status
-                          };
-                        }
-                        // Otherwise normalize existing status
-                        return {
-                          ...doc,
-                          status: doc.status || doc.processing_status || null,
-                          processing_status: doc.processing_status || doc.status || null
-                        };
-                      }) || []
+                      documents: contents.documents?.map(doc => ({
+                        ...doc,
+                        status: doc.status || doc.processing_status || null,
+                        processing_status: doc.processing_status || doc.status || null
+                      })) || []
                     };
                     const newContents = { ...prev, [update.folder_id]: normalizedContents };
                     console.log(`✅ Real-time folder contents updated!`, {
                       folderId: update.folder_id,
-                      documentId: update.document_id,
-                      newStatus: update.status,
-                      documentCount: normalizedContents.documents?.length || 0
+                      documentCount: normalizedContents.documents?.length || 0,
+                      documents: normalizedContents.documents?.map(d => ({ 
+                        filename: d.filename, 
+                        status: d.status || d.processing_status,
+                        actual_status_field: d.status,
+                        actual_processing_status_field: d.processing_status
+                      }))
                     });
                     return newContents;
                   });
+                  
+                  // Remove from processing files list AFTER folder contents are updated
+                  // Use requestAnimationFrame to ensure folder contents update is rendered first
+                  if (update.status === 'completed' && update.filename) {
+                    requestAnimationFrame(() => {
+                      setProcessingFiles(prev => prev.filter(f => f.filename !== update.filename));
+                      showToast(`✅ "${update.filename}" processing completed!`, 'success');
+                    });
+                  }
                 })
                 .catch(error => {
                   console.error(`❌ Failed to refresh folder ${update.folder_id}:`, error);
+                  // Still remove from processing list even if folder refresh fails
+                  if (update.status === 'completed' && update.filename) {
+                    setProcessingFiles(prev => prev.filter(f => f.filename !== update.filename));
+                    showToast(`✅ "${update.filename}" processing completed!`, 'success');
+                  }
                 });
             } else {
               // Folder ID missing - try to find and update the document in loaded folder contents
@@ -323,6 +306,12 @@ const FileTreeSidebar = ({
               // This handles cases where the document isn't in loaded contents yet
               // React Query will dedupe requests, so this is safe
               queryClient.invalidateQueries(['folders', 'contents']);
+              
+              // Remove from processing files list if status is completed
+              if (update.status === 'completed' && update.filename) {
+                setProcessingFiles(prev => prev.filter(f => f.filename !== update.filename));
+                showToast(`✅ "${update.filename}" processing completed!`, 'success');
+              }
             }
           } else if (update.type === 'file_deleted') {
             console.log('🗑️ Received file deleted notification:', update);
@@ -886,20 +875,12 @@ const FileTreeSidebar = ({
           }
         })
       ).then(results => {
-        // Update folder contents in batch with normalized status fields
+        // Update folder contents in batch
         setFolderContents(prev => {
           const newContents = { ...prev };
           results.forEach(({ folderId, contents }) => {
             if (contents) {
-              // Normalize status fields for consistency
-              newContents[folderId] = {
-                ...contents,
-                documents: contents.documents?.map(doc => ({
-                  ...doc,
-                  status: doc.status || doc.processing_status || null,
-                  processing_status: doc.processing_status || doc.status || null
-                })) || []
-              };
+              newContents[folderId] = contents;
             }
           });
           return newContents;

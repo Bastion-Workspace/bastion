@@ -1542,6 +1542,7 @@ class FictionEditingAgent(BaseAgent):
                 "selection_end": state.get("selection_end", -1),
                 "cursor_offset": state.get("cursor_offset", -1),
                 "requested_chapter_number": state.get("requested_chapter_number"),
+                "explicit_primary_chapter": state.get("explicit_primary_chapter"),  # CRITICAL: For validating requested_chapter_number freshness
                 # ✅ CRITICAL: Preserve reference context too!
                 "outline_body": state.get("outline_body"),
                 "rules_body": state.get("rules_body"),

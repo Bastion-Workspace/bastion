@@ -71,18 +71,37 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         selection_end = state.get("selection_end", -1)
         cursor_offset = state.get("cursor_offset", -1)
         requested_chapter_number = state.get("requested_chapter_number")
+        explicit_primary_chapter = state.get("explicit_primary_chapter")
         
-        # Use requested chapter number if provided, otherwise use current
-        target_chapter_number = requested_chapter_number if requested_chapter_number is not None else current_chapter_number
+        # CRITICAL: Only use requested_chapter_number if it's "fresh" (explicitly set in current query)
+        # This prevents stale requested_chapter_number from persisted state from overriding cursor-based detection
+        is_fresh_request = (
+            explicit_primary_chapter is not None and 
+            requested_chapter_number is not None and 
+            requested_chapter_number == explicit_primary_chapter
+        )
+        
+        if is_fresh_request:
+            # User explicitly requested this chapter in the current query - use it
+            target_chapter_number = requested_chapter_number
+            logger.info(f"📖 Using FRESH requested chapter {requested_chapter_number} (explicitly mentioned in current query)")
+        else:
+            # Use cursor-based detection (current_chapter_number from cursor position)
+            target_chapter_number = current_chapter_number
+            if requested_chapter_number is not None:
+                logger.info(f"📖 Ignoring STALE requested_chapter_number={requested_chapter_number} (not in current query), using cursor-based current_chapter_number={current_chapter_number}")
+            else:
+                logger.info(f"📖 Using cursor-based current_chapter_number={current_chapter_number}")
         
         # Determine chapter labels with actual chapter numbers
         prev_chapter_number = state.get("prev_chapter_number")
         next_chapter_number = state.get("next_chapter_number")
         
-        if requested_chapter_number is not None:
-            current_chapter_label = f"Chapter {requested_chapter_number}"
+        # Use target_chapter_number (which respects freshness check) for label
+        if target_chapter_number is not None:
+            current_chapter_label = f"Chapter {target_chapter_number}"
         else:
-            current_chapter_label = f"Chapter {current_chapter_number}" if current_chapter_number else "Current Chapter"
+            current_chapter_label = "Current Chapter"
         
         prev_chapter_label = f"Chapter {prev_chapter_number}" if prev_chapter_number else None
         next_chapter_label = f"Chapter {next_chapter_number}" if next_chapter_number else None
@@ -131,7 +150,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         
         # Extract last line of previous chapter for new chapter insertion guidance
         prev_chapter_last_line = None
-        if prev_chapter_text and requested_chapter_number is not None:
+        if prev_chapter_text and is_fresh_request:
             # This is a new chapter generation - extract the last line for anchor guidance
             prev_lines = prev_chapter_text.strip().split('\n')
             # Get last non-empty line
@@ -145,10 +164,10 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
             context_parts.append(section_header)
             
             # For new chapter generation, emphasize continuity assessment
-            if requested_chapter_number is not None:
+            if is_fresh_request:
                 context_parts.append("**CRITICAL FOR NEW CHAPTER GENERATION:**\n")
                 context_parts.append(f"READ THIS CHAPTER CAREFULLY to understand where the story left off!\n")
-                context_parts.append(f"Your new Chapter {requested_chapter_number} must pick up the narrative thread naturally.\n")
+                context_parts.append(f"Your new Chapter {target_chapter_number} must pick up the narrative thread naturally.\n")
                 context_parts.append(f"- What was the last scene/location/emotional state?\n")
                 context_parts.append(f"- Where are the characters physically and emotionally?\n")
                 context_parts.append(f"- What narrative momentum exists to build on?\n")
@@ -536,6 +555,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
             "selection_end": state.get("selection_end", -1),
             "cursor_offset": state.get("cursor_offset", -1),
             "requested_chapter_number": state.get("requested_chapter_number"),
+            "explicit_primary_chapter": state.get("explicit_primary_chapter"),  # CRITICAL: For validating requested_chapter_number freshness
             # PRESERVE outline context
             "outline_body": state.get("outline_body"),
             "story_overview": story_overview if 'story_overview' in locals() else state.get("story_overview"),
@@ -570,6 +590,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
             "selection_end": state.get("selection_end", -1),
             "cursor_offset": state.get("cursor_offset", -1),
             "requested_chapter_number": state.get("requested_chapter_number"),
+            "explicit_primary_chapter": state.get("explicit_primary_chapter"),
         }
 
 
@@ -611,11 +632,21 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
         selection_end = state.get("selection_end", -1)
         cursor_offset = state.get("cursor_offset", -1)
         requested_chapter_number = state.get("requested_chapter_number")
+        explicit_primary_chapter = state.get("explicit_primary_chapter")
         current_chapter_number = state.get("current_chapter_number")
         target_chapter_number = state.get("target_chapter_number")
         if target_chapter_number is None:
-            # Calculate target_chapter_number if not in state
-            target_chapter_number = requested_chapter_number if requested_chapter_number is not None else current_chapter_number
+            # CRITICAL: Only use requested_chapter_number if it's "fresh" (explicitly set in current query)
+            # This prevents stale requested_chapter_number from persisted state from overriding cursor-based detection
+            is_fresh_request = (
+                explicit_primary_chapter is not None and 
+                requested_chapter_number is not None and 
+                requested_chapter_number == explicit_primary_chapter
+            )
+            if is_fresh_request:
+                target_chapter_number = requested_chapter_number
+            else:
+                target_chapter_number = current_chapter_number
         chapter_ranges = state.get("chapter_ranges", [])
         
         # datetime_context should be provided by main agent via state
@@ -693,11 +724,16 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 )
             
             # Check if creating a new chapter
-            is_creating_new_chapter = (
-                requested_chapter_number is not None and 
+            # Only treat as new chapter if target_chapter_number is explicitly requested (fresh) and current chapter is empty
+            explicit_primary_chapter = state.get("explicit_primary_chapter")
+            is_fresh_new_chapter_request = (
+                explicit_primary_chapter is not None and 
+                target_chapter_number is not None and
+                target_chapter_number == explicit_primary_chapter and
                 state.get("current_chapter_text", "").strip() == "" and
                 any(keyword in current_request.lower() for keyword in ["create", "craft", "write", "generate", "chapter"])
             )
+            is_creating_new_chapter = is_fresh_new_chapter_request
             
             new_chapter_hints = ""
             if is_creating_new_chapter:
@@ -711,14 +747,14 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     last_chapter_num = last_chapter_range.chapter_number
                     
                     new_chapter_hints = (
-                        f"\n=== CREATING NEW CHAPTER {requested_chapter_number} ===\n"
+                        f"\n=== CREATING NEW CHAPTER {target_chapter_number} ===\n"
                         f"The chapter doesn't exist yet - you need to insert it after the last existing chapter.\n\n"
                         f"**CONTINUITY ASSESSMENT (CRITICAL):**\n"
                         f"SCROLL UP and READ the CHAPTER {prev_chapter_number} MANUSCRIPT TEXT section carefully!\n"
                         f"- Where did the last chapter END (location, emotional state, action)?\n"
                         f"- What narrative momentum exists to build on?\n"
                         f"- DO NOT repeat the last scene - pick up AFTER it!\n"
-                        f"- If Chapter {last_chapter_num} ended with characters in a location, Chapter {requested_chapter_number} should continue FROM that location (not re-enter it)\n"
+                        f"- If Chapter {last_chapter_num} ended with characters in a location, Chapter {target_chapter_number} should continue FROM that location (not re-enter it)\n"
                         f"- Maintain emotional continuity from where Chapter {last_chapter_num} left off\n\n"
                         f"**INSERTION MECHANICS:**\n"
                         f"Last existing chapter: Chapter {last_chapter_num}\n"
@@ -730,19 +766,19 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         f"{{\n"
                         f'  "target_filename": "manuscript.md",\n'
                         f'  "scope": "chapter",\n'
-                        f'  "summary": "Generated Chapter {requested_chapter_number}",\n'
+                        f'  "summary": "Generated Chapter {target_chapter_number}",\n'
                         f'  "safety": "medium",\n'
                         f'  "operations": [{{\n'
                         f'    "op_type": "insert_after_heading",\n'
                         f'    "anchor_text": "{prev_chapter_last_line}",\n'
-                        f'    "text": "## Chapter {requested_chapter_number}\\n\\nYour chapter content here...",\n'
+                        f'    "text": "## Chapter {target_chapter_number}\\n\\nYour chapter content here...",\n'
                         f'    "start": 0,\n'
                         f'    "end": 0\n'
                         f"  }}]\n"
                         f"}}\n\n"
-                        f"**MANDATORY**: Your 'text' field MUST start with '## Chapter {requested_chapter_number}' followed by two newlines, then your chapter content.\n"
+                        f"**MANDATORY**: Your 'text' field MUST start with '## Chapter {target_chapter_number}' followed by two newlines, then your chapter content.\n"
                         f"**MANDATORY**: Use the exact last line shown above as your anchor_text!\n"
-                        f"**DO NOT** use '## Chapter {requested_chapter_number}' as anchor_text - it doesn't exist yet!\n"
+                        f"**DO NOT** use '## Chapter {target_chapter_number}' as anchor_text - it doesn't exist yet!\n"
                         f"**DO NOT** insert at the beginning of the file - insert after the last line shown above!\n"
                         f"**DO NOT** forget the chapter header - it is REQUIRED for all new chapters!\n\n"
                     )
@@ -752,7 +788,7 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     last_chapter_num = last_chapter_range.chapter_number
                     
                     new_chapter_hints = (
-                        f"\n=== CREATING NEW CHAPTER {requested_chapter_number} ===\n"
+                        f"\n=== CREATING NEW CHAPTER {target_chapter_number} ===\n"
                         f"The chapter doesn't exist yet - you need to insert it after the last existing chapter.\n"
                         f"Last existing chapter: Chapter {last_chapter_num}\n"
                         f"**CRITICAL**: Find the LAST LINE of Chapter {last_chapter_num} in the manuscript above and use it as anchor_text.\n"
@@ -762,7 +798,8 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
             
             # Build chapter clarification if there's a discrepancy
             chapter_clarification = ""
-            if requested_chapter_number is not None and requested_chapter_number == target_chapter_number:
+            # Only show clarification if target_chapter_number was explicitly requested (fresh)
+            if explicit_primary_chapter is not None and target_chapter_number == explicit_primary_chapter:
                 # Clear generation instruction matching detected chapter
                 chapter_clarification = (
                     f"\n{'='*80}\n"
