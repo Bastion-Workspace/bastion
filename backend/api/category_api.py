@@ -136,11 +136,3 @@ async def get_category_statistics():
     except Exception as e:
         logger.error(f"❌ Failed to get category statistics: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-
-
-
-
-# ===== OCR ENDPOINTS =====
-
