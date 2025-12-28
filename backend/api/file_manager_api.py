@@ -18,10 +18,10 @@ from utils.auth_middleware import get_current_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/file-manager", tags=["File Manager"])
+router = APIRouter(tags=["File Manager"])
 
 
-@router.post("/place-file", response_model=FilePlacementResponse)
+@router.post("/api/file-manager/place-file", response_model=FilePlacementResponse)
 async def place_file(
     request: FilePlacementRequest,
     current_user: Optional[str] = Depends(get_current_user)
@@ -43,7 +43,7 @@ async def place_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/move-file", response_model=FileMoveResponse)
+@router.post("/api/file-manager/move-file", response_model=FileMoveResponse)
 async def move_file(
     request: FileMoveRequest,
     current_user = Depends(get_current_user)
@@ -66,7 +66,7 @@ async def move_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/delete-file", response_model=FileDeleteResponse)
+@router.post("/api/file-manager/delete-file", response_model=FileDeleteResponse)
 async def delete_file(
     request: FileDeleteRequest,
     current_user: Optional[str] = Depends(get_current_user)
@@ -88,7 +88,7 @@ async def delete_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/rename-file", response_model=FileRenameResponse)
+@router.post("/api/file-manager/rename-file", response_model=FileRenameResponse)
 async def rename_file(
     request: FileRenameRequest,
     current_user: Optional[str] = Depends(get_current_user)
@@ -106,7 +106,7 @@ async def rename_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/create-folder-structure", response_model=FolderStructureResponse)
+@router.post("/api/file-manager/create-folder-structure", response_model=FolderStructureResponse)
 async def create_folder_structure(
     request: FolderStructureRequest,
     current_user: Optional[str] = Depends(get_current_user)

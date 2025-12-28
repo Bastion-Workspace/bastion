@@ -17,10 +17,10 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/audio", tags=["Audio"])
+router = APIRouter(tags=["Audio"])
 
 
-@router.post("/transcribe")
+@router.post("/api/audio/transcribe")
 async def transcribe_audio(
     file: UploadFile = File(...),
     current_user: AuthenticatedUserResponse = Depends(get_current_user)

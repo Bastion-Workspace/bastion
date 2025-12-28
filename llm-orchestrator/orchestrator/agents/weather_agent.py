@@ -14,7 +14,6 @@ from langgraph.graph import StateGraph, END
 from orchestrator.agents.base_agent import BaseAgent
 from orchestrator.services.weather_request_analyzer import get_weather_request_analyzer
 from orchestrator.services.weather_response_formatters import get_weather_response_formatters
-from orchestrator.tools.weather_tools import get_weather_tools
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +94,6 @@ class WeatherAgent(BaseAgent):
         if self._formatter is None:
             self._formatter = get_weather_response_formatters()
         return self._formatter
-    
-    async def _get_weather_tools(self):
-        """Get weather tools instance"""
-        if self._weather_tools is None:
-            self._weather_tools = await get_weather_tools()
-        return self._weather_tools
     
     async def _prepare_context_node(self, state: WeatherState) -> Dict[str, Any]:
         """Prepare context: extract messages, preferences, and communication style"""
@@ -225,18 +218,15 @@ class WeatherAgent(BaseAgent):
         return "get_data"
     
     async def _get_weather_data_node(self, state: WeatherState) -> Dict[str, Any]:
-        """Get weather data using weather tools"""
+        """Get weather data using centralized Tools Service via gRPC"""
         try:
-            logger.info("🌤️ Fetching weather data...")
+            logger.info("🌤️ Fetching weather data via gRPC...")
             
             weather_request = state.get("weather_request", {})
             user_id = state.get("user_id", "system")
             
-            # Get weather tools instance
-            weather_tools = await self._get_weather_tools()
-            
-            # Get weather data
-            weather_data = await self._get_weather_data(weather_request, weather_tools, user_id)
+            # Get weather data via gRPC
+            weather_data = await self._get_weather_data(weather_request, None, user_id)
             
             # Store results in shared memory if successful
             if weather_data.get("success", False):
@@ -526,25 +516,54 @@ class WeatherAgent(BaseAgent):
             return self._create_error_response(str(e))
     
     async def _get_weather_data(self, weather_request: Dict[str, Any], weather_tools, user_id: str) -> Dict[str, Any]:
-        """Get weather data using weather tools"""
+        """Get weather data using centralized Tools Service via gRPC"""
         try:
-            if weather_request["request_type"] == "current":
-                # Get current conditions
-                result = await weather_tools.get_weather_conditions(
-                    location=weather_request["location"],
-                    units=weather_request["units"],
-                    user_id=user_id
-                )
-            else:
-                # Get forecast
-                result = await weather_tools.get_weather_forecast(
-                    location=weather_request["location"],
-                    days=weather_request["forecast_days"],
-                    units=weather_request["units"],
-                    user_id=user_id
-                )
+            # Get gRPC client from BaseAgent
+            grpc_client = await self._get_grpc_client()
             
-            return result
+            # Determine data types
+            data_types = ["current"]
+            if weather_request.get("request_type") != "current":
+                data_types.append("forecast")
+            
+            # Fetch via gRPC
+            result = await grpc_client.get_weather(
+                location=weather_request["location"],
+                user_id=user_id,
+                data_types=data_types
+            )
+            
+            if not result or not result.get("success"):
+                return {"success": False, "error": "Weather service unavailable or failed"}
+                
+            # Reconstruct expected format for agent analysis
+            metadata = result.get('metadata', {})
+            
+            # Map gRPC response to internal tool format
+            formatted = {
+                "success": True,
+                "location": {
+                    "name": result.get("location", weather_request["location"]),
+                    "query": weather_request["location"]
+                },
+                "current": {
+                    "temperature": float(metadata.get("temperature", 0)),
+                    "conditions": metadata.get("conditions", ""),
+                    "humidity": float(metadata.get("humidity", 0)),
+                    "wind_speed": float(metadata.get("wind_speed", 0)),
+                    "feels_like": float(metadata.get("feels_like", 0))
+                },
+                "moon_phase": {
+                    "phase_name": metadata.get("moon_phase_name", ""),
+                    "phase_icon": metadata.get("moon_phase_icon", "")
+                },
+                "units": {
+                    "temperature": "°F",
+                    "wind_speed": "mph"
+                }
+            }
+            
+            return formatted
             
         except Exception as e:
             logger.error(f"❌ Error getting weather data: {e}")

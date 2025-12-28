@@ -95,18 +95,39 @@ That's it! No migrations, no multiple SQL files, no complex setup.
     - `checkpoint_blobs` - Large object storage
     - `checkpoint_writes` - Pending writes
 
-11. **Video Processing**
-    - `videos` - Video metadata
-    - `video_transcripts` - Full transcripts
-    - `video_segments` - Searchable chunks
-
-12. **Org-Mode**
+11. **Org-Mode**
     - `org_settings` - Per-user org preferences
 
-13. **GitHub Integration** ⭐
+12. **GitHub Integration** ⭐
     - `github_connections` - API connections
     - `github_project_mappings` - Repository mappings
     - `github_issue_sync` - Sync tracking
+
+13. **Messaging System**
+    - `rooms` - Chat rooms/channels
+    - `room_participants` - Room membership
+    - `room_messages` - Message storage
+
+14. **Teams & Collaboration**
+    - `teams` - Team entities
+    - `team_members` - Team membership
+    - `team_invitations` - Pending invites
+    - `team_folders` - Shared folder structure
+
+15. **Music Library** 🎵
+    - `music_sync_configs` - Service configurations (Plex/Jellyfin)
+    - `music_sync_items` - Artist/Album/Track metadata
+    - `music_liked_albums` - User favorites
+    - `music_cache_metadata` - Sync state tracking
+
+16. **Entertainment Tracking** 🎬
+    - `entertainment_sync_configs` - Movie/TV service configs
+    - `entertainment_sync_items` - Content metadata
+
+17. **Email Agent** 📧
+    - `email_agent_connections` - Email account connections
+    - `email_agent_folders` - Folder mappings
+    - `email_agent_messages` - Cached email data
 
 ### Security Features:
 - Row Level Security (RLS) on most user tables

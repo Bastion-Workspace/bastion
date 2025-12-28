@@ -29,7 +29,7 @@ from models.team_models import TeamRole, PostType
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/teams", tags=["teams"])
+router = APIRouter(tags=["teams"])
 
 # Debug: Log all routes when module loads
 import sys
@@ -45,7 +45,7 @@ post_service = TeamPostService()
 # TEAM MANAGEMENT ENDPOINTS
 # =====================
 
-@router.post("", response_model=TeamResponse)
+@router.post("/api/teams", response_model=TeamResponse)
 async def create_team(
     request: CreateTeamRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -65,7 +65,7 @@ async def create_team(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("", response_model=TeamsListResponse)
+@router.get("/api/teams", response_model=TeamsListResponse)
 async def list_user_teams(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -86,7 +86,7 @@ async def list_user_teams(
 # UNREAD TRACKING ENDPOINTS (must be before /{team_id} route)
 # =====================
 
-@router.get("/unread-counts")
+@router.get("/api/teams/unread-counts")
 async def get_unread_post_counts(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -105,7 +105,7 @@ async def get_unread_post_counts(
 # USER SEARCH ENDPOINT (for invitations - must be before /{team_id} route)
 # =====================
 
-@router.get("/users/search")
+@router.get("/api/teams/users/search")
 async def search_users_for_teams(
     query: Optional[str] = Query(None, description="Search query for username, email, or display name"),
     limit: int = Query(100, ge=1, le=1000, description="Maximum number of results"),
@@ -151,7 +151,7 @@ async def search_users_for_teams(
         raise HTTPException(status_code=500, detail="Failed to search users")
 
 
-@router.get("/{team_id}", response_model=TeamResponse)
+@router.get("/api/teams/{team_id}", response_model=TeamResponse)
 async def get_team(
     team_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -170,7 +170,7 @@ async def get_team(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/{team_id}", response_model=TeamResponse)
+@router.put("/api/teams/{team_id}", response_model=TeamResponse)
 async def update_team(
     team_id: str,
     request: UpdateTeamRequest,
@@ -193,7 +193,7 @@ async def update_team(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/{team_id}")
+@router.delete("/api/teams/{team_id}")
 async def delete_team(
     team_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -246,7 +246,7 @@ async def delete_team(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{team_id}/avatar")
+@router.post("/api/teams/{team_id}/avatar")
 async def upload_team_avatar(
     team_id: str,
     file: UploadFile = File(...),
@@ -316,7 +316,7 @@ async def upload_team_avatar(
         raise HTTPException(status_code=500, detail="Failed to upload avatar")
 
 
-@router.get("/{team_id}/avatar/{filename}")
+@router.get("/api/teams/{team_id}/avatar/{filename}")
 async def get_team_avatar(
     team_id: str,
     filename: str,
@@ -360,7 +360,7 @@ async def get_team_avatar(
 # MEMBER MANAGEMENT ENDPOINTS
 # =====================
 
-@router.get("/{team_id}/members", response_model=TeamMembersListResponse)
+@router.get("/api/teams/{team_id}/members", response_model=TeamMembersListResponse)
 async def get_team_members(
     team_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -381,7 +381,7 @@ async def get_team_members(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{team_id}/members")
+@router.post("/api/teams/{team_id}/members")
 async def add_member(
     team_id: str,
     request: AddMemberRequest,
@@ -440,11 +440,15 @@ async def add_member(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        error_msg = str(e)
+        # Translate database constraint violations to user-friendly messages
+        if "duplicate key" in error_msg.lower() or "unique constraint" in error_msg.lower():
+            raise HTTPException(status_code=400, detail="User is already a team member")
         logger.error(f"Failed to add member: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Failed to add member to team")
 
 
-@router.delete("/{team_id}/members/{user_id}")
+@router.delete("/api/teams/{team_id}/members/{user_id}")
 async def remove_member(
     team_id: str,
     user_id: str,
@@ -503,7 +507,7 @@ async def remove_member(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/{team_id}/members/{user_id}/role")
+@router.put("/api/teams/{team_id}/members/{user_id}/role")
 async def update_member_role(
     team_id: str,
     user_id: str,
@@ -537,7 +541,7 @@ async def update_member_role(
 # UNREAD TRACKING ENDPOINTS
 # =====================
 
-@router.get("/unread-counts")
+@router.get("/api/teams/unread-counts")
 async def get_unread_post_counts(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -550,7 +554,7 @@ async def get_unread_post_counts(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{team_id}/mark-read")
+@router.post("/api/teams/{team_id}/mark-read")
 async def mark_team_posts_as_read(
     team_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -566,7 +570,7 @@ async def mark_team_posts_as_read(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/{team_id}/mute")
+@router.put("/api/teams/{team_id}/mute")
 async def mute_team(
     team_id: str,
     muted: bool = Query(True, description="True to mute, False to unmute"),
@@ -589,7 +593,7 @@ async def mute_team(
 # INVITATION ENDPOINTS
 # =====================
 
-@router.post("/{team_id}/invitations")
+@router.post("/api/teams/{team_id}/invitations")
 async def create_invitation(
     team_id: str,
     invited_user_id: str = Query(..., description="User ID to invite"),
@@ -613,7 +617,7 @@ async def create_invitation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{team_id}/invitations", response_model=List[TeamInvitationResponse])
+@router.get("/api/teams/{team_id}/invitations", response_model=List[TeamInvitationResponse])
 async def list_team_invitations(
     team_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -676,7 +680,7 @@ async def list_team_invitations(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/{team_id}/invitations/{invitation_id}")
+@router.delete("/api/teams/{team_id}/invitations/{invitation_id}")
 async def cancel_invitation(
     team_id: str,
     invitation_id: str,
@@ -698,7 +702,7 @@ async def cancel_invitation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/invitations/pending", response_model=List[TeamInvitationResponse])
+@router.get("/api/teams/invitations/pending", response_model=List[TeamInvitationResponse])
 async def get_pending_invitations(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -712,7 +716,7 @@ async def get_pending_invitations(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/invitations/{invitation_id}/accept", response_model=TeamResponse)
+@router.put("/api/teams/invitations/{invitation_id}/accept", response_model=TeamResponse)
 async def accept_invitation(
     invitation_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -729,7 +733,7 @@ async def accept_invitation(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/invitations/{invitation_id}/reject")
+@router.put("/api/teams/invitations/{invitation_id}/reject")
 async def reject_invitation(
     invitation_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -757,7 +761,7 @@ async def reject_invitation(
 # IMPORTANT: More specific routes must come before general ones
 # Attachment routes must come before general posts routes
 
-@router.get("/{team_id}/posts/attachments/{filename}")
+@router.get("/api/teams/{team_id}/posts/attachments/{filename}")
 async def get_post_attachment(
     team_id: str,
     filename: str,
@@ -883,7 +887,7 @@ async def get_post_attachment(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{team_id}/posts", response_model=TeamPostsListResponse)
+@router.get("/api/teams/{team_id}/posts", response_model=TeamPostsListResponse)
 async def get_team_posts(
     team_id: str,
     limit: int = Query(20, ge=1, le=100),
@@ -911,7 +915,7 @@ async def get_team_posts(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{team_id}/posts/upload")
+@router.post("/api/teams/{team_id}/posts/upload")
 async def upload_post_attachment(
     team_id: str,
     file: UploadFile = File(...),
@@ -1032,7 +1036,7 @@ async def upload_post_attachment(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{team_id}/posts/attachments/debug/list")
+@router.get("/api/teams/{team_id}/posts/attachments/debug/list")
 async def list_post_attachments_debug(
     team_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -1074,7 +1078,7 @@ async def list_post_attachments_debug(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/{team_id}/posts", response_model=TeamPostResponse)
+@router.post("/api/teams/{team_id}/posts", response_model=TeamPostResponse)
 async def create_post(
     team_id: str,
     request: CreatePostRequest,
@@ -1157,7 +1161,7 @@ async def create_post(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/{team_id}/posts/{post_id}")
+@router.delete("/api/teams/{team_id}/posts/{post_id}")
 async def delete_post(
     team_id: str,
     post_id: str,
@@ -1183,7 +1187,7 @@ async def delete_post(
 # REACTION ENDPOINTS
 # =====================
 
-@router.post("/{team_id}/posts/{post_id}/reactions")
+@router.post("/api/teams/{team_id}/posts/{post_id}/reactions")
 async def add_reaction(
     team_id: str,
     post_id: str,
@@ -1246,7 +1250,7 @@ async def add_reaction(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/{team_id}/posts/{post_id}/reactions/{reaction_type}")
+@router.delete("/api/teams/{team_id}/posts/{post_id}/reactions/{reaction_type}")
 async def remove_reaction(
     team_id: str,
     post_id: str,
@@ -1311,7 +1315,7 @@ async def remove_reaction(
 # COMMENT ENDPOINTS
 # =====================
 
-@router.post("/{team_id}/posts/{post_id}/comments", response_model=Dict[str, Any])
+@router.post("/api/teams/{team_id}/posts/{post_id}/comments", response_model=Dict[str, Any])
 async def create_comment(
     team_id: str,
     post_id: str,
@@ -1371,7 +1375,7 @@ async def create_comment(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{team_id}/posts/{post_id}/comments", response_model=PostCommentsListResponse)
+@router.get("/api/teams/{team_id}/posts/{post_id}/comments", response_model=PostCommentsListResponse)
 async def get_post_comments(
     team_id: str,
     post_id: str,
@@ -1392,7 +1396,7 @@ async def get_post_comments(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/{team_id}/posts/{post_id}/comments/{comment_id}")
+@router.delete("/api/teams/{team_id}/posts/{post_id}/comments/{comment_id}")
 async def delete_comment(
     team_id: str,
     post_id: str,

@@ -302,8 +302,8 @@ class GRPCContextGatherer:
                 logger.info(f"📚 EDITOR CONTEXT: Including reference document even though not editable (reference_agent needs to read it)")
             
             filename = active_editor.get("filename", "")
-            if not filename.endswith(".md"):
-                logger.warning(f"⚠️ EDITOR CONTEXT: Skipping - filename '{filename}' does not end with .md")
+            if not (filename.endswith(".md") or filename.endswith(".org")):
+                logger.warning(f"⚠️ EDITOR CONTEXT: Skipping - filename '{filename}' does not end with .md or .org")
                 return
             
             # Parse frontmatter

@@ -1,0 +1,27 @@
+# Celery Flower - Monitoring UI Only
+# Minimal dependencies for task monitoring
+
+# Core Celery
+celery==5.5.3
+flower==2.0.1
+redis==6.4.0
+
+# gRPC (needed for task module imports)
+grpcio==1.76.0
+grpcio-tools==1.76.0
+
+# Configuration (needed for config.py imports)
+pydantic==2.10.3
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+
+# Database (needed for service_container imports)
+psycopg2-binary==2.9.10
+asyncpg==0.30.0
+sqlalchemy==2.0.36
+
+# Authentication (needed for service_container imports)
+PyJWT==2.9.0
+passlib[bcrypt]==1.7.4
+bcrypt==3.2.2
+

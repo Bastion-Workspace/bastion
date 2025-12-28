@@ -81,6 +81,10 @@ class GeneralProjectState(TypedDict):
     documentation_maintenance_plan: Optional[Dict[str, Any]]
     documentation_verification_result: Optional[Dict[str, Any]]
     pending_save_plan: Optional[Dict[str, Any]]
+    project_document_id: Optional[str]  # Explicit project document ID (for cross-agent assessment)
+    read_only_context: Dict[str, Any]  # Read-only referenced files for context
+    existing_sections: List[str]  # Level 2 headers (##) found in primary document
+    diagram_result: Optional[Dict[str, Any]]  # Diagram generation result
     task_status: str
     error: str
 
@@ -108,6 +112,68 @@ class GeneralProjectAgent(BaseAgent):
         self.maintenance_nodes = GeneralProjectMaintenanceNodes(self)
         logger.info("General Project Agent ready for project planning and management!")
     
+    def _get_diagramming_subgraph(self, checkpointer):
+        """Get or build diagramming subgraph"""
+        if not hasattr(self, '_diagramming_subgraph') or self._diagramming_subgraph is None:
+            from orchestrator.subgraphs import build_diagramming_subgraph
+            self._diagramming_subgraph = build_diagramming_subgraph(checkpointer)
+        return self._diagramming_subgraph
+    
+    async def _call_diagramming_subgraph_node(self, state: GeneralProjectState) -> Dict[str, Any]:
+        """Call diagramming subgraph to generate project diagrams"""
+        try:
+            logger.info("📊 Calling diagramming subgraph")
+            
+            workflow = await self._get_workflow()
+            checkpointer = workflow.checkpointer
+            diagramming_sg = self._get_diagramming_subgraph(checkpointer)
+            
+            # Prepare diagram context
+            query = state.get("query", "")
+            metadata = state.get("metadata", {})
+            messages = state.get("messages", [])
+            shared_memory = state.get("shared_memory", {})
+            
+            # Include project context for diagram generation
+            referenced_context = state.get("referenced_context", {})
+            active_editor = shared_memory.get("active_editor", {})
+            
+            diagram_state = {
+                "query": query,
+                "messages": messages,
+                "metadata": metadata,
+                "shared_memory": shared_memory,
+                "user_id": state.get("user_id", "system"),
+                "project_context": {
+                    "referenced_files": referenced_context,
+                    "active_editor": active_editor
+                }
+            }
+            
+            config = self._get_checkpoint_config(metadata)
+            result = await diagramming_sg.ainvoke(diagram_state, config)
+            
+            return {
+                "diagram_result": result.get("diagram_result", {}),
+                # Preserve all critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Diagramming subgraph failed: {e}")
+            return {
+                "diagram_result": {"success": False, "error": str(e)},
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
+    
     def _build_workflow(self, checkpointer) -> StateGraph:
         """
         LangGraph workflow for general project agent.
@@ -134,6 +200,7 @@ class GeneralProjectAgent(BaseAgent):
         workflow.add_node("save_content", self.save_nodes.save_content_node)
         workflow.add_node("resolve_plan_operations", self._resolve_plan_operations_node)  # NEW: Resolve plan edits to editor operations
         workflow.add_node("format_response", self._format_response_node)  # NEW: Format response with editor operations
+        workflow.add_node("generate_diagram", self._call_diagramming_subgraph_node)  # Generate project diagrams
         
         # Entry point
         workflow.set_entry_point("analyze_intent")
@@ -194,16 +261,20 @@ class GeneralProjectAgent(BaseAgent):
         # Web search goes to response generation
         workflow.add_edge("perform_web_search", "generate_response")
         
-        # Response generation routes to decision extraction or save or end
+        # Response generation routes to decision extraction, diagram generation, save, or end
         workflow.add_conditional_edges(
             "generate_response",
             self._route_from_response,
             {
                 "extract_decisions": "extract_decisions",
+                "generate_diagram": "generate_diagram",
                 "save": "extract_and_route_content",
                 "end": END
             }
         )
+        
+        # Diagram generation goes to save (to insert diagram into document)
+        workflow.add_edge("generate_diagram", "extract_and_route_content")
         
         # Decision extraction routes to project plan update, verification, or save
         workflow.add_conditional_edges(
@@ -314,16 +385,14 @@ class GeneralProjectAgent(BaseAgent):
         return "load_context"
     
     def _route_from_save(self, state: GeneralProjectState) -> str:
-        """Route from save_content: resolve operations if editing mode with plan edits, otherwise format response"""
-        editing_mode = state.get("editing_mode", False)
+        """Route from save_content: resolve operations if plan edits exist (file is open), otherwise format response"""
         plan_edits = state.get("plan_edits")
         
-        if editing_mode and plan_edits and len(plan_edits) > 0:
+        # If we have plan_edits, it means file is open and we should use inline editing
+        if plan_edits and len(plan_edits) > 0:
             return "resolve_operations"
-        elif editing_mode or plan_edits:
-            return "format"
         else:
-            return "end"
+            return "format"
     
     def _route_from_execution_plan(self, state: GeneralProjectState) -> str:
         """Route from execution planning - always load context"""
@@ -456,10 +525,30 @@ class GeneralProjectAgent(BaseAgent):
     
     def _route_from_response(self, state: GeneralProjectState) -> str:
         """Route based on whether content should be saved or decisions extracted"""
+        # Check if diagram would be helpful
+        query = state.get("query", "").lower()
         response = state.get("response", {})
         response_text = response.get("response", "") if isinstance(response, dict) else str(response)
         
-        query = state.get("query", "").lower()
+        # Explicit diagram requests
+        diagram_keywords = [
+            "diagram", "flowchart", "timeline", "gantt", "workflow",
+            "decision tree", "process flow", "show steps", "visualize"
+        ]
+        
+        if any(keyword in query for keyword in diagram_keywords):
+            logger.info("📊 Diagram explicitly requested")
+            return "generate_diagram"
+        
+        # Automatic suggestion (if response mentions complex flow/structure)
+        if isinstance(response_text, str):
+            auto_diagram_triggers = [
+                "workflow", "process", "steps", "timeline", "schedule",
+                "decision tree", "multiple phases", "project phases"
+            ]
+            if any(trigger in response_text.lower() for trigger in auto_diagram_triggers):
+                logger.info("📊 Diagram automatically suggested")
+                return "generate_diagram"
         project_plan_action = state.get("project_plan_action")
         
         involves_decisions = any(keyword in query for keyword in [
@@ -786,18 +875,26 @@ Return ONLY valid JSON:
     async def _load_project_context_node(self, state: GeneralProjectState) -> Dict[str, Any]:
         """
         Load project context efficiently with lazy loading.
-        Only loads if query is project-related and editor_preference is not "ignore".
+        Prioritizes single-document structure with header-based organization.
+        Supports explicit project_document_id for cross-agent assessment.
+        Loads referenced files as read-only context.
         """
         try:
             user_id = state.get("user_id", "")
             metadata = state.get("metadata", {})
             shared_memory = metadata.get("shared_memory", {})
             
+            # Check for explicit project document ID (e.g., from Org Agent assessment)
+            project_document_id = metadata.get("project_document_id") or shared_memory.get("project_document_id")
+            
             editor_preference = shared_memory.get("editor_preference", "prefer")
-            if editor_preference == "ignore":
+            if editor_preference == "ignore" and not project_document_id:
                 logger.info(f"Skipping project context - editor_preference is 'ignore'")
                 return {
                     "referenced_context": {},
+                    "read_only_context": {},
+                    "existing_sections": [],
+                    "project_document_id": None,
                     # ✅ CRITICAL: Preserve critical state keys
                     "metadata": state.get("metadata", {}),
                     "user_id": state.get("user_id", "system"),
@@ -808,10 +905,36 @@ Return ONLY valid JSON:
             
             active_editor = metadata.get("active_editor") or shared_memory.get("active_editor", {})
             
-            if not active_editor or active_editor.get("frontmatter", {}).get("type", "").lower() != "project":
-                logger.info(f"Skipping project context - no project plan open")
+            # Resolve the primary project document
+            project_content = ""
+            project_filename = ""
+            resolved_project_doc_id = None
+            
+            if project_document_id:
+                # Explicit project document ID provided (e.g., from Org Agent)
+                from orchestrator.tools.document_tools import get_document_content_tool
+                project_content = await get_document_content_tool(project_document_id, user_id)
+                if project_content.startswith("Error"):
+                    logger.warning(f"Could not load explicit project document {project_document_id}")
+                    project_content = ""
+                else:
+                    project_filename = "referenced_project.md"
+                    resolved_project_doc_id = project_document_id
+                    logger.info(f"Loaded explicit project document: {project_document_id}")
+            elif active_editor and active_editor.get("frontmatter", {}).get("type", "").lower() == "project":
+                # Use active editor as primary document
+                project_content = active_editor.get("content", "")
+                project_filename = active_editor.get("filename", "project_plan.md")
+                resolved_project_doc_id = active_editor.get("document_id")
+                logger.info(f"Using active project editor: {project_filename}")
+            
+            if not project_content:
+                logger.info(f"Skipping project context - no project document available")
                 return {
                     "referenced_context": {},
+                    "read_only_context": {},
+                    "existing_sections": [],
+                    "project_document_id": None,
                     # ✅ CRITICAL: Preserve critical state keys
                     "metadata": state.get("metadata", {}),
                     "user_id": state.get("user_id", "system"),
@@ -820,8 +943,24 @@ Return ONLY valid JSON:
                     "query": state.get("query", "")
                 }
             
-            # Load referenced files from frontmatter
+            # Extract Level 2 headers (##) to inform LLM of document structure
+            import re
+            headers = re.findall(r'^##\s+(.+)$', project_content, re.MULTILINE)
+            existing_sections = [h.strip() for h in headers]
+            logger.info(f"Found {len(existing_sections)} existing sections: {existing_sections[:5]}...")
+            
+            # Load referenced files from frontmatter as read-only context
             from orchestrator.tools.reference_file_loader import load_referenced_files
+            
+            # Build active_editor dict for reference loader (if using explicit doc_id)
+            editor_for_loader = active_editor
+            if project_document_id and not active_editor.get("document_id"):
+                # Create a minimal editor dict for reference loading
+                editor_for_loader = {
+                    "content": project_content,
+                    "document_id": project_document_id,
+                    "filename": project_filename
+                }
             
             # General project reference configuration
             reference_config = {
@@ -829,11 +968,13 @@ Return ONLY valid JSON:
                 "design": ["design", "design_docs", "architecture"],
                 "tasks": ["tasks", "task", "todo", "checklist"],
                 "notes": ["notes", "note", "documentation", "docs"],
+                "supplies": ["supplies", "materials", "parts"],
+                "decisions": ["decisions", "log", "history"],
                 "other": ["references", "reference", "files", "related", "documents"]
             }
             
             result = await load_referenced_files(
-                active_editor=active_editor,
+                active_editor=editor_for_loader,
                 user_id=user_id,
                 reference_config=reference_config,
                 doc_type_filter="project"
@@ -841,20 +982,22 @@ Return ONLY valid JSON:
             
             referenced_context = result.get("loaded_files", {})
             
-            logger.info(f"Loaded {len(referenced_context)} referenced files")
+            # Store referenced files as read-only context (for LLM awareness, not for editing)
+            read_only_context = referenced_context.copy()
+            
+            logger.info(f"Loaded {len(referenced_context)} referenced files as read-only context")
             
             # Detect editing mode: check if project plan has content after frontmatter
-            editor_content = active_editor.get("content", "")
-            editing_mode = False
-            if editor_content:
-                frontmatter_end = self._get_frontmatter_end(editor_content)
-                has_content_after_frontmatter = len(editor_content) > frontmatter_end + 10
-                editing_mode = has_content_after_frontmatter
+            frontmatter_end = self._get_frontmatter_end(project_content)
+            editing_mode = len(project_content) > frontmatter_end + 10
             
-            logger.info(f"General project agent mode: {'EDITING' if editing_mode else 'GENERATION'}")
+            logger.info(f"General project agent mode: {'EDITING' if editing_mode else 'GENERATION'} (document: {project_filename})")
             
             return {
                 "referenced_context": referenced_context,
+                "read_only_context": read_only_context,
+                "existing_sections": existing_sections,
+                "project_document_id": resolved_project_doc_id,
                 "editing_mode": editing_mode,
                 "editor_operations": [],
                 "plan_edits": None,
@@ -868,8 +1011,13 @@ Return ONLY valid JSON:
             
         except Exception as e:
             logger.error(f"Context loading failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return {
                 "referenced_context": {},
+                "read_only_context": {},
+                "existing_sections": [],
+                "project_document_id": None,
                 # ✅ CRITICAL: Preserve critical state keys even on error
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
@@ -914,10 +1062,15 @@ Return ONLY valid JSON:
         return (0, 0)
     
     def _convert_section_edit_to_operation(self, edit: Dict[str, Any], content: str, frontmatter_end: int) -> Optional[Dict[str, Any]]:
-        """Convert a section-based edit to a position-based editor operation"""
+        """
+        Convert a section-based edit to a position-based editor operation.
+        Supports both large-scale (section-level) and granular (text-level) operations.
+        """
         section = edit.get("section", "")
         action = edit.get("action", "append")
         edit_content = edit.get("content", "")
+        original_text = edit.get("original_text", "")  # For granular replacements
+        anchor_text = edit.get("anchor_text", "")  # For granular inserts
         
         if not section:
             return None
@@ -925,51 +1078,113 @@ Return ONLY valid JSON:
         # Find section boundaries
         section_start, section_end = self._find_section_in_content(content, section)
         
+        # Handle granular operations (within section)
+        if action == "granular_replace" and original_text:
+            # Granular replacement: replace specific text within section
+            # Search for original_text within the section
+            section_content = content[section_start:section_end]
+            text_pos = section_content.find(original_text)
+            
+            if text_pos >= 0:
+                # Found the text within the section
+                actual_start = section_start + text_pos
+                actual_end = actual_start + len(original_text)
+                
+                return {
+                    "op_type": "replace_range",
+                    "start": actual_start,
+                    "end": actual_end,
+                    "text": edit_content,
+                    "original_text": original_text,
+                    "left_context": content[max(0, actual_start-50):actual_start],
+                    "right_context": content[actual_end:min(len(content), actual_end+50)]
+                }
+            else:
+                logger.warning(f"Granular replace: original_text not found in section '{section}' - falling back to section-level replace")
+                # Fall back to section-level replace
+                action = "replace"
+        
+        elif action == "granular_insert" and anchor_text:
+            # Granular insert: insert after specific text within section
+            section_content = content[section_start:section_end]
+            text_pos = section_content.find(anchor_text)
+            
+            if text_pos >= 0:
+                # Found anchor text - insert after it
+                actual_pos = section_start + text_pos + len(anchor_text)
+                
+                return {
+                    "op_type": "insert_after",
+                    "start": actual_pos,
+                    "end": actual_pos,
+                    "text": edit_content,
+                    "anchor_text": anchor_text,
+                    "left_context": content[max(0, actual_pos-50):actual_pos],
+                    "right_context": content[actual_pos:min(len(content), actual_pos+50)]
+                }
+            else:
+                logger.warning(f"Granular insert: anchor_text not found in section '{section}' - falling back to section-level append")
+                # Fall back to section-level append
+                action = "append"
+        
+        # Handle section-level operations (large-scale)
         if section_start == 0 and section_end == 0:
-            # Section not found - skip
-            logger.warning(f"Section '{section}' not found in content - skipping")
-            return None
+            # Section not found - can only append new section
+            if action in ("append", "granular_insert"):
+                # Insert new section at end of document
+                return {
+                    "op_type": "insert_after_heading",
+                    "start": len(content),
+                    "end": len(content),
+                    "text": f"\n\n## {section}\n\n{edit_content}\n",
+                    "anchor_text": content[-100:] if len(content) > 100 else content,
+                    "left_context": content[-50:] if len(content) > 50 else content,
+                    "right_context": ""
+                }
+            else:
+                logger.warning(f"Section '{section}' not found in content - skipping")
+                return None
         
         # Build operation based on action
-        if action == "replace":
-            # Replace entire section
-            original_text = content[section_start:section_end].strip()
+        if action == "replace" or action == "update":
+            # Replace entire section (large-scale)
+            original_text_full = content[section_start:section_end].strip()
             return {
                 "op_type": "replace_range",
                 "start": section_start,
                 "end": section_end,
                 "text": edit_content,
-                "original_text": original_text[:200] if len(original_text) > 200 else original_text,
+                "original_text": original_text_full[:200] if len(original_text_full) > 200 else original_text_full,
                 "left_context": content[max(0, section_start-50):section_start],
                 "right_context": content[section_end:min(len(content), section_end+50)]
             }
         elif action == "remove":
-            # Delete section
-            original_text = content[section_start:section_end].strip()
+            # Delete section (large-scale)
+            original_text_full = content[section_start:section_end].strip()
             return {
                 "op_type": "delete_range",
                 "start": section_start,
                 "end": section_end,
                 "text": "",
-                "original_text": original_text[:200] if len(original_text) > 200 else original_text,
+                "original_text": original_text_full[:200] if len(original_text_full) > 200 else original_text_full,
                 "left_context": content[max(0, section_start-50):section_start],
                 "right_context": content[section_end:min(len(content), section_end+50)]
             }
         elif action == "append":
-            # Insert after section
+            # Insert after section (large-scale)
             section_end_line = content.rfind("\n", section_start, section_end)
             if section_end_line == -1:
                 anchor_pos = section_end
             else:
                 anchor_pos = section_end_line + 1
             
-            anchor_text = content[max(0, anchor_pos-100):anchor_pos].strip()
+            anchor_text_full = content[max(0, anchor_pos-100):anchor_pos].strip()
             return {
                 "op_type": "insert_after_heading",
                 "start": anchor_pos,
                 "end": anchor_pos,
                 "text": edit_content,
-                "anchor_text": anchor_text[-50:] if len(anchor_text) > 50 else anchor_text,
+                "anchor_text": anchor_text_full[-50:] if len(anchor_text_full) > 50 else anchor_text_full,
                 "left_context": content[max(0, anchor_pos-50):anchor_pos],
                 "right_context": content[anchor_pos:min(len(content), anchor_pos+50)]
             }
@@ -1106,23 +1321,28 @@ Return ONLY valid JSON:
             }
     
     async def _format_response_node(self, state: GeneralProjectState) -> Dict[str, Any]:
-        """Format final response with editor operations if in editing mode"""
+        """Format final response with editor operations if available (file is open)"""
         try:
-            editing_mode = state.get("editing_mode", False)
             editor_operations = state.get("editor_operations", [])
             saved_files = state.get("saved_files", [])
             
             response = state.get("response", {})
             response_text = response.get("response", "") if isinstance(response, dict) else str(response)
             
-            if editing_mode and editor_operations:
+            # If we have editor_operations, it means file is open - use inline editing
+            if editor_operations:
                 response_text = "I've generated edits for the project plan. Review and accept the changes below.\n\n" + response_text
+                
+                # Get filename from active_editor or use default
+                metadata = state.get("metadata", {})
+                active_editor = metadata.get("active_editor") or metadata.get("shared_memory", {}).get("active_editor", {})
+                target_filename = active_editor.get("filename", "project_plan.md")
                 
                 response = {
                     "response": response_text,
                     "editor_operations": editor_operations,
                     "manuscript_edit": {
-                        "target_filename": state.get("metadata", {}).get("active_editor", {}).get("filename", "project_plan.md"),
+                        "target_filename": target_filename,
                         "scope": "section",
                         "summary": f"Updated {len(editor_operations)} section(s) in project plan"
                     },
@@ -1259,6 +1479,7 @@ Return ONLY valid JSON:
             query_type = state.get("query_type", "general")
             metadata = state.get("metadata", {})
             referenced_context = state.get("referenced_context", {})
+            read_only_context = state.get("read_only_context", {})
             segments = state.get("segments", [])
             
             # Build system prompt
@@ -1266,6 +1487,16 @@ Return ONLY valid JSON:
             
             # Build context from documents and referenced files
             context_parts = []
+            
+            # Include read-only referenced files (for context understanding)
+            if read_only_context:
+                for category, files in read_only_context.items():
+                    if isinstance(files, list):
+                        for ref_file in files[:5]:  # Limit to 5 files per category
+                            if isinstance(ref_file, dict):
+                                filename = ref_file.get("filename", "reference file")
+                                content = ref_file.get("content", "")
+                                context_parts.append(f"**REFERENCE FILE ({category}): {filename}** (READ-ONLY - for context only):\n{content[:1000]}")
             
             if segments:
                 for seg in segments[:10]:
@@ -1354,54 +1585,69 @@ Return ONLY valid JSON:
         """Build system prompt for general project queries"""
         return """You are a General Project Management Agent - an expert in project planning, design, and documentation for a wide variety of projects (HVAC, landscaping, gardening, home improvement, etc.).
 
-**BEST PRACTICES FOR GENERAL PROJECT MANAGEMENT**:
+**SINGLE DOCUMENT PHILOSOPHY**:
+Your mission is to maintain a SINGLE, AUTHORITATIVE project document. Avoid sprawling into multiple files. 
+Organize all information into clear sections using Level 2 headers (##).
 
-**PROJECT STRUCTURE HIERARCHY**:
-- **PROJECT PLAN = SOURCE OF TRUTH**: The project plan (project_plan.md) is the authoritative document containing:
-  - Project goals, scope, and requirements
-  - High-level design and approach
-  - Project timeline and milestones
-  - Key decisions and tradeoffs
-  - References to detailed files (specifications, design docs, tasks, notes, etc.)
-  
-- **REFERENCED FILES = SPECIFIC DETAILS**: Referenced files contain:
-  - Detailed specifications
-  - Design documents and diagrams
-  - Task lists and checklists
-  - Project notes and documentation
-  - Specific aspects relevant to the project plan
+**STANDARD SECTIONS**:
+Use these sections to organize the project:
+- ## Project Overview: Goals, scope, and high-level summary
+- ## Supplies Needed: Tools, materials, parts, and hardware
+- ## Tasks and Milestones: TODO items, schedule, and progress
+- ## Design Decisions: Rationale for choices made during the project
+- ## Notes and Details: Any other relevant information
 
-**ROUTING RULES**:
-- **System-level/overarching content** -> Project Plan (goals, requirements, high-level design, decisions)
-- **Specific detailed content** -> Referenced Files (specifications, design details, tasks, notes)
-- **Unclear/fallback** -> Project Plan (when in doubt, use the source of truth)
+**REFERENCED FILES (READ-ONLY CONTEXT)**:
+Files referenced in the project document's frontmatter are loaded as READ-ONLY context. Use them to:
+- Understand the project's current state
+- Reference existing specifications, notes, or design documents
+- Inform your recommendations and assessments
 
-1. **ALWAYS USE EXISTING PROJECT FILES**: When you have referenced project files, ALWAYS prefer updating those existing files over suggesting new ones.
+**DO NOT** edit referenced files directly. All updates should go to the primary project document under appropriate headers.
 
-2. **ALWAYS UPDATE FILES BASED ON USER INPUT**: When the user provides information, automatically update the appropriate project files.
+**BATTLE RULES**:
+1. **PREFER HEADERS OVER FILES**: Always look for a section header before suggesting a new file. Use existing headers when possible.
+2. **MAINTAIN STRUCTURE**: When adding information, place it under the most appropriate header. If a header doesn't exist, suggest creating it.
+3. **IN-EDITOR DIFFS**: All changes to the project document must be proposed as precise editor operations (diffs) targeting specific sections.
+4. **CROSS-AGENT ASSESSMENT**: If asked to assess a project file, provide a concise report on its completeness, identify missing sections, and suggest specific header-based updates.
 
-3. **STAY CURRENT WITH PROJECT FILES**: Use project context to provide context-aware responses.
+**ASSESSMENT MODE**:
+When assessing a project document (e.g., from Org Agent):
+- Review the document structure and existing sections
+- Identify gaps or missing information
+- Suggest specific updates organized by header
+- Provide actionable recommendations for improvement
+- Keep the assessment concise and focused
 
-4. **INTELLIGENT CONTENT ROUTING**: Route content to the most appropriate file based on content scope and type.
-
-5. **PROACTIVE UPDATES**: When you provide information, automatically save/update the appropriate project files.
-
-**MISSION**: Provide practical project planning, design, and management assistance for general projects.
+**MISSION**: Provide practical project planning, design, and management assistance for general projects using a single-document, header-based approach.
 
 **CAPABILITIES**:
 1. **Project Planning**: Requirements gathering, scope definition, timeline planning
 2. **Design Assistance**: Design guidance, approach recommendations, tradeoff analysis
-3. **Documentation**: Organize project information, maintain project files
+3. **Documentation**: Organize project information using header-based structure
 4. **Research**: Find relevant information for project planning and design
 5. **Task Management**: Help organize tasks, checklists, and project milestones
+6. **Assessment**: Evaluate project documents and suggest improvements
+7. **Diagram Generation**: Generate project management diagrams to visualize workflows, timelines, and decision trees
+
+**DIAGRAM GENERATION**:
+You can generate project management diagrams:
+- Project workflows (Mermaid flowcharts)
+- Task timelines (Mermaid Gantt charts)
+- Decision trees (Mermaid flowcharts with decision nodes)
+- Process flows (Mermaid sequence diagrams)
+
+When a diagram would clarify project structure or flow, request diagram generation. Diagrams will be automatically inserted into the appropriate section of the project document.
 
 **RESPONSE GUIDELINES**:
 - Use a practical, helpful tone
 - Include specific recommendations and next steps
 - Ask clarifying questions to better understand requirements
-- Reference project context when available
+- Reference project context when available (including read-only referenced files)
 - Be proactive in suggesting concrete actions
-- Structure responses naturally and conversationally"""
+- Structure responses naturally and conversationally
+- When updating the project document, always target specific headers
+- **USE DIAGRAMS**: When explaining complex workflows, timelines, or decision processes, suggest generating a diagram"""
 
     
     def _extract_json_from_response(self, content: str) -> Optional[Dict[str, Any]]:
@@ -1491,6 +1737,9 @@ Return ONLY valid JSON:
                 "documentation_maintenance_plan": None,
                 "documentation_verification_result": None,
                 "pending_save_plan": pending_save_plan,
+                "project_document_id": metadata.get("project_document_id"),
+                "read_only_context": {},
+                "existing_sections": [],
                 "editing_mode": False,
                 "editor_operations": [],
                 "manuscript_edit": None,

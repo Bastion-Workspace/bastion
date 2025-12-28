@@ -14,7 +14,7 @@ from repositories.document_repository import DocumentRepository
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/resilient-embedding", tags=["resilient-embedding"])
+router = APIRouter(tags=["resilient-embedding"])
 
 # Global resilient embedding manager instance
 resilient_manager: Optional[ResilientEmbeddingManager] = None
@@ -61,7 +61,7 @@ async def get_resilient_manager() -> ResilientEmbeddingManager:
     return resilient_manager
 
 
-@router.post("/embed-document")
+@router.post("/api/resilient-embedding/embed-document")
 async def embed_document_resilient(
     request: EmbeddingRequest,
     background_tasks: BackgroundTasks,
@@ -107,7 +107,7 @@ async def embed_document_resilient(
         raise HTTPException(status_code=500, detail=f"Failed to start embedding: {str(e)}")
 
 
-@router.get("/status/{document_id}")
+@router.get("/api/resilient-embedding/status/{document_id}")
 async def get_embedding_status(
     document_id: str,
     current_user: dict = Depends(get_current_user),
@@ -132,7 +132,7 @@ async def get_embedding_status(
         raise HTTPException(status_code=500, detail=f"Failed to get status: {str(e)}")
 
 
-@router.get("/active-jobs")
+@router.get("/api/resilient-embedding/active-jobs")
 async def list_active_embedding_jobs(
     current_user: dict = Depends(get_current_user),
     manager: ResilientEmbeddingManager = Depends(get_resilient_manager)
@@ -151,7 +151,7 @@ async def list_active_embedding_jobs(
         raise HTTPException(status_code=500, detail=f"Failed to list active jobs: {str(e)}")
 
 
-@router.post("/resume/{document_id}")
+@router.post("/api/resilient-embedding/resume/{document_id}")
 async def resume_document_embedding(
     document_id: str,
     background_tasks: BackgroundTasks,
@@ -220,7 +220,7 @@ async def resume_document_embedding(
         raise HTTPException(status_code=500, detail=f"Failed to resume embedding: {str(e)}")
 
 
-@router.post("/retry-failed/{document_id}")
+@router.post("/api/resilient-embedding/retry-failed/{document_id}")
 async def retry_failed_chunks(
     document_id: str,
     request: RetryRequest,
@@ -255,7 +255,7 @@ async def retry_failed_chunks(
         raise HTTPException(status_code=500, detail=f"Failed to start retry: {str(e)}")
 
 
-@router.delete("/cancel/{document_id}")
+@router.delete("/api/resilient-embedding/cancel/{document_id}")
 async def cancel_embedding_processing(
     document_id: str,
     current_user: dict = Depends(get_current_user),
@@ -281,7 +281,7 @@ async def cancel_embedding_processing(
         raise HTTPException(status_code=500, detail=f"Failed to cancel processing: {str(e)}")
 
 
-@router.get("/health")
+@router.get("/api/resilient-embedding/health")
 async def embedding_health_check(
     manager: ResilientEmbeddingManager = Depends(get_resilient_manager)
 ):

@@ -20,7 +20,7 @@ from fastapi import File, UploadFile
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/messaging", tags=["messaging"])
+router = APIRouter(tags=["messaging"])
 
 
 # =====================
@@ -64,7 +64,7 @@ class UpdateNotificationSettingsRequest(BaseModel):
 # ROOM ENDPOINTS
 # =====================
 
-@router.post("/rooms")
+@router.post("/api/messaging/rooms")
 async def create_room(
     request: CreateRoomRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -104,7 +104,7 @@ async def create_room(
         raise HTTPException(status_code=500, detail="Failed to create room")
 
 
-@router.get("/rooms")
+@router.get("/api/messaging/rooms")
 async def get_user_rooms(
     limit: int = Query(20, ge=1, le=100),
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -129,7 +129,7 @@ async def get_user_rooms(
         raise HTTPException(status_code=500, detail="Failed to get rooms")
 
 
-@router.put("/rooms/{room_id}/name")
+@router.put("/api/messaging/rooms/{room_id}/name")
 async def update_room_name(
     room_id: str,
     request: UpdateRoomNameRequest,
@@ -169,7 +169,7 @@ async def update_room_name(
         raise HTTPException(status_code=500, detail="Failed to update room name")
 
 
-@router.put("/rooms/{room_id}/notifications")
+@router.put("/api/messaging/rooms/{room_id}/notifications")
 async def update_notification_settings(
     room_id: str,
     request: UpdateNotificationSettingsRequest,
@@ -200,7 +200,7 @@ async def update_notification_settings(
         raise HTTPException(status_code=500, detail="Failed to update notification settings")
 
 
-@router.delete("/rooms/{room_id}")
+@router.delete("/api/messaging/rooms/{room_id}")
 async def delete_room(
     room_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -228,7 +228,7 @@ async def delete_room(
         raise HTTPException(status_code=500, detail="Failed to delete room")
 
 
-@router.post("/rooms/{room_id}/participants")
+@router.post("/api/messaging/rooms/{room_id}/participants")
 async def add_participant(
     room_id: str,
     request: AddParticipantRequest,
@@ -272,7 +272,7 @@ async def add_participant(
 # MESSAGE ENDPOINTS
 # =====================
 
-@router.post("/rooms/{room_id}/read")
+@router.post("/api/messaging/rooms/{room_id}/read")
 async def mark_room_as_read(
     room_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -290,7 +290,7 @@ async def mark_room_as_read(
         raise HTTPException(status_code=500, detail="Failed to mark room as read")
 
 
-@router.get("/rooms/{room_id}/messages")
+@router.get("/api/messaging/rooms/{room_id}/messages")
 async def get_room_messages(
     room_id: str,
     limit: int = Query(50, ge=1, le=100),
@@ -322,7 +322,7 @@ async def get_room_messages(
         raise HTTPException(status_code=500, detail="Failed to get messages")
 
 
-@router.post("/rooms/{room_id}/messages")
+@router.post("/api/messaging/rooms/{room_id}/messages")
 async def send_message(
     room_id: str,
     request: SendMessageRequest,
@@ -364,7 +364,7 @@ async def send_message(
         raise HTTPException(status_code=500, detail="Failed to send message")
 
 
-@router.delete("/messages/{message_id}")
+@router.delete("/api/messaging/messages/{message_id}")
 async def delete_message(
     message_id: str,
     delete_for: str = Query("me", regex="^(me|everyone)$"),
@@ -397,7 +397,7 @@ async def delete_message(
 # ATTACHMENT ENDPOINTS
 # =====================
 
-@router.post("/rooms/{room_id}/messages/{message_id}/attachments")
+@router.post("/api/messaging/rooms/{room_id}/messages/{message_id}/attachments")
 async def upload_message_attachment(
     room_id: str,
     message_id: str,
@@ -428,7 +428,7 @@ async def upload_message_attachment(
         raise HTTPException(status_code=500, detail="Failed to upload attachment")
 
 
-@router.get("/attachments/{attachment_id}")
+@router.get("/api/messaging/attachments/{attachment_id}")
 async def get_attachment(
     attachment_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -457,7 +457,7 @@ async def get_attachment(
         raise HTTPException(status_code=500, detail="Failed to get attachment")
 
 
-@router.get("/attachments/{attachment_id}/file")
+@router.get("/api/messaging/attachments/{attachment_id}/file")
 async def serve_attachment_file(
     attachment_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -481,7 +481,7 @@ async def serve_attachment_file(
         raise HTTPException(status_code=500, detail="Failed to serve attachment")
 
 
-@router.get("/messages/{message_id}/attachments")
+@router.get("/api/messaging/messages/{message_id}/attachments")
 async def get_message_attachments(
     message_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -511,7 +511,7 @@ async def get_message_attachments(
 # REACTION ENDPOINTS
 # =====================
 
-@router.post("/messages/{message_id}/reactions")
+@router.post("/api/messaging/messages/{message_id}/reactions")
 async def add_reaction(
     message_id: str,
     request: AddReactionRequest,
@@ -540,7 +540,7 @@ async def add_reaction(
         raise HTTPException(status_code=500, detail="Failed to add reaction")
 
 
-@router.delete("/reactions/{reaction_id}")
+@router.delete("/api/messaging/reactions/{reaction_id}")
 async def remove_reaction(
     reaction_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -571,7 +571,7 @@ async def remove_reaction(
 # PRESENCE ENDPOINTS
 # =====================
 
-@router.put("/presence")
+@router.put("/api/messaging/presence")
 async def update_presence(
     request: UpdatePresenceRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -607,7 +607,7 @@ async def update_presence(
         raise HTTPException(status_code=500, detail="Failed to update presence")
 
 
-@router.get("/presence/{user_id}")
+@router.get("/api/messaging/presence/{user_id}")
 async def get_user_presence(
     user_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -631,7 +631,7 @@ async def get_user_presence(
         raise HTTPException(status_code=500, detail="Failed to get presence")
 
 
-@router.get("/rooms/{room_id}/presence")
+@router.get("/api/messaging/rooms/{room_id}/presence")
 async def get_room_presence(
     room_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -652,7 +652,7 @@ async def get_room_presence(
         raise HTTPException(status_code=500, detail="Failed to get room presence")
 
 
-@router.get("/unread-counts")
+@router.get("/api/messaging/unread-counts")
 async def get_unread_counts(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -680,7 +680,7 @@ async def get_unread_counts(
 # USER LIST ENDPOINT (for creating rooms)
 # =====================
 
-@router.get("/users")
+@router.get("/api/messaging/users")
 async def get_users_for_messaging(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -716,7 +716,7 @@ async def get_users_for_messaging(
 # WEBSOCKET ENDPOINT
 # =====================
 
-@router.websocket("/ws/{room_id}")
+@router.websocket("/api/messaging/ws/{room_id}")
 async def websocket_room_endpoint(websocket: WebSocket, room_id: str):
     """
     WebSocket endpoint for real-time room messaging
@@ -805,7 +805,7 @@ async def websocket_room_endpoint(websocket: WebSocket, room_id: str):
             pass
 
 
-@router.websocket("/ws/user")
+@router.websocket("/api/messaging/ws/user")
 async def websocket_user_endpoint(websocket: WebSocket):
     """
     User-level WebSocket for notifications across ALL user rooms

@@ -49,6 +49,11 @@ from orchestrator.tools.unit_conversions import (
     convert_units_tool
 )
 
+from orchestrator.tools.visualization_tools import (
+    create_chart_tool,
+    VISUALIZATION_TOOLS
+)
+
 __all__ = [
     # Document tools
     'search_documents_tool',
@@ -78,6 +83,9 @@ __all__ = [
     'evaluate_formula_tool',
     'convert_units_tool',
     'list_available_formulas_tool',
-    'MATH_TOOLS'
+    'MATH_TOOLS',
+    # Visualization tools
+    'create_chart_tool',
+    'VISUALIZATION_TOOLS'
 ]
 

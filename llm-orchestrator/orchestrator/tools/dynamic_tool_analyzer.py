@@ -18,6 +18,7 @@ class OrchestratorToolCategory:
     CACHE = "cache"
     SEGMENT_SEARCH = "segment_search"
     INFORMATION_ANALYSIS = "information_analysis"
+    VISUALIZATION = "visualization"
 
 
 # Tool name to category mapping
@@ -36,6 +37,7 @@ TOOL_CATEGORY_MAP = {
     "extract_relevant_content_section": OrchestratorToolCategory.SEGMENT_SEARCH,
     "analyze_information_needs_tool": OrchestratorToolCategory.INFORMATION_ANALYSIS,
     "generate_project_aware_queries_tool": OrchestratorToolCategory.INFORMATION_ANALYSIS,
+    "create_chart_tool": OrchestratorToolCategory.VISUALIZATION,
 }
 
 
@@ -50,6 +52,10 @@ CATEGORY_KEYWORDS = {
     ],
     OrchestratorToolCategory.INFORMATION_ANALYSIS: [
         "analyze", "what information", "what do I need", "gap analysis"
+    ],
+    OrchestratorToolCategory.VISUALIZATION: [
+        "chart", "graph", "plot", "visualize", "show me", "compare", "trend",
+        "make a chart", "graph this", "plot the data", "visualization", "diagram"
     ],
 }
 

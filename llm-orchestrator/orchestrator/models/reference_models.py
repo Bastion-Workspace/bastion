@@ -19,6 +19,14 @@ class QueryComplexityAnalysis(BaseModel):
         default=None,
         description="Formulated research query if external info is needed (e.g., 'nutritional content of pizza')"
     )
+    needs_visualization: bool = Field(
+        default=False,
+        description="Whether the query would benefit from a chart or graph visualization"
+    )
+    visualization_type: Optional[str] = Field(
+        default=None,
+        description="Type of chart if visualization is needed (bar, line, pie, scatter, area, heatmap, box_plot, histogram)"
+    )
     reasoning: str = Field(
         description="Brief explanation of complexity assessment and research need"
     )
@@ -139,6 +147,22 @@ class ReferenceResponse(BaseModel):
     research_citations: Optional[List[str]] = Field(
         default=None,
         description="Citations from research (if research was used)"
+    )
+    visualization_used: bool = Field(
+        default=False,
+        description="Whether a visualization was generated"
+    )
+    visualization_data: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Visualization chart data (HTML or base64 image) if visualization was used"
+    )
+    static_visualization_data: Optional[str] = Field(
+        default=None,
+        description="Static visualization data (e.g. SVG string) for project library import"
+    )
+    static_format: Optional[str] = Field(
+        default=None,
+        description="Format of the static visualization (e.g. 'svg')"
     )
     confidence: float = Field(
         ge=0.0,

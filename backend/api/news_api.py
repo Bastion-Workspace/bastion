@@ -16,10 +16,10 @@ from utils.auth_middleware import require_admin
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/news", tags=["News"])
+router = APIRouter(tags=["News"])
 
 
-@router.get("/headlines", response_model=NewsHeadlinesResponse)
+@router.get("/api/news/headlines", response_model=NewsHeadlinesResponse)
 async def get_headlines(
     limit: int = 20,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -41,7 +41,7 @@ async def get_headlines(
         raise HTTPException(status_code=500, detail="Failed to get headlines")
 
 
-@router.get("/{news_id}", response_model=NewsArticleSynth)
+@router.get("/api/news/{news_id}", response_model=NewsArticleSynth)
 async def get_article(
     news_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -65,7 +65,7 @@ async def get_article(
         raise HTTPException(status_code=500, detail="Failed to get article")
 
 
-@router.delete("/purge")
+@router.delete("/api/news/purge")
 async def purge_all_news(
     current_user: AuthenticatedUserResponse = Depends(require_admin())
 ):

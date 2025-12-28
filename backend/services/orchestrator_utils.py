@@ -97,9 +97,8 @@ def analyze_active_agent_context(messages: List, shared_memory: Dict[str, Any]) 
                     if any(indicator in content_lower for indicator in collaboration_indicators):
                         # Extract suggested agent/capability
                         suggested_agent = "chat_agent"  # Default to chat agent
-                        if "format" in content_lower or "table" in content_lower:
-                            suggested_agent = "data_formatting_agent"
-                        elif "weather" in content_lower:
+                        # Note: Data formatting is now handled internally by research_agent via subgraph
+                        if "weather" in content_lower:
                             suggested_agent = "weather_agent"
                         
                         return {

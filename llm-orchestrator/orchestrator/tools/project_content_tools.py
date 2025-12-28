@@ -1520,33 +1520,7 @@ async def propose_section_update(
             
             if edit_result.get("success"):
                 logger.info(f"✅ Proposed update to {section_name} section (file is open - showing inline suggestions)")
-                # Send WebSocket notification for real-time suggestion display
-                try:
-                    from services.service_container import get_service_container
-                    container = await get_service_container()
-                    if container.websocket_manager:
-                        await container.websocket_manager.send_document_status_update(
-                            document_id=document_id,
-                            status="edit_proposal",
-                            user_id=user_id,
-                            filename=None,
-                            proposal_data={
-                                "proposal_id": edit_result.get("proposal_id"),
-                                "edit_type": "operations",
-                                "operations": [{
-                                    "op_type": "replace_range",
-                                    "start": section_start,
-                                    "end": section_end,
-                                    "text": updated_section,
-                                    "original_text": existing_section,
-                                    "note": f"Update {section_name} section with new information"
-                                }],
-                                "agent_name": "project_content_manager",
-                                "summary": f"Update {section_name} section with revised information"
-                            }
-                        )
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to send edit proposal notification: {e}")
+                # WebSocket notification is handled by backend's propose_document_edit_tool
             else:
                 logger.warning(f"⚠️ Failed to propose section update: {edit_result.get('error')}")
         else:
@@ -1652,30 +1626,7 @@ async def append_project_content(
             
             if edit_result.get("success"):
                 logger.info(f"✅ Proposed append of {section_name} section (file is open - showing inline suggestions)")
-                # Send WebSocket notification for real-time suggestion display
-                try:
-                    from services.service_container import get_service_container
-                    container = await get_service_container()
-                    if container.websocket_manager:
-                        await container.websocket_manager.send_document_status_update(
-                            document_id=document_id,
-                            status="edit_proposal",
-                            user_id=user_id,
-                            filename=None,
-                            proposal_data={
-                                "proposal_id": edit_result.get("proposal_id"),
-                                "edit_type": "content",
-                                "content_edit": {
-                                    "edit_mode": "append",
-                                    "content": content_to_add,
-                                    "note": f"Add new {section_name} section"
-                                },
-                                "agent_name": "project_content_manager",
-                                "summary": f"Add new {section_name} section to document"
-                            }
-                        )
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to send edit proposal notification: {e}")
+                # WebSocket notification is handled by backend's propose_document_edit_tool
             else:
                 logger.warning(f"⚠️ Failed to propose append: {edit_result.get('error')}")
         else:

@@ -110,7 +110,7 @@ class EpubExportService:
         if include_cover and cover_src and user_id:
             # Try to resolve and load cover image
             cover_image_bytes, cover_media_type, cover_href = await self._resolve_cover_image(
-                cover_src, user_id
+                cover_src, user_id, folder_id=metadata.get("folder_id")
             )
 
         # Convert markdown to simple HTML and split chapters
@@ -194,7 +194,7 @@ class EpubExportService:
 
         return buf.getvalue()
     
-    async def _resolve_cover_image(self, cover_src: str, user_id: str) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
+    async def _resolve_cover_image(self, cover_src: str, user_id: str, folder_id: Optional[str] = None) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
         """
         Resolve cover image path and load image bytes.
         Returns: (image_bytes, media_type, href_path)
@@ -203,6 +203,7 @@ class EpubExportService:
             from pathlib import Path
             from config import settings
             from services.folder_service import FolderService
+            from services.database_manager.database_helpers import fetch_one
             
             # Initialize folder service for path resolution
             folder_service = FolderService()
@@ -217,11 +218,17 @@ class EpubExportService:
             # Try different path resolution strategies
             potential_paths = []
             
+            # Strategy 0: Resolve relative to folder_id if provided
+            if folder_id and not Path(cover_src).is_absolute():
+                folder_path = await folder_service.get_folder_physical_path(folder_id, user_id=user_id)
+                if folder_path:
+                    # Try directly relative to the folder
+                    potential_paths.append(folder_path / cover_src.lstrip("./"))
+            
             # Strategy 1: Direct path resolution (relative to uploads)
             if not Path(cover_src).is_absolute():
                 # Try user's base directory
                 try:
-                    from services.database_manager.database_helpers import fetch_one
                     row = await fetch_one("SELECT username FROM users WHERE user_id = $1", user_id)
                     username = row['username'] if row else user_id
                     user_base = upload_dir / "Users" / username
@@ -258,6 +265,37 @@ class EpubExportService:
                     # Generate href path
                     cover_href = f"images/cover{ext or '.jpg'}"
                     
+                    return image_bytes, media_type, cover_href
+
+            # Strategy 2: DB Lookup - If still not found, search for a document with this filename in DB
+            clean_filename = Path(cover_src).name
+            db_row = await fetch_one(
+                "SELECT filename, doc_type, document_id, folder_id FROM documents WHERE (filename = $1 OR title = $1) AND user_id = $2 AND doc_type IN ('image', 'jpg', 'png', 'gif', 'webp', 'jpeg')",
+                clean_filename, user_id
+            )
+            
+            if db_row:
+                # We found a document reference, now we need its physical path
+                # Use FolderService to get its physical path
+                target_folder_id = db_row['folder_id']
+                target_filename = db_row['filename']
+                
+                full_path = await folder_service.get_document_file_path(
+                    filename=target_filename,
+                    folder_id=target_folder_id,
+                    user_id=user_id
+                )
+                
+                if full_path and full_path.exists() and full_path.is_file():
+                    image_bytes = full_path.read_bytes()
+                    ext = full_path.suffix.lower()
+                    media_type = {
+                        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                        ".png": "image/png", ".gif": "image/gif",
+                        ".webp": "image/webp"
+                    }.get(ext, "image/jpeg")
+                    
+                    cover_href = f"images/cover{ext or '.jpg'}"
                     return image_bytes, media_type, cover_href
             
             # If no file found, return None
@@ -310,9 +348,16 @@ class EpubExportService:
             start = h.start()
             end = indices[i + 1]
             title = h.group(2).strip()
-            md_chunk = md_text[start:end]
-            html_chunk = self._convert_markdown_to_html(md_chunk)
-            # Ensure heading included at top
+            # Find the end of the heading line (after newline)
+            heading_end = md_text.find('\n', h.end())
+            if heading_end == -1:
+                heading_end = h.end()
+            else:
+                heading_end += 1  # Include the newline
+            # Extract markdown chunk starting AFTER the heading line
+            md_chunk = md_text[heading_end:end].strip()
+            html_chunk = self._convert_markdown_to_html(md_chunk) if md_chunk else ""
+            # Add heading at top (only once)
             level = len(h.group(1))
             html_chunk = f"<h{level}>{self._escape_html(title)}</h{level}>\n" + html_chunk
             chapters.append((title, html_chunk))
@@ -392,23 +437,19 @@ class EpubExportService:
 
     def _build_cover_xhtml(self, title: str, img_href: str) -> str:
         return (
-            """<?xml version="1.0" encoding="utf-8"?>
+            f"""<?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml">
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
 <head>
   <meta charset="utf-8" />
   <title>Cover</title>
   <link rel="stylesheet" type="text/css" href="style.css" />
 </head>
 <body>
-  <section>
-    <h1>"""
-            + self._escape_html(title)
-            + """</h1>
+  <section epub:type="cover">
+    <h1>{self._escape_html(title)}</h1>
     <div style="text-align:center">
-      <img src="""
-            + img_href
-            + """" alt="Cover" />
+      <img src="{img_href}" alt="Cover" />
     </div>
   </section>
 </body>
@@ -453,10 +494,10 @@ class EpubExportService:
         spine_lines: List[str] = []
         if nav_id:
             spine_lines.append(f'    <itemref idref="{nav_id}"/>')
-        if cover_id:
-            spine_lines.append(f'    <itemref idref="{cover_id}"/>')
         for cid in chapter_ids:
             spine_lines.append(f'    <itemref idref="{cid}"/>')
+        if cover_id:
+            spine_lines.append(f'    <itemref idref="{cover_id}"/>')
 
         return (
             """<?xml version="1.0" encoding="UTF-8"?>
@@ -485,7 +526,9 @@ class EpubExportService:
             + "\n".join(manifest_lines)
             + "\n  </manifest>\n  <spine>\n"
             + "\n".join(spine_lines)
-            + "\n  </spine>\n</package>"
+            + "\n  </spine>"
+            + (f'\n  <guide>\n    <reference type="cover" title="Cover" href="cover.xhtml"/>\n  </guide>' if cover_id else "")
+            + "\n</package>"
         )
 
     def _escape_html(self, s: str) -> str:

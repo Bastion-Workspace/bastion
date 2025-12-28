@@ -1,0 +1,68 @@
+# Celery Worker - Minimal Requirements
+# Based on actual imports in celery_tasks (orchestrator_tasks, agent_tasks, rss_tasks, entertainment_sync_tasks)
+
+# Core Celery
+celery==5.5.3
+redis==6.4.0
+# kombu is installed automatically by celery (celery 5.5.3 requires kombu>=5.5.2,<5.6)
+
+# PostgreSQL database (for RSS tasks, entertainment sync, state persistence)
+psycopg2-binary==2.9.10
+asyncpg==0.30.0
+sqlalchemy==2.0.36
+
+# gRPC client (to call llm-orchestrator and backend tool service)
+grpcio==1.76.0
+grpcio-tools==1.76.0
+
+# HTTP clients (RSS polling, entertainment sync, content fetching)
+httpx==0.28.1
+aiohttp>=3.11.11
+aiofiles==24.1.0
+
+# RSS processing
+feedparser==6.0.11
+beautifulsoup4==4.12.3
+readability-lxml==0.8.1
+newspaper3k==0.2.8
+trafilatura==2.0.0
+
+# LangChain ecosystem (for BaseMessage and agent framework)
+langchain-core==0.3.72
+langchain-openai==0.3.28
+langchain==0.3.27
+langchain-community==0.3.27
+
+# LangGraph for agentic architecture (RSS background agent)
+langgraph==0.6.3
+langgraph-checkpoint-postgres>=2.0.0
+
+# LLM APIs (for embeddings and agent calls)
+openai==1.99.1
+
+# Configuration and logging
+pydantic==2.10.3
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+structlog==24.4.0
+pytz==2024.1
+
+# Authentication (task context)
+python-jose[cryptography]==3.3.0
+PyJWT==2.9.0
+passlib[bcrypt]==1.7.4
+bcrypt==3.2.2
+
+# AWS SDK (entertainment sync tasks)
+boto3==1.35.84
+botocore==1.35.84
+
+# Knowledge graph (entertainment sync tasks)
+neo4j==5.15.0
+
+# Vector database client (for embeddings)
+qdrant-client==1.14.1
+
+# Async utilities
+nest-asyncio==1.6.0
+

@@ -4,6 +4,7 @@ import { useLocation } from 'react-router-dom';
 import apiService from '../services/apiService';
 import BackgroundJobService from '../services/backgroundJobService';
 import tabNotificationManager from '../utils/tabNotification';
+import browserNotificationManager from '../utils/browserNotification';
 import { documentDiffStore } from '../services/documentDiffStore';
 
 // Format agent type to display name
@@ -976,10 +977,11 @@ export const ChatSidebarProvider = ({ children }) => {
         // 3. filename exists and ends with .md
         // 4. content exists (not empty/null)
         // 5. frontmatter.type is in allowed list
+        const filenameLower = editorCtx?.filename?.toLowerCase() || '';
         const hasValidEditorState = editorCtx && 
                                     editorCtx.isEditable === true && 
                                     editorCtx.filename && 
-                                    editorCtx.filename.toLowerCase().endsWith('.md') &&
+                                    (filenameLower.endsWith('.md') || filenameLower.endsWith('.org')) &&
                                     editorCtx.content &&
                                     editorCtx.content.trim().length > 0;
         
@@ -987,7 +989,7 @@ export const ChatSidebarProvider = ({ children }) => {
           hasValidEditorState,
           passedCheck1_editorCtxExists: !!editorCtx,
           passedCheck2_isEditableTrue: editorCtx?.isEditable === true,
-          passedCheck3_filenameEndsMd: editorCtx?.filename?.toLowerCase().endsWith('.md'),
+          passedCheck3_filenameEndsMdOrOrg: filenameLower.endsWith('.md') || filenameLower.endsWith('.org'),
           passedCheck4_hasContent: !!(editorCtx?.content && editorCtx.content.trim().length > 0)
         });
         
@@ -997,10 +999,11 @@ export const ChatSidebarProvider = ({ children }) => {
           const allowedTypes = ['fiction','non-fiction','nonfiction','article','rules','outline','character','style','sysml','podcast','substack','blog','electronics','project','reference'];
           
           if (allowedTypes.includes(fmType)) {
+            const language = filenameLower.endsWith('.org') ? 'org' : (editorCtx.language || 'markdown');
             activeEditorPayload = {
               is_editable: true,
               filename: editorCtx.filename,
-              language: 'markdown',
+              language: language,
               content: editorCtx.content,
               content_length: editorCtx.contentLength || editorCtx.content.length,
               frontmatter: editorCtx.frontmatter || {},
@@ -1109,10 +1112,6 @@ export const ChatSidebarProvider = ({ children }) => {
                       const agentType = data.agent_type || data.agent || data.node;
                       if (agentType) {
                         updateData.metadata = { ...currentMetadata, agent_type: agentType };
-                        // If content is empty, show formatted agent name
-                        if (!data.message || data.message.trim() === '') {
-                          updateData.content = formatAgentName(agentType);
-                        }
                       }
                       return { ...msg, ...updateData };
                     }
@@ -1147,10 +1146,6 @@ export const ChatSidebarProvider = ({ children }) => {
                       const agentType = data.agent_type || data.agent || data.node;
                       if (agentType) {
                         updateData.metadata = { ...currentMetadata, agent_type: agentType };
-                        // If content is empty, show formatted agent name
-                        if (!msg.content || msg.content.trim() === '') {
-                          updateData.content = formatAgentName(agentType);
-                        }
                       }
                       // Update with progress message if provided
                       if (data.message) {
@@ -1407,6 +1402,48 @@ export const ChatSidebarProvider = ({ children }) => {
                   
                   console.log('✅ Permission request message updated');
                   
+                } else if (data.type === 'notification') {
+                  // Signal Corps: Spontaneous notification/alert
+                  console.log('📢 Notification received:', data);
+                  
+                  const notification = {
+                    id: `note_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+                    role: 'system',
+                    type: 'notification',
+                    severity: data.severity || 'info', // info, success, warning, error
+                    content: data.message,
+                    ephemeral: true, // Mark as ephemeral - not saved to long-term history
+                    timestamp: data.timestamp || new Date().toISOString(),
+                    agent_name: data.agent || data.agent_name || 'system'
+                  };
+                  
+                  setMessages(prev => [...prev, notification]);
+                  
+                  // Show browser notification for warnings, errors, or if explicitly requested
+                  // Check metadata for browser_notify flag (allows agents to explicitly request browser notifications)
+                  const browserNotify = data.browser_notify === true || 
+                                       data.metadata?.browser_notify === 'true' ||
+                                       data.metadata?.browser_notify === true;
+                  
+                  browserNotificationManager.showNotification({
+                    message: data.message,
+                    severity: data.severity || 'info',
+                    agent: data.agent || data.agent_name || 'system',
+                    timestamp: data.timestamp || new Date().toISOString(),
+                    browser_notify: browserNotify
+                  }).catch(err => {
+                    console.error('Error showing browser notification:', err);
+                  });
+                  
+                  // Auto-remove temporary notifications after 10 seconds
+                  if (data.temporary) {
+                    setTimeout(() => {
+                      setMessages(prev => prev.filter(m => m.id !== notification.id));
+                    }, 10000);
+                  }
+                  
+                  console.log('✅ Notification added to messages');
+                  
                 } else if (data.type === 'complete_hitl') {
                   // HITL completion - awaiting user permission response
                   console.log('🛡️ HITL completion - awaiting permission response');
@@ -1428,9 +1465,13 @@ export const ChatSidebarProvider = ({ children }) => {
                             ...msg, 
                             content: data.final_content || accumulatedContent || msg.content,
                             isStreaming: false,
-                            timestamp: new Date().toISOString()
+                            timestamp: new Date().toISOString(),
                             // **ROOSEVELT'S CITATION PRESERVATION**: Don't overwrite citations!
                             // Citations and metadata are already in msg from previous citation event
+                            metadata: {
+                              ...(msg.metadata || {}),
+                              ...(data.metadata || {})
+                            }
                           }
                         : msg
                     );

@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Install system dependencies for OCR, document processing, video processing, and web crawling
+# Install system dependencies for OCR, document processing, and web crawling
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-eng \
@@ -16,7 +16,6 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     wget \
     gnupg \
-    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -60,8 +59,8 @@ RUN chmod +x docker-entrypoint.sh
 # Create necessary directories
 RUN mkdir -p /app/uploads /app/processed /app/logs
 
-# Expose ports (8000 for FastAPI, 50052 for gRPC tool service)
-EXPOSE 8000 50052
+# Expose ports (8000 for FastAPI)
+EXPOSE 8000
 
 # Run the application (V2 with PostgreSQL migration)
 CMD ["./docker-entrypoint.sh"]

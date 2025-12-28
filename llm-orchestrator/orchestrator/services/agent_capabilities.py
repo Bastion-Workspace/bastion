@@ -161,9 +161,9 @@ AGENT_CAPABILITIES = {
     },
     'reference_agent': {
         'domains': ['general', 'reference', 'journal', 'log'],
-        'actions': ['query', 'analysis', 'observation'],
+        'actions': ['query', 'analysis', 'observation', 'generation'],  # generation for visualization requests
         'editor_types': ['reference'],
-        'keywords': ['journal', 'log', 'record', 'tracking', 'diary', 'food log', 'weight log', 'mood log'],
+        'keywords': ['journal', 'log', 'record', 'tracking', 'diary', 'food log', 'weight log', 'mood log', 'graph', 'chart', 'visualize'],
         'context_boost': 20  # Strong preference when editor type matches
     },
     'knowledge_builder_agent': {
@@ -178,6 +178,20 @@ AGENT_CAPABILITIES = {
         ],
         'context_boost': 0,
         'requires_explicit_keywords': False
+    },
+    'org_agent': {
+        'domains': ['general', 'management'],
+        'actions': ['management', 'query', 'generation', 'modification'],
+        'editor_types': [],  # Can work with or without editor
+        'keywords': [
+            'org', 'org-mode', 'orgmode', 'inbox', 'todo', 'task',
+            'add todo', 'capture', 'list todos', 'toggle done',
+            'archive done', 'schedule', 'project capture',
+            'start project', 'create project', 'new project',
+            'org file', 'inbox.org'
+        ],
+        'context_boost': 10,  # Moderate boost when org-related keywords present
+        'requires_editor': False
     }
 }
 
@@ -254,7 +268,8 @@ def detect_domain(
                 'research_agent': 'general',
                 'site_crawl_agent': 'general',
                 'reference_agent': 'general',
-                'image_generation_agent': 'general'
+                'image_generation_agent': 'general',
+                'org_agent': 'general'
             }
             domain = agent_domain_map.get(last_agent)
             if domain:
@@ -286,7 +301,9 @@ def is_information_lookup_query(query: str) -> bool:
         'what is the way to', 'what is the method to',
         'can you tell me how', 'can you explain how',
         'change the', 'set the', 'adjust the', 'configure the',
-        'what are the settings', 'what settings', 'what configuration'
+        'what are the settings', 'what settings', 'what configuration',
+        'more detail', 'more details', 'more information', 'tell me more',
+        'elaborate on', 'explain more', 'need more'
     ]
     
     # Check for information lookup patterns
@@ -400,7 +417,10 @@ def route_within_domain(
             # Modification without specific editor context → chat_agent
             return 'chat_agent'
         elif action_intent == 'management':
-            # Management operations → check for specific keywords or default to chat_agent
+            # Management operations → check for org-related keywords
+            org_keywords = ['org', 'org-mode', 'inbox', 'todo', 'task', 'project capture']
+            if any(kw in query_lower for kw in org_keywords):
+                return 'org_agent'
             return 'chat_agent'
         else:
             # Default fallback
@@ -571,6 +591,31 @@ def find_best_agent_match(
     
     Returns: (agent_name, confidence_score)
     """
+    # EDITOR TYPE OVERRIDE: When editor_preference is 'prefer' and editor type matches,
+    # route directly to that agent (editor type is PRIMARY signal)
+    if editor_preference == 'prefer' and editor_context:
+        editor_type = editor_context.get('type', '').strip().lower()
+        if editor_type:
+            # Find agents that support this editor type
+            matching_agents = []
+            for agent, capabilities in AGENT_CAPABILITIES.items():
+                # Skip internal-only agents
+                if capabilities.get('internal_only', False):
+                    continue
+                if editor_type in capabilities.get('editor_types', []):
+                    matching_agents.append(agent)
+            
+            if matching_agents:
+                if len(matching_agents) == 1:
+                    # Single match - route directly (editor type is PRIMARY signal)
+                    best_agent = matching_agents[0]
+                    logger.info(f"🎯 EDITOR TYPE OVERRIDE: editor_type='{editor_type}' → {best_agent} (editor type is PRIMARY signal)")
+                    return best_agent, 0.95  # High confidence for editor type match
+                else:
+                    # Multiple agents match - use capability scoring to choose
+                    logger.info(f"🎯 EDITOR TYPE MATCH: editor_type='{editor_type}' matches {len(matching_agents)} agents, using capability scoring")
+                    # Continue to capability scoring below, but these agents will get context_boost
+    
     last_agent = None
     if conversation_history:
         last_agent = conversation_history.get('last_agent') or conversation_history.get('primary_agent_selected')

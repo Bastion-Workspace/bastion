@@ -75,14 +75,19 @@ class ElectronicsProjectPlanNodes:
                     if decision_text:
                         decision_summary += f"- **{decision_type.replace('_', ' ').title()}**: {decision_text}\n"
             
+            # Get existing sections from state
+            existing_sections = state.get("existing_sections", [])
+            
             # Use LLM to generate project plan update
             fast_model = self.agent._get_fast_model(state)
             llm = self.agent._get_llm(temperature=0.2, model=fast_model, state=state)
             
-            prompt = f"""You are a project plan maintenance expert. Update the project plan with high-level summaries and decisions.
+            prompt = f"""You are a project plan maintenance expert. Update the electronics project plan with high-level summaries and decisions.
 
 **CURRENT PROJECT PLAN**:
 {current_content[:3000]}
+
+**EXISTING SECTIONS**: {', '.join(existing_sections) if existing_sections else 'None (new document)'}
 
 **RECENT CONVERSATION**:
 {conversation_summary[:1500]}
@@ -92,26 +97,47 @@ class ElectronicsProjectPlanNodes:
 
 **CURRENT QUERY**: {query}
 
+**STANDARD SECTIONS** (use these Level 2 headers):
+- **## Project Overview**: System requirements, architecture, goals, scope, constraints
+- **## Components and Datasheets**: Component specifications, selections, datasheet references
+- **## Schematic Analysis**: Circuit diagrams, wiring diagrams, signal flow
+- **## Firmware and Software**: Code implementations, firmware, embedded programming
+- **## BOM**: Bill of materials, parts list, sourcing information
+- **## Testing and Results**: Test procedures, measurements, validation results
+
 **TASK**: Generate updates to the project plan that:
-1. **Summarize high-level decisions** made in recent conversation
-2. **Update project overview** with key information discussed
-3. **Maintain project state** - what's been decided, what's in progress, what's planned
-4. **Early project definition** - if project plan is mostly empty/placeholder, fill it with what's been discussed
-5. **Keep it high-level** - don't include detailed specs (those go in specific files)
+1. **Use STANDARD SECTIONS** - Route content to the appropriate standard section above
+2. **Summarize high-level decisions** made in recent conversation
+3. **Update project overview** with key information discussed
+4. **Maintain project state** - what's been decided, what's in progress, what's planned
+5. **Early project definition** - if project plan is mostly empty/placeholder, fill it with what's been discussed
+6. **Keep it high-level** - don't include detailed specs (those go in specific files)
 
 **UPDATE STRATEGY**:
+- **Use standard sections** - Match content to the appropriate standard section from the list above
+- **Granular edits for small changes** - Use `granular_replace` or `granular_insert` for precise text changes
+- **Section-level edits for larger changes** - Use `replace` or `append` for broader updates
 - If project plan has placeholder sections, replace them with actual information
 - If project plan has existing sections, update them with new information
 - Focus on: Project goals, architecture decisions, component overview, system design, key constraints
 - Keep summaries concise and high-level
 
+**GRANULAR VS SECTION-LEVEL**:
+- **granular_replace**: For replacing specific text within a section (provide `original_text`)
+- **granular_insert**: For inserting text after specific anchor text (provide `anchor_text`)
+- **replace**: For replacing entire sections
+- **append**: For adding new content to existing sections or creating new sections
+
 **OUTPUT FORMAT**: Return ONLY valid JSON:
 {{
   "updates": [
     {{
-      "section": "Section name (e.g., 'Project Overview', 'Key Decisions', 'System Architecture')",
+      "section": "Standard section name (e.g., 'Project Overview', 'Components and Datasheets')",
       "content": "Markdown formatted content to update this section",
-      "action": "update|append|replace"
+      "action": "append|replace|granular_replace|granular_insert",
+      "op_type": "granular_replace|granular_insert|replace|append",  // For granular ops, specify op_type
+      "original_text": "",  // For granular_replace: specific text to replace within section
+      "anchor_text": ""  // For granular_insert: text to insert after within section
     }}
   ],
   "should_update": true
@@ -130,8 +156,12 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                                 "properties": {
                                     "section": {"type": "string"},
                                     "content": {"type": "string"},
-                                    "action": {"type": "string"}
-                                }
+                                    "action": {"type": "string"},
+                                    "op_type": {"type": "string", "description": "For granular ops: granular_replace or granular_insert"},
+                                    "original_text": {"type": "string", "description": "For granular_replace: specific text to replace within section"},
+                                    "anchor_text": {"type": "string", "description": "For granular_insert: text to insert after within section"}
+                                },
+                                "required": ["section", "content", "action"]
                             }
                         },
                         "should_update": {"type": "boolean"}

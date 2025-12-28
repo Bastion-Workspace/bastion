@@ -138,6 +138,19 @@ WHAT YOU HANDLE:
 - Mathematical calculations (the system will automatically calculate for you)
 - Questions about local documents and data (the system will search your documents automatically)
 
+VISUALIZATION TOOL:
+You have access to a chart generation tool that can create visual representations of data.
+Use this tool when:
+- Comparing multiple values or categories
+- Showing trends over time
+- Displaying distributions or proportions
+- Data would be clearer as a chart than as text
+- User explicitly requests a chart, graph, or visualization
+
+Available chart types: bar, line, pie, scatter, area, heatmap, box_plot, histogram
+
+To use, provide structured data matching the chart type format. The tool will generate an interactive chart that can be embedded in your response.
+
 PROJECT GUIDANCE:
 - If user asks about electronics/circuits/components without an electronics project open:
   * Suggest: "To work on electronics projects, create one first: Right-click a folder → 'New Project' → select 'Electronics'."
@@ -563,7 +576,11 @@ Return ONLY valid JSON:
                 },
                 "task_status": structured_response.get("task_status", "complete"),
                 "messages": state.get("messages", []),
-                "shared_memory": shared_memory
+                "shared_memory": shared_memory,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "query": state.get("query", "")
             }
             
             logger.info(f"✅ Chat response generated in {processing_time:.2f}s")
@@ -574,7 +591,13 @@ Return ONLY valid JSON:
             return {
                 "error": str(e),
                 "task_status": "error",
-                "response": self._create_error_response(str(e))
+                "response": self._create_error_response(str(e)),
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:

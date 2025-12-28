@@ -16,10 +16,10 @@ from models.org_settings_models import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/org/settings", tags=["Org Settings"])
+router = APIRouter(tags=["Org Settings"])
 
 
-@router.get("")
+@router.get("/api/org/settings")
 async def get_org_settings(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ) -> OrgModeSettingsResponse:
@@ -47,7 +47,7 @@ async def get_org_settings(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("")
+@router.put("/api/org/settings")
 async def update_org_settings(
     settings_update: OrgModeSettingsUpdate,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -79,7 +79,7 @@ async def update_org_settings(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("")
+@router.delete("/api/org/settings")
 async def reset_org_settings(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ) -> OrgModeSettingsResponse:
@@ -108,7 +108,7 @@ async def reset_org_settings(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/todo-states")
+@router.get("/api/org/settings/todo-states")
 async def get_todo_states(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ) -> dict:
@@ -138,7 +138,7 @@ async def get_todo_states(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/tags")
+@router.get("/api/org/settings/tags")
 async def get_tags(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ) -> dict:

@@ -14,15 +14,13 @@ from orchestrator.agents import (
     get_full_research_agent,
     ChatAgent,
     DictionaryAgent,
-    DataFormattingAgent,
     get_weather_agent,
     get_image_generation_agent,
     # FactCheckingAgent removed - not actively used
     get_rss_agent,
-    get_org_inbox_agent,
+    get_org_agent,
     get_article_writing_agent,
     get_podcast_script_agent,
-    get_org_project_agent,
     get_entertainment_agent,
     get_electronics_agent,
     get_character_development_agent,
@@ -62,16 +60,14 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         self.research_agent = None
         self.chat_agent = None
         self.dictionary_agent = None
-        self.data_formatting_agent = None
         self.help_agent = None
         self.weather_agent = None
         self.image_generation_agent = None
         # FactCheckingAgent removed - not actively used
         self.rss_agent = None
-        self.org_inbox_agent = None
+        self.org_agent = None
         self.article_writing_agent = None
         self.podcast_script_agent = None
-        self.org_project_agent = None
         self.entertainment_agent = None
         self.electronics_agent = None
         self.character_development_agent = None
@@ -91,7 +87,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
     def _ensure_agents_loaded(self):
         """Lazy load agents"""
         agents_loaded = 0
-        total_agents = 27  # Total number of agents to load
+        total_agents = 26  # Total number of agents to load
         
         if self.research_agent is None:
             self.research_agent = get_full_research_agent()
@@ -103,10 +99,6 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         
         if self.dictionary_agent is None:
             self.dictionary_agent = DictionaryAgent()
-            agents_loaded += 1
-        
-        if self.data_formatting_agent is None:
-            self.data_formatting_agent = DataFormattingAgent()
             agents_loaded += 1
         
         if self.help_agent is None:
@@ -128,8 +120,8 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             self.rss_agent = get_rss_agent()
             agents_loaded += 1
         
-        if self.org_inbox_agent is None:
-            self.org_inbox_agent = get_org_inbox_agent()
+        if self.org_agent is None:
+            self.org_agent = get_org_agent()
             agents_loaded += 1
         
         if self.article_writing_agent is None:
@@ -138,10 +130,6 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         
         if self.podcast_script_agent is None:
             self.podcast_script_agent = get_podcast_script_agent()
-            agents_loaded += 1
-        
-        if self.org_project_agent is None:
-            self.org_project_agent = get_org_project_agent()
             agents_loaded += 1
         
         if self.entertainment_agent is None:
@@ -655,7 +643,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         """
         Stream chat responses back to client
         
-        Supports multiple agent types: research, chat, data_formatting
+        Supports multiple agent types: research, chat, help, weather, image_generation, rss, org, etc.
         Includes cancellation support - detects client disconnect and cancels operations
         """
         # Create cancellation token for this request
@@ -883,7 +871,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 # Handle special cases first
                 special_cases = {
                     "combined_proofread_and_analyze": "chat",  # Not implemented, fallback to chat
-                    "pipeline_agent": "data_formatting",  # Pipeline functionality handled by data_formatting
+                    "pipeline_agent": "chat",  # Pipeline functionality not implemented, fallback to chat
                     "website_crawler_agent": "site_crawl",  # Different naming convention
                     "dictionary_agent": "dictionary",  # Short-circuit dictionary agent
                 }
@@ -1043,49 +1031,6 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 yield orchestrator_pb2.ChatChunk(
                     type="complete",
                     message=f"Dictionary lookup complete (word found: {result.get('found', False)})",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-            
-            elif agent_type == "data_formatting":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Data formatting agent organizing your data...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="data_formatting_agent"
-                )
-                
-                # Build metadata with shared_memory (STANDARD PATTERN)
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                data_formatting_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                if cancellation_token.is_set():
-                    raise asyncio.CancelledError("Operation cancelled")
-                
-                result = await self._process_agent_with_cancellation(
-                    agent=self.data_formatting_agent,
-                    query=request.query,
-                    metadata=data_formatting_metadata,
-                    messages=messages,
-                    cancellation_token=cancellation_token
-                )
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=result.get("response", "No formatted output generated"),
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="data_formatting_agent"
-                )
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=f"Formatting complete (type: {result.get('format_type', 'structured_text')})",
                     timestamp=datetime.now().isoformat(),
                     agent_name="system"
                 )
@@ -1554,10 +1499,19 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
 
                 status_msg = f"Reference analysis complete: {complexity_level} (confidence: {confidence:.2f}, research: {research_used})"
 
+                # Capture visualization metadata for static images/SVGs
+                chunk_metadata = {}
+                if isinstance(result, dict):
+                    if result.get("static_visualization_data"):
+                        chunk_metadata["static_visualization_data"] = result["static_visualization_data"]
+                    if result.get("static_format"):
+                        chunk_metadata["static_format"] = result["static_format"]
+
                 yield orchestrator_pb2.ChatChunk(
                     type="complete",
                     message=status_msg,
                     timestamp=datetime.now().isoformat(),
+                    metadata=chunk_metadata,
                     agent_name="system"
                 )
 
@@ -2363,47 +2317,59 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="system"
                 )
 
-            elif agent_type == "org_inbox":
+            elif agent_type == "org" or agent_type == "org_inbox" or agent_type == "org_project":
                 yield orchestrator_pb2.ChatChunk(
                     type="status",
-                    message="Org inbox agent managing inbox...",
+                    message="Org agent processing request...",
                     timestamp=datetime.now().isoformat(),
-                    agent_name="org_inbox_agent"
+                    agent_name="org_agent"
                 )
                 
-                # Build metadata for org inbox agent (STANDARD PATTERN)
+                # Build metadata for org agent (STANDARD PATTERN)
                 shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
                 
-                org_inbox_metadata = {
+                # Check if there's pending project capture in conversation intelligence
+                if request.pending_operations:
+                    for op in request.pending_operations:
+                        if op.type == "project_capture":
+                            # Restore pending project state
+                            import json
+                            try:
+                                pending_data = json.loads(op.metadata.get("data", "{}")) if op.metadata else {}
+                                shared_memory["pending_project_capture"] = pending_data
+                            except:
+                                pass
+                
+                org_metadata = {
                     "user_id": request.user_id,
                     "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,  # Extracted properly
+                    "shared_memory": shared_memory,
                     **{k: v for k, v in metadata.items() if k != "shared_memory"}
                 }
                 
-                result = await self.org_inbox_agent.process(
+                result = await self.org_agent.process(
                     query=request.query,
-                    metadata=org_inbox_metadata,
+                    metadata=org_metadata,
                     messages=messages
                 )
                 
                 # Extract response from result
                 response_messages = result.get("messages", [])
-                response_text = response_messages[-1].content if response_messages else result.get("response", "No org inbox results available")
+                response_text = response_messages[-1].content if response_messages else result.get("response", "No org results available")
                 
                 yield orchestrator_pb2.ChatChunk(
                     type="content",
                     message=response_text,
                     timestamp=datetime.now().isoformat(),
-                    agent_name="org_inbox_agent"
+                    agent_name="org_agent"
                 )
                 
                 is_complete = result.get("is_complete", True)
                 agent_results = result.get("agent_results", {})
-                org_inbox_result = agent_results.get("org_inbox", {})
-                action = org_inbox_result.get("action", "unknown")
+                org_result = agent_results.get("org_inbox", {}) or agent_results.get("org_agent", {})
+                action = org_result.get("action", "unknown")
                 
-                status_msg = f"Org inbox operation complete: {action}"
+                status_msg = f"Org operation complete: {action}"
                 
                 yield orchestrator_pb2.ChatChunk(
                     type="complete",
@@ -2548,55 +2514,6 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="system"
                 )
             
-            elif agent_type == "org_project":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Org project agent capturing project...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="org_project_agent"
-                )
-                
-                # Build metadata with shared_memory (STANDARD PATTERN)
-                # Extract base shared_memory first, then add pending operations
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                # Check if there's pending project capture in conversation intelligence
-                if request.conversation_intelligence and request.conversation_intelligence.pending_operations:
-                    for op in request.conversation_intelligence.pending_operations:
-                        if op.operation_type == "project_capture":
-                            # Restore pending project state
-                            import json
-                            try:
-                                pending_data = json.loads(op.operation_data) if op.operation_data else {}
-                                shared_memory["pending_project_capture"] = pending_data
-                            except:
-                                pass
-                
-                org_project_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                result = await self.org_project_agent.process(
-                    query=request.query,
-                    metadata=org_project_metadata,
-                    messages=messages
-                )
-                
-                # Extract response
-                response_messages = result.get("messages", [])
-                response_text = response_messages[-1].content if response_messages else result.get("response", "No project captured")
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="org_project_agent"
-                )
-                
-                # Check if awaiting user input or complete
                 agent_results = result.get("agent_results", {})
                 task_status = agent_results.get("task_status", "complete")
                 
@@ -2740,10 +2657,19 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     agent_name="research_agent"
                 )
                 
+                # Capture visualization metadata for static images/SVGs
+                chunk_metadata = {}
+                if isinstance(result, dict):
+                    if result.get("static_visualization_data"):
+                        chunk_metadata["static_visualization_data"] = result["static_visualization_data"]
+                    if result.get("static_format"):
+                        chunk_metadata["static_format"] = result["static_format"]
+
                 yield orchestrator_pb2.ChatChunk(
                     type="complete",
                     message="Research complete",
                     timestamp=datetime.now().isoformat(),
+                    metadata=chunk_metadata,
                     agent_name="system"
                 )
             
@@ -2844,8 +2770,8 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 "phase": "6",
                 "service": "llm-orchestrator",
                 "status": "multi_agent_active",
-                "agents": "research,chat,data_formatting,help,weather,image_generation,rss,org_inbox,substack,podcast_script,org_project",
-                "features": "multi_round_research,query_expansion,gap_analysis,web_search,caching,conversation,formatting,weather_forecasts,image_generation,rss_management,org_inbox_management,article_generation,podcast_script_generation,org_project_capture"
+                "agents": "research,chat,help,weather,image_generation,rss,org,substack,podcast_script",
+                "features": "multi_round_research,query_expansion,gap_analysis,web_search,caching,conversation,formatting,weather_forecasts,image_generation,rss_management,org_management,article_generation,podcast_script_generation,org_project_capture,cross_document_synthesis"
             }
         )
 

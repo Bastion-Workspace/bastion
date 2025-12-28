@@ -12,10 +12,10 @@ from services.org_search_service import get_org_search_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/org", tags=["Org Tools"])
+router = APIRouter(tags=["Org Tools"])
 
 
-@router.get("/search")
+@router.get("/api/org/search")
 async def search_org_files(
     query: str = Query(..., description="Search query string"),
     tags: Optional[str] = Query(None, description="Comma-separated tags to filter by"),
@@ -79,7 +79,7 @@ async def search_org_files(
         }
 
 
-@router.get("/todos")
+@router.get("/api/org/todos")
 async def get_all_todos(
     states: Optional[str] = Query(None, description="Comma-separated TODO states to filter by"),
     tags: Optional[str] = Query(None, description="Comma-separated tags to filter by"),
@@ -139,7 +139,7 @@ async def get_all_todos(
         }
 
 
-@router.get("/contacts")
+@router.get("/api/org/contacts")
 async def get_all_contacts(
     category: Optional[str] = Query(None, description="Filter by category (tag or parent heading)"),
     limit: int = Query(500, ge=1, le=1000, description="Maximum number of results"),
@@ -236,7 +236,7 @@ async def get_all_contacts(
         }
 
 
-@router.get("/agenda")
+@router.get("/api/org/agenda")
 async def get_agenda(
     days_ahead: int = Query(7, ge=1, le=90, description="Number of days to look ahead"),
     include_scheduled: bool = Query(True, description="Include SCHEDULED items"),
@@ -291,16 +291,41 @@ async def get_agenda(
             # Check for scheduled
             if include_scheduled and result.get('scheduled'):
                 try:
-                    # Parse org date format: "2025-01-20 Mon"
-                    date_str = result['scheduled'].split()[0]
+                    # Parse org date format: "2025-01-20 Mon" or "2025-01-20 Mon 14:00"
+                    scheduled_str = result['scheduled']
+                    parts = scheduled_str.split()
+                    date_str = parts[0]
                     item_date = datetime.strptime(date_str, '%Y-%m-%d').date()
                     
+                    # Extract time if present (format: "14:00" or "14:00-15:00")
+                    time_str = None
+                    time_for_sort = None
+                    if len(parts) >= 3:
+                        time_str = parts[2]  # Could be "14:00" or "14:00-15:00"
+                        # For sorting, use start time
+                        if '-' in time_str:
+                            time_for_sort = time_str.split('-')[0]
+                        else:
+                            time_for_sort = time_str
+                    
                     if today <= item_date <= end_date:
+                        # Create sort datetime (use midnight if no time)
+                        if time_for_sort:
+                            try:
+                                hour, minute = map(int, time_for_sort.split(':'))
+                                sort_datetime = datetime.combine(item_date, datetime.min.time().replace(hour=hour, minute=minute))
+                            except:
+                                sort_datetime = datetime.combine(item_date, datetime.min.time())
+                        else:
+                            sort_datetime = datetime.combine(item_date, datetime.min.time())
+                        
                         agenda_items.append({
                             **result,
                             'agenda_type': 'SCHEDULED',
                             'agenda_date': item_date.isoformat(),
-                            'sort_date': item_date
+                            'sort_date': item_date,
+                            'sort_datetime': sort_datetime,
+                            'time': time_str
                         })
                 except Exception as e:
                     logger.warning(f"Failed to parse scheduled date: {result.get('scheduled')}: {e}")
@@ -308,20 +333,45 @@ async def get_agenda(
             # Check for deadline
             if include_deadlines and result.get('deadline'):
                 try:
-                    date_str = result['deadline'].split()[0]
+                    # Parse org date format: "2025-01-20 Mon" or "2025-01-20 Mon 18:00"
+                    deadline_str = result['deadline']
+                    parts = deadline_str.split()
+                    date_str = parts[0]
                     item_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+                    
+                    # Extract time if present
+                    time_str = None
+                    time_for_sort = None
+                    if len(parts) >= 3:
+                        time_str = parts[2]
+                        if '-' in time_str:
+                            time_for_sort = time_str.split('-')[0]
+                        else:
+                            time_for_sort = time_str
                     
                     if today <= item_date <= end_date:
                         # Calculate days until deadline
                         days_until = (item_date - today).days
+                        
+                        # Create sort datetime (use end of day if no time)
+                        if time_for_sort:
+                            try:
+                                hour, minute = map(int, time_for_sort.split(':'))
+                                sort_datetime = datetime.combine(item_date, datetime.min.time().replace(hour=hour, minute=minute))
+                            except:
+                                sort_datetime = datetime.combine(item_date, datetime.min.time().replace(hour=23, minute=59))
+                        else:
+                            sort_datetime = datetime.combine(item_date, datetime.min.time().replace(hour=23, minute=59))
                         
                         agenda_items.append({
                             **result,
                             'agenda_type': 'DEADLINE',
                             'agenda_date': item_date.isoformat(),
                             'sort_date': item_date,
+                            'sort_datetime': sort_datetime,
                             'days_until': days_until,
-                            'is_urgent': days_until <= 3  # Flag urgent deadlines
+                            'is_urgent': days_until <= 3,  # Flag urgent deadlines
+                            'time': time_str
                         })
                 except Exception as e:
                     logger.warning(f"Failed to parse deadline date: {result.get('deadline')}: {e}")
@@ -339,23 +389,39 @@ async def get_agenda(
                         if today <= item_date <= end_date:
                             # Extract time if present
                             time_str = None
+                            time_for_sort = None
                             parts = timestamp_str.split()
                             if len(parts) >= 3:  # Has time component
-                                time_str = parts[2]
+                                time_str = parts[2]  # Could be "19:00" or "19:00-19:05"
+                                if '-' in time_str:
+                                    time_for_sort = time_str.split('-')[0]
+                                else:
+                                    time_for_sort = time_str
+                            
+                            # Create sort datetime
+                            if time_for_sort:
+                                try:
+                                    hour, minute = map(int, time_for_sort.split(':'))
+                                    sort_datetime = datetime.combine(item_date, datetime.min.time().replace(hour=hour, minute=minute))
+                                except:
+                                    sort_datetime = datetime.combine(item_date, datetime.min.time())
+                            else:
+                                sort_datetime = datetime.combine(item_date, datetime.min.time())
                             
                             agenda_items.append({
                                 **result,
                                 'agenda_type': 'APPOINTMENT',
                                 'agenda_date': item_date.isoformat(),
                                 'sort_date': item_date,
+                                'sort_datetime': sort_datetime,
                                 'time': time_str,
                                 'timestamp': timestamp_str
                             })
                     except Exception as e:
                         logger.warning(f"Failed to parse active timestamp: {timestamp_str}: {e}")
         
-        # Sort by date
-        agenda_items.sort(key=lambda x: x['sort_date'])
+        # Sort by datetime (date + time) for proper chronological ordering
+        agenda_items.sort(key=lambda x: x.get('sort_datetime', datetime.combine(x['sort_date'], datetime.min.time())))
         
         # Group by date
         grouped = {}
@@ -364,6 +430,10 @@ async def get_agenda(
             if date_key not in grouped:
                 grouped[date_key] = []
             grouped[date_key].append(item)
+        
+        # Sort items within each date group by time
+        for date_key in grouped:
+            grouped[date_key].sort(key=lambda x: x.get('sort_datetime', datetime.combine(x['sort_date'], datetime.min.time())))
         
         return {
             "success": True,
@@ -387,7 +457,7 @@ async def get_agenda(
         }
 
 
-@router.get("/backlinks")
+@router.get("/api/org/backlinks")
 async def get_backlinks(
     filename: str = Query(..., description="Filename to find backlinks for"),
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -437,7 +507,7 @@ async def get_backlinks(
         }
 
 
-@router.get("/lookup-document")
+@router.get("/api/org/lookup-document")
 async def lookup_document_by_filename(
     filename: str = Query(..., description="Filename to search for"),
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -459,14 +529,14 @@ async def lookup_document_by_filename(
         from services.database_manager.database_helpers import fetch_all
         from pathlib import Path
         
-        # Extract just the filename without path and extension
+        # Extract just the filename without path
         target_path = Path(filename)
-        target_name = target_path.stem  # "inbox.org" -> "inbox"
+        target_filename = target_path.name  # "inbox.org" or "path/to/inbox.org" -> "inbox.org"
         
-        logger.info(f"🔍 Searching for org file with title: '{target_name}'")
+        logger.info(f"🔍 Searching for org file with filename: '{target_filename}'")
         
         # Query document_metadata table for org files matching the filename
-        # Note: title field doesn't include .org extension
+        # Search by filename field, not title (title may differ from filename)
         query = """
             SELECT 
                 document_id,
@@ -478,39 +548,37 @@ async def lookup_document_by_filename(
                 processing_status
             FROM document_metadata
             WHERE user_id = $1 
-            AND title ILIKE $2
+            AND filename ILIKE $2
             AND doc_type = 'org'
             ORDER BY 
-                CASE WHEN title = $3 THEN 0 ELSE 1 END,
+                CASE WHEN filename = $3 THEN 0 ELSE 1 END,
                 created_at DESC
             LIMIT 10
         """
         
-        rows = await fetch_all(query, current_user.user_id, f"%{target_name}%", target_name)
+        rows = await fetch_all(query, current_user.user_id, f"%{target_filename}%", target_filename)
         
         if not rows:
-            logger.warning(f"⚠️ No org files found matching '{filename}'")
+            logger.warning(f"⚠️ No org files found matching '{target_filename}'")
             raise HTTPException(
                 status_code=404,
-                detail=f"No org file found with filename '{filename}'"
+                detail=f"No org file found with filename '{target_filename}'"
             )
         
         # Filter to exact filename matches (case-insensitive)
-        target_name_lower = target_name.lower()
+        target_filename_lower = target_filename.lower()
         
         exact_matches = []
         partial_matches = []
         
         for row in rows:
             doc = dict(row)
-            doc_title = doc.get('title', '')
-            # Add .org extension if not present in title
-            doc_filename = doc_title if doc_title.endswith('.org') else f"{doc_title}.org"
-            doc_name_lower = doc_filename.lower()
+            doc_filename = doc.get('filename', '')
+            doc_filename_lower = doc_filename.lower()
             
-            if doc_name_lower == target_name_lower:
+            if doc_filename_lower == target_filename_lower:
                 exact_matches.append(doc)
-            elif target_name_lower in doc_name_lower:
+            elif target_filename_lower in doc_filename_lower:
                 partial_matches.append(doc)
         
         # Prefer exact matches
@@ -540,7 +608,7 @@ async def lookup_document_by_filename(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/discover-targets")
+@router.get("/api/org/discover-targets")
 async def discover_refile_targets(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -579,7 +647,7 @@ class RefileRequest(BaseModel):
     target_file: str
     target_heading_line: Optional[int] = None
 
-@router.post("/refile")
+@router.post("/api/org/refile")
 async def refile_entry(
     request: RefileRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -632,7 +700,7 @@ class ArchiveRequest(BaseModel):
     line_number: int
     archive_location: Optional[str] = None
 
-@router.post("/archive")
+@router.post("/api/org/archive")
 async def archive_entry(
     request: ArchiveRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -680,7 +748,7 @@ class BulkArchiveRequest(BaseModel):
     source_file: str
     archive_location: Optional[str] = None
 
-@router.post("/archive-bulk")
+@router.post("/api/org/archive-bulk")
 async def archive_all_done(
     request: BulkArchiveRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -728,7 +796,7 @@ class TaskCompletionRequest(BaseModel):
     file_path: str
     line_number: int
 
-@router.post("/recurring/complete")
+@router.post("/api/org/recurring/complete")
 async def handle_recurring_task_completion(
     request: TaskCompletionRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -780,7 +848,7 @@ class HabitConsistencyRequest(BaseModel):
     heading_text: str
     days: int = 30
 
-@router.post("/recurring/consistency")
+@router.post("/api/org/recurring/consistency")
 async def get_habit_consistency(
     request: HabitConsistencyRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -832,7 +900,7 @@ class ClockInRequest(BaseModel):
     line_number: int
     heading: str
 
-@router.post("/clock/in")
+@router.post("/api/org/clock/in")
 async def clock_in(
     request: ClockInRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -876,7 +944,7 @@ async def clock_in(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/clock/out")
+@router.post("/api/org/clock/out")
 async def clock_out(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -916,7 +984,7 @@ async def clock_out(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/clock/active")
+@router.get("/api/org/clock/active")
 async def get_active_clock(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -951,7 +1019,7 @@ class TimeReportRequest(BaseModel):
     file_path: Optional[str] = None
     days: int = 30
 
-@router.post("/clock/report")
+@router.post("/api/org/clock/report")
 async def get_time_report(
     request: TimeReportRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)

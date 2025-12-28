@@ -1290,6 +1290,8 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
   exportMarkdownAsEpub = async (markdown, options = {}) => {
     const payload = {
       content: markdown,
+      document_id: options.documentId,
+      folder_id: options.folderId,
       include_toc: options.includeToc !== false,
       include_cover: !!options.includeCover,
       split_on_headings: options.splitOnHeadings !== false,

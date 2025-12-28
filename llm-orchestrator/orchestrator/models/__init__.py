@@ -33,6 +33,14 @@ from orchestrator.models.editor_models import (
     EditorOperation,
     ManuscriptEdit
 )
+from orchestrator.models.visualization_models import (
+    VisualizationAnalysis,
+    VisualizationResult
+)
+from orchestrator.models.diagramming_models import (
+    DiagramAnalysis,
+    DiagramResult
+)
 
 __all__ = [
     'SimpleIntentResult',
@@ -52,6 +60,10 @@ __all__ = [
     'IncrementalUpdateAnalysis',
     'ComponentCompatibilityAnalysis',
     'EditorOperation',
-    'ManuscriptEdit'
+    'ManuscriptEdit',
+    'VisualizationAnalysis',
+    'VisualizationResult',
+    'DiagramAnalysis',
+    'DiagramResult'
 ]
 

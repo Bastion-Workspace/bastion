@@ -46,17 +46,33 @@ class ElectronicsContentNodes:
             available_files = []
             file_content_previews = {}  # Store content for section detection
             
-            # Also include the project plan from active_editor
-            if active_editor and active_editor.get("document_id"):
+            # Get primary electronics document (from state or active_editor)
+            electronics_document_id = state.get("electronics_document_id")
+            existing_sections = state.get("existing_sections", [])
+            
+            # Prioritize primary electronics document
+            primary_doc = None
+            if electronics_document_id:
+                # Explicit document ID provided
+                from orchestrator.tools.document_tools import get_document_content_tool
+                primary_content = await get_document_content_tool(electronics_document_id, user_id)
+                if not primary_content.startswith("Error"):
+                    primary_doc = {
+                        "document_id": electronics_document_id,
+                        "filename": "project_plan.md",
+                        "summary": f"PRIMARY ELECTRONICS DOCUMENT - Use standard sections: {', '.join(existing_sections[:10]) if existing_sections else 'Project Overview, Components and Datasheets, Schematic Analysis, Firmware and Software, BOM, Testing and Results'}"
+                    }
+                    available_files.insert(0, primary_doc)  # Insert at beginning (highest priority)
+                    file_content_previews[electronics_document_id] = primary_content[:1000]
+            elif active_editor and active_editor.get("document_id") and active_editor.get("frontmatter", {}).get("type", "").lower() == "electronics":
+                # Use active editor as primary document
                 project_plan_content = active_editor.get("content", "")
-                # Extract section names from project plan
-                sections = re.findall(r'^##+\s+(.+)$', project_plan_content, re.MULTILINE)
-                project_plan_doc = {
+                primary_doc = {
                     "document_id": active_editor.get("document_id"),
                     "filename": active_editor.get("filename", "project_plan.md"),
-                    "summary": f"Main project plan document. Sections: {', '.join(sections[:10])}" if sections else "Main project plan document"
+                    "summary": f"PRIMARY ELECTRONICS DOCUMENT - Use standard sections: {', '.join(existing_sections[:10]) if existing_sections else 'Project Overview, Components and Datasheets, Schematic Analysis, Firmware and Software, BOM, Testing and Results'}"
                 }
-                available_files.append(project_plan_doc)
+                available_files.insert(0, primary_doc)  # Insert at beginning (highest priority)
                 file_content_previews[active_editor.get("document_id")] = project_plan_content[:1000]
             
             # Flatten referenced_context (it's organized by category)
@@ -224,15 +240,23 @@ Correct routing:
    - **Connect ideas** - Link new content to existing sections with transitions and context
    - **Group related updates** - If multiple sections need updates, group them logically
 
-3. **ROUTE TO APPROPRIATE FILES** (use AVAILABLE FILES list above):
-   - **Match content type to file purpose**: Read the file summaries/descriptions in AVAILABLE FILES to understand each file's purpose
-   - **Component specs/values**: Route to files with "component", "spec", or "hardware" in name/description
-   - **Hardware design**: Route to files with "design", "architecture", "hardware", or "system" in name/description
-   - **Protocols/communication**: Route to files with "protocol", "communication", or "interface" in name/description
-   - **Code/firmware**: Route to files with "software", "code", "firmware", or "implementation" in name/description
-   - **General project info**: Route to "project_plan" or files with "plan", "overview", or "requirements" in name/description
-   - **If no clear match**: Use the file whose description/summary best matches the content type
-   - **Multiple matches**: Split content logically across multiple files if appropriate
+3. **ROUTE TO PRIMARY DOCUMENT USING STANDARD SECTIONS** (SINGLE DOCUMENT PHILOSOPHY):
+   - **ALL content goes to the PRIMARY ELECTRONICS DOCUMENT** (first file in AVAILABLE FILES list)
+   - **Use standard Level 2 headers (##)** to organize content:
+     * **## Project Overview**: System requirements, architecture, goals, scope, constraints
+     * **## Components and Datasheets**: Component specifications, selections, datasheet references
+     * **## Schematic Analysis**: Circuit diagrams, wiring diagrams, signal flow
+     * **## Firmware and Software**: Code implementations, firmware, embedded programming
+     * **## BOM**: Bill of materials, parts list, sourcing information
+     * **## Testing and Results**: Test procedures, measurements, validation results
+   - **Match content type to standard section**:
+     * Component specs/values → "Components and Datasheets"
+     * Hardware design/architecture → "Project Overview" or "Schematic Analysis"
+     * Protocols/communication → "Firmware and Software" or "Project Overview"
+     * Code/firmware → "Firmware and Software"
+     * BOM/parts list → "BOM"
+     * Testing/validation → "Testing and Results"
+   - **Referenced files are READ-ONLY** - do NOT route content to them, only reference them in your responses
 
 4. **DETECT REVISIONS AND CORRECTIONS** (CRITICAL FOR CLEANUP): 
    - **CRITICAL: REVIEW EXISTING SECTION CONTENT ABOVE** - The "EXISTING SECTION CONTENT" section shows you what's currently in the files
@@ -266,7 +290,7 @@ Correct routing:
    - **BE THOROUGH**: Check circuit diagrams, code comments, specifications - remove ALL references
    - The old component references will be automatically deleted - your job is to write clean replacement content with ONLY the new component AND identify sections that need deletion
 
-5. **MATCH EXISTING SECTIONS**: Use exact section names that exist in files (check file summaries for section lists)
+5. **MATCH EXISTING SECTIONS**: Use exact section names that exist in the primary document. If a section doesn't exist yet, use the appropriate standard section name from the list above.
 
 6. **FORMAT AS MARKDOWN**: All content must be markdown (not JSON, not raw text)
    - Use proper headings, lists, code blocks, and tables
@@ -280,22 +304,7 @@ Correct routing:
 
 8. **ALWAYS EXTRACT**: Even if content seems small, extract it! Technical details like 12VDC and 40-44 ohms are valuable and should be saved.
 
-9. **NEW REFERENCE FILE CREATION** (when content is too detailed for project plan):
-   - **When to create**: Content is substantial (>1500 chars) AND doesn't fit existing files well
-   - **Criteria**: Content is about a distinct, specific topic that warrants its own file
-   - **Set flags**: "create_new_file": true, "suggested_filename": "descriptive-name.md", "file_summary": "Brief purpose"
-   - **File naming**: Use lowercase-with-dashes.md format (e.g., "motor-driver-specs.md", "i2c-protocol.md")
-   - **Automatic handling**: System will create file, add to project plan frontmatter, save content
-   - **Conservative approach**: Only create if NO existing file is a good match (<20% relevance)
-   - **Examples of when to create**:
-     * Complete component specifications >1500 chars (e.g., detailed microcontroller specs)
-     * Protocol documentation with multiple sections (e.g., SPI communication protocol)
-     * Comprehensive circuit design documents
-     * Detailed code implementations or firmware modules
-   - **Examples of when NOT to create**:
-     * Small component values or specifications (<1500 chars)
-     * Content that fits well in existing component/protocol files
-     * General design notes (belongs in project_plan)
+9. **NO NEW FILE CREATION**: All content goes into the primary electronics document using standard sections. Do NOT create new files - use the standard sections instead.
 
 10. **USE EXACT FILENAMES**: For existing files, always use the exact filename from AVAILABLE FILES
 
@@ -311,11 +320,11 @@ Correct routing:
   "routing": [
     {{
       "content_type": "components|code|calculations|general",
-      "target_file": "filename.md (exact filename from AVAILABLE FILES) or 'project_plan'",
-      "action": "append|replace|remove",
-      "create_new_file": false,  // Set to true if creating a new reference file
-      "suggested_filename": "",  // Required if create_new_file is true (e.g., "motor-driver-specs.md")
-      "file_summary": "",  // Required if create_new_file is true (brief description of file purpose)
+      "target_file": "project_plan.md (ALWAYS use primary document filename)",
+      "action": "append|replace|remove|granular_replace|granular_insert",
+      "op_type": "granular_replace|granular_insert|replace|append|remove",  // For granular ops, specify op_type
+      "original_text": "",  // For granular_replace: specific text to replace within section
+      "anchor_text": "",  // For granular_insert: text to insert after within section
       "section": "Exact section name (match existing sections if updating/correcting)",
       "content": "Markdown formatted content (lists, tables, code blocks, etc.)",
       "action": "append|replace|remove"

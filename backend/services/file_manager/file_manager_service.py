@@ -559,15 +559,38 @@ class FileManagerService:
                 if new_filename.lower().endswith(e + e):
                     new_filename = new_filename[:-len(e)]
 
-            # Rename on disk (best effort)
+            # Rename on disk using folder structure
             try:
-                upload_dir = Path(settings.UPLOAD_DIR)
-                old_path = upload_dir / f"{request.document_id}_{old_filename}"
-                new_path = upload_dir / f"{request.document_id}_{new_filename}"
-                if old_path.exists() and old_path != new_path:
-                    old_path.rename(new_path)
+                # Get the actual file path using folder service
+                old_file_path = await self.folder_service.get_document_file_path(
+                    filename=old_filename,
+                    folder_id=folder_id,
+                    user_id=doc.user_id,
+                    collection_type=doc.collection_type
+                )
+                
+                # Get the new file path with the new filename
+                new_file_path = await self.folder_service.get_document_file_path(
+                    filename=new_filename,
+                    folder_id=folder_id,
+                    user_id=doc.user_id,
+                    collection_type=doc.collection_type
+                )
+                
+                # Rename the file if paths are different and old file exists
+                if old_file_path.exists() and old_file_path != new_file_path:
+                    # Ensure parent directory exists for new path
+                    new_file_path.parent.mkdir(parents=True, exist_ok=True)
+                    old_file_path.rename(new_file_path)
+                    logger.info(f"✅ Renamed file on disk: {old_file_path} -> {new_file_path}")
+                elif not old_file_path.exists():
+                    logger.warning(f"⚠️ Old file not found at: {old_file_path}")
+                elif old_file_path == new_file_path:
+                    logger.debug(f"File path unchanged (only case change?): {old_file_path}")
             except Exception as re:
                 logger.warning(f"⚠️ Disk rename warning: {re}")
+                import traceback
+                logger.debug(traceback.format_exc())
 
             # Update DB
             updated = await self.document_service.document_repository.update(

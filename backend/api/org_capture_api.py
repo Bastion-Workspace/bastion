@@ -13,10 +13,10 @@ from models.org_capture_models import OrgCaptureRequest, OrgCaptureResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/org", tags=["Org Tools"])
+router = APIRouter(tags=["Org Tools"])
 
 
-@router.post("/capture", response_model=OrgCaptureResponse)
+@router.post("/api/org/capture", response_model=OrgCaptureResponse)
 async def quick_capture(
     request: OrgCaptureRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -71,7 +71,7 @@ async def quick_capture(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/check-inbox", response_model=Dict[str, Any])
+@router.get("/api/org/check-inbox", response_model=Dict[str, Any])
 async def check_inbox_status(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ) -> Dict[str, Any]:

@@ -12,7 +12,10 @@ import {
   TextField,
   Select,
   MenuItem,
-  FormControl
+  FormControl,
+  Menu,
+  ListItemIcon,
+  ListItemText
 } from '@mui/material';
 import {
   Description,
@@ -20,13 +23,14 @@ import {
   Person,
   Category,
   Tag,
-  OpenInNew,
   Download,
   Edit,
   Save,
   Visibility,
   FileDownload,
-  Schedule
+  Schedule,
+  Fullscreen,
+  FullscreenExit
 } from '@mui/icons-material';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -99,6 +103,9 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   const [editedFilename, setEditedFilename] = useState('');
   const [updatingMetadata, setUpdatingMetadata] = useState(false);
   const [externalUpdateNotification, setExternalUpdateNotification] = useState(null);
+  const [downloadMenuAnchor, setDownloadMenuAnchor] = useState(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const fullscreenContainerRef = React.useRef(null);
 
   // Helper functions for unsaved content persistence
   const getUnsavedContentKey = (docId) => `unsaved_content_${docId}`;
@@ -855,8 +862,8 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   // Publish editor context (must be declared before any early returns)
   useEffect(() => {
     const fname = (document?.filename || '').toLowerCase();
-    if (isEditing && fname.endsWith('.md')) {
-      // **BULLY!** Parse frontmatter for proper editor context
+    if (isEditing && (fname.endsWith('.md') || fname.endsWith('.org'))) {
+      // **BULLY!** Parse frontmatter for proper editor context (org files may have frontmatter too)
       const parsed = parseFrontmatter(editContent || '');
       
       // **ROOSEVELT'S FRONTMATTER MERGE**: Merge data and lists so array fields (files, components, etc.) are included!
@@ -866,7 +873,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
         ...prev,
         isEditable: true,
         filename: document?.filename || null,
-        language: 'markdown',
+        language: fname.endsWith('.org') ? 'org' : 'markdown',
         content: editContent,
         contentLength: (editContent || '').length,
         frontmatter: mergedFrontmatter,
@@ -1016,6 +1023,202 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
     }
   };
 
+  // Download menu handlers
+  const handleDownloadMenuOpen = (event) => {
+    setDownloadMenuAnchor(event.currentTarget);
+  };
+
+  const handleDownloadMenuClose = () => {
+    setDownloadMenuAnchor(null);
+  };
+
+  // Download document handler
+  const handleDownload = async () => {
+    handleDownloadMenuClose();
+    try {
+      const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+      const fnameLower = (document?.filename || '').toLowerCase();
+      
+      // For PDFs, use the PDF endpoint
+      if (fnameLower.endsWith('.pdf')) {
+        const response = await fetch(`/api/documents/${documentId}/pdf`, {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
+        
+        if (!response.ok) {
+          throw new Error('Failed to download PDF');
+        }
+        
+        const blob = await response.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = document.filename || 'document.pdf';
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(blobUrl);
+      } else {
+        // For other files, try the file endpoint first
+        let response = await fetch(`/api/documents/${documentId}/file`, {
+          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+        });
+        
+        // If file endpoint fails, create blob from content
+        if (!response.ok) {
+          const content = isEditing ? editContent : (document.content || '');
+          const blob = new Blob([content], { type: 'text/plain' });
+          const blobUrl = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = blobUrl;
+          link.download = document.filename || 'document';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(blobUrl);
+        } else {
+          const blob = await response.blob();
+          const blobUrl = URL.createObjectURL(blob);
+          const link = document.createElement('a');
+          link.href = blobUrl;
+          link.download = document.filename || 'document';
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+          URL.revokeObjectURL(blobUrl);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to download document:', err);
+      alert('Failed to download document');
+    }
+  };
+
+  // Export as EPUB handler
+  const handleExportEpub = () => {
+    handleDownloadMenuClose();
+    // Parse frontmatter to pre-fill metadata
+    const parsed = parseFrontmatter(editContent || document.content || '');
+    const mergedFrontmatter = { ...(parsed.data || {}), ...(parsed.lists || {}) };
+    
+    // Pre-fill title from frontmatter or document
+    setEpubTitle(mergedFrontmatter.title || mergedFrontmatter.Title || (document.title || document.filename || '').replace(/\.[^.]+$/, ''));
+    
+    // Pre-fill author fields from frontmatter
+    if (mergedFrontmatter.author_first || mergedFrontmatter['Author First']) {
+      setEpubAuthorFirst(mergedFrontmatter.author_first || mergedFrontmatter['Author First'] || '');
+    } else {
+      setEpubAuthorFirst('');
+    }
+    
+    if (mergedFrontmatter.author_last || mergedFrontmatter['Author Last']) {
+      setEpubAuthorLast(mergedFrontmatter.author_last || mergedFrontmatter['Author Last'] || '');
+    } else {
+      // Try to split existing author field if present
+      const author = mergedFrontmatter.author || mergedFrontmatter.Author || document.author || '';
+      if (author) {
+        const parts = author.trim().split(/\s+/);
+        if (parts.length >= 2) {
+          setEpubAuthorFirst(parts[0]);
+          setEpubAuthorLast(parts.slice(1).join(' '));
+        } else {
+          setEpubAuthorFirst(author);
+          setEpubAuthorLast('');
+        }
+      } else {
+        setEpubAuthorLast('');
+      }
+    }
+    
+    setEpubLanguage(mergedFrontmatter.language || mergedFrontmatter.Language || 'en');
+    setExportOpen(true);
+  };
+
+  // Fullscreen handlers
+  const handleToggleFullscreen = async () => {
+    if (!fullscreenContainerRef.current) return;
+    
+    // Guard: ensure we're in a browser environment
+    if (typeof document === 'undefined' || !document) {
+      console.warn('Fullscreen API not available - not in browser environment');
+      return;
+    }
+
+    const element = fullscreenContainerRef.current;
+    const isCurrentlyFullscreen = !!(
+      document.fullscreenElement ||
+      document.webkitFullscreenElement ||
+      document.mozFullScreenElement ||
+      document.msFullscreenElement
+    );
+
+    try {
+      if (!isCurrentlyFullscreen) {
+        // Enter fullscreen - try different vendor prefixes
+        if (element.requestFullscreen) {
+          await element.requestFullscreen();
+        } else if (element.webkitRequestFullscreen) {
+          await element.webkitRequestFullscreen();
+        } else if (element.mozRequestFullScreen) {
+          await element.mozRequestFullScreen();
+        } else if (element.msRequestFullscreen) {
+          await element.msRequestFullscreen();
+        } else {
+          console.warn('Fullscreen API not supported');
+          return;
+        }
+        setIsFullscreen(true);
+      } else {
+        // Exit fullscreen - try different vendor prefixes
+        if (document.exitFullscreen) {
+          await document.exitFullscreen();
+        } else if (document.webkitExitFullscreen) {
+          await document.webkitExitFullscreen();
+        } else if (document.mozCancelFullScreen) {
+          await document.mozCancelFullScreen();
+        } else if (document.msExitFullscreen) {
+          await document.msExitFullscreen();
+        }
+        setIsFullscreen(false);
+      }
+    } catch (err) {
+      console.error('Fullscreen error:', err);
+      setIsFullscreen(false);
+    }
+  };
+
+  // Listen for fullscreen changes (user might exit via ESC key)
+  useEffect(() => {
+    // Guard: ensure we're in a browser environment
+    if (typeof document === 'undefined' || !document) {
+      return;
+    }
+
+    const handleFullscreenChange = () => {
+      const isCurrentlyFullscreen = !!(
+        document.fullscreenElement ||
+        document.webkitFullscreenElement ||
+        document.mozFullScreenElement ||
+        document.msFullscreenElement
+      );
+      setIsFullscreen(isCurrentlyFullscreen);
+    };
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+    document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+    document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+
+    return () => {
+      if (typeof document !== 'undefined' && document) {
+        document.removeEventListener('fullscreenchange', handleFullscreenChange);
+        document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
+        document.removeEventListener('mozfullscreenchange', handleFullscreenChange);
+        document.removeEventListener('MSFullscreenChange', handleFullscreenChange);
+      }
+    };
+  }, []);
+
   if (loading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
@@ -1052,6 +1255,50 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
     );
   }
 
+  // Image files get image viewer treatment
+  const imageExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg'];
+  const isImageFile = imageExtensions.some(ext => fnameLower.endsWith(ext));
+  
+  if (isImageFile && document) {
+    // SECURITY: Use the authenticated /api/images endpoint
+    const imageUrl = `/api/images/${encodeURIComponent(document.filename)}`;
+    
+    return (
+      <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+        <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Box>
+            <Typography variant="h6">{document.filename || document.title || 'Image File'}</Typography>
+            {document.title && document.title !== document.filename && (
+              <Typography variant="body2" color="text.secondary">{document.title}</Typography>
+            )}
+          </Box>
+          <Box>
+            <Tooltip title="Download">
+              <IconButton size="small" onClick={handleDownload}>
+                <Download fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Box>
+        </Box>
+        <Box sx={{ flex: 1, p: 3, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto', bgcolor: 'background.default' }}>
+          <Box 
+            component="img"
+            src={imageUrl}
+            alt={document.filename}
+            sx={{ 
+              maxWidth: '100%', 
+              maxHeight: '100%', 
+              objectFit: 'contain',
+              boxShadow: 3,
+              borderRadius: 1,
+              bgcolor: 'white' // Better contrast for transparent SVGs
+            }}
+          />
+        </Box>
+      </Box>
+    );
+  }
+
   // Audio files get audio player treatment
   const audioExtensions = ['.mp3', '.aac', '.wav', '.flac', '.ogg', '.m4a', '.wma', '.opus'];
   const isAudioFile = audioExtensions.some(ext => fnameLower.endsWith(ext));
@@ -1079,7 +1326,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   }
 
   return (
-    <Box sx={{ height: '100%', overflow: 'hidden' }}>
+    <Box ref={fullscreenContainerRef} sx={{ height: '100%', overflow: 'hidden' }}>
       {/* Single scroll area inside the viewer */}
       <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
         {/* External Update Notification */}
@@ -1102,44 +1349,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
         
         {/* Compact Header */}
         <Box sx={{ px: 2, py: 1, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-          <Box sx={{ minWidth: 0, overflow: 'hidden', flex: 1 }}>
-            {/* Editable Title */}
-            {editingTitle ? (
-              <TextField
-                value={editedTitle}
-                onChange={(e) => setEditedTitle(e.target.value)}
-                onBlur={handleSaveTitle}
-                onKeyDown={(e) => handleKeyDown(e, 'title')}
-                autoFocus
-                fullWidth
-                size="small"
-                disabled={updatingMetadata}
-                sx={{ mb: 0.5 }}
-                placeholder="Enter title..."
-              />
-            ) : (
-              <Typography 
-                variant="subtitle1" 
-                onClick={handleTitleClick}
-                sx={{ 
-                  fontWeight: 600, 
-                  mb: 0, 
-                  whiteSpace: 'nowrap', 
-                  overflow: 'hidden', 
-                  textOverflow: 'ellipsis',
-                  cursor: 'pointer',
-                  '&:hover': {
-                    backgroundColor: 'action.hover',
-                    borderRadius: 1,
-                    px: 0.5
-                  }
-                }}
-                title="Click to edit title"
-              >
-                {document.title || document.filename}
-              </Typography>
-            )}
-            
+          <Box sx={{ minWidth: 0, overflow: 'hidden', flex: 1, display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
             {/* Editable Filename */}
             {editingFilename ? (
               <TextField
@@ -1148,13 +1358,13 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                 onBlur={handleSaveFilename}
                 onKeyDown={(e) => handleKeyDown(e, 'filename')}
                 autoFocus
-                fullWidth
                 size="small"
                 disabled={updatingMetadata}
                 placeholder="Enter filename..."
+                sx={{ minWidth: 200 }}
               />
             ) : (
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, flexWrap: 'wrap' }}>
+              <>
                 <Typography 
                   variant="caption" 
                   color="text.secondary" 
@@ -1164,6 +1374,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                     overflow: 'hidden', 
                     textOverflow: 'ellipsis',
                     cursor: 'pointer',
+                    fontWeight: 500,
                     '&:hover': {
                       backgroundColor: 'action.hover',
                       borderRadius: 1,
@@ -1196,7 +1407,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                       displayEmpty
                       renderValue={() => (
                         <Typography variant="caption" color="text.secondary">
-                          Jump to header...
+                          Jump to...
                         </Typography>
                       )}
                       onChange={(e) => {
@@ -1215,7 +1426,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                     >
                       <MenuItem value="" disabled>
                         <Typography variant="caption" color="text.secondary">
-                          Jump to header...
+                          Jump to...
                         </Typography>
                       </MenuItem>
                       {headers.map((header, idx) => {
@@ -1247,8 +1458,9 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                     sx={{ 
                       display: 'flex', 
                       alignItems: 'center', 
-                      gap: 1.5,
-                      opacity: 0.8
+                      gap: 0.75,
+                      opacity: 0.8,
+                      whiteSpace: 'nowrap'
                     }}
                   >
                     {(() => {
@@ -1278,7 +1490,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                             hours = hours % 12;
                             hours = hours ? hours : 12; // the hour '0' should be '12'
                             const hoursStr = String(hours).padStart(2, '0');
-                            lastSavedText = `Last Saved: ${month}/${day}/${year} ${hoursStr}:${minutes}:${seconds} ${ampm}`;
+                            lastSavedText = `Saved: ${month}/${day}/${year} ${hoursStr}:${minutes}:${seconds} ${ampm}`;
                           }
                         } catch (e) {
                           console.error('Failed to format updated_at:', e);
@@ -1301,7 +1513,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                     })()}
                   </Typography>
                 )}
-              </Box>
+              </>
             )}
           </Box>
 
@@ -1434,49 +1646,6 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                 </Tooltip>
               )
             )}
-            {isEditing && document.filename && fnameLower.endsWith('.md') && (
-              <Tooltip title="Export as EPUB">
-                <IconButton size="small" onClick={() => {
-                  // Parse frontmatter to pre-fill metadata
-                  const parsed = parseFrontmatter(editContent || document.content || '');
-                  const mergedFrontmatter = { ...(parsed.data || {}), ...(parsed.lists || {}) };
-                  
-                  // Pre-fill title from frontmatter or document
-                  setEpubTitle(mergedFrontmatter.title || mergedFrontmatter.Title || (document.title || document.filename || '').replace(/\.[^.]+$/, ''));
-                  
-                  // Pre-fill author fields from frontmatter
-                  if (mergedFrontmatter.author_first || mergedFrontmatter['Author First']) {
-                    setEpubAuthorFirst(mergedFrontmatter.author_first || mergedFrontmatter['Author First'] || '');
-                  } else {
-                    setEpubAuthorFirst('');
-                  }
-                  
-                  if (mergedFrontmatter.author_last || mergedFrontmatter['Author Last']) {
-                    setEpubAuthorLast(mergedFrontmatter.author_last || mergedFrontmatter['Author Last'] || '');
-                  } else {
-                    // Try to split existing author field if present
-                    const author = mergedFrontmatter.author || mergedFrontmatter.Author || document.author || '';
-                    if (author) {
-                      const parts = author.trim().split(/\s+/);
-                      if (parts.length >= 2) {
-                        setEpubAuthorFirst(parts[0]);
-                        setEpubAuthorLast(parts.slice(1).join(' '));
-                      } else {
-                        setEpubAuthorFirst(author);
-                        setEpubAuthorLast('');
-                      }
-                    } else {
-                      setEpubAuthorLast('');
-                    }
-                  }
-                  
-                  setEpubLanguage(mergedFrontmatter.language || mergedFrontmatter.Language || 'en');
-                  setExportOpen(true);
-                }}>
-                  <FileDownload fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            )}
             {isEditing && (
               <Tooltip title={showPreview ? 'Hide Preview' : 'Show Preview'}>
                 <IconButton size="small" onClick={() => setShowPreview((p) => !p)}>
@@ -1484,16 +1653,44 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                 </IconButton>
               </Tooltip>
             )}
-            <Tooltip title="Open in new tab">
-              <IconButton size="small">
-                <OpenInNew fontSize="small" />
+            <Tooltip title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}>
+              <IconButton size="small" onClick={handleToggleFullscreen}>
+                {isFullscreen ? <FullscreenExit fontSize="small" /> : <Fullscreen fontSize="small" />}
               </IconButton>
             </Tooltip>
-            <Tooltip title="Download">
-              <IconButton size="small">
+            <Tooltip title="Download or Export">
+              <IconButton size="small" onClick={handleDownloadMenuOpen}>
                 <Download fontSize="small" />
               </IconButton>
             </Tooltip>
+            <Menu
+              anchorEl={downloadMenuAnchor}
+              open={Boolean(downloadMenuAnchor)}
+              onClose={handleDownloadMenuClose}
+              anchorOrigin={{
+                vertical: 'bottom',
+                horizontal: 'right',
+              }}
+              transformOrigin={{
+                vertical: 'top',
+                horizontal: 'right',
+              }}
+            >
+              <MenuItem onClick={handleDownload}>
+                <ListItemIcon>
+                  <Download fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>Download</ListItemText>
+              </MenuItem>
+              {isEditing && document.filename && fnameLower.endsWith('.md') && (
+                <MenuItem onClick={handleExportEpub}>
+                  <ListItemIcon>
+                    <FileDownload fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText>Export as EPUB</ListItemText>
+                </MenuItem>
+              )}
+            </Menu>
           </Box>
         </Box>
 
@@ -1782,6 +1979,8 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
               const authorFull = [epubAuthorFirst, epubAuthorLast].filter(Boolean).join(' ') || 'Unknown Author';
               
               await exportService.exportMarkdownAsEpub(editContent || document.content || '', {
+                documentId: document.document_id,
+                folderId: document.folder_id,
                 includeToc,
                 includeCover,
                 splitOnHeadings,

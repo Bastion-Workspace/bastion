@@ -1,0 +1,38 @@
+FROM python:3.11-slim
+
+# No system dependencies needed for monitoring UI
+
+# Set working directory
+WORKDIR /app
+
+# Set PYTHONPATH to /app so that top-level modules like 'utils' can be imported correctly
+ENV PYTHONPATH=/app
+
+# Copy shared proto files first
+COPY protos /app/protos
+
+# Copy VERSION file for version management
+COPY VERSION /app/VERSION
+
+# Copy requirements and install Python dependencies (monitoring only)
+COPY backend/requirements-celery-flower.txt .
+RUN pip install --no-cache-dir -r requirements-celery-flower.txt
+
+# Copy application code (full structure needed for task module imports)
+COPY backend /app
+
+# Generate gRPC code from shared proto files (needed for task module imports)
+RUN python -m grpc_tools.protoc \
+    -I/app \
+    --python_out=/app \
+    --grpc_python_out=/app \
+    --pyi_out=/app \
+    /app/protos/tool_service.proto \
+    /app/protos/orchestrator.proto \
+    /app/protos/vector_service.proto \
+    /app/protos/data_service.proto \
+    /app/protos/crawl_service.proto
+
+# Celery flower command (will be overridden in docker-compose.yml)
+CMD ["celery", "-A", "services.celery_app", "flower", "--port=5555"]
+

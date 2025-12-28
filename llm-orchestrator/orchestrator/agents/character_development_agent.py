@@ -189,12 +189,6 @@ class CharacterDevelopmentAgent(BaseAgent):
         
         return workflow.compile(checkpointer=checkpointer)
     
-    async def _get_grpc_client(self):
-        """Get or create gRPC client for backend tools"""
-        if self._grpc_client is None:
-            from orchestrator.clients.backend_tool_client import get_backend_tool_client
-            self._grpc_client = await get_backend_tool_client()
-        return self._grpc_client
     
     async def _prepare_context_node(self, state: CharacterDevelopmentState) -> Dict[str, Any]:
         """Prepare context: extract editor info and check document type"""

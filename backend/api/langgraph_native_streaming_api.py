@@ -18,7 +18,7 @@ from services.prompt_service import prompt_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/langgraph/stream", tags=["LangGraph Native Streaming"])
+router = APIRouter(tags=["LangGraph Native Streaming"])
 
 
 class LangGraphStreamRequest(BaseModel):
@@ -28,7 +28,7 @@ class LangGraphStreamRequest(BaseModel):
     session_id: str = "default"
 
 
-@router.post("/native")
+@router.post("/api/langgraph/stream/native")
 async def stream_langgraph_native(
     request: LangGraphStreamRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -90,11 +90,12 @@ async def stream_langgraph_native(
                     # Stream with 'values' mode for state updates
                     async for chunk in graph.astream(initial_input, config=config, stream_mode="values"):
                         # Send state updates
-                        yield f"data: {json.dumps({
+                        data_payload = json.dumps({
                             'type': 'state_update',
                             'chunk': str(chunk),
                             'timestamp': datetime.now().isoformat()
-                        })}\n\n"
+                        })
+                        yield f"data: {data_payload}\n\n"
                         await asyncio.sleep(0.05)  # Small delay for UX
                         
                 except Exception as interrupt_error:
@@ -121,21 +122,25 @@ async def stream_langgraph_native(
                                 
                                 if permission_message:
                                     # Stream the permission message
-                                    yield f"data: {json.dumps({
+                                    data_payload = json.dumps({
                                         'type': 'permission_request',
                                         'content': permission_message,
                                         'requires_approval': True,
                                         'timestamp': datetime.now().isoformat()
-                                    })}\n\n"
+                                    })
+
+                                    yield f"data: {data_payload}\n\n"
                                     
                                     # Stream completion with HITL status
-                                    yield f"data: {json.dumps({
+                                    data_payload = json.dumps({
                                         'type': 'complete_hitl',
                                         'status': 'awaiting_permission',
                                         'conversation_id': request.conversation_id,
                                         'thread_id': request.conversation_id,
                                         'timestamp': datetime.now().isoformat()
-                                    })}\n\n"
+                                    })
+
+                                    yield f"data: {data_payload}\n\n"
                                     
                                     logger.info("✅ LANGGRAPH HITL: Permission request streamed successfully")
                                     return
@@ -148,19 +153,23 @@ async def stream_langgraph_native(
                 
                 # If we reach here, the graph completed without interruption
                 # Stream normal completion
-                yield f"data: {json.dumps({
+                data_payload = json.dumps({
                     'type': 'complete',
                     'status': 'success',
                     'timestamp': datetime.now().isoformat()
-                })}\n\n"
+                })
+
+                yield f"data: {data_payload}\n\n"
                 
             except Exception as e:
                 logger.error(f"❌ LANGGRAPH NATIVE STREAMING ERROR: {e}")
-                yield f"data: {json.dumps({
+                data_payload = json.dumps({
                     'type': 'error',
                     'error': str(e),
                     'timestamp': datetime.now().isoformat()
-                })}\n\n"
+                })
+
+                yield f"data: {data_payload}\n\n"
         
         return StreamingResponse(
             generate_native_stream(),
@@ -181,7 +190,7 @@ async def stream_langgraph_native(
         )
 
 
-@router.post("/resume")
+@router.post("/api/langgraph/stream/resume")
 async def resume_langgraph_hitl(
     request: LangGraphStreamRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -220,27 +229,33 @@ async def resume_langgraph_hitl(
                 
                 # Stream the resumed execution
                 async for chunk in graph.astream(resume_input, config=config, stream_mode="values"):
-                    yield f"data: {json.dumps({
+                    data_payload = json.dumps({
                         'type': 'resume_update',
                         'chunk': str(chunk),
                         'timestamp': datetime.now().isoformat()
-                    })}\n\n"
+                    })
+
+                    yield f"data: {data_payload}\n\n"
                     await asyncio.sleep(0.05)
                 
                 # Stream completion
-                yield f"data: {json.dumps({
+                data_payload = json.dumps({
                     'type': 'complete',
                     'status': 'resumed_success',
                     'timestamp': datetime.now().isoformat()
-                })}\n\n"
+                })
+
+                yield f"data: {data_payload}\n\n"
                 
             except Exception as e:
                 logger.error(f"❌ LANGGRAPH RESUME ERROR: {e}")
-                yield f"data: {json.dumps({
+                data_payload = json.dumps({
                     'type': 'error',
                     'error': str(e),
                     'timestamp': datetime.now().isoformat()
-                })}\n\n"
+                })
+
+                yield f"data: {data_payload}\n\n"
         
         return StreamingResponse(
             generate_resume_stream(),

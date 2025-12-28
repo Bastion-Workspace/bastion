@@ -73,21 +73,43 @@ const OrgAgendaView = ({ onOpenDocument }) => {
   }, [loadAgenda]);
 
   // Handle clicking an agenda item
-  const handleItemClick = (item) => {
+  const handleItemClick = async (item) => {
     if (!onOpenDocument) return;
 
-    // document_id is already in the search results!
-    if (!item.document_id) {
+    let documentId = item.document_id;
+
+    // If document_id is missing, try to look it up from filename
+    if (!documentId && item.filename) {
+      try {
+        console.log(`🔍 Looking up document_id for: ${item.filename}`);
+        const lookupResult = await apiService.get(`/api/org/lookup-document?filename=${encodeURIComponent(item.filename)}`);
+        
+        if (lookupResult.success && lookupResult.document_id) {
+          documentId = lookupResult.document_id;
+          console.log(`✅ Found document_id: ${documentId}`);
+        } else {
+          console.error('❌ Could not find document ID for:', item.filename);
+          alert(`❌ Could not find document ID for: ${item.filename}`);
+          return;
+        }
+      } catch (err) {
+        console.error('❌ Failed to lookup document:', err);
+        alert(`❌ Failed to find document: ${item.filename}`);
+        return;
+      }
+    }
+
+    if (!documentId) {
       console.error('❌ Agenda item missing document_id:', item);
       alert(`❌ Could not find document ID for: ${item.filename}`);
       return;
     }
 
-    console.log('✅ ROOSEVELT: Opening org file:', item.document_id);
+    console.log('✅ Opening org file:', documentId);
     
     // Open document with scroll parameters
     onOpenDocument({
-      documentId: item.document_id,
+      documentId: documentId,
       documentName: item.filename,
       scrollToLine: item.line_number,
       scrollToHeading: item.heading
@@ -223,9 +245,26 @@ const OrgAgendaView = ({ onOpenDocument }) => {
                                 <Box sx={{ width: '100%' }}>
                                   {/* Heading and Badges */}
                                   <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1, mb: 0.5 }}>
-                                    <Typography variant="body1" sx={{ flex: 1, fontWeight: 500 }}>
-                                      {'•'.repeat(item.level)} {item.heading}
-                                    </Typography>
+                                    <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+                                      <Typography variant="body1" sx={{ fontWeight: 500 }}>
+                                        {'•'.repeat(item.level)} {item.heading}
+                                      </Typography>
+                                      {item.time && (
+                                        <Chip
+                                          icon={<Schedule fontSize="small" />}
+                                          label={item.time.includes('-') ? item.time.split('-')[0] : item.time}
+                                          size="small"
+                                          color="default"
+                                          variant="outlined"
+                                          sx={{ 
+                                            fontSize: '0.7rem',
+                                            height: 22,
+                                            fontWeight: 600,
+                                            backgroundColor: 'action.hover'
+                                          }}
+                                        />
+                                      )}
+                                    </Box>
 
                                     {item.agenda_type === 'DEADLINE' && (
                                       <Chip

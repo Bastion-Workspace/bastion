@@ -1266,4 +1266,17 @@ class BaseAgent:
             
         except Exception as e:
             logger.error(f"❌ Failed to handle checkpoint restoration: {e}")
+    
+    async def _get_grpc_client(self):
+        """
+        Get or create gRPC client for backend tools
+        
+        This provides a standardized way for all agents to access the backend Tool Service.
+        Uses the unified BackendToolClient from orchestrator.backend_tool_client.
+        
+        Returns:
+            BackendToolClient instance
+        """
+        from orchestrator.backend_tool_client import get_backend_tool_client
+        return await get_backend_tool_client()
 

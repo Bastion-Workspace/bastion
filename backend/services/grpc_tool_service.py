@@ -1044,13 +1044,58 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
     ) -> tool_service_pb2.WeatherResponse:
         """Get weather data"""
         try:
-            logger.info(f"GetWeatherData: location={request.location}")
+            logger.info(f"GetWeatherData: location={request.location}, user_id={request.user_id}")
             
-            # Placeholder implementation
-            response = tool_service_pb2.WeatherResponse(
+            # Import weather tools
+            from services.langgraph_tools.weather_tools import weather_conditions
+            
+            # Determine units from request (default to imperial)
+            units = "imperial"  # Default for status bar compatibility
+            
+            # Fetch weather data using weather tools
+            weather_result = await weather_conditions(
                 location=request.location,
-                current_conditions="Placeholder weather data"
+                units=units,
+                user_id=request.user_id
             )
+            
+            if not weather_result.get("success"):
+                error_msg = weather_result.get("error", "Unknown error")
+                logger.warning(f"Weather fetch failed: {error_msg}")
+                await context.abort(grpc.StatusCode.INTERNAL, f"Weather data failed: {error_msg}")
+                return
+            
+            # Extract weather data
+            location_name = weather_result.get("location", {}).get("name", request.location)
+            current = weather_result.get("current", {})
+            temperature = int(current.get("temperature", 0))
+            conditions = current.get("conditions", "")
+            moon_phase = weather_result.get("moon_phase", {})
+            
+            # Build metadata dict with all weather information
+            metadata = {
+                "location_name": location_name,
+                "temperature": str(temperature),
+                "conditions": conditions,
+                "moon_phase_name": moon_phase.get("phase_name", ""),
+                "moon_phase_icon": moon_phase.get("phase_icon", ""),
+                "moon_phase_value": str(moon_phase.get("phase_value", 0)),
+                "humidity": str(current.get("humidity", 0)),
+                "wind_speed": str(current.get("wind_speed", 0)),
+                "feels_like": str(current.get("feels_like", 0))
+            }
+            
+            # Format current conditions string
+            current_conditions = f"{temperature}°F, {conditions}"
+            
+            # Build response
+            response = tool_service_pb2.WeatherResponse(
+                location=location_name,
+                current_conditions=current_conditions,
+                metadata=metadata
+            )
+            
+            logger.info(f"✅ Weather data retrieved for {location_name}: {temperature}°F, {conditions}")
             return response
             
         except Exception as e:
@@ -2610,6 +2655,134 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         except Exception as e:
             logger.error(f"UpdateConversationTitle error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Conversation title update failed: {str(e)}")
+    
+    # ===== Visualization Operations =====
+    
+    async def CreateChart(
+        self,
+        request: tool_service_pb2.CreateChartRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.CreateChartResponse:
+        """Create a chart or graph from structured data"""
+        try:
+            logger.info(f"CreateChart: chart_type={request.chart_type}, title={request.title}")
+            
+            # Import visualization service
+            from services.visualization_service import create_chart
+            
+            # Parse data JSON
+            try:
+                data = json.loads(request.data_json)
+            except json.JSONDecodeError as e:
+                logger.error(f"CreateChart: Invalid JSON data: {e}")
+                return tool_service_pb2.CreateChartResponse(
+                    success=False,
+                    error=f"Invalid JSON data: {str(e)}"
+                )
+            
+            # Call visualization service
+            result = await create_chart(
+                chart_type=request.chart_type,
+                data=data,
+                title=request.title,
+                x_label=request.x_label,
+                y_label=request.y_label,
+                interactive=request.interactive,
+                color_scheme=request.color_scheme if request.color_scheme else "plotly",
+                width=request.width if request.width > 0 else 800,
+                height=request.height if request.height > 0 else 600
+            )
+            
+            # Convert result to proto response
+            if result.get("success"):
+                metadata_json = json.dumps(result.get("metadata", {}))
+                return tool_service_pb2.CreateChartResponse(
+                    success=True,
+                    chart_type=result.get("chart_type", request.chart_type),
+                    output_format=result.get("output_format", "html"),
+                    chart_data=result.get("chart_data", ""),
+                    metadata_json=metadata_json
+                )
+            else:
+                return tool_service_pb2.CreateChartResponse(
+                    success=False,
+                    error=result.get("error", "Unknown error creating chart")
+                )
+                
+        except Exception as e:
+            logger.error(f"CreateChart error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return tool_service_pb2.CreateChartResponse(
+                success=False,
+                error=f"Chart creation failed: {str(e)}"
+            )
+    
+    # ===== File Analysis Operations =====
+    
+    async def AnalyzeTextContent(
+        self,
+        request: tool_service_pb2.TextAnalysisRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.TextAnalysisResponse:
+        """Analyze text content and return metrics"""
+        try:
+            logger.info(f"AnalyzeTextContent: user={request.user_id}, include_advanced={request.include_advanced}")
+            
+            # Import file analysis service
+            from services.file_analysis_service import FileAnalysisService
+            
+            # Initialize service
+            analysis_service = FileAnalysisService()
+            
+            # Analyze text
+            metrics = analysis_service.analyze_text(
+                content=request.content,
+                include_advanced=request.include_advanced
+            )
+            
+            # Build response
+            response = tool_service_pb2.TextAnalysisResponse(
+                word_count=metrics.get("word_count", 0),
+                line_count=metrics.get("line_count", 0),
+                non_empty_line_count=metrics.get("non_empty_line_count", 0),
+                character_count=metrics.get("character_count", 0),
+                character_count_no_spaces=metrics.get("character_count_no_spaces", 0),
+                paragraph_count=metrics.get("paragraph_count", 0),
+                sentence_count=metrics.get("sentence_count", 0),
+            )
+            
+            # Add advanced metrics if requested
+            if request.include_advanced:
+                response.avg_words_per_sentence = metrics.get("avg_words_per_sentence", 0.0)
+                response.avg_words_per_paragraph = metrics.get("avg_words_per_paragraph", 0.0)
+            
+            # Add metadata JSON for extensibility
+            metadata = {
+                "analysis_timestamp": None,  # Could add timestamp if needed
+            }
+            response.metadata_json = json.dumps(metadata)
+            
+            logger.debug(f"AnalyzeTextContent: Analyzed {metrics.get('word_count', 0)} words")
+            return response
+            
+        except Exception as e:
+            logger.error(f"AnalyzeTextContent error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            # Return response with zero values on error
+            return tool_service_pb2.TextAnalysisResponse(
+                word_count=0,
+                line_count=0,
+                non_empty_line_count=0,
+                character_count=0,
+                character_count_no_spaces=0,
+                paragraph_count=0,
+                sentence_count=0,
+                avg_words_per_sentence=0.0,
+                avg_words_per_paragraph=0.0,
+                metadata_json=json.dumps({"error": str(e)})
+            )
 
 
 async def serve_tool_service(port: int = 50052):

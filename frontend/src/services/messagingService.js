@@ -169,16 +169,26 @@ class MessagingService {
       const formData = new FormData();
       formData.append('file', file);
       
-      const response = await apiService.post(
+      // Use fetch directly for FormData to avoid JSON.stringify issues
+      const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+      const response = await fetch(
         `/api/messaging/rooms/${roomId}/messages/${messageId}/attachments`,
-        formData,
         {
+          method: 'POST',
           headers: {
-            'Content-Type': 'multipart/form-data',
+            'Authorization': `Bearer ${token}`,
+            // Don't set Content-Type - let browser set it with boundary
           },
+          body: formData,
         }
       );
-      return response;
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+        throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+      }
+      
+      return await response.json();
     } catch (error) {
       console.error('Failed to upload attachment:', error);
       throw error;

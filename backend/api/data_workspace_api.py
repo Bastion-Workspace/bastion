@@ -27,7 +27,7 @@ from services.data_workspace_sharing_service import get_sharing_service
 from services.team_service import TeamService
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/data", tags=["data_workspace"])
+router = APIRouter(tags=["data_workspace"])
 
 # Global gRPC client instance
 _grpc_client = None
@@ -54,7 +54,7 @@ async def _get_user_team_ids(user_id: str) -> List[str]:
 
 
 # Workspace Endpoints
-@router.post("/workspaces", response_model=WorkspaceResponse)
+@router.post("/api/data/workspaces", response_model=WorkspaceResponse)
 async def create_workspace(
     request: CreateWorkspaceRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -75,7 +75,7 @@ async def create_workspace(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/workspaces", response_model=List[WorkspaceResponse])
+@router.get("/api/data/workspaces", response_model=List[WorkspaceResponse])
 async def list_workspaces(
     include_shared: bool = True,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -117,7 +117,7 @@ async def list_workspaces(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/workspaces/{workspace_id}", response_model=WorkspaceResponse)
+@router.get("/api/data/workspaces/{workspace_id}", response_model=WorkspaceResponse)
 async def get_workspace(
     workspace_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -150,7 +150,7 @@ async def get_workspace(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/workspaces/{workspace_id}", response_model=WorkspaceResponse)
+@router.put("/api/data/workspaces/{workspace_id}", response_model=WorkspaceResponse)
 async def update_workspace(
     workspace_id: str,
     request: UpdateWorkspaceRequest,
@@ -188,7 +188,7 @@ async def update_workspace(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/workspaces/{workspace_id}")
+@router.delete("/api/data/workspaces/{workspace_id}")
 async def delete_workspace(
     workspace_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -222,7 +222,7 @@ async def delete_workspace(
 
 
 # Database Endpoints
-@router.post("/databases", response_model=DatabaseResponse)
+@router.post("/api/data/databases", response_model=DatabaseResponse)
 async def create_database(
     request: CreateDatabaseRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -248,7 +248,7 @@ async def create_database(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/workspaces/{workspace_id}/databases", response_model=List[DatabaseResponse])
+@router.get("/api/data/workspaces/{workspace_id}/databases", response_model=List[DatabaseResponse])
 async def list_databases(
     workspace_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -273,7 +273,7 @@ async def list_databases(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/databases/{database_id}", response_model=DatabaseResponse)
+@router.get("/api/data/databases/{database_id}", response_model=DatabaseResponse)
 async def get_database(
     database_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -300,7 +300,7 @@ async def get_database(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/databases/{database_id}")
+@router.delete("/api/data/databases/{database_id}")
 async def delete_database(
     database_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -329,7 +329,7 @@ async def delete_database(
 
 
 # Import Endpoints
-@router.post("/import/upload")
+@router.post("/api/data/import/upload")
 async def upload_import_file(
     workspace_id: str,
     file: UploadFile = File(...),
@@ -363,7 +363,7 @@ async def upload_import_file(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/import/preview", response_model=PreviewImportResponse)
+@router.post("/api/data/import/preview", response_model=PreviewImportResponse)
 async def preview_import(
     request: PreviewImportRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -382,7 +382,7 @@ async def preview_import(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/import/execute", response_model=ImportJobResponse)
+@router.post("/api/data/import/execute", response_model=ImportJobResponse)
 async def execute_import(
     request: ExecuteImportRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -409,7 +409,7 @@ async def execute_import(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/import/jobs/{job_id}", response_model=ImportJobResponse)
+@router.get("/api/data/import/jobs/{job_id}", response_model=ImportJobResponse)
 async def get_import_status(
     job_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -429,7 +429,7 @@ async def get_import_status(
 
 
 # Table Endpoints
-@router.post("/tables", response_model=TableResponse)
+@router.post("/api/data/tables", response_model=TableResponse)
 async def create_table(
     request: CreateTableRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -456,7 +456,7 @@ async def create_table(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/databases/{database_id}/tables", response_model=List[TableResponse])
+@router.get("/api/data/databases/{database_id}/tables", response_model=List[TableResponse])
 async def list_tables(
     database_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -481,7 +481,7 @@ async def list_tables(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/tables/{table_id}", response_model=TableResponse)
+@router.get("/api/data/tables/{table_id}", response_model=TableResponse)
 async def get_table(
     table_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -508,7 +508,7 @@ async def get_table(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/tables/{table_id}")
+@router.delete("/api/data/tables/{table_id}")
 async def delete_table(
     table_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -537,7 +537,7 @@ async def delete_table(
 
 
 # Table Data Endpoints
-@router.get("/tables/{table_id}/data", response_model=TableDataResponse)
+@router.get("/api/data/tables/{table_id}/data", response_model=TableDataResponse)
 async def get_table_data(
     table_id: str,
     offset: int = 0,
@@ -566,7 +566,7 @@ async def get_table_data(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/tables/{table_id}/rows")
+@router.post("/api/data/tables/{table_id}/rows")
 async def insert_table_row(
     table_id: str,
     request: InsertRowRequest,
@@ -588,7 +588,7 @@ async def insert_table_row(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/tables/{table_id}/rows/{row_id}")
+@router.put("/api/data/tables/{table_id}/rows/{row_id}")
 async def update_table_row(
     table_id: str,
     row_id: str,
@@ -636,7 +636,7 @@ async def update_table_cell(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/tables/{table_id}/rows/{row_id}")
+@router.delete("/api/data/tables/{table_id}/rows/{row_id}")
 async def delete_table_row(
     table_id: str,
     row_id: str,
@@ -660,7 +660,7 @@ async def delete_table_row(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/tables/{table_id}/recalculate", response_model=RecalculateTableResponse)
+@router.post("/api/data/tables/{table_id}/recalculate", response_model=RecalculateTableResponse)
 async def recalculate_table(
     table_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -682,7 +682,7 @@ async def recalculate_table(
 
 
 # Sharing Endpoints
-@router.post("/workspaces/{workspace_id}/share", response_model=WorkspaceShareResponse)
+@router.post("/api/data/workspaces/{workspace_id}/share", response_model=WorkspaceShareResponse)
 async def share_workspace(
     workspace_id: str,
     request: ShareWorkspaceRequest,
@@ -708,7 +708,7 @@ async def share_workspace(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/workspaces/{workspace_id}/shares", response_model=List[WorkspaceShareResponse])
+@router.get("/api/data/workspaces/{workspace_id}/shares", response_model=List[WorkspaceShareResponse])
 async def list_workspace_shares(
     workspace_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -728,7 +728,7 @@ async def list_workspace_shares(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/workspaces/{workspace_id}/shares/{share_id}")
+@router.delete("/api/data/workspaces/{workspace_id}/shares/{share_id}")
 async def revoke_share(
     workspace_id: str,
     share_id: str,
@@ -754,7 +754,7 @@ async def revoke_share(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/workspaces/shared", response_model=List[WorkspaceResponse])
+@router.get("/api/data/workspaces/shared", response_model=List[WorkspaceResponse])
 async def list_shared_workspaces(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -783,7 +783,7 @@ async def list_shared_workspaces(
 
 
 # Query Endpoints
-@router.post("/workspaces/{workspace_id}/query/sql", response_model=QueryResultResponse)
+@router.post("/api/data/workspaces/{workspace_id}/query/sql", response_model=QueryResultResponse)
 async def execute_sql_query(
     workspace_id: str,
     request: SQLQueryRequest,
@@ -825,7 +825,7 @@ async def execute_sql_query(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/workspaces/{workspace_id}/query/natural-language", response_model=QueryResultResponse)
+@router.post("/api/data/workspaces/{workspace_id}/query/natural-language", response_model=QueryResultResponse)
 async def execute_nl_query(
     workspace_id: str,
     request: NaturalLanguageQueryRequest,

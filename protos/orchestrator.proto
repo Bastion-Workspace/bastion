@@ -190,7 +190,7 @@ message ResearchCache {
 
 // Streaming chat chunk
 message ChatChunk {
-  string type = 1;  // "status", "content", "tool_call", "agent_update", "complete", "error"
+  string type = 1;  // "status", "content", "tool_call", "agent_update", "complete", "error", "notification"
   string message = 2;
   string timestamp = 3;
   map<string, string> metadata = 4;

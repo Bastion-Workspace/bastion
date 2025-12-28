@@ -70,6 +70,9 @@ class ElectronicsState(TypedDict):
     documents: List[Dict[str, Any]]
     segments: List[Dict[str, Any]]  # NEW: Relevant segments found within documents
     referenced_context: Dict[str, Any]  # Loaded referenced files from active editor
+    electronics_document_id: Optional[str]  # Primary electronics document ID (for cross-agent calls)
+    read_only_context: Dict[str, Any]  # Referenced files loaded as read-only context
+    existing_sections: List[str]  # Level 2 headers (##) from primary document
     information_needs: Optional[Dict[str, Any]]  # NEW: Analysis of what information is needed
     search_queries: List[Dict[str, Any]]  # NEW: Project-aware search queries
     search_quality_assessment: Optional[Dict[str, Any]]  # NEW: Quality assessment of search results
@@ -89,6 +92,7 @@ class ElectronicsState(TypedDict):
     editor_operations: List[Dict[str, Any]]  # Editor operations for inline editing (project plan only)
     manuscript_edit: Optional[Dict[str, Any]]  # Manuscript edit metadata
     plan_edits: Optional[List[Dict[str, Any]]]  # Edits targeting project plan (for operation resolution)
+    diagram_result: Optional[Dict[str, Any]]  # Diagram generation result
     task_status: str
     error: str
 
@@ -115,6 +119,68 @@ class ElectronicsAgent(BaseAgent):
         self.project_plan_nodes = ElectronicsProjectPlanNodes(self)
         self.maintenance_nodes = ElectronicsMaintenanceNodes(self)
         logger.info("🔌 Electronics Agent ready for circuit design and embedded programming!")
+    
+    def _get_diagramming_subgraph(self, checkpointer):
+        """Get or build diagramming subgraph"""
+        if not hasattr(self, '_diagramming_subgraph') or self._diagramming_subgraph is None:
+            from orchestrator.subgraphs import build_diagramming_subgraph
+            self._diagramming_subgraph = build_diagramming_subgraph(checkpointer)
+        return self._diagramming_subgraph
+    
+    async def _call_diagramming_subgraph_node(self, state: ElectronicsState) -> Dict[str, Any]:
+        """Call diagramming subgraph to generate technical diagrams"""
+        try:
+            logger.info("📊 Calling diagramming subgraph")
+            
+            workflow = await self._get_workflow()
+            checkpointer = workflow.checkpointer
+            diagramming_sg = self._get_diagramming_subgraph(checkpointer)
+            
+            # Prepare diagram context
+            query = state.get("query", "")
+            metadata = state.get("metadata", {})
+            messages = state.get("messages", [])
+            shared_memory = state.get("shared_memory", {})
+            
+            # Include project context for diagram generation
+            referenced_context = state.get("referenced_context", {})
+            active_editor = shared_memory.get("active_editor", {})
+            
+            diagram_state = {
+                "query": query,
+                "messages": messages,
+                "metadata": metadata,
+                "shared_memory": shared_memory,
+                "user_id": state.get("user_id", "system"),
+                "project_context": {
+                    "referenced_files": referenced_context,
+                    "active_editor": active_editor
+                }
+            }
+            
+            config = self._get_checkpoint_config(metadata)
+            result = await diagramming_sg.ainvoke(diagram_state, config)
+            
+            return {
+                "diagram_result": result.get("diagram_result", {}),
+                # Preserve all critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Diagramming subgraph failed: {e}")
+            return {
+                "diagram_result": {"success": False, "error": str(e)},
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
     
     def _build_workflow(self, checkpointer) -> StateGraph:
         """
@@ -144,6 +210,7 @@ class ElectronicsAgent(BaseAgent):
         workflow.add_node("save_content", self.save_nodes.save_content_node)
         workflow.add_node("resolve_plan_operations", self._resolve_plan_operations_node)  # NEW: Resolve plan edits to editor operations
         workflow.add_node("format_response", self._format_response_node)  # NEW: Format response with editor operations
+        workflow.add_node("generate_diagram", self._call_diagramming_subgraph_node)  # Generate technical diagrams
         
         # Entry point
         workflow.set_entry_point("analyze_intent")
@@ -208,16 +275,20 @@ class ElectronicsAgent(BaseAgent):
         # Web search goes to response generation
         workflow.add_edge("perform_web_search", "generate_response")
         
-        # Response generation routes to decision extraction or save or end
+        # Response generation routes to decision extraction, diagram generation, save, or end
         workflow.add_conditional_edges(
             "generate_response",
             self._route_from_response,
             {
                 "extract_decisions": "extract_decisions",
+                "generate_diagram": "generate_diagram",
                 "save": "extract_and_route_content",
                 "end": END
             }
         )
+        
+        # Diagram generation goes to save (to insert diagram into document)
+        workflow.add_edge("generate_diagram", "extract_and_route_content")
         
         # Decision extraction routes to project plan update, verification, or save
         workflow.add_conditional_edges(
@@ -468,11 +539,11 @@ class ElectronicsAgent(BaseAgent):
                 return "generate"
     
     def _route_from_save(self, state: ElectronicsState) -> str:
-        """Route from save_content: resolve operations if editing mode with plan edits, otherwise format response"""
-        editing_mode = state.get("editing_mode", False)
+        """Route from save_content: resolve operations if plan edits exist (file is open), otherwise format response"""
         plan_edits = state.get("plan_edits")
         
-        if editing_mode and plan_edits and len(plan_edits) > 0:
+        # If we have plan_edits, it means file is open and we should use inline editing
+        if plan_edits and len(plan_edits) > 0:
             return "resolve_operations"
         elif editing_mode or plan_edits:
             # Has operations or editing mode, format response
@@ -483,12 +554,34 @@ class ElectronicsAgent(BaseAgent):
     
     def _route_from_response(self, state: ElectronicsState) -> str:
         """Route based on whether content should be saved or decisions extracted"""
-        # Check if response has substantial content that should be saved
+        # Check if diagram would be helpful
+        query = state.get("query", "").lower()
         response = state.get("response", {})
         response_text = response.get("response", "") if isinstance(response, dict) else str(response)
         
+        # Explicit diagram requests
+        diagram_keywords = [
+            "diagram", "flowchart", "state machine", "show circuit",
+            "pin connections", "wiring", "block diagram", "timing diagram",
+            "schematic", "circuit diagram", "state diagram", "sequence diagram"
+        ]
+        
+        if any(keyword in query for keyword in diagram_keywords):
+            logger.info("📊 Diagram explicitly requested")
+            return "generate_diagram"
+        
+        # Automatic suggestion (if response mentions complex flow/structure)
+        if isinstance(response_text, str):
+            auto_diagram_triggers = [
+                "state machine", "workflow", "sequence", "multiple steps",
+                "pin connections", "wiring diagram", "signal flow",
+                "state transitions", "firmware states", "circuit block"
+            ]
+            if any(trigger in response_text.lower() for trigger in auto_diagram_triggers):
+                logger.info("📊 Diagram automatically suggested")
+                return "generate_diagram"
+        
         # Check if this is a project creation or update request
-        query = state.get("query", "").lower()
         project_plan_action = state.get("project_plan_action")
         
         # Check for change indicators that suggest corrections/revisions
@@ -794,38 +887,101 @@ Return ONLY valid JSON:
     
     async def _load_project_context_node(self, state: ElectronicsState) -> Dict[str, Any]:
         """
-        Merged node: load_referenced_context + score_file_relevance + load_selective_content
-        Loads project context efficiently with lazy loading.
-        Only loads if query is project-related and editor_preference is not "ignore".
+        Load primary electronics document and referenced files as read-only context.
+        Follows Single Document Philosophy: one primary document with Level 2 headers,
+        referenced files loaded as read-only context for additional information.
         """
         try:
             user_id = state.get("user_id", "")
             metadata = state.get("metadata", {})
             shared_memory = metadata.get("shared_memory", {})
             
-            # Check editor_preference - if "ignore", skip project context
+            # Check for explicit electronics document ID (e.g., from Org Agent)
+            electronics_document_id = metadata.get("electronics_document_id") or shared_memory.get("electronics_document_id")
+            
             editor_preference = shared_memory.get("editor_preference", "prefer")
-            if editor_preference == "ignore":
+            if editor_preference == "ignore" and not electronics_document_id:
                 logger.info(f"🔌 Skipping project context - editor_preference is 'ignore'")
                 return {
-                    "referenced_context": {}
+                    "referenced_context": {},
+                    "read_only_context": {},
+                    "existing_sections": [],
+                    "electronics_document_id": None,
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
-            # ALL queries routed to electronics_agent are project-oriented by definition
-            # Always load context if we have an active electronics editor
-            
-            # Check both metadata.active_editor and shared_memory.active_editor
             active_editor = metadata.get("active_editor") or shared_memory.get("active_editor", {})
             
-            # Only load if we have an active editor with electronics type
-            if not active_editor or active_editor.get("frontmatter", {}).get("type", "").lower() != "electronics":
-                logger.info(f"🔌 Skipping project context - no electronics project plan open")
+            # Resolve the primary electronics document
+            electronics_content = ""
+            electronics_filename = ""
+            resolved_electronics_doc_id = None
+            
+            if electronics_document_id:
+                # Explicit electronics document ID provided (e.g., from Org Agent)
+                from orchestrator.tools.document_tools import get_document_content_tool
+                electronics_content = await get_document_content_tool(electronics_document_id, user_id)
+                if electronics_content.startswith("Error"):
+                    logger.warning(f"Could not load explicit electronics document {electronics_document_id}")
+                    electronics_content = ""
+                else:
+                    electronics_filename = "referenced_electronics.md"
+                    resolved_electronics_doc_id = electronics_document_id
+                    logger.info(f"Loaded explicit electronics document: {electronics_document_id}")
+            elif active_editor and active_editor.get("frontmatter", {}).get("type", "").lower() == "electronics":
+                # Use active editor as primary document
+                electronics_content = active_editor.get("content", "")
+                electronics_filename = active_editor.get("filename", "project_plan.md")
+                resolved_electronics_doc_id = active_editor.get("document_id")
+                logger.info(f"Using active electronics editor: {electronics_filename}")
+            
+            if not electronics_content:
+                logger.info(f"🔌 Skipping project context - no electronics document available")
                 return {
-                    "referenced_context": {}
+                    "referenced_context": {},
+                    "read_only_context": {},
+                    "existing_sections": [],
+                    "electronics_document_id": None,
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
                 }
             
-            # Load referenced files from frontmatter
+            # Extract Level 2 headers (##) to inform LLM of document structure
+            import re
+            headers = re.findall(r'^##\s+(.+)$', electronics_content, re.MULTILINE)
+            existing_sections = [h.strip() for h in headers]
+            logger.info(f"🔌 Found {len(existing_sections)} existing sections: {existing_sections[:5]}...")
+            
+            # Load referenced files from frontmatter as read-only context
             from orchestrator.tools.reference_file_loader import load_referenced_files
+            
+            # Build active_editor dict for reference loader (if using explicit doc_id)
+            editor_for_loader = active_editor
+            if resolved_electronics_doc_id and not active_editor.get("document_id"):
+                # Create a minimal editor dict for reference loading
+                editor_for_loader = {
+                    "content": electronics_content,
+                    "document_id": resolved_electronics_doc_id,
+                    "filename": electronics_filename,
+                    "frontmatter": {}
+                }
+                # Try to extract frontmatter from content
+                frontmatter_match = re.match(r'^---\s*\n([\s\S]*?)\n---\s*\n', electronics_content)
+                if frontmatter_match:
+                    import yaml
+                    try:
+                        editor_for_loader["frontmatter"] = yaml.safe_load(frontmatter_match.group(1)) or {}
+                    except:
+                        pass
             
             # Electronics reference configuration
             reference_config = {
@@ -833,11 +989,13 @@ Return ONLY valid JSON:
                 "protocols": ["protocols", "protocol", "protocol_docs"],
                 "schematics": ["schematics", "schematic", "schematic_docs"],
                 "specifications": ["specifications", "spec", "specs", "specification"],
+                "firmware": ["firmware", "code", "software"],
+                "bom": ["bom", "bill_of_materials", "parts_list"],
                 "other": ["references", "reference", "docs", "documents", "related", "files"]
             }
             
             result = await load_referenced_files(
-                active_editor=active_editor,
+                active_editor=editor_for_loader,
                 user_id=user_id,
                 reference_config=reference_config,
                 doc_type_filter="electronics"
@@ -845,29 +1003,48 @@ Return ONLY valid JSON:
             
             referenced_context = result.get("loaded_files", {})
             
-            logger.info(f"🔌 Loaded {len(referenced_context)} referenced files")
+            # Store referenced files as read-only context (for LLM awareness, not for editing)
+            read_only_context = referenced_context.copy()
+            
+            logger.info(f"🔌 Loaded {len(referenced_context)} referenced files as read-only context")
             
             # Detect editing mode: check if project plan has content after frontmatter
-            editor_content = active_editor.get("content", "")
-            editing_mode = False
-            if editor_content:
-                frontmatter_end = self._get_frontmatter_end(editor_content)
-                has_content_after_frontmatter = len(editor_content) > frontmatter_end + 10
-                editing_mode = has_content_after_frontmatter
+            frontmatter_end = self._get_frontmatter_end(electronics_content)
+            editing_mode = len(electronics_content) > frontmatter_end + 10
             
-            logger.info(f"🔌 Electronics agent mode: {'EDITING' if editing_mode else 'GENERATION'}")
+            logger.info(f"🔌 Electronics agent mode: {'EDITING' if editing_mode else 'GENERATION'} (document: {electronics_filename})")
             
             return {
                 "referenced_context": referenced_context,
+                "read_only_context": read_only_context,
+                "existing_sections": existing_sections,
+                "electronics_document_id": resolved_electronics_doc_id,
                 "editing_mode": editing_mode,
                 "editor_operations": [],
-                "plan_edits": None
+                "plan_edits": None,
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
             logger.error(f"❌ Context loading failed: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return {
-                "referenced_context": {}
+                "referenced_context": {},
+                "read_only_context": {},
+                "existing_sections": [],
+                "electronics_document_id": None,
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
     
     def _get_frontmatter_end(self, content: str) -> int:
@@ -909,12 +1086,78 @@ Return ONLY valid JSON:
         """Convert a section-based edit to a position-based editor operation"""
         section = edit.get("section", "")
         action = edit.get("action", "append")
+        op_type = edit.get("op_type", action)  # Support explicit op_type for granular ops
         edit_content = edit.get("content", "")
+        original_text = edit.get("original_text", "")  # For granular_replace
+        anchor_text = edit.get("anchor_text", "")  # For granular_insert
         
         if not section:
             return None
         
-        # Find section boundaries
+        # Handle granular operations
+        if op_type == "granular_replace" and original_text:
+            # Granular replace: find specific text within section and replace it
+            section_start, section_end = self._find_section_in_content(content, section)
+            if section_start == 0 and section_end == 0:
+                logger.warning(f"Section '{section}' not found in content - skipping granular_replace")
+                return None
+            
+            # Search for original_text within the section
+            section_content = content[section_start:section_end]
+            original_pos = section_content.find(original_text)
+            if original_pos == -1:
+                logger.warning(f"Original text not found in section '{section}' - falling back to section replace")
+                # Fall back to section-level replace
+                return {
+                    "op_type": "replace_range",
+                    "start": section_start,
+                    "end": section_end,
+                    "text": edit_content,
+                    "original_text": section_content[:200],
+                    "left_context": content[max(0, section_start-50):section_start],
+                    "right_context": content[section_end:min(len(content), section_end+50)]
+                }
+            
+            # Found the text - replace it
+            replace_start = section_start + original_pos
+            replace_end = replace_start + len(original_text)
+            return {
+                "op_type": "replace_range",
+                "start": replace_start,
+                "end": replace_end,
+                "text": edit_content,
+                "original_text": original_text,
+                "left_context": content[max(0, replace_start-50):replace_start],
+                "right_context": content[replace_end:min(len(content), replace_end+50)]
+            }
+        elif op_type == "granular_insert" and anchor_text:
+            # Granular insert: find anchor text and insert after it
+            section_start, section_end = self._find_section_in_content(content, section)
+            if section_start == 0 and section_end == 0:
+                logger.warning(f"Section '{section}' not found in content - skipping granular_insert")
+                return None
+            
+            # Search for anchor_text within the section
+            section_content = content[section_start:section_end]
+            anchor_pos = section_content.find(anchor_text)
+            if anchor_pos == -1:
+                logger.warning(f"Anchor text not found in section '{section}' - falling back to append")
+                # Fall back to append at end of section
+                anchor_pos = section_end
+            else:
+                anchor_pos = section_start + anchor_pos + len(anchor_text)
+            
+            return {
+                "op_type": "insert_after",
+                "start": anchor_pos,
+                "end": anchor_pos,
+                "text": edit_content,
+                "anchor_text": anchor_text,
+                "left_context": content[max(0, anchor_pos-50):anchor_pos],
+                "right_context": content[anchor_pos:min(len(content), anchor_pos+50)]
+            }
+        
+        # Handle section-level operations
         section_start, section_end = self._find_section_in_content(content, section)
         
         if section_start == 0 and section_end == 0:
@@ -925,25 +1168,25 @@ Return ONLY valid JSON:
         # Build operation based on action
         if action == "replace":
             # Replace entire section
-            original_text = content[section_start:section_end].strip()
+            original_text_full = content[section_start:section_end].strip()
             return {
                 "op_type": "replace_range",
                 "start": section_start,
                 "end": section_end,
                 "text": edit_content,
-                "original_text": original_text[:200] if len(original_text) > 200 else original_text,  # First 200 chars for matching
+                "original_text": original_text_full[:200] if len(original_text_full) > 200 else original_text_full,
                 "left_context": content[max(0, section_start-50):section_start],
                 "right_context": content[section_end:min(len(content), section_end+50)]
             }
         elif action == "remove":
             # Delete section
-            original_text = content[section_start:section_end].strip()
+            original_text_full = content[section_start:section_end].strip()
             return {
                 "op_type": "delete_range",
                 "start": section_start,
                 "end": section_end,
                 "text": "",
-                "original_text": original_text[:200] if len(original_text) > 200 else original_text,
+                "original_text": original_text_full[:200] if len(original_text_full) > 200 else original_text_full,
                 "left_context": content[max(0, section_start-50):section_start],
                 "right_context": content[section_end:min(len(content), section_end+50)]
             }
@@ -956,13 +1199,13 @@ Return ONLY valid JSON:
             else:
                 anchor_pos = section_end_line + 1
             
-            anchor_text = content[max(0, anchor_pos-100):anchor_pos].strip()
+            anchor_text_full = content[max(0, anchor_pos-100):anchor_pos].strip()
             return {
                 "op_type": "insert_after_heading",
                 "start": anchor_pos,
                 "end": anchor_pos,
                 "text": edit_content,
-                "anchor_text": anchor_text[-50:] if len(anchor_text) > 50 else anchor_text,  # Last 50 chars for matching
+                "anchor_text": anchor_text_full[-50:] if len(anchor_text_full) > 50 else anchor_text_full,
                 "left_context": content[max(0, anchor_pos-50):anchor_pos],
                 "right_context": content[anchor_pos:min(len(content), anchor_pos+50)]
             }
@@ -980,7 +1223,16 @@ Return ONLY valid JSON:
             if not plan_edits:
                 return {
                     "editor_operations": [],
-                    "task_status": "complete"
+                    "task_status": "complete",
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "editing_mode": state.get("editing_mode", False),
+                    "plan_edits": state.get("plan_edits")
                 }
             
             # Get editor content
@@ -993,7 +1245,16 @@ Return ONLY valid JSON:
                 return {
                     "editor_operations": [],
                     "task_status": "error",
-                    "error": "No editor content available"
+                    "error": "No editor content available",
+                    # ✅ CRITICAL: Preserve critical state keys even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "editing_mode": state.get("editing_mode", False),
+                    "plan_edits": state.get("plan_edits")
                 }
             
             frontmatter_end = self._get_frontmatter_end(editor_content)
@@ -1053,7 +1314,16 @@ Return ONLY valid JSON:
             
             return {
                 "editor_operations": editor_operations,
-                "task_status": "complete"
+                "task_status": "complete",
+                # ✅ CRITICAL: Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "editing_mode": state.get("editing_mode", False),
+                "plan_edits": state.get("plan_edits")
             }
             
         except Exception as e:
@@ -1063,13 +1333,21 @@ Return ONLY valid JSON:
             return {
                 "editor_operations": [],
                 "task_status": "error",
-                "error": str(e)
+                "error": str(e),
+                # ✅ CRITICAL: Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "referenced_context": state.get("referenced_context", {}),
+                "editing_mode": state.get("editing_mode", False),
+                "plan_edits": state.get("plan_edits")
             }
     
     async def _format_response_node(self, state: ElectronicsState) -> Dict[str, Any]:
-        """Format final response with editor operations if in editing mode"""
+        """Format final response with editor operations if available (file is open)"""
         try:
-            editing_mode = state.get("editing_mode", False)
             editor_operations = state.get("editor_operations", [])
             saved_files = state.get("saved_files", [])
             
@@ -1077,15 +1355,20 @@ Return ONLY valid JSON:
             response = state.get("response", {})
             response_text = response.get("response", "") if isinstance(response, dict) else str(response)
             
-            if editing_mode and editor_operations:
-                # Editing mode: include operations in response
+            # If we have editor_operations, it means file is open - use inline editing
+            if editor_operations:
                 response_text = "I've generated edits for the project plan. Review and accept the changes below.\n\n" + response_text
+                
+                # Get filename from active_editor or use default
+                metadata = state.get("metadata", {})
+                active_editor = metadata.get("active_editor") or metadata.get("shared_memory", {}).get("active_editor", {})
+                target_filename = active_editor.get("filename", "project_plan.md")
                 
                 response = {
                     "response": response_text,
                     "editor_operations": editor_operations,
                     "manuscript_edit": {
-                        "target_filename": state.get("metadata", {}).get("active_editor", {}).get("filename", "project_plan.md"),
+                        "target_filename": target_filename,
                         "scope": "section",
                         "summary": f"Updated {len(editor_operations)} section(s) in project plan"
                     },
@@ -1093,7 +1376,7 @@ Return ONLY valid JSON:
                     "task_status": "complete"
                 }
             else:
-                # Generation mode or no operations: standard response
+                # No operations: standard response
                 if saved_files:
                     files_list = ", ".join(saved_files)
                     response_text = f"I've updated the project files: {files_list}\n\n" + response_text
@@ -1123,51 +1406,43 @@ Return ONLY valid JSON:
 
 **BEST PRACTICES FOR ELECTRONICS PROJECT MANAGEMENT**:
 
-**PROJECT STRUCTURE HIERARCHY**:
-- **PROJECT PLAN = SOURCE OF TRUTH**: The project plan (project_plan.md) is the authoritative document containing:
-  - Overarching system requirements and specifications
-  - High-level system architecture and block diagrams
-  - System design overview and processes
-  - Project goals, scope, and constraints
-  - Integration points and system-level decisions
-  - References to detailed files (components, protocols, schematics, etc.)
-  
-- **REFERENCED FILES = SPECIFIC DETAILS**: Referenced files (component_list.md, protocol files, schematics, etc.) contain:
-  - Specific component specifications and selections
-  - Detailed protocol implementations
-  - Circuit schematics and wiring diagrams
-  - Detailed technical specifications
-  - Code implementations and firmware
-  - Specific aspects relevant to the project plan
+**SINGLE DOCUMENT PHILOSOPHY**:
+You work with ONE primary electronics document organized with Level 2 headers (##). All project information goes into this single document using these standard sections:
 
-**ROUTING RULES**:
-- **System-level/overarching content** -> Project Plan (architecture, requirements, processes, high-level design)
-- **Specific detailed content** -> Referenced Files (components, protocols, schematics, code, detailed specs)
-- **Unclear/fallback** -> Project Plan (when in doubt, use the source of truth)
+- **## Project Overview**: System requirements, architecture, goals, scope, constraints
+- **## Components and Datasheets**: Component specifications, selections, datasheet references
+- **## Schematic Analysis**: Circuit diagrams, wiring diagrams, signal flow
+- **## Firmware and Software**: Code implementations, firmware, embedded programming
+- **## BOM**: Bill of materials, parts list, sourcing information
+- **## Testing and Results**: Test procedures, measurements, validation results
 
-1. **ALWAYS USE EXISTING PROJECT FILES**: When you have referenced project files (components, protocols, schematics, specifications), ALWAYS prefer updating those existing files over suggesting new ones. Only suggest a new file if the content truly does not fit in any existing file.
+**REFERENCED FILES (READ-ONLY CONTEXT)**:
+Files referenced in the primary document's frontmatter are loaded as READ-ONLY context. These provide additional information but are NOT edited directly. Use them for:
+- Understanding existing component specifications
+- Referencing protocol implementations
+- Reviewing schematic details
+- Understanding system constraints
 
-2. **ALWAYS UPDATE FILES BASED ON USER INPUT**: When the user provides information, feedback, or asks questions, automatically update the appropriate project files with that information. Do not wait for explicit permission - intelligently route content to the right files based on the hierarchy above.
-   - **DETECT REVISIONS**: When user says 'instead of X, use Y' or 'change X to Y', this means REPLACE existing content, not add new content
-   - **UPDATE EXISTING SECTIONS**: If a section already exists with similar content, UPDATE it rather than creating duplicates
-   - **COMPONENT REPLACEMENTS**: When components are replaced, update the existing component section, do not create new sections
+**CONTENT ROUTING RULES**:
+- **ALL content goes into the primary document** using the standard sections above
+- **Use granular edits** for small changes (replace specific lines, insert after specific text)
+- **Use section-level edits** for larger changes (replace entire sections, append new sections)
+- **Referenced files are READ-ONLY** - never edit them directly, only reference them in your responses
 
-3. **STAY CURRENT WITH PROJECT FILES**: You always have access to the latest content from referenced project files AND the project plan. Use this information to provide context-aware responses and ensure you're building on what's already documented. The project plan provides the big picture; referenced files provide the details.
+1. **SINGLE DOCUMENT FOCUS**: All project information belongs in the primary electronics document. Use the standard sections to organize content logically.
 
-4. **INTELLIGENT CONTENT ROUTING**: Route content to the most appropriate file based on:
-   - **Content scope**: System-level/overarching -> project plan; Specific details -> referenced files
-   - Content type (components -> component_list.md, protocols -> protocol files, etc.)
-   - File titles and descriptions
-   - Existing file structure
-   - User's project organization
+2. **ALWAYS UPDATE BASED ON USER INPUT**: When the user provides information, feedback, or asks questions, automatically update the appropriate section in the primary document. Do not wait for explicit permission.
+   - **DETECT REVISIONS**: When user says 'instead of X, use Y' or 'change X to Y', use `granular_replace` to replace specific text
+   - **UPDATE EXISTING SECTIONS**: If a section already exists, UPDATE it rather than creating duplicates
+   - **COMPONENT REPLACEMENTS**: When components are replaced, update the existing component entry using granular edits
 
-5. **CONSERVATIVE FILE CREATION**: Only suggest creating new files when:
-   - Content is very substantial (>1500 chars)
-   - Content is about a distinct, specific topic
-   - NO existing file of that type exists OR existing files are a very poor match (<20%)
-   - User explicitly requests a new file
+3. **USE REFERENCED CONTEXT WISELY**: Referenced files provide additional context but are READ-ONLY. Reference them in your responses when relevant, but all edits go to the primary document.
 
-6. **PROACTIVE UPDATES**: When you provide information, calculations, recommendations, or answers, automatically save/update the appropriate project files. The user shouldn't have to ask you to save information - you should do it intelligently, respecting the project plan as source of truth and referenced files for specific details.
+4. **GRANULAR VS SECTION-LEVEL EDITS**:
+   - **Granular edits** (`granular_replace`, `granular_insert`): For precise changes to specific text within a section
+   - **Section-level edits** (`replace`, `append`): For broader changes affecting entire sections
+
+5. **PROACTIVE UPDATES**: When you provide information, calculations, recommendations, or answers, automatically update the primary document in the appropriate section. The user shouldn't have to ask you to save information.
 
 **MISSION**: Provide practical electronics design assistance, embedded programming guidance, and component selection for DIY electronics projects.
 
@@ -1183,6 +1458,7 @@ Return ONLY valid JSON:
 4. **Troubleshooting**: Circuit debugging, signal integrity, power issues
 5. **Calculations**: Resistor values, voltage dividers, power dissipation, timing
 6. **Project Management**: Create project plans, organize project files and folders in user's My Documents section
+7. **Diagram Generation**: Generate technical diagrams to visualize circuits, state machines, pin connections, and system architectures
 
 **STRUCTURED OUTPUT REQUIRED**:
 You MUST respond with valid JSON matching this exact schema:
@@ -1220,6 +1496,16 @@ You MUST respond with valid JSON matching this exact schema:
   "confidence": 0.85
 }
 
+**DIAGRAM GENERATION**:
+You can generate technical diagrams to visualize:
+- Circuit block diagrams (Mermaid flowcharts)
+- Firmware state machines (Mermaid state diagrams)
+- Pin connection tables (Markdown tables)
+- Signal timing diagrams (Mermaid sequence diagrams)
+- Component interconnections (ASCII circuit diagrams)
+
+When a diagram would help explain your response, you can request diagram generation. Diagrams will be automatically inserted into the appropriate section of the project document.
+
 **RESPONSE GUIDELINES**:
 - Use a technical, practical tone like an experienced electronics engineer
 - Include specific component values, pin connections, and safety considerations
@@ -1230,22 +1516,26 @@ You MUST respond with valid JSON matching this exact schema:
 - Suggest alternative components when appropriate
 - **BE PROACTIVE**: Ask clarifying questions, suggest next steps, propose concrete actions based on what you know
 - **ENGAGE WITH THEIR PROJECT**: Reference specific details from their project, offer to help with specific aspects, identify challenges they should consider
+- **USE DIAGRAMS**: When explaining complex circuits, state machines, or pin connections, suggest generating a diagram
 
 **IMPORTANT**:
-- **PROJECT CONTEXT**: Agent assumes an electronics project plan is always open (gated by intent classifier)
+- **SINGLE DOCUMENT WORKFLOW**: All project information goes into ONE primary electronics document using standard Level 2 headers (##). Use the standard sections: Project Overview, Components and Datasheets, Schematic Analysis, Firmware and Software, BOM, Testing and Results.
+- **ASSESSMENT MODE**: When called by another agent (e.g., Org Agent) to assess an electronics document, provide a structured assessment focusing on:
+  * Project completeness and organization
+  * Component selection rationale
+  * Schematic design quality
+  * Firmware implementation status
+  * Testing coverage and results
+  * Areas needing attention or improvement
+- **REFERENCED FILES (READ-ONLY CONTEXT)**: Files referenced in the primary document's frontmatter are loaded as READ-ONLY context. Use them for understanding existing specifications, protocols, and schematics, but do NOT edit them directly. All edits go to the primary document.
 - **SIMPLE TECHNICAL QUERIES**: For queries like "calculate resistor", "design a circuit", "troubleshoot", etc.:
-  * Provide technical help directly, updating project files as needed
-- **FILE CREATION**: You can create files and folders in the user's Documents section. Use create_user_file and create_user_folder tools to organize project files. Default to "Projects" or "Projects/Electronics" folder unless user specifies otherwise.
-- **DOCUMENT EDITING**: 
-  * Use update_document_metadata to set appropriate titles and frontmatter types (e.g., "electronics", "component", "schematic", "protocol")
-  * Use update_document_content_tool to add or update content in project files (append=True to add content, append=False to replace)
-  * When helping with project work, you can add component specs, code examples, schematics, etc. directly to the appropriate project files
-  * This helps organize and categorize project files properly and keeps project documentation up-to-date
-- **PROJECT CONTEXT FIRST**: Documents marked "(CURRENTLY OPEN IN EDITOR - PROJECT CONTEXT)" are the user's active project work and should be prioritized over reference materials
-- **REFERENCED PROJECT FILES**: Documents marked "(REFERENCED FROM PROJECT - ...)" are files referenced in the active editor's frontmatter (components, protocols, schematics, specifications). These are part of the project structure and should be understood in relation to the main project document. Understand how these documents relate to each other and the overall project architecture.
-- **REFERENCE DATA SECONDARY**: Documents marked "(LIBRARY REFERENCE)" are general electronics documentation for supplemental information
-- **CONTEXT-AWARE RESPONSES**: When project context is available, tailor solutions to the user's specific project requirements and constraints. Use referenced files to understand component specifications, protocol requirements, and design constraints.
-- **PROJECT STRUCTURE UNDERSTANDING**: When multiple referenced files are provided, understand their relationships - component specs inform design choices, protocols define communication requirements, schematics show circuit connections, etc.
+  * Provide technical help directly, updating the primary document in the appropriate section
+- **GRANULAR VS SECTION-LEVEL EDITS**:
+  * Use `granular_replace` for precise text changes within sections
+  * Use `granular_insert` for inserting text after specific anchor text
+  * Use `replace` for replacing entire sections
+  * Use `append` for adding new sections or content to existing sections
+- **CONTEXT-AWARE RESPONSES**: When project context is available, tailor solutions to the user's specific project requirements and constraints. Use referenced files (read-only) to understand component specifications, protocol requirements, and design constraints.
 - **GENERAL KNOWLEDGE FALLBACK**: When no user documents are available, provide guidance based on standard electronics principles
 - **WEB SEARCH INTEGRATION**: When web search results are available, use them to supplement project-specific and reference knowledge
 - **PRACTICAL SOLUTIONS**: Focus on implementable solutions with real component specifications appropriate to the user's project context
@@ -2136,18 +2426,6 @@ Return ONLY the JSON object, no markdown, no code blocks."""
     
     # Legacy _check_content_saving_needed_node removed - saving decision now handled in _route_from_response
     
-    def _convert_json_to_markdown(self, content: str, content_type: Optional[str] = None) -> str:
-        """
-        Convert any JSON arrays/objects in content to markdown format.
-        Delegates to shared utility function for consistency across agents.
-        
-        Args:
-            content: Content that may contain JSON
-            content_type: Type of content ("code", "components", "calculations", "general", etc.)
-        """
-        from orchestrator.utils.content_formatting_utils import convert_json_to_markdown
-        return convert_json_to_markdown(content, content_type=content_type)
-    
     def _extract_json_from_response(self, content: str) -> Optional[Dict[str, Any]]:
         """
         Extract JSON from LLM response, handling markdown code blocks and extra text.
@@ -2259,42 +2537,27 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 "metadata": metadata,  # Includes user_chat_model and user_fast_model
                 "messages": conversation_messages,
                 "query_type": "",
-                "should_search": False,
-                "has_explicit_search": False,
+                "query_intent": "",
+                "search_needed": False,
                 "documents": [],
                 "segments": [],
-                "referenced_context": {
-                    "components": [],
-                    "protocols": [],
-                    "schematics": [],
-                    "specifications": [],
-                    "other": []
-                },
+                "referenced_context": {},
+                "electronics_document_id": None,
+                "read_only_context": {},
+                "existing_sections": [],
                 "information_needs": None,
                 "search_queries": [],
                 "search_quality_assessment": None,
                 "search_retry_count": 0,
-                "has_project_plan": False,
-                "project_plan_needed": False,
                 "project_plan_action": None,
-                "project_plan_location": None,
                 "project_structure_plan": None,
                 "web_search_needed": False,
                 "web_search_explicit": False,
-                "web_search_permission_granted": False,
+                "project_decisions": [],
+                "documentation_maintenance_plan": None,
+                "documentation_verification_result": None,
                 "response": {},
-                "should_save_content": False,
-                "is_explicit_save_request": False,
-                "content_structure": None,
-                "file_routing_plan": None,
-                "is_follow_up": False,
-                "needs_previous_context": False,
-                "has_content_conflicts": False,
-                "content_conflicts": None,
-                "response_quality_score": None,
-                "needs_response_refinement": False,
-                "is_incremental_update": False,
-                "component_compatibility_issues": None,
+                "save_plan": None,
                 "editing_mode": False,
                 "editor_operations": [],
                 "manuscript_edit": None,
@@ -2337,16 +2600,7 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     # Try to convert to string if it's not already
                     response_text = str(response_text) if response_text else "Electronics design assistance complete"
                 
-                # Check if response_text is JSON that should be converted to readable format
-                if response_text.strip().startswith("{") or response_text.strip().startswith("["):
-                    try:
-                        import json
-                        parsed_json = json.loads(response_text)
-                        # Convert JSON to readable markdown format
-                        response_text = self._convert_json_to_markdown(str(parsed_json))
-                    except (json.JSONDecodeError, ValueError):
-                        # Not valid JSON, use as-is
-                        pass
+                # Electronics agent should generate proper structured responses, not fallback to JSON conversion
                 
                 # Append cleanup summary if available (from save_content_node)
                 cleanup_summary = result_state.get("cleanup_summary")

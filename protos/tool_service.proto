@@ -76,6 +76,12 @@ service ToolService {
   
   // Conversation operations
   rpc UpdateConversationTitle(UpdateConversationTitleRequest) returns (UpdateConversationTitleResponse);
+  
+  // Visualization operations
+  rpc CreateChart(CreateChartRequest) returns (CreateChartResponse);
+  
+  // File analysis operations
+  rpc AnalyzeTextContent(TextAnalysisRequest) returns (TextAnalysisResponse);
 }
 
 // Document Messages
@@ -847,3 +853,45 @@ message UpdateConversationTitleResponse {
   optional string error = 5;
 }
 
+// Visualization Messages
+message CreateChartRequest {
+  string chart_type = 1;
+  string data_json = 2;  // JSON string for flexibility
+  string title = 3;
+  string x_label = 4;
+  string y_label = 5;
+  bool interactive = 6;
+  string color_scheme = 7;
+  int32 width = 8;
+  int32 height = 9;
+}
+
+message CreateChartResponse {
+  bool success = 1;
+  string chart_type = 2;
+  string output_format = 3;  // "html" or "base64_png"
+  string chart_data = 4;
+  optional string error = 5;
+  string metadata_json = 6;  // JSON string with metadata
+}
+
+// File Analysis Messages
+message TextAnalysisRequest {
+  string content = 1;
+  bool include_advanced = 2;  // Include advanced metrics
+  string user_id = 3;  // For logging
+}
+
+message TextAnalysisResponse {
+  int32 word_count = 1;
+  int32 line_count = 2;
+  int32 non_empty_line_count = 3;
+  int32 character_count = 4;
+  int32 character_count_no_spaces = 5;
+  int32 paragraph_count = 6;
+  int32 sentence_count = 7;
+  // Advanced metrics (optional)
+  float avg_words_per_sentence = 8;
+  float avg_words_per_paragraph = 9;
+  string metadata_json = 10;  // For extensibility
+}

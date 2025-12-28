@@ -741,6 +741,8 @@ class AuthenticatedUserResponse(BaseModel):
 class EpubExportRequest(BaseModel):
     """Request to export Markdown to EPUB"""
     content: str = Field(..., description="Markdown content to export")
+    document_id: Optional[str] = Field(None, description="Source document ID for context")
+    folder_id: Optional[str] = Field(None, description="Source folder ID for context")
     include_toc: bool = Field(default=True, description="Include EPUB navigation (TOC)")
     include_cover: bool = Field(default=True, description="Include cover page if resolvable")
     split_on_headings: bool = Field(default=True, description="Split chapters on headings")

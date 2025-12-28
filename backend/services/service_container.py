@@ -12,28 +12,7 @@ from config import settings
 from repositories.document_repository import DocumentRepository
 from services.settings_service import settings_service
 from services.auth_service import auth_service
-# Removed: intent_classification_service (deprecated - never used in production)
-# from services.conversation_service import ConversationService  # Temporarily removed due to import issues
-from services.chat_service import ChatService
-
-from services.knowledge_graph_service import KnowledgeGraphService
-from services.collection_analysis_service import CollectionAnalysisService
-from services.parallel_document_service import ParallelDocumentService
-from services.enhanced_pdf_segmentation_service import EnhancedPDFSegmentationService
-from services.category_service import CategoryService
-
-from services.rss_service import get_rss_service
-from services.file_manager import get_file_manager
-from services.folder_service import FolderService
-
-# Research plan service removed - migrated to LangGraph subgraph workflows
-from services.content_categorization_service import get_content_categorization_service
-from services.conversation_context_service import ConversationContextService
-from services.clarity_assessment_service import ClarityAssessmentService
-from services.pending_query_manager import PendingQueryManager
-# Research plan repository removed - migrated to LangGraph subgraph workflows
-from services.embedding_service_wrapper import get_embedding_service
-from utils.websocket_manager import WebSocketManager
+# Heavy services moved to lazy loading inside methods to avoid dependency bloat in Celery Beat/Flower
 
 from utils.db_context import initialize_db_context, get_db_context
 
@@ -53,31 +32,32 @@ class ServiceContainer:
         self.config = config or {}
         
         # Core shared instances
-        self.websocket_manager: Optional[WebSocketManager] = None
+        self.websocket_manager: Optional[Any] = None
         self.db_pool = None
-        self.document_repository: Optional[DocumentRepository] = None
+        self.document_repository: Optional["DocumentRepository"] = None
         self.embedding_manager = None  # EmbeddingServiceWrapper (singleton)
         self.db_context = None
         
         # Service instances
         self.conversation_service: Optional[Any] = None # Placeholder, will be initialized later
-        self.chat_service: Optional[ChatService] = None
+        self.chat_service: Optional["ChatService"] = None
 
-        self.knowledge_graph_service: Optional[KnowledgeGraphService] = None
-        self.collection_analysis_service: Optional[CollectionAnalysisService] = None
-        self.document_service: Optional[ParallelDocumentService] = None
-        self.enhanced_pdf_service: Optional[EnhancedPDFSegmentationService] = None
-        self.category_service: Optional[CategoryService] = None
+        self.knowledge_graph_service: Optional["KnowledgeGraphService"] = None
+        self.collection_analysis_service: Optional["CollectionAnalysisService"] = None
+        self.document_service: Optional["ParallelDocumentService"] = None
+        self.enhanced_pdf_service: Optional["EnhancedPDFSegmentationService"] = None
+        self.category_service: Optional["CategoryService"] = None
 
         self.rss_service: Optional[Any] = None
         self.file_manager: Optional[Any] = None
-        self.folder_service: Optional[FolderService] = None
+        self.folder_service: Optional["FolderService"] = None
         self.news_service: Optional[Any] = None
+        self.direct_search_service: Optional[Any] = None
 
         # Research plan service removed - migrated to LangGraph subgraph workflows
         self.content_categorization_service: Optional[Any] = None
-        self.conversation_context_service: Optional[ConversationContextService] = None
-        self.clarity_assessment_service: Optional[ClarityAssessmentService] = None
+        self.conversation_context_service: Optional["ConversationContextService"] = None
+        self.clarity_assessment_service: Optional["ClarityAssessmentService"] = None
 
     
     async def initialize(self) -> None:
@@ -138,6 +118,7 @@ class ServiceContainer:
         logger.info("🔧 Phase 2: Initializing shared resources...")
         
         # Single WebSocket manager instance
+        from utils.websocket_manager import WebSocketManager
         self.websocket_manager = WebSocketManager()
         
         # Single document repository with shared connection pool
@@ -161,6 +142,7 @@ class ServiceContainer:
         logger.info("✅ ROOSEVELT'S AUTH INITIALIZATION: Auth service initialized successfully!")
         
         # Initialize embedding service wrapper (singleton)
+        from services.embedding_service_wrapper import get_embedding_service
         self.embedding_manager = await get_embedding_service()
         logger.info("✅ Embedding service wrapper initialized (shared singleton)")
         
@@ -176,6 +158,7 @@ class ServiceContainer:
         logger.info("✅ Conversation service initialized")
         
         # Knowledge graph service (single instance)
+        from services.knowledge_graph_service import KnowledgeGraphService
         self.knowledge_graph_service = KnowledgeGraphService()
         await self._retry_with_backoff(
             self.knowledge_graph_service.initialize,
@@ -183,6 +166,7 @@ class ServiceContainer:
         )
         
         # Document service (single instance with shared resources)
+        from services.parallel_document_service import ParallelDocumentService
         self.document_service = ParallelDocumentService()
         # Set WebSocket manager for real-time updates
         self.document_service.websocket_manager = self.websocket_manager
@@ -196,6 +180,7 @@ class ServiceContainer:
         )
         
         # Chat service (single instance with shared resources)
+        from services.chat_service import ChatService
         self.chat_service = ChatService(self.websocket_manager)
         await self._retry_with_backoff(
             lambda: self.chat_service.initialize(
@@ -207,6 +192,7 @@ class ServiceContainer:
         )
         
         # RSS service (single instance with shared database pool)
+        from services.rss_service import get_rss_service
         self.rss_service = await get_rss_service(shared_db_pool=self.db_pool)
 
         # News service (single instance)
@@ -217,7 +203,12 @@ class ServiceContainer:
             "NewsService"
         )
         
+        # Direct search service
+        from services.direct_search_service import DirectSearchService
+        self.direct_search_service = DirectSearchService()
+        
         # Folder service (single instance with shared resources)
+        from services.folder_service import FolderService
         self.folder_service = FolderService()
         await self._retry_with_backoff(
             self.folder_service.initialize,
@@ -235,6 +226,7 @@ class ServiceContainer:
         logger.info("🔧 Phase 4: Initializing specialized services...")
         
         # Collection analysis service
+        from services.collection_analysis_service import CollectionAnalysisService
         self.collection_analysis_service = CollectionAnalysisService(self.chat_service)
         await self._retry_with_backoff(
             self.collection_analysis_service.initialize,
@@ -242,6 +234,7 @@ class ServiceContainer:
         )
         
         # Enhanced PDF segmentation service
+        from services.enhanced_pdf_segmentation_service import EnhancedPDFSegmentationService
         self.enhanced_pdf_service = EnhancedPDFSegmentationService(
             self.document_repository, 
             self.embedding_manager
@@ -254,6 +247,7 @@ class ServiceContainer:
 
         
         # Category Service
+        from services.category_service import CategoryService
         self.category_service = CategoryService()
         await self._retry_with_backoff(
             lambda: self.category_service.initialize(shared_db_pool=self.db_pool),
@@ -261,14 +255,17 @@ class ServiceContainer:
         )
         
         # Context-Aware Services (simplified - no MCP dependency)
+        from services.pending_query_manager import PendingQueryManager
         self.pending_query_manager = PendingQueryManager(mcp_chat_service=None)
         await self.pending_query_manager.initialize()
         
+        from services.conversation_context_service import ConversationContextService
         self.conversation_context_service = ConversationContextService(
             mcp_chat_service=None,
             db_pool=self.db_pool
         )
         
+        from services.clarity_assessment_service import ClarityAssessmentService
         self.clarity_assessment_service = ClarityAssessmentService(
             mcp_chat_service=None,
             pending_query_manager=self.pending_query_manager
@@ -277,6 +274,7 @@ class ServiceContainer:
         # Research Plan Service removed - migrated to LangGraph subgraph workflows
         
         # Content Categorization Service
+        from services.content_categorization_service import get_content_categorization_service
         self.content_categorization_service = await get_content_categorization_service()
         await self._retry_with_backoff(
             self.content_categorization_service.initialize,
@@ -297,6 +295,7 @@ class ServiceContainer:
         
         try:
             # Initialize FileManager service - it will get dependencies via lazy loading
+            from services.file_manager import get_file_manager
             self.file_manager = await get_file_manager()
             
             # Update FileManager with services from container
@@ -332,13 +331,13 @@ class ServiceContainer:
     
     # Research plan service getter removed - migrated to LangGraph subgraph workflows
     
-    def get_conversation_context_service(self) -> ConversationContextService:
+    def get_conversation_context_service(self) -> "ConversationContextService":
         """Get the conversation context service"""
         if not self._initialized:
             raise RuntimeError("Service container not initialized")
         return self.conversation_context_service
     
-    def get_clarity_assessment_service(self) -> ClarityAssessmentService:
+    def get_clarity_assessment_service(self) -> "ClarityAssessmentService":
         """Get the clarity assessment service"""
         if not self._initialized:
             raise RuntimeError("Service container not initialized")

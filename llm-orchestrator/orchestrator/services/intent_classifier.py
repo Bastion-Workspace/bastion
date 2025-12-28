@@ -81,13 +81,11 @@ def infer_action_from_agent(agent_name: str) -> Optional[str]:
         "character_development_agent": "generation",
         "style_editing_agent": "generation",
         "proofreading_agent": "modification",
-        "org_inbox_agent": "management",
-        "org_project_agent": "management",
+        "org_agent": "management",
         "website_crawler_agent": "management",
         "article_writing_agent": "generation",
         "podcast_script_agent": "generation",
         "email_agent": "generation",
-        "data_formatting_agent": "modification",
     }
     return agent_action_map.get(agent_name)
 
@@ -119,20 +117,22 @@ def should_boost_continuity(
         "yes", "no", "ok", "okay", "sure", "please", "continue", "more",
         "that", "this", "it", "what about", "how about", "tell me more",
         "show me", "save", "update", "change", "modify", "edit that",
-        "search for more", "find more", "get more", "do more", "go ahead"
+        "search for more", "find more", "get more", "do more", "go ahead",
+        "detail", "details", "elaborate", "explain further"
     ]
     
     message_lower = user_message.lower().strip()
     
     # Short responses are likely continuations
-    if len(message_lower.split()) <= 5:  # Increased from 3 to catch "Yes, search for more"
+    if len(message_lower.split()) <= 8:  # Increased from 5 to catch longer follow-ups
         if any(indicator in message_lower for indicator in follow_up_indicators):
             return True
     
     # Check for explicit continuation phrases
     continuation_phrases = [
-        "continue", "go on", "more details", "expand", "elaborate",
-        "what's next", "and then", "also", "additionally"
+        "continue", "go on", "more details", "more detail", "expand", "elaborate",
+        "what's next", "and then", "also", "additionally", "tell me more",
+        "need more", "give me more", "further detail", "further details"
     ]
     
     if any(phrase in message_lower for phrase in continuation_phrases):
@@ -857,8 +857,9 @@ class IntentClassifier:
    - Examples that are NOT weather: "It's cold and snowy" (just mentioning weather), "The weather is nice today" (casual statement)
    - If user mentions weather but isn't asking about it → "general"
 4. **content** - Content creation (articles, podcasts, blog posts)
-5. **management** - Task management, project organization, system configuration
-6. **general** - General queries, research, information gathering, or unclear domain
+5. **management** - Task management (TODOs), project organization (Org-mode), system resource management
+   - NOT for technical configuration or hardware instructions (use "general" for those)
+6. **general** - General queries, research, information gathering, hardware/software technical instructions, or unclear domain
 
 **CRITICAL RULES**:
 - Editor context is PRIMARY signal - if editor type matches a domain, use that domain
@@ -1051,8 +1052,8 @@ The '{primary_agent}' agent previously responded with:
 		try:
 			ci = conversation_context.get("conversation_intelligence", {}) or {}
 			ao = (ci.get("agent_outputs", {}) or {})
-			if isinstance(ao, dict) and ao.get("org_inbox_agent"):
-				org_bias_hint = "\n**CONTEXT**: The user was recently working with org-mode tasks; prefer ORG_INBOX for task-like statements."
+			if isinstance(ao, dict) and (ao.get("org_agent") or ao.get("org_inbox_agent") or ao.get("org_project_agent")):
+				org_bias_hint = "\n**CONTEXT**: The user was recently working with org-mode tasks; prefer ORG_AGENT for task-like statements."
 		except Exception:
 			pass
 		
@@ -1089,8 +1090,6 @@ The '{primary_agent}' agent previously responded with:
 		# Pipeline agent is ONLY available when on pipelines page
 		pipeline_agent_section = ""
 		pipeline_agent_enum = ""
-		data_formatting_note = ""
-		data_formatting_avoid = ""
 		
 		if has_active_pipeline:
 			pipeline_agent_section = """
@@ -1106,11 +1105,9 @@ The '{primary_agent}' agent previously responded with:
     * "Add a transform to convert epoch time"
     * "Build an ETL pipeline for processing CSV files"
     * "Set up a Glue job to transform data"
-  - AVOID: Simple data formatting (use data_formatting_agent), table creation without AWS context
+  - AVOID: Simple data formatting, table creation without AWS context
 """
 			pipeline_agent_enum = "pipeline_agent|"
-			data_formatting_note = " (NOT AWS pipelines!)"
-			data_formatting_avoid = "\n  - AVOID: AWS pipeline creation (use pipeline_agent)"
 		
 		return f"""You are a Simple Intent Classifier - quick and decisive routing!
 
@@ -1183,15 +1180,15 @@ Every query has a PRIMARY action intent that determines routing behavior:
    - Language: "Add TODO...", "Mark as done...", "Crawl website...", "Set up...", "Configure...", "Save...", "Save what we discussed...", "Update project files..."
    - Intent: System, task, or project file management
    - **CRITICAL DISTINCTION**:
-     * **Org-mode task management**: Managing inbox.org tasks (TODO lists) → org_inbox_agent or org_project_agent
+     * **Org-mode task management**: Managing inbox.org tasks (TODO lists) → org_agent
      * **Project file management**: Saving/updating project files (electronics, fiction, etc.) → editor-specific agent (electronics_agent, fiction_editing_agent, etc.)
      * **System management**: Website crawling, configuration → website_crawler_agent or appropriate system agent
    - Examples:
-     * "Add TODO: Finish chapter 5" → management (org-mode task) → org_inbox_agent
+     * "Add TODO: Finish chapter 5" → management (org-mode task) → org_agent
      * "Save what we discussed on this electronics project" → management (project file) → electronics_agent (if electronics editor)
      * "Update project files" → management (project file) → editor agent matching editor type
      * "Crawl this website" → management (system/data ingestion) → website_crawler_agent
-     * "Mark task as complete" → management (org-mode task) → org_inbox_agent
+     * "Mark task as complete" → management (org-mode task) → org_agent
 
 **CRITICAL ROUTING RULES USING ACTION INTENT**:
 
@@ -1324,28 +1321,19 @@ Every query has a PRIMARY action intent that determines routing behavior:
   - AVOID: General knowledge questions (use chat_agent), research queries (use research_agent)
 
 **MANAGEMENT AGENTS** (ORG-MODE TASK MANAGEMENT ONLY):
-- **org_inbox_agent**
-  - ACTION INTENTS: management (org-mode task modifications ONLY)
-  - USE FOR: MANAGING inbox.org (add TODO, toggle done, update task, change TODO state)
-  - TRIGGERS: "add TODO", "mark done", "toggle", "update task", "change state"
+- **org_agent**
+  - ACTION INTENTS: management (org-mode task modifications and project capture)
+  - USE FOR: 
+    * MANAGING inbox.org (add TODO, toggle done, update task, change TODO state)
+    * Creating new org-mode project entries for task management (NOT technical project design/planning)
+    * Cross-document synthesis based on Org-mode file links
+  - TRIGGERS: "add TODO", "mark done", "toggle", "update task", "change state", "start project", "create project", "new initiative", "launch campaign"
   - **CRITICAL**: ONLY for org-mode task management (inbox.org), NOT for project file management
   - **AVOID**: 
     * Project file operations (use editor agents: electronics_agent, fiction_editing_agent, etc.)
     * Saving/updating project files (use editor agents)
     * Technical project planning (use electronics_agent, etc.)
     * Reading/searching org files (use chat_agent or research_agent)
-
-- **org_project_agent**
-  - ACTION INTENTS: management (org-mode project entry creation ONLY)
-  - USE FOR: Creating new org-mode project entries for task management (NOT technical project design/planning)
-  - TRIGGERS: "start project", "create project", "new initiative", "launch campaign" (ONLY for org-mode task/project management, NOT technical design)
-  - **CRITICAL**: This is for ORG-MODE PROJECT MANAGEMENT (creating org-mode entries), not technical project planning/design
-  - **AVOID**: 
-    * Technical project planning (use electronics_agent, research_agent, or chat_agent): "design a circuit project", "plan an electronic project", "formulate a new electronic project"
-    * Software project planning (use chat_agent or research_agent): "create a software project", "plan a coding project"
-    * Project file operations (use editor agents: electronics_agent, etc.)
-    * Saving/updating project files (use editor agents)
-    * Simple tasks (use org_inbox_agent)
 
 - **website_crawler_agent**
   - ACTION INTENTS: management (data ingestion)
@@ -1364,11 +1352,6 @@ Every query has a PRIMARY action intent that determines routing behavior:
     * "Compose an email to sarah@example.com" → email_agent
     * "Send the research findings to my manager" → email_agent
   - AVOID: General email questions (use chat_agent), email configuration (use help_agent)
-
-- **data_formatting_agent**
-  - ACTION INTENTS: modification (data transformation)
-  - USE FOR: Format data into tables, CSV, JSON for display/output{data_formatting_note}
-  - TRIGGERS: "format as table", "convert to CSV", "create data structure", "show as JSON"{data_formatting_avoid}
 
 - **image_generation_agent**
   - ACTION INTENTS: generation
@@ -1406,15 +1389,16 @@ Every query has a PRIMARY action intent that determines routing behavior:
               "plan electronic", "formulate electronic project", "design electronic system", "electro-magnetic control",
               **"save project", "save what we discussed", "update project files", "save the system", "save the design"**
   - **CRITICAL**: Use for technical electronics project planning/design AND project file management, NOT org-mode project management
-  - **MANAGEMENT ACTIONS**: When user wants to save/update electronics project files → electronics_agent (NOT org_inbox_agent or org_project_agent)
-  - AVOID: non-electronics technical queries, org-mode task management (use org_inbox_agent/org_project_agent)
+  - **MANAGEMENT ACTIONS**: When user wants to save/update electronics project files → electronics_agent (NOT org_agent)
+  - AVOID: non-electronics technical queries, org-mode task management (use org_agent)
 
 **ORG-MODE ROUTING RULES (CRITICAL - READ CAREFULLY!)**:
-- **org_inbox_agent**: ONLY for MODIFICATION actions on inbox.org
-  - "Add TODO: Buy milk" → org_inbox_agent
-  - "Mark task 3 as done" → org_inbox_agent
-  - "Toggle TODO state" → org_inbox_agent
-  - "Update my task about X" → org_inbox_agent
+- **org_agent**: For MODIFICATION actions on inbox.org and project capture
+  - "Add TODO: Buy milk" → org_agent
+  - "Mark task 3 as done" → org_agent
+  - "Toggle TODO state" → org_agent
+  - "Update my task about X" → org_agent
+  - "Start project: Build a shed" → org_agent
 - **chat_agent**: For READING/LISTING org data (quick casual queries)
   - "What's on my TODO list?" → chat_agent (uses list_org_todos)
   - "What's tagged @work?" → chat_agent (uses search_org_by_tag)
@@ -1426,17 +1410,17 @@ Every query has a PRIMARY action intent that determines routing behavior:
   - "Show me all WAITING tasks related to budget" → research_agent (complex filtered search)
 
 ROUTING HINTS FOR PROJECT CAPTURE:
-- **ORG-MODE PROJECT MANAGEMENT**: If the user requests creating a project entry for task management (phrases like 'start project', 'create project', 'new initiative', 'launch campaign') with NO technical context, route to org_project_agent.
+- **ORG-MODE PROJECT MANAGEMENT**: If the user requests creating a project entry for task management (phrases like 'start project', 'create project', 'new initiative', 'launch campaign') with NO technical context, route to org_agent.
 - **TECHNICAL PROJECT PLANNING**: If the user mentions "project" in a technical context (electronics, software, engineering, etc.), route to the appropriate specialized agent:
   * "electronic project", "electronics project", "plan electronic", "formulate electronic project" → electronics_agent
   * "software project", "coding project", "programming project" → chat_agent or research_agent
   * "engineering project" → research_agent or chat_agent
-- **KEY DISTINCTION**: org_project_agent is for TASK/PROJECT MANAGEMENT (creating org-mode entries), NOT for technical project design/planning.
+- **KEY DISTINCTION**: org_agent is for TASK/PROJECT MANAGEMENT (creating org-mode entries), NOT for technical project design/planning.
 
 **STRICT OUTPUT FORMAT - JSON ONLY (NO MARKDOWN, NO EXPLANATION):**
 You MUST respond with a single JSON object matching this schema:
 {{
-  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|style_editing_agent|data_formatting_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_inbox_agent|org_project_agent|website_crawler_agent|podcast_script_agent|article_writing_agent|entertainment_agent|weather_agent|electronics_agent",
+  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|style_editing_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_agent|website_crawler_agent|podcast_script_agent|article_writing_agent|entertainment_agent|weather_agent|electronics_agent",
   "action_intent": "observation|generation|modification|analysis|query|management",
   "permission_required": false,
   "confidence": 0.0,
@@ -1644,7 +1628,7 @@ You MUST respond with a single JSON object matching this schema:
 							'weather_agent', 'research_agent', 'rss_agent',
 							'image_generation_agent',  # WargamingAgent removed - not fully fleshed out
 							# FactCheckingAgent removed - not actively used
-							'org_inbox_agent', 'org_project_agent',
+							'org_agent',
 							'fiction_editing_agent', 'story_analysis_agent',
 							'content_analysis_agent', 'proofreading_agent'
 						]

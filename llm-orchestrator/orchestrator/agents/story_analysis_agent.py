@@ -14,6 +14,7 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from .base_agent import BaseAgent, TaskStatus
+from orchestrator.tools.file_analysis_tools import analyze_active_editor_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -144,13 +145,36 @@ class StoryAnalysisAgent(BaseAgent):
             frontmatter = active_editor.get("frontmatter", {}) or {}
             title = str(frontmatter.get("title") or "").strip()
             filename = active_editor.get("filename") or "document.md"
+            user_id = state.get("user_id", "system")
             
             if not manuscript:
                 return {
                     "analysis_result": "",
                     "error": "No manuscript content available",
-                    "task_status": "error"
+                    "task_status": "error",
+                    # Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "active_editor": state.get("active_editor", {}),
+                    "query": state.get("query", "")
                 }
+            
+            # Get file analysis metrics
+            metrics = None
+            try:
+                metrics = await analyze_active_editor_metrics(
+                    active_editor=active_editor,
+                    include_advanced=True,
+                    user_id=user_id
+                )
+                if "error" in metrics:
+                    logger.warning(f"File analysis failed (non-fatal): {metrics['error']}")
+                    metrics = None
+            except Exception as e:
+                logger.warning(f"File analysis error (non-fatal): {e}")
+                metrics = None
             
             # Build system prompt
             system_prompt = (
@@ -176,6 +200,19 @@ class StoryAnalysisAgent(BaseAgent):
                 header_lines.append(f"STORY TITLE: {title}")
                 header_lines.append("")
             
+            # Add file metrics if available
+            if metrics and "error" not in metrics:
+                header_lines.append("=== MANUSCRIPT STATISTICS ===")
+                header_lines.append(f"Word Count: {metrics.get('word_count', 0):,}")
+                header_lines.append(f"Paragraphs: {metrics.get('paragraph_count', 0):,}")
+                header_lines.append(f"Sentences: {metrics.get('sentence_count', 0):,}")
+                header_lines.append(f"Lines: {metrics.get('line_count', 0):,}")
+                if metrics.get('avg_words_per_sentence'):
+                    header_lines.append(f"Average Words per Sentence: {metrics['avg_words_per_sentence']:.1f}")
+                if metrics.get('avg_words_per_paragraph'):
+                    header_lines.append(f"Average Words per Paragraph: {metrics['avg_words_per_paragraph']:.1f}")
+                header_lines.append("")
+            
             header_lines.append("=== USER REQUEST ===")
             header_lines.append(f'"{query}"')
             header_lines.append("")
@@ -186,6 +223,8 @@ class StoryAnalysisAgent(BaseAgent):
             header_lines.append("- If answering a specific question, START with a direct answer")
             header_lines.append("- Be specific and constructive, with actionable recommendations")
             header_lines.append("- Reference specific passages when relevant")
+            if metrics and "error" not in metrics:
+                header_lines.append("- You may reference the manuscript statistics above when relevant (e.g., word count, pacing metrics)")
             header_lines.append("")
             header_lines.append("=== FULL MANUSCRIPT (FOR CONTEXT) ===")
             header_lines.append(manuscript)
@@ -209,7 +248,7 @@ class StoryAnalysisAgent(BaseAgent):
             # Unwrap JSON if present
             content = self._unwrap_json_response(content)
             
-            return {
+            result = {
                 "analysis_result": content,
                 # Preserve critical state keys
                 "metadata": state.get("metadata", {}),
@@ -219,6 +258,12 @@ class StoryAnalysisAgent(BaseAgent):
                 "active_editor": state.get("active_editor", {}),
                 "query": state.get("query", "")
             }
+            
+            # Include metrics in state if available
+            if metrics and "error" not in metrics:
+                result["file_metrics"] = metrics
+            
+            return result
             
         except Exception as e:
             logger.error(f"Failed to analyze content: {e}")
@@ -255,16 +300,25 @@ class StoryAnalysisAgent(BaseAgent):
                     "task_status": "error"
                 }
             
+            # Get file metrics if available
+            file_metrics = state.get("file_metrics")
+            
             # Build structured response
+            structured_response = {
+                "task_status": "complete",
+                "analysis_text": analysis_result,
+                "mode": "story_analysis",
+                "filename": filename,
+            }
+            
+            # Include file metrics in structured response if available
+            if file_metrics and "error" not in file_metrics:
+                structured_response["file_metrics"] = file_metrics
+            
             response_dict = {
                 "task_status": TaskStatus.COMPLETE.value,
                 "response": analysis_result,
-                "structured_response": {
-                    "task_status": "complete",
-                    "analysis_text": analysis_result,
-                    "mode": "story_analysis",
-                    "filename": filename,
-                },
+                "structured_response": structured_response,
                 "timestamp": datetime.now().isoformat(),
                 "mode": "story_analysis"
             }

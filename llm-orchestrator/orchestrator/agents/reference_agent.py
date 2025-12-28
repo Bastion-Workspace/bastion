@@ -55,6 +55,11 @@ class ReferenceAgentState(TypedDict):
     calculation_request: Optional[Dict[str, Any]]  # Structured calculation request
     calculation_results: Optional[Dict[str, Any]]  # Math tool results
     
+    # Visualization integration
+    needs_visualization: bool
+    visualization_request: Optional[Dict[str, Any]]  # Structured visualization request
+    visualization_results: Optional[Dict[str, Any]]  # Chart generation results
+    
     # Response
     response: Dict[str, Any]
     task_status: str
@@ -84,6 +89,7 @@ class ReferenceAgent(BaseAgent):
         workflow.add_node("process_pattern_analysis", self._process_pattern_analysis_node)
         workflow.add_node("process_insights", self._process_insights_node)
         workflow.add_node("perform_calculations", self._perform_calculations_node)
+        workflow.add_node("perform_visualization", self._perform_visualization_node)
         workflow.add_node("call_research_subgraph", self._call_research_subgraph_node)
         workflow.add_node("synthesize_response", self._synthesize_response_node)
         workflow.add_node("format_response", self._format_response_node)
@@ -109,12 +115,13 @@ class ReferenceAgent(BaseAgent):
         # Unrelated query goes directly to formatting
         workflow.add_edge("handle_unrelated_query", "format_response")
         
-        # All analysis nodes check if calculations or research are needed
+        # All analysis nodes check if calculations, visualization, or research are needed
         workflow.add_conditional_edges(
             "process_simple_qa",
             self._route_from_analysis,
             {
                 "calculations": "perform_calculations",
+                "visualization": "perform_visualization",
                 "research": "call_research_subgraph",
                 "synthesize": "synthesize_response"
             }
@@ -125,6 +132,7 @@ class ReferenceAgent(BaseAgent):
             self._route_from_analysis,
             {
                 "calculations": "perform_calculations",
+                "visualization": "perform_visualization",
                 "research": "call_research_subgraph",
                 "synthesize": "synthesize_response"
             }
@@ -135,15 +143,27 @@ class ReferenceAgent(BaseAgent):
             self._route_from_analysis,
             {
                 "calculations": "perform_calculations",
+                "visualization": "perform_visualization",
                 "research": "call_research_subgraph",
                 "synthesize": "synthesize_response"
             }
         )
         
-        # After calculations, check if research is still needed
+        # After calculations, check if visualization or research is still needed
         workflow.add_conditional_edges(
             "perform_calculations",
             self._route_after_calculations,
+            {
+                "visualization": "perform_visualization",
+                "research": "call_research_subgraph",
+                "synthesize": "synthesize_response"
+            }
+        )
+        
+        # After visualization, check if research is still needed
+        workflow.add_conditional_edges(
+            "perform_visualization",
+            self._route_after_visualization,
             {
                 "research": "call_research_subgraph",
                 "synthesize": "synthesize_response"
@@ -170,16 +190,26 @@ class ReferenceAgent(BaseAgent):
         return complexity
     
     def _route_from_analysis(self, state: ReferenceAgentState) -> str:
-        """Route based on whether calculations or research are needed"""
-        # Prioritize calculations first, then research
+        """Route based on whether calculations, visualization, or research are needed"""
+        # Prioritize calculations first, then visualization, then research
         if state.get("needs_calculations", False):
             return "calculations"
+        if state.get("needs_visualization", False):
+            return "visualization"
         if state.get("needs_external_info", False):
             return "research"
         return "synthesize"
     
     def _route_after_calculations(self, state: ReferenceAgentState) -> str:
-        """Route after calculations - check if research is still needed"""
+        """Route after calculations - check if visualization or research is still needed"""
+        if state.get("needs_visualization", False):
+            return "visualization"
+        if state.get("needs_external_info", False):
+            return "research"
+        return "synthesize"
+    
+    def _route_after_visualization(self, state: ReferenceAgentState) -> str:
+        """Route after visualization - check if research is still needed"""
         if state.get("needs_external_info", False):
             return "research"
         return "synthesize"
@@ -327,6 +357,12 @@ class ReferenceAgent(BaseAgent):
 5. **calculation_type**: If calculations needed, what type? "formula" (BTU, electrical formulas), "expression" (simple math), or "conversion" (unit conversion)
 6. **needs_external_info**: Does this query require external information (e.g., nutritional data, definitions, research)?
 7. **research_query**: If external info is needed, what should be researched? (e.g., "nutritional content of pizza")
+8. **needs_visualization**: Would this query benefit from a chart or graph? Consider:
+   - Queries asking to "show", "graph", "chart", "plot", or "visualize" data
+   - Queries about trends over time (weight, mood, food intake)
+   - Queries comparing values across categories or time periods
+   - Queries about distributions or frequency patterns
+9. **visualization_type**: If visualization needed, what type? "bar" (comparisons), "line" (trends over time), "pie" (proportions), "scatter" (correlations), "area" (cumulative trends), "heatmap" (2D patterns), "box_plot" (distributions), "histogram" (frequency distributions)
 
 **RELEVANCE EXAMPLES**:
 - "What did I write in my journal on December 5th?" → relevance: 0.95 (directly about document)
@@ -335,11 +371,13 @@ class ReferenceAgent(BaseAgent):
 - "Show me all days I mentioned feeling anxious" → relevance: 0.9 (directly about document patterns)
 
 **COMPLEXITY EXAMPLES**:
-- "What did I write in my journal on December 5th?" → simple_qa, no calculations, no external info
-- "Show me all days I mentioned feeling anxious" → pattern_analysis, no calculations, no external info
-- "What BTU requirements do I need for these rooms?" → simple_qa, needs calculations (formula: btu_hvac), no external info
-- "What's the calorie count of the foods I logged yesterday?" → simple_qa, no calculations, needs external info (nutritional data)
-- "What patterns do you notice in my logs?" → insights, no calculations, no external info
+- "What did I write in my journal on December 5th?" → simple_qa, no calculations, no external info, no visualization
+- "Show me all days I mentioned feeling anxious" → pattern_analysis, no calculations, no external info, no visualization
+- "Graph my weight over time" → pattern_analysis, no calculations, no external info, needs visualization (line chart)
+- "Chart the frequency of different foods I ate" → pattern_analysis, no calculations, no external info, needs visualization (bar or pie chart)
+- "What BTU requirements do I need for these rooms?" → simple_qa, needs calculations (formula: btu_hvac), no external info, no visualization
+- "What's the calorie count of the foods I logged yesterday?" → simple_qa, no calculations, needs external info (nutritional data), no visualization
+- "What patterns do you notice in my logs?" → insights, no calculations, no external info, no visualization
 
 Return ONLY valid JSON:
 {{
@@ -350,6 +388,8 @@ Return ONLY valid JSON:
   "calculation_type": null,
   "needs_external_info": false,
   "research_query": null,
+  "needs_visualization": false,
+  "visualization_type": null,
   "reasoning": "Brief explanation"
 }}"""
             
@@ -375,9 +415,11 @@ Return ONLY valid JSON:
                         "calculation_type": {"type": ["string", "null"]},
                         "needs_external_info": {"type": "boolean"},
                         "research_query": {"type": ["string", "null"]},
+                        "needs_visualization": {"type": "boolean"},
+                        "visualization_type": {"type": ["string", "null"]},
                         "reasoning": {"type": "string"}
                     },
-                    "required": ["query_relevance", "is_unrelated", "complexity_level", "needs_calculations", "needs_external_info"]
+                    "required": ["query_relevance", "is_unrelated", "complexity_level", "needs_calculations", "needs_external_info", "needs_visualization"]
                 }
                 structured_llm = llm.with_structured_output(schema)
                 result = await structured_llm.ainvoke(llm_messages)
@@ -399,8 +441,10 @@ Return ONLY valid JSON:
             calculation_type = result_dict.get("calculation_type")
             needs_external = result_dict.get("needs_external_info", False)
             research_query = result_dict.get("research_query")
+            needs_visualization = result_dict.get("needs_visualization", False)
+            visualization_type = result_dict.get("visualization_type")
             
-            logger.info(f"📚 Query relevance: {query_relevance:.2f}, is_unrelated: {is_unrelated}, complexity: {complexity}, needs calculations: {needs_calculations}, needs external info: {needs_external}")
+            logger.info(f"📚 Query relevance: {query_relevance:.2f}, is_unrelated: {is_unrelated}, complexity: {complexity}, needs calculations: {needs_calculations}, needs external info: {needs_external}, needs visualization: {needs_visualization}")
             
             return {
                 "query_relevance": query_relevance,
@@ -410,6 +454,8 @@ Return ONLY valid JSON:
                 "calculation_type": calculation_type,
                 "needs_external_info": needs_external,
                 "research_query": research_query,
+                "needs_visualization": needs_visualization,
+                "visualization_request": {"chart_type": visualization_type} if visualization_type else None,
                 # ✅ CRITICAL: Preserve state for subsequent nodes
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
@@ -425,6 +471,7 @@ Return ONLY valid JSON:
                 "query_relevance": 1.0,
                 "is_unrelated": False,
                 "needs_external_info": False,
+                "needs_visualization": False,
                 # ✅ CRITICAL: Preserve state even on error
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
@@ -964,6 +1011,160 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 "query": state.get("query", "")
             }
     
+    async def _perform_visualization_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
+        """Perform visualization using chart generation tool"""
+        try:
+            query = state.get("query", "")
+            reference_content = state.get("reference_content", "")
+            analysis_results = state.get("analysis_results", {})
+            visualization_request = state.get("visualization_request", {})
+            chart_type = visualization_request.get("chart_type") if visualization_request else None
+            messages = state.get("messages", [])
+            
+            # Use LLM to extract visualization data from analysis results and document
+            fast_model = self._get_fast_model(state)
+            llm = self._get_llm(temperature=0.1, model=fast_model, state=state)
+            
+            # Build prompt to extract visualization data
+            prompt = f"""Extract data for visualization from this query, reference document, and analysis results:
+
+**QUERY**: {query}
+
+**CHART TYPE REQUESTED**: {chart_type or "auto-detect"}
+
+**ANALYSIS RESULTS**:
+{json.dumps(analysis_results, indent=2)[:2000]}
+
+**REFERENCE DOCUMENT CONTENT** (sample):
+{reference_content[:1500]}
+
+**TASK**: Extract data points and structure a visualization request.
+
+**INSTRUCTIONS**:
+1. Determine the best chart type if not specified: bar (comparisons), line (trends over time), pie (proportions), scatter (correlations), area (cumulative), heatmap (2D patterns), box_plot (distributions), histogram (frequencies)
+2. Extract data from analysis_results:
+   - For frequencies: use frequencies dict (labels=keys, values=values)
+   - For temporal trends: extract dates/values from patterns metadata
+   - For comparisons: use patterns with occurrences
+   - For time series: extract dates and corresponding values
+3. Structure the visualization request as JSON matching create_chart_tool format
+
+**OUTPUT FORMAT**: Return ONLY valid JSON:
+{{
+  "chart_type": "bar|line|pie|scatter|area|heatmap|box_plot|histogram",
+  "data": {{
+    "labels": ["label1", "label2"] (for bar/pie),
+    "values": [10, 20] (for bar/pie/histogram),
+    "x": [1, 2, 3] (for line/scatter/area),
+    "y": [10, 20, 30] (for line/scatter/area),
+    "series": [{{"x": [1,2], "y": [10,20], "name": "Series1"}}] (for multi-series line),
+    "z": [[1,2],[3,4]] (for heatmap - 2D array)
+  }},
+  "title": "Chart title",
+  "x_label": "X axis label",
+  "y_label": "Y axis label",
+  "interactive": true
+}}
+
+Return ONLY the JSON object, no markdown, no code blocks."""
+            
+            # Build messages with conversation history using standardized helper
+            system_prompt = "You are a data visualization assistant. Extract data from analysis results and structure visualization requests for chart generation."
+            llm_messages = self._build_conversational_agent_messages(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                messages_list=messages,
+                look_back_limit=4
+            )
+            
+            try:
+                schema = {
+                    "type": "object",
+                    "properties": {
+                        "chart_type": {"type": "string"},
+                        "data": {"type": "object"},
+                        "title": {"type": "string"},
+                        "x_label": {"type": "string"},
+                        "y_label": {"type": "string"},
+                        "interactive": {"type": "boolean"}
+                    },
+                    "required": ["chart_type", "data"]
+                }
+                structured_llm = llm.with_structured_output(schema)
+                result = await structured_llm.ainvoke(llm_messages)
+                viz_request = result if isinstance(result, dict) else result.dict() if hasattr(result, 'dict') else result.model_dump()
+            except Exception:
+                # Fallback to manual parsing
+                response = await llm.ainvoke(llm_messages)
+                content = response.content if hasattr(response, 'content') else str(response)
+                viz_request = self._parse_json_response(content) or {}
+            
+            if not viz_request or "chart_type" not in viz_request or "data" not in viz_request:
+                return {
+                    "visualization_results": None,
+                    "needs_visualization": False,
+                    "error": "Could not extract visualization request from query and analysis",
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
+                }
+            
+            # Call visualization tool
+            from orchestrator.tools.visualization_tools import create_chart_tool
+            
+            chart_type = viz_request.get("chart_type")
+            chart_data = viz_request.get("data", {})
+            chart_title = viz_request.get("title", "")
+            x_label = viz_request.get("x_label", "")
+            y_label = viz_request.get("y_label", "")
+            interactive = viz_request.get("interactive", True)
+            
+            visualization_result = await create_chart_tool(
+                chart_type=chart_type,
+                data=chart_data,
+                title=chart_title,
+                x_label=x_label,
+                y_label=y_label,
+                interactive=interactive,
+                include_static=True
+            )
+            
+            if visualization_result and visualization_result.get("success"):
+                logger.info(f"✅ Visualization created successfully: {chart_type}, format: {visualization_result.get('output_format')}")
+            else:
+                logger.warning(f"⚠️ Visualization failed: {visualization_result.get('error') if visualization_result else 'Unknown error'}")
+            
+            return {
+                "visualization_results": visualization_result,
+                "visualization_request": viz_request,
+                "static_visualization_data": visualization_result.get("static_svg") if visualization_result else None,
+                "static_format": visualization_result.get("static_format") if visualization_result else None,
+                "needs_visualization": False,  # Visualization completed
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Visualization failed: {e}")
+            return {
+                "visualization_results": None,
+                "needs_visualization": False,
+                "error": str(e),
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
+    
     async def _call_research_subgraph_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
         """Call research agent as subgraph for external information"""
         try:
@@ -1067,10 +1268,11 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             }
     
     async def _synthesize_response_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
-        """Synthesize analysis results with calculations and research (if any)"""
+        """Synthesize analysis results with calculations, visualization, and research (if any)"""
         try:
             analysis_results = state.get("analysis_results", {})
             calculation_results = state.get("calculation_results")
+            visualization_results = state.get("visualization_results")
             research_results = state.get("research_results")
             query = state.get("query", "")
             query_complexity = state.get("query_complexity", "simple_qa")
@@ -1097,6 +1299,29 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 
                 logger.info("📚 Integrated calculation results into response")
             
+            # If visualization was generated, integrate it
+            if visualization_results and visualization_results.get("success"):
+                chart_data = visualization_results.get("chart_data", "")
+                output_format = visualization_results.get("output_format", "")
+                chart_type = visualization_results.get("chart_type", "")
+                
+                # Add visualization to response
+                viz_section = f"\n\n**Visualization**:\n"
+                
+                if output_format == "html":
+                    # Interactive HTML chart - use special markdown code block format
+                    # Frontend will detect language "html:chart" and render as HTML
+                    viz_section += f"\n```html:chart\n{chart_data}\n```\n"
+                elif output_format == "base64_png":
+                    # Base64 image - embed as image
+                    viz_section += f"\n![Chart: {chart_type}]({chart_data})\n"
+                else:
+                    viz_section += f"Chart generated: {chart_type} ({output_format})\n"
+                
+                response_text = f"""{response_text}{viz_section}"""
+                
+                logger.info(f"📚 Integrated visualization into response: {chart_type}, format: {output_format}")
+            
             # If research was used, integrate it
             if research_results:
                 research_response = research_results.get("response", "")
@@ -1120,6 +1345,10 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 "insights": analysis_results.get("insights"),
                 "calculations_used": calculation_results is not None and calculation_results.get("success", False),
                 "calculation_result": calculation_results.get("result") if calculation_results else None,
+                "visualization_used": visualization_results is not None and visualization_results.get("success", False),
+                "visualization_data": visualization_results if visualization_results and visualization_results.get("success") else None,
+                "static_visualization_data": visualization_results.get("static_svg") if visualization_results and visualization_results.get("success") else None,
+                "static_format": visualization_results.get("static_format") if visualization_results and visualization_results.get("success") else None,
                 "research_used": research_results is not None,
                 "research_citations": research_results.get("citations", []) if research_results else None,
                 "confidence": 0.85,
@@ -1128,6 +1357,8 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             
             return {
                 "response": response,
+                "static_visualization_data": visualization_results.get("static_svg") if visualization_results and visualization_results.get("success") else None,
+                "static_format": visualization_results.get("static_format") if visualization_results and visualization_results.get("success") else None,
                 # ✅ CRITICAL: Preserve state for subsequent nodes
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
@@ -1169,6 +1400,8 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             return {
                 "response": response,
                 "task_status": response.get("task_status", "complete"),
+                "static_visualization_data": response.get("static_visualization_data"),
+                "static_format": response.get("static_format"),
                 "messages": state.get("messages", []),
                 "shared_memory": state.get("shared_memory", {}),
                 # ✅ CRITICAL: Preserve state (final node, but good practice)
@@ -1221,7 +1454,13 @@ Return ONLY the JSON object, no markdown, no code blocks."""
 - FACTUAL: Base responses on actual document content
 - MATH TOOL INTEGRATION: When calculations are needed (BTU, electrical, etc.), the system will automatically use the math tool for accurate results
 - RESEARCH INTEGRATION: When you need external information, the system will automatically call the research agent
-- CLEAR COMMUNICATION: Be clear about what information comes from the document vs. calculations vs. external research
+- VISUALIZATION TOOL: You have access to a chart generation tool for visualizing data patterns, trends, and distributions. The system will automatically detect when visualizations would be helpful and generate them. Use visualizations when:
+  * Showing trends over time (weight, mood, food intake, etc.)
+  * Comparing values across categories or time periods
+  * Displaying distributions or frequency patterns
+  * User explicitly requests a chart, graph, or visualization
+  Available chart types: bar (comparisons), line (trends over time), pie (proportions), scatter (correlations), area (cumulative trends), heatmap (2D patterns), box_plot (distributions), histogram (frequency distributions)
+- CLEAR COMMUNICATION: Be clear about what information comes from the document vs. calculations vs. visualizations vs. external research
 
 **RESPONSE STYLE**:
 - Supportive and understanding tone
@@ -1290,6 +1529,9 @@ When providing pattern analysis or insights, use structured JSON with:
                 "calculation_type": None,
                 "calculation_request": None,
                 "calculation_results": None,
+                "needs_visualization": False,
+                "visualization_request": None,
+                "visualization_results": None,
                 "response": {},
                 "task_status": "",
                 "error": ""

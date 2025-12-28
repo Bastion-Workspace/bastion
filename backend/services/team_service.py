@@ -513,20 +513,30 @@ class TeamService:
                 # Set user context for RLS
                 await conn.execute("SELECT set_config('app.current_user_id', $1, false)", added_by)
                 
-                # Check if already member
-                existing = await conn.fetchval("""
-                    SELECT 1 FROM team_members
-                    WHERE team_id = $1 AND user_id = $2
-                """, team_id, user_id)
+                # Check if already member (may not work due to RLS, but try anyway)
+                try:
+                    existing = await conn.fetchval("""
+                        SELECT 1 FROM team_members
+                        WHERE team_id = $1 AND user_id = $2
+                    """, team_id, user_id)
+                    
+                    if existing:
+                        raise ValueError("User is already a team member")
+                except Exception:
+                    # RLS might prevent seeing the row, continue to try insert
+                    pass
                 
-                if existing:
-                    raise ValueError("User is already a team member")
-                
-                # Add member
-                await conn.execute("""
+                # Add member (with ON CONFLICT to handle race conditions and RLS edge cases)
+                result = await conn.execute("""
                     INSERT INTO team_members (team_id, user_id, role, invited_by)
                     VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (team_id, user_id) DO NOTHING
                 """, team_id, user_id, role, added_by)
+                
+                # Check if insert actually happened
+                # asyncpg returns "INSERT 0 1" for success, "INSERT 0 0" for conflict
+                if result == "INSERT 0 0":
+                    raise ValueError("User is already a team member")
                 
                 # Add to team room if exists
                 if self.messaging_service:

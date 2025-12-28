@@ -9,10 +9,10 @@ from services.epub_export_service import EpubExportService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/export", tags=["Export"])
+router = APIRouter(tags=["Export"])
 
 
-@router.post("/epub")
+@router.post("/api/export/epub")
 async def export_epub(
     request: EpubExportRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -26,7 +26,11 @@ async def export_epub(
                 "include_cover": request.include_cover,
                 "split_on_headings": request.split_on_headings,
                 "split_on_heading_levels": request.split_on_heading_levels,
-                "metadata": request.metadata,
+                "metadata": {
+                    **(request.metadata or {}),
+                    "document_id": request.document_id,
+                    "folder_id": request.folder_id,
+                },
                 "heading_alignments": request.heading_alignments,
                 "indent_paragraphs": request.indent_paragraphs,
                 "no_indent_first_paragraph": request.no_indent_first_paragraph,

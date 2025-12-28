@@ -39,8 +39,17 @@ class ElectronicsSaveNodes:
         """
         doc_id = None
         
-        if target_file == "project_plan":
+        # Check if target_file matches project plan (handle both "project_plan" and "project_plan.md")
+        is_project_plan = (
+            target_file == "project_plan" or
+            target_file == "project_plan.md" or
+            target_file.endswith("/project_plan.md") or
+            target_file.endswith("\\project_plan.md")
+        )
+        
+        if is_project_plan:
             doc_id = active_editor.get("document_id")
+            logger.info(f"🔌 Resolving project_plan: active_editor.document_id={doc_id}, canonical_path={active_editor.get('canonical_path')}")
             
             if not doc_id and active_editor.get("canonical_path"):
                 try:
@@ -56,23 +65,13 @@ class ElectronicsSaveNodes:
                 except Exception as e:
                     logger.warning(f"Failed to lookup document_id from canonical_path: {e}")
             
-            if not doc_id and active_editor.get("filename"):
-                try:
-                    from orchestrator.backend_tool_client import get_backend_tool_client
-                    client = await get_backend_tool_client()
-                    search_results = await client.search_documents_structured(
-                        query=active_editor.get("filename"),
-                        user_id=user_id,
-                        limit=5
-                    )
-                    for result in search_results:
-                        doc_metadata = result.get("document", {})
-                        if doc_metadata.get("filename") == active_editor.get("filename"):
-                            doc_id = doc_metadata.get("document_id")
-                            logger.info(f"🔌 Found project_plan document_id via filename search: {doc_id}")
-                            break
-                except Exception as e:
-                    logger.warning(f"Failed to lookup document_id from filename: {e}")
+            # Also check if filename matches
+            if not doc_id:
+                editor_filename = active_editor.get("filename", "")
+                if editor_filename == "project_plan.md" or editor_filename.endswith("/project_plan.md"):
+                    doc_id = active_editor.get("document_id")
+                    if doc_id:
+                        logger.info(f"🔌 Found project_plan document_id from filename match: {doc_id}")
             
             logger.info(f"🔌 Routing to project_plan (document_id: {doc_id})")
         else:
@@ -271,6 +270,7 @@ summary: {file_summary}
                 # Check if this edit targets the project plan (active editor)
                 is_plan_edit = (
                     target_file == "project_plan" or
+                    target_file == "project_plan.md" or
                     target_file == active_editor.get("filename", "") or
                     target_file == active_editor.get("canonical_path", "")
                 )
@@ -281,12 +281,15 @@ summary: {file_summary}
                         item["content"], state.get("query", "")
                     )
                 
-                if is_plan_edit and editing_mode:
+                # Use inline editing if file is open (has document_id) - works in both editing and generation mode
+                has_active_editor = bool(active_editor and active_editor.get("document_id"))
+                
+                if is_plan_edit and has_active_editor:
                     # Store for inline editing (skip frontmatter updates - apply directly)
                     if item.get("section", "").lower() != "frontmatter":
                         plan_edits.append(item)
                 else:
-                    # Apply directly (referenced files or generation mode)
+                    # Apply directly (referenced files or no active editor)
                     referenced_edits.append(item)
             
             # **PHASE 2B: GROUP REFERENCED EDITS BY DOCUMENT**
@@ -363,15 +366,25 @@ summary: {file_summary}
             logger.info(f"✅ Saved content to {len(saved_files)} files: {', '.join(saved_files)}")
             
             # **PHASE 3B: HANDLE PLAN EDITS FOR INLINE EDITING**
-            # If we have plan edits in editing mode, store them for operation resolution
-            # Otherwise, apply plan edits directly (generation mode or frontmatter-only)
-            if plan_edits and editing_mode:
-                logger.info(f"📝 Storing {len(plan_edits)} plan edits for inline editing")
+            # If we have plan edits AND active editor is open, use inline editing (editor_operations)
+            # This works in both editing_mode and generation_mode - if file is open, show diffs!
+            has_active_editor = bool(active_editor and active_editor.get("document_id"))
+            
+            if plan_edits and has_active_editor:
+                logger.info(f"📝 Storing {len(plan_edits)} plan edits for inline editing (file is open - will show diffs)")
                 # Store in state for operation resolution node
                 return {
                     "plan_edits": plan_edits,
                     "saved_files": saved_files,
-                    "cleanup_operations": cleanup_operations
+                    "cleanup_operations": cleanup_operations,
+                    "editing_mode": True,  # Force editing mode for inline diffs
+                    # ✅ CRITICAL: Preserve critical state keys
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
                 }
             elif plan_edits:
                 # Generation mode: apply plan edits directly

@@ -24,6 +24,7 @@ class GeneralProjectPlanNodes:
     async def update_project_plan_node(self, state) -> Dict[str, Any]:
         """
         Proactively update project plan with high-level summaries and decisions.
+        Uses header-based sections (##) for single-document structure.
         
         This node updates the project plan with:
         - High-level conversation summaries
@@ -41,7 +42,10 @@ class GeneralProjectPlanNodes:
             metadata = state.get("metadata", {})
             active_editor = metadata.get("active_editor") or metadata.get("shared_memory", {}).get("active_editor", {})
             
-            project_plan_doc_id = active_editor.get("document_id")
+            # Resolve project document ID (explicit or from active editor)
+            project_plan_doc_id = state.get("project_document_id") or active_editor.get("document_id")
+            existing_sections = state.get("existing_sections", [])
+            
             if not project_plan_doc_id:
                 logger.info("No project plan document - skipping update")
                 return {
@@ -52,7 +56,9 @@ class GeneralProjectPlanNodes:
                     "messages": state.get("messages", []),
                     "query": state.get("query", ""),
                     "referenced_context": state.get("referenced_context", {}),
-                    "project_decisions": state.get("project_decisions", [])
+                    "project_decisions": state.get("project_decisions", []),
+                    "existing_sections": existing_sections,
+                    "project_document_id": project_plan_doc_id
                 }
             
             # Get current project plan content
@@ -68,7 +74,9 @@ class GeneralProjectPlanNodes:
                     "messages": state.get("messages", []),
                     "query": state.get("query", ""),
                     "referenced_context": state.get("referenced_context", {}),
-                    "project_decisions": state.get("project_decisions", [])
+                    "project_decisions": state.get("project_decisions", []),
+                    "existing_sections": existing_sections,
+                    "project_document_id": project_plan_doc_id
                 }
             
             # Build conversation summary (last 5-10 messages)
@@ -91,14 +99,38 @@ class GeneralProjectPlanNodes:
                     if decision_text:
                         decision_summary += f"- **{decision_type.replace('_', ' ').title()}**: {decision_text}\n"
             
+            # Standard header sections for single-document structure
+            standard_sections = [
+                "Project Overview",
+                "Supplies Needed",
+                "Tasks and Milestones",
+                "Design Decisions",
+                "Notes and Details"
+            ]
+            
             # Use LLM to generate project plan update
             fast_model = self.agent._get_fast_model(state)
             llm = self.agent._get_llm(temperature=0.2, model=fast_model, state=state)
             
-            prompt = f"""You are a project plan maintenance expert. Update the project plan with high-level summaries and decisions.
+            sections_info = ""
+            if existing_sections:
+                sections_info = f"\n**EXISTING SECTIONS**: {', '.join(existing_sections)}\nUse these existing sections when possible. If a section doesn't exist, use the standard section names below."
+            else:
+                sections_info = "\n**NO EXISTING SECTIONS FOUND** - Use the standard section names below."
+            
+            prompt = f"""You are a project plan maintenance expert. Update the project plan using standardized header-based sections (##).
 
 **CURRENT PROJECT PLAN**:
 {current_content[:3000]}
+
+{sections_info}
+
+**STANDARD SECTIONS** (use these header names):
+- ## Project Overview: Goals, scope, and high-level summary
+- ## Supplies Needed: Tools, materials, parts, and hardware
+- ## Tasks and Milestones: TODO items, schedule, and progress
+- ## Design Decisions: Rationale for choices made during the project
+- ## Notes and Details: Any other relevant information
 
 **RECENT CONVERSATION**:
 {conversation_summary[:1500]}
@@ -109,15 +141,24 @@ class GeneralProjectPlanNodes:
 **CURRENT QUERY**: {query}
 
 **TASK**: Generate updates to the project plan that:
-1. **Summarize high-level decisions** made in recent conversation
-2. **Update project overview** with key information discussed
-3. **Maintain project state** - what's been decided, what's in progress, what's planned
-4. **Early project definition** - if project plan is mostly empty/placeholder, fill it with what's been discussed
-5. **Keep it high-level** - don't include detailed specs (those go in specific files)
+1. **Target specific headers** - Use the standard section names above (e.g., "Supplies Needed", "Tasks and Milestones")
+2. **Summarize high-level decisions** made in recent conversation (goes in "Design Decisions")
+3. **Update project overview** with key information discussed (goes in "Project Overview")
+4. **Maintain project state** - what's been decided, what's in progress, what's planned
+5. **Early project definition** - if project plan is mostly empty/placeholder, fill it with what's been discussed
+6. **Keep it high-level** - organize information under appropriate headers
 
 **UPDATE STRATEGY**:
-- If project plan has placeholder sections, replace them with actual information
-- If project plan has existing sections, update them with new information
+- Match content to the most appropriate standard section header
+- If a section exists, update it; if not, create it
+- **Large-scale operations** (section-level):
+  - Use "replace" or "update" to replace entire section content
+  - Use "append" to add new content to end of section
+  - Use when making broad changes or adding substantial new information
+- **Granular operations** (text-level within section):
+  - Use "granular_replace" with original_text to replace specific text within a section
+  - Use "granular_insert" with anchor_text to insert text after specific content
+  - Use when making precise edits to existing content (e.g., updating a single item in a list, fixing a typo, changing a specific detail)
 - Focus on: Project goals, design decisions, approach overview, key constraints, timeline
 - Keep summaries concise and high-level
 
@@ -125,13 +166,24 @@ class GeneralProjectPlanNodes:
 {{
   "updates": [
     {{
-      "section": "Section name (e.g., 'Project Overview', 'Key Decisions', 'Design Approach')",
-      "content": "Markdown formatted content to update this section",
-      "action": "update|append|replace"
+      "section": "Supplies Needed",
+      "content": "- Item 1\\n- Item 2",
+      "action": "update|append|replace|granular_replace",
+      "original_text": "Optional: specific text to replace (for granular edits within section)",
+      "anchor_text": "Optional: text to insert after (for granular inserts)"
     }}
   ],
   "should_update": true
 }}
+
+**ACTION TYPES**:
+- "replace": Replace entire section (large-scale)
+- "append": Append to end of section (large-scale)
+- "update": Update entire section (same as replace)
+- "granular_replace": Replace specific text within section (granular - requires original_text)
+- "granular_insert": Insert text at specific point (granular - requires anchor_text)
+
+For granular edits, provide original_text or anchor_text to target specific content within the section.
 
 Return ONLY the JSON object, no markdown, no code blocks."""
             
@@ -146,8 +198,11 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                                 "properties": {
                                     "section": {"type": "string"},
                                     "content": {"type": "string"},
-                                    "action": {"type": "string"}
-                                }
+                                    "action": {"type": "string"},
+                                    "original_text": {"type": "string", "description": "For granular_replace: specific text to replace within section"},
+                                    "anchor_text": {"type": "string", "description": "For granular_insert: text to insert after within section"}
+                                },
+                                "required": ["section", "content", "action"]
                             }
                         },
                         "should_update": {"type": "boolean"}
@@ -239,7 +294,9 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 "messages": state.get("messages", []),
                 "query": state.get("query", ""),
                 "referenced_context": state.get("referenced_context", {}),
-                "project_decisions": state.get("project_decisions", [])
+                "project_decisions": state.get("project_decisions", []),
+                "existing_sections": existing_sections,
+                "project_document_id": project_plan_doc_id
             }
             
         except Exception as e:
@@ -254,7 +311,9 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 "messages": state.get("messages", []),
                 "query": state.get("query", ""),
                 "referenced_context": state.get("referenced_context", {}),
-                "project_decisions": state.get("project_decisions", [])
+                "project_decisions": state.get("project_decisions", []),
+                "existing_sections": state.get("existing_sections", []),
+                "project_document_id": state.get("project_document_id")
             }
 
 

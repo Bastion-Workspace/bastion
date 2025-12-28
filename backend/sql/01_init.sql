@@ -2497,21 +2497,41 @@ ALTER TABLE team_posts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE post_reactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE post_comments ENABLE ROW LEVEL SECURITY;
 
--- RLS Policy: Users can see teams they are members of
+-- RLS Policy: Users can see teams they are members of, or teams they created
 CREATE POLICY teams_select_policy ON teams
     FOR SELECT
     USING (
+        -- Allow if user is a member
         EXISTS (
             SELECT 1 FROM team_members 
             WHERE team_members.team_id = teams.team_id 
             AND team_members.user_id = current_setting('app.current_user_id', true)
         )
+        -- OR if user is the creator (needed for adding first member during team creation)
+        OR created_by = current_setting('app.current_user_id', true)::varchar
     );
 
--- RLS Policy: Users can see their own team memberships
+-- Function to check team membership (bypasses RLS to break recursion)
+CREATE OR REPLACE FUNCTION check_team_membership(check_team_id UUID, check_user_id VARCHAR)
+RETURNS BOOLEAN AS $$
+BEGIN
+    -- This function runs with the privileges of the creator (postgres)
+    -- and thus ignores RLS policies on the tables it queries.
+    RETURN EXISTS (
+        SELECT 1 FROM team_members
+        WHERE team_id = check_team_id 
+        AND user_id = check_user_id
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- RLS Policy: Users can see team members of teams they belong to
 CREATE POLICY team_members_select_policy ON team_members
     FOR SELECT
-    USING (user_id = current_setting('app.current_user_id', true));
+    USING (
+        -- User can see members of teams they belong to (using function to break recursion)
+        check_team_membership(team_id, current_setting('app.current_user_id', true)::varchar)
+    );
 
 -- RLS Policy: Users can see invitations sent to them
 CREATE POLICY team_invitations_select_policy ON team_invitations

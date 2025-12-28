@@ -17,9 +17,6 @@ from services.celery_utils import (
     create_progress_meta,
     safe_task_wrapper
 )
-from services.langgraph_agents.rss_background_agent import RSSBackgroundAgent
-from services.settings_service import settings_service
-from services.database_manager.database_helpers import execute
 
 logger = logging.getLogger(__name__)
 
@@ -375,7 +372,8 @@ async def _async_poll_rss_feeds(
     try:
         update_task_progress(task, 2, 4, "Creating RSS background agent...")
         
-        # Initialize RSS background agent
+        # Initialize RSS background agent - LAZY IMPORT
+        from services.langgraph_agents.rss_background_agent import RSSBackgroundAgent
         rss_agent = RSSBackgroundAgent()
         
         # Prepare state for RSS processing
@@ -831,7 +829,8 @@ async def _async_extract_full_content(task, user_id: str, article_ids: List[str]
         
         update_task_progress(task, 3, 4, f"Extracting full content for {len(articles)} articles...")
         
-        # Initialize RSS background agent for content extraction
+        # Initialize RSS background agent for content extraction - LAZY IMPORT
+        from services.langgraph_agents.rss_background_agent import RSSBackgroundAgent
         rss_agent = RSSBackgroundAgent()
         
         articles_processed = 0
@@ -969,6 +968,9 @@ def purge_old_news_task(self):
         def _run():
             async def _purge():
                 try:
+                    from services.settings_service import settings_service
+                    from services.database_manager.database_helpers import execute
+                    
                     if not getattr(settings_service, "_initialized", False):
                         await settings_service.initialize()
                     days = await settings_service.get_setting("news.retention_days", 14)

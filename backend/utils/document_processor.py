@@ -169,9 +169,9 @@ class DocumentProcessor:
                 logger.info(f"✅ Org file registered for structured access (no vectorization)")
                 return result
             
-            # ROOSEVELT FIX: Images are stored but NOT vectorized!
+            # Images are stored but NOT vectorized!
             if doc_type == 'image':
-                logger.info(f"⏭️  BULLY! Skipping vectorization for image file (binary data, not text)")
+                logger.info(f"⏭️ Skipping vectorization for image file (binary data, not text)")
                 logger.info(f"📷 Image stored for reference but not embedded")
                 
                 # Return empty processing result - file is stored but not vectorized
@@ -239,27 +239,17 @@ class DocumentProcessor:
             raise
     
     async def _process_pdf(self, file_path: str, document_id: str) -> tuple[str, float]:
-        """Process PDF document with OCR integration
+        """Process PDF document with automated fallback to OCR
         
         Args:
             file_path: Path to the PDF file
-            document_id: UUID of the document for OCR lookup
+            document_id: UUID of the document
         """
         text = ""
         ocr_confidence = 1.0
         
         try:
-            # First check if we have OCR text available (from previous OCR processing)
-            if self.ocr_service:
-                ocr_text = await self.ocr_service.get_ocr_text_for_embedding(document_id)
-                if ocr_text:
-                    logger.info(f"✅ Using OCR text for document {document_id}")
-                    # Get OCR metadata for confidence
-                    ocr_metadata = await self.ocr_service.get_ocr_metadata(document_id)
-                    ocr_confidence = ocr_metadata.get("ocr_confidence", 0.8)
-                    return ocr_text, ocr_confidence
-            
-            # If no OCR text available, try standard text extraction
+            # Try standard text extraction
             with open(file_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
                 for page in pdf_reader.pages:
@@ -267,7 +257,7 @@ class DocumentProcessor:
                     if page_text.strip():
                         text += page_text + "\n"
             
-            # If no text extracted, try pdfplumber
+            # If no text extracted, try pdfplumber (better for some layouts)
             if not text.strip():
                 with pdfplumber.open(file_path) as pdf:
                     for page in pdf.pages:
@@ -275,12 +265,13 @@ class DocumentProcessor:
                         if page_text:
                             text += page_text + "\n"
             
-            # If still no text, try OCR as fallback
+            # If still no text, the PDF is likely a scan - trigger OCR fallback
             if not text.strip():
+                logger.info(f"🔍 No text found in {document_id}, triggering OCR fallback...")
                 text, ocr_confidence = await self._ocr_pdf(file_path)
             
         except Exception as e:
-            logger.warning(f"⚠️  PDF processing failed, trying OCR: {e}")
+            logger.warning(f"⚠️ PDF text extraction failed, trying OCR: {e}")
             text, ocr_confidence = await self._ocr_pdf(file_path)
         
         return text, ocr_confidence
@@ -850,13 +841,13 @@ class DocumentProcessor:
             email_body = '\n'.join(lines[content_start:])
             
             # Now chunk this individual email with strict token limits
-            email_chunks = self._chunk_single_email(email_body, file_path, chunk_index, file_name)
+            email_chunks = self._chunk_single_email(email_body, file_path, document_id, chunk_index, file_name)
             chunks.extend(email_chunks)
             chunk_index += len(email_chunks)
         
         return chunks
     
-    def _chunk_single_email(self, email_text: str, file_path: str, start_index: int, file_name: str) -> List[Chunk]:
+    def _chunk_single_email(self, email_text: str, file_path: str, document_id: str, start_index: int, file_name: str) -> List[Chunk]:
         """Chunk a single email with very strict token limits"""
         chunks = []
         lines = email_text.split('\n')

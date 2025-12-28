@@ -90,14 +90,8 @@ class CapabilityWorkflowEngine:
             workflow_steps.extend(collaboration_steps)
             
             # **STEP 4: DATA FORMATTING** (if beneficial)
-            if self._should_add_formatting_step(capability_result):
-                workflow_steps.append(WorkflowStep(
-                    step_type=WorkflowStepType.DATA_FORMATTING,
-                    agent_type="data_formatting_agent",
-                    description="Format results into structured tables/charts",
-                    prerequisites=[primary_agent],
-                    auto_execute=True  # Data formatting auto-executes
-                ))
+            # Note: Data formatting is now handled internally by research_agent via subgraph
+            # No need to add explicit formatting steps here
             
             logger.info(f"🗂️ WORKFLOW PLANNED: {len(workflow_steps)} steps for {capability_result.intent_type}")
             return workflow_steps
@@ -156,18 +150,8 @@ class CapabilityWorkflowEngine:
                     ))
             
             # **ANY AGENT → DATA FORMATTING**
-            # Check if result might benefit from formatting
-            if len(capability_result.capable_agents) > 1:
-                # Multiple data sources suggest formatting might be beneficial
-                formatting_agent_info = self._agent_network.get_agent_info("data_formatting_agent")
-                if formatting_agent_info and formatting_agent_info.collaboration_permission == CollaborationPermission.AUTO_USE:
-                    collaboration_steps.append(WorkflowStep(
-                        step_type=WorkflowStepType.DATA_FORMATTING,
-                        agent_type="data_formatting_agent",
-                        description="Auto-format results into structured presentation",
-                        prerequisites=[primary_agent],
-                        auto_execute=True
-                    ))
+            # Note: Data formatting is now handled internally by research_agent via subgraph
+            # No need to add explicit formatting steps here
             
             logger.info(f"🤝 COLLABORATION OPPORTUNITIES: {len(collaboration_steps)} steps identified")
             return collaboration_steps

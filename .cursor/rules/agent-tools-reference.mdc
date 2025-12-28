@@ -274,6 +274,159 @@ from orchestrator.tools.web_tools import search_web_structured
 results = await search_web_structured(query="Arduino ESP32 tutorial", num_results=10)
 ```
 
+### Visualization Tools (`orchestrator/tools/visualization_tools.py`)
+**Pure utility tools for generating charts and graphs from structured data**
+
+- `create_chart_tool(chart_type, data, title, x_label, y_label, interactive, color_scheme, width, height)` - Generate charts and graphs
+
+**Key Features:**
+- **Comprehensive chart types**: bar, line, pie, scatter, area, heatmap, box_plot, histogram
+- **Interactive and static output**: Generate interactive HTML charts or base64-encoded PNG images
+- **Flexible data formats**: Supports single and multiple series data
+- **Professional appearance**: Uses Plotly for polished, modern charts
+
+**Chart Types and Data Formats:**
+
+**Bar Chart:**
+```python
+data = {
+    "labels": ["Q1", "Q2", "Q3", "Q4"],
+    "values": [100, 150, 120, 180],
+    "series_name": "Sales",  # optional
+    "orientation": "v"  # "v" for vertical, "h" for horizontal
+}
+```
+
+**Line Chart (single series):**
+```python
+data = {
+    "x": [1, 2, 3, 4, 5],
+    "y": [10, 15, 13, 17, 20],
+    "series_name": "Temperature"
+}
+```
+
+**Line Chart (multiple series):**
+```python
+data = {
+    "series": [
+        {"x": [1, 2, 3], "y": [10, 15, 13], "name": "Series A"},
+        {"x": [1, 2, 3], "y": [8, 12, 11], "name": "Series B"}
+    ]
+}
+```
+
+**Pie Chart:**
+```python
+data = {
+    "labels": ["Chrome", "Firefox", "Safari", "Edge"],
+    "values": [45, 25, 20, 10]
+}
+```
+
+**Scatter Plot:**
+```python
+data = {
+    "x": [1, 2, 3, 4, 5],
+    "y": [2, 4, 3, 5, 6],
+    "series_name": "Data Points"
+}
+```
+
+**Area Chart:**
+```python
+data = {
+    "x": [1, 2, 3, 4, 5],
+    "y": [10, 12, 11, 15, 14],
+    "series_name": "Revenue"
+}
+```
+
+**Heatmap:**
+```python
+data = {
+    "z": [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+    "x_labels": ["A", "B", "C"],  # optional
+    "y_labels": ["Row 1", "Row 2", "Row 3"]  # optional
+}
+```
+
+**Box Plot:**
+```python
+data = {
+    "values": [10, 12, 11, 15, 14, 13, 16, 12, 14, 15],  # Single group
+    # OR multiple groups:
+    "labels": ["Group A", "Group B"],
+    "values": [[10, 12, 11], [15, 14, 13]]
+}
+```
+
+**Histogram:**
+```python
+data = {
+    "values": [10, 12, 11, 15, 14, 13, 16, 12, 14, 15],
+    "bins": 10  # optional
+}
+```
+
+**Usage**:
+```python
+from orchestrator.tools.visualization_tools import create_chart_tool
+
+# Bar chart comparing sales
+result = await create_chart_tool(
+    chart_type="bar",
+    data={"labels": ["Q1", "Q2", "Q3"], "values": [100, 150, 120]},
+    title="Quarterly Sales",
+    y_label="Revenue ($)",
+    interactive=True,
+    width=800,
+    height=600
+)
+
+if result["success"]:
+    if result["output_format"] == "base64_png":
+        # Embed as markdown image
+        chart_markdown = f"![Chart]({result['chart_data']})"
+    else:  # HTML
+        # Embed HTML directly (for interactive charts)
+        chart_markdown = result['chart_data']
+    
+    # Include in agent response
+    response_text = f"Here's the data visualized:\n\n{chart_markdown}\n\n{explanation}"
+```
+
+**Return Format:**
+```python
+{
+    "success": True,
+    "chart_type": "bar",
+    "output_format": "base64_png" | "html",
+    "chart_data": "base64_encoded_string" | "html_string",
+    "metadata": {
+        "width": 800,
+        "height": 600,
+        "data_points": 10,
+        "series_count": 1
+    }
+}
+```
+
+**When to Use:**
+- Comparing multiple values or categories
+- Showing trends over time
+- Displaying distributions or proportions
+- User explicitly requests a chart or graph
+- Data would be clearer as a chart than as text
+
+**Agent Integration:**
+Agents should intelligently choose to use visualization when:
+1. User explicitly requests: "show me a chart", "graph this", "visualize the data"
+2. Comparison scenarios: Comparing multiple values, categories, or time periods
+3. Trend analysis: Time series data, growth patterns, seasonal variations
+4. Distribution display: Showing proportions, percentages, frequency distributions
+5. Complex numerical data: When tabular data would be clearer as a chart
+
 ### Enhancement Tools (`orchestrator/tools/enhancement_tools.py`)
 **Backend gRPC tools for query enhancement**
 

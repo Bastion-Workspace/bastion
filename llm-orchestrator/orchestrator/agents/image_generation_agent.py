@@ -58,12 +58,6 @@ class ImageGenerationAgent(BaseAgent):
         
         return workflow.compile(checkpointer=checkpointer)
     
-    async def _get_grpc_client(self):
-        """Get or create gRPC client for backend tools"""
-        if self._grpc_client is None:
-            from orchestrator.clients.grpc_tool_client import get_grpc_tool_client
-            self._grpc_client = await get_grpc_tool_client()
-        return self._grpc_client
     
     async def _prepare_context_node(self, state: ImageGenerationState) -> Dict[str, Any]:
         """Prepare context: extract prompt and generation parameters"""
@@ -157,7 +151,7 @@ class ImageGenerationAgent(BaseAgent):
             
             # Call GenerateImage gRPC method
             user_id = state.get("user_id", "system")
-            tool_result_json = await grpc_client.generate_image(
+            tool_result = await grpc_client.generate_image(
                 prompt=prompt,
                 size=generation_params.get("size", "1024x1024"),
                 format=generation_params.get("format", "png"),
@@ -166,8 +160,6 @@ class ImageGenerationAgent(BaseAgent):
                 negative_prompt=generation_params.get("negative_prompt"),
                 user_id=user_id
             )
-            
-            tool_result = json.loads(tool_result_json) if isinstance(tool_result_json, str) else tool_result_json
             
             if not tool_result.get("success"):
                 error_msg = tool_result.get("error", "Unknown error")

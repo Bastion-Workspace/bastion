@@ -20,7 +20,7 @@ from utils.auth_middleware import get_current_user, AuthenticatedUserResponse
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/async/orchestrator", tags=["Async Orchestrator"])
+router = APIRouter(tags=["Async Orchestrator"])
 
 
 class AsyncOrchestratorRequest(BaseModel):
@@ -46,7 +46,7 @@ class AsyncOrchestratorRequest(BaseModel):
 # - GET /tasks/active - unused
 
 
-@router.post("/stream")
+@router.post("/api/async/orchestrator/stream")
 async def stream_orchestrator_response(
     request: AsyncOrchestratorRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)

@@ -134,13 +134,65 @@ const RoomChat = () => {
       // Upload attachment if preview exists
       if (previewFile && message && message.message_id) {
         try {
-          await messagingService.uploadAttachment(
+          const attachment = await messagingService.uploadAttachment(
             currentRoom.room_id,
             message.message_id,
             previewFile
           );
+          
+          console.log('✅ Attachment uploaded successfully:', attachment);
+          
+          // Reload attachments for this message after upload completes
+          try {
+            const atts = await messagingService.getMessageAttachments(message.message_id);
+            console.log('📎 Reloaded attachments:', atts);
+            
+            if (atts && atts.length > 0) {
+              // Update messageAttachments state
+              setMessageAttachments(prev => ({
+                ...prev,
+                [message.message_id]: atts
+              }));
+              
+              // Create blob URLs for newly uploaded images
+              const blobUrlsMap = {};
+              for (const att of atts) {
+                if (att.mime_type?.startsWith('image/')) {
+                  try {
+                    const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+                    const response = await fetch(
+                      `/api/messaging/attachments/${att.attachment_id}/file`,
+                      {
+                        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+                      }
+                    );
+                    if (response.ok) {
+                      const blob = await response.blob();
+                      const blobUrl = URL.createObjectURL(blob);
+                      blobUrlsMap[att.attachment_id] = blobUrl;
+                      console.log('🖼️ Created blob URL for attachment:', att.attachment_id);
+                    } else {
+                      console.error('❌ Failed to fetch attachment file:', response.status, response.statusText);
+                    }
+                  } catch (error) {
+                    console.error('❌ Failed to load image blob:', error);
+                  }
+                }
+              }
+              
+              if (Object.keys(blobUrlsMap).length > 0) {
+                setImageBlobUrls(prev => ({ ...prev, ...blobUrlsMap }));
+                console.log('✅ Image blob URLs created:', Object.keys(blobUrlsMap));
+              }
+            } else {
+              console.warn('⚠️ No attachments found after upload');
+            }
+          } catch (error) {
+            console.error('❌ Failed to reload attachments after upload:', error);
+          }
         } catch (error) {
-          console.error('Failed to upload attachment:', error);
+          console.error('❌ Failed to upload attachment:', error);
+          console.error('❌ Error details:', error.message, error.response);
         }
       }
 

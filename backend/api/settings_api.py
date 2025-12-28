@@ -30,7 +30,7 @@ def _get_bias_label(bias_value: str) -> str:
     }
     return bias_labels.get(bias_value, bias_value.replace("_", " ").title())
 
-router = APIRouter(prefix="/api/settings", tags=["Settings"])
+router = APIRouter(tags=["Settings"])
 
 
 # Pydantic models for settings validation
@@ -72,7 +72,7 @@ class PromptSettingsResponse(BaseModel):
     available_personas: list[str]
 
 
-@router.get("", response_model=SettingsResponse)
+@router.get("/api/settings", response_model=SettingsResponse)
 async def get_all_settings():
     """Get all settings grouped by category"""
     try:
@@ -93,7 +93,7 @@ async def get_all_settings():
 # - POST /test/intent-classification-model - Test endpoint removed
 
 
-@router.put("/{key}", response_model=SettingUpdateResponse)
+@router.put("/api/settings/{key}", response_model=SettingUpdateResponse)
 async def update_setting(
     key: str, 
     request: SettingUpdateRequest,
@@ -140,7 +140,7 @@ async def update_setting(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/bulk", response_model=SettingUpdateResponse)
+@router.post("/api/settings/bulk", response_model=SettingUpdateResponse)
 async def bulk_update_settings(
     request: BulkSettingsUpdateRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -168,7 +168,7 @@ async def bulk_update_settings(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/{key}")
+@router.delete("/api/settings/{key}")
 async def delete_setting(
     key: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -197,7 +197,7 @@ async def delete_setting(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/user/timezone")
+@router.get("/api/settings/user/timezone")
 async def get_user_timezone(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -215,7 +215,7 @@ async def get_user_timezone(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/user/timezone")
+@router.put("/api/settings/user/timezone")
 async def set_user_timezone(
     request: TimezoneRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -245,7 +245,7 @@ async def set_user_timezone(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/user/zip-code")
+@router.get("/api/settings/user/zip-code")
 async def get_user_zip_code(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -263,7 +263,7 @@ async def get_user_zip_code(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/user/zip-code")
+@router.put("/api/settings/user/zip-code")
 async def set_user_zip_code(
     request: ZipCodeRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -299,7 +299,7 @@ async def set_user_zip_code(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/user/time-format")
+@router.get("/api/settings/user/time-format")
 async def get_user_time_format(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -317,7 +317,7 @@ async def get_user_time_format(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/user/time-format")
+@router.put("/api/settings/user/time-format")
 async def set_user_time_format(
     request: TimeFormatRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -353,7 +353,7 @@ async def set_user_time_format(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/prompt", response_model=PromptSettingsResponse)
+@router.get("/api/settings/prompt", response_model=PromptSettingsResponse)
 async def get_prompt_settings(current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     """Get current user's prompt settings"""
     try:
@@ -378,7 +378,7 @@ async def get_prompt_settings(current_user: AuthenticatedUserResponse = Depends(
         )
 
 
-@router.post("/prompt", response_model=PromptSettingsResponse)
+@router.post("/api/settings/prompt", response_model=PromptSettingsResponse)
 async def update_prompt_settings(
     settings: PromptSettingsRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -427,7 +427,7 @@ async def update_prompt_settings(
         )
 
 
-@router.get("/prompt/options")
+@router.get("/api/settings/prompt/options")
 async def get_prompt_options():
     """Get available prompt options for the frontend"""
     return {
@@ -455,7 +455,7 @@ async def get_prompt_options():
     }
 
 
-@router.get("/user/preferred-name")
+@router.get("/api/settings/user/preferred-name")
 async def get_user_preferred_name(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -473,7 +473,7 @@ async def get_user_preferred_name(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/user/preferred-name")
+@router.put("/api/settings/user/preferred-name")
 async def set_user_preferred_name(
     request: PreferredNameRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -503,7 +503,7 @@ async def set_user_preferred_name(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/user/ai-context")
+@router.get("/api/settings/user/ai-context")
 async def get_user_ai_context(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -521,7 +521,7 @@ async def get_user_ai_context(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.put("/user/ai-context")
+@router.put("/api/settings/user/ai-context")
 async def set_user_ai_context(
     request: AiContextRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -557,7 +557,7 @@ async def set_user_ai_context(
         raise HTTPException(status_code=500, detail=str(e)) 
 
 
-@router.get("/{category}")
+@router.get("/api/settings/{category}")
 async def get_settings_by_category(category: str):
     """Get settings by category"""
     try:

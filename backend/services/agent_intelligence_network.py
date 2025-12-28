@@ -117,32 +117,6 @@ class AgentIntelligenceNetwork:
             collaboration_permission=CollaborationPermission.SUGGEST_ONLY  # Research requires user approval
         )
         
-        # Data Formatting Agent
-        self._agent_registry["data_formatting_agent"] = AgentInfo(
-            agent_type="data_formatting_agent",
-            display_name="Data Formatting Specialist", 
-            description="Transforms research data into organized tables, charts, and structured formats",
-            capabilities=[AgentCapability.DATA_FORMATTING],
-            specialties=[
-                "Markdown table creation",
-                "Timeline and chronological formatting",
-                "Visual timeline creation",
-                "Data organization and structuring",
-                "Comparison tables",
-                "Summary formatting",
-                "Report structuring"
-            ],
-            handoff_triggers=[
-                "research results with multiple data points",
-                "timeline creation requests",
-                "chronological organization needs",
-                "comparison queries",
-                "list organization requests",
-                "summary table needs"
-            ],
-            collaboration_permission=CollaborationPermission.AUTO_USE  # BULLY! Auto-execute when beneficial
-        )
-        
         # Chat Agent
         self._agent_registry["chat_agent"] = AgentInfo(
             agent_type="chat_agent",
@@ -384,11 +358,8 @@ class AgentIntelligenceNetwork:
             ]):
                 suggestions.append("weather_agent")
                 
-            # Check for data formatting needs
-            if any(keyword in research_findings for keyword in [
-                "comparison", "list", "table", "data", "statistics", "multiple"
-            ]) and len(research_findings) > 500:  # Substantial data
-                suggestions.append("data_formatting_agent")
+            # Note: Data formatting is now handled internally by research_agent via subgraph
+            # No need to suggest data_formatting_agent separately
         
         return suggestions
     

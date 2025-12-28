@@ -10,11 +10,20 @@ import {
   Button,
   Chip,
   useTheme,
+  Dialog,
+  DialogContent,
 } from '@mui/material';
 import {
   Person,
   Error,
   AutoAwesome,
+  CloudUpload,
+  Fullscreen,
+  Close,
+  Search,
+  Chat,
+  Code,
+  Language,
 } from '@mui/icons-material';
 import { useQuery } from 'react-query';
 import ExportButton from './ExportButton';
@@ -30,6 +39,73 @@ import { markdownToPlainText, renderCitations, smartCopy } from '../../utils/cha
 import { useCapabilities } from '../../contexts/CapabilitiesContext';
 import EditorOpsPreviewModal from './EditorOpsPreviewModal';
 import FolderSelectionDialog from './FolderSelectionDialog';
+
+/**
+ * ROOSEVELT'S CHART RENDERER: Safely renders standalone Plotly HTML in an iframe
+ * Now with support for Library Import!
+ */
+const ChartRenderer = ({ html, staticData, staticFormat, onImport, onFullScreen }) => {
+  return (
+    <Box 
+      sx={{ 
+        my: 2, 
+        width: '100%', 
+        overflow: 'hidden',
+        border: '1px solid',
+        borderColor: 'divider',
+        borderRadius: 1,
+        backgroundColor: '#fff',
+        display: 'flex',
+        flexDirection: 'column'
+      }}
+    >
+      {/* Action header */}
+      <Box sx={{ 
+        p: 1, 
+        borderBottom: '1px solid', 
+        borderColor: 'divider', 
+        display: 'flex', 
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        bgcolor: 'rgba(0, 0, 0, 0.02)'
+      }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+          <Typography variant="caption" sx={{ fontWeight: 600, color: 'text.secondary' }}>
+            Interactive Visualization
+          </Typography>
+          <Tooltip title="View Full Screen">
+            <IconButton size="small" onClick={() => onFullScreen(html)}>
+              <Fullscreen fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Box>
+        {staticData && (
+          <Button 
+            size="small" 
+            variant="text" 
+            startIcon={<CloudUpload fontSize="small" />}
+            onClick={() => onImport(staticData, staticFormat)}
+            sx={{ textTransform: 'none', py: 0 }}
+          >
+            Import to Library
+          </Button>
+        )}
+      </Box>
+
+      {/* Interactive Iframe */}
+      <Box sx={{ height: '500px', width: '100%' }}>
+        <iframe
+          srcDoc={html}
+          title="Visualization"
+          width="100%"
+          height="100%"
+          style={{ border: 'none' }}
+          sandbox="allow-scripts allow-same-origin"
+        />
+      </Box>
+    </Box>
+  );
+};
 
 const ChatMessagesArea = () => {
   const theme = useTheme();
@@ -113,6 +189,7 @@ const ChatMessagesArea = () => {
   const scrollTimeoutRef = useRef(null);
   const lastScrollTopRef = useRef(0);
   const [hasTextSelection, setHasTextSelection] = useState(false);
+  const [fullScreenChart, setFullScreenChart] = useState(null);
   const lastMessageCountRef = useRef(0);  // Track actual NEW messages vs updates
   const isScrollingRef = useRef(false);  // Track if user is actively scrolling
 
@@ -391,28 +468,35 @@ ${message.content}
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
-  const getMessageIcon = (role) => {
-    switch (role) {
-      case 'user':
-        return <Person fontSize="small" />;
-      case 'assistant':
-        return (
-          <Box
-            component="img"
-            src="/images/favicon.ico"
-            alt="Bastion"
-            sx={{ 
-              width: 20, 
-              height: 20,
-              objectFit: 'contain'
-            }}
-          />
-        );
-      case 'system':
-        return <Error fontSize="small" />;
-      default:
-        return <Person fontSize="small" />;
+  const getMessageIcon = (role, agentType = null) => {
+    if (role === 'user') return <Person fontSize="small" />;
+    if (role === 'system') return <Error fontSize="small" />;
+    
+    if (role === 'assistant') {
+      if (agentType) {
+        const type = agentType.toLowerCase();
+        if (type.includes('research')) return <Search fontSize="small" />;
+        if (type.includes('chat')) return <Chat fontSize="small" />;
+        if (type.includes('coding')) return <Code fontSize="small" />;
+        if (type.includes('crawl')) return <Language fontSize="small" />;
+        if (type.includes('direct')) return <AutoAwesome fontSize="small" />;
+      }
+      
+      return (
+        <Box
+          component="img"
+          src="/images/favicon.ico"
+          alt="Bastion"
+          sx={{ 
+            width: 20, 
+            height: 20,
+            objectFit: 'contain'
+          }}
+        />
+      );
     }
+    
+    return <Person fontSize="small" />;
   };
 
   const getMessageColor = (role, isError) => {
@@ -576,13 +660,26 @@ ${message.content}
   // Custom markdown components for better styling
   const markdownComponents = {
     // Style code blocks - ROOSEVELT'S ENHANCED CODE BLOCK HANDLING
-    code: ({ node, inline, className, children, ...props }) => {
-      const match = /language-(\w+)/.exec(className || '');
+    code: ({ node, inline, className, children, staticData, staticFormat, onImport, onFullScreen, ...props }) => {
+      const match = /language-([\w:]+)/.exec(className || '');
+      
+      // Handle HTML chart visualizations - render as HTML in ChartRenderer
+      if (!inline && match && match[1] === 'html:chart') {
+        return (
+          <ChartRenderer 
+            html={String(children).replace(/\n$/, '')} 
+            staticData={staticData}
+            staticFormat={staticFormat}
+            onImport={onImport}
+            onFullScreen={onFullScreen}
+          />
+        );
+      }
       
       return !inline && match ? (
         <SyntaxHighlighter
           style={materialLight}
-          language={match[1]}
+          language={match[1].split(':')[0]} // Handle potential colons in language name for highlighter
           PreTag="div"
           {...props}
         >
@@ -860,6 +957,45 @@ ${message.content}
         {children}
       </Typography>
     ),
+    
+    // Handle chart images (base64 data URIs) and regular images
+    img: ({ node, src, alt, ...props }) => {
+      // Check if this is a chart image (base64 data URI)
+      if (src?.startsWith('data:image/')) {
+        return (
+          <Box sx={{ my: 2, textAlign: 'center' }}>
+            <img 
+              src={src}
+              alt={alt || 'Chart'}
+              {...props}
+              style={{
+                maxWidth: '100%',
+                height: 'auto',
+                border: '1px solid',
+                borderColor: theme.palette.divider,
+                borderRadius: theme.shape.borderRadius,
+                ...props.style
+              }}
+            />
+          </Box>
+        );
+      }
+      // Regular image
+      return (
+        <Box sx={{ my: 2, textAlign: 'center' }}>
+          <img 
+            src={src}
+            alt={alt}
+            {...props}
+            style={{
+              maxWidth: '100%',
+              height: 'auto',
+              ...props.style
+            }}
+          />
+        </Box>
+      );
+    },
   };
 
   if (!currentConversationId) {
@@ -946,15 +1082,79 @@ ${message.content}
           </Box>
         )}
 
-        {messages.map((message, index) => (
-          <Box
-            key={message.id || index}
-            sx={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: message.role === 'user' ? 'flex-end' : 'flex-start',
-            }}
-          >
+        {messages.map((message, index) => {
+          // ROOSEVELT'S REDUNDANCY CHECK: Don't render streaming messages while loading 
+          // (the loading indicator at the bottom handles this feedback with agent name and rotating icon)
+          if (isLoading && 
+              index === messages.length - 1 && 
+              (message.role === 'assistant' || message.type === 'assistant') && 
+              (message.isStreaming || !message.content || message.content.trim() === '')) {
+            return null;
+          }
+
+          // Signal Corps: Render notifications as centered, borderless pills
+          if (message.type === 'notification') {
+            const severityColor = {
+              'info': 'info',
+              'success': 'success',
+              'warning': 'warning',
+              'error': 'error'
+            }[message.severity] || 'info';
+            
+            // Determine background color for dark mode
+            let bgColor = 'transparent';
+            if (theme.palette.mode === 'dark') {
+              if (severityColor === 'info') {
+                bgColor = 'rgba(33, 150, 243, 0.1)';
+              } else if (severityColor === 'success') {
+                bgColor = 'rgba(76, 175, 80, 0.1)';
+              } else if (severityColor === 'warning') {
+                bgColor = 'rgba(255, 152, 0, 0.1)';
+              } else if (severityColor === 'error') {
+                bgColor = 'rgba(244, 67, 54, 0.1)';
+              }
+            }
+            
+            return (
+              <Box
+                key={message.id || index}
+                sx={{
+                  width: '100%',
+                  display: 'flex',
+                  justifyContent: 'center',
+                  my: 1
+                }}
+              >
+                <Chip
+                  label={message.content}
+                  color={severityColor}
+                  variant="outlined"
+                  size="small"
+                  sx={{
+                    fontStyle: 'italic',
+                    opacity: 0.8,
+                    backgroundColor: bgColor,
+                    borderColor: (theme.palette[severityColor] && theme.palette[severityColor].main) || theme.palette.info.main,
+                    '& .MuiChip-label': {
+                      fontSize: '0.75rem',
+                      px: 1.5
+                    }
+                  }}
+                />
+              </Box>
+            );
+          }
+
+          // Regular message rendering
+          return (
+            <Box
+              key={message.id || index}
+              sx={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: message.role === 'user' ? 'flex-end' : 'flex-start',
+              }}
+            >
             <Paper
               elevation={1}
               sx={{
@@ -983,23 +1183,49 @@ ${message.content}
                 userSelect: 'none'
               }}>
                 {message.role !== 'user' && (
-                  <Box sx={{ color: getMessageColor(message.role, message.isError) }}>
-                    {getMessageIcon(message.role)}
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Box 
+                      component="img" 
+                      src="/images/favicon.ico" 
+                      sx={{ width: 18, height: 18, objectFit: 'contain' }} 
+                    />
+                    <Typography 
+                      variant="caption" 
+                      color="text.secondary"
+                      sx={{ fontSize: '0.75rem', fontWeight: 600 }}
+                    >
+                      {aiName}
+                    </Typography>
+                    {(message.metadata?.agent_type || message.agent_type) && (
+                      <Chip 
+                        size="small" 
+                        label={
+                          (message.metadata?.agent_type || message.agent_type)
+                            .split('_')
+                            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+                            .join(' ')
+                        }
+                        sx={{ 
+                          height: 16, 
+                          fontSize: '0.6rem', 
+                          backgroundColor: 'rgba(0, 0, 0, 0.05)',
+                          '& .MuiChip-label': { px: 1 }
+                        }} 
+                      />
+                    )}
                   </Box>
                 )}
                 
-                <Typography 
-                  variant="caption" 
-                  color="text.secondary"
-                  sx={{ fontSize: '0.7rem' }}
-                >
-                  {message.role === 'user' ? 'You' : 
-                   message.role === 'assistant' ? aiName : 'System'}
-                </Typography>
-                
                 {message.role === 'user' && (
-                  <Box sx={{ color: getMessageColor(message.role, message.isError) }}>
-                    {getMessageIcon(message.role)}
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <Typography 
+                      variant="caption" 
+                      color="text.secondary"
+                      sx={{ fontSize: '0.75rem', fontWeight: 600 }}
+                    >
+                      You
+                    </Typography>
+                    <Person fontSize="small" sx={{ color: 'primary.main' }} />
                   </Box>
                 )}
               </Box>
@@ -1074,24 +1300,32 @@ ${message.content}
                     }
                   }}>
                     {(() => {
-                      // Format agent type to display name
-                      const formatAgentName = (agentType) => {
-                        if (!agentType) return 'AI';
-                        return agentType
-                          .split('_')
-                          .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-                          .join(' ');
+                      const displayContent = message.content || '';
+                      
+                      const handleChartImport = (data, format) => {
+                        // For SVG, we convert to a Data URI
+                        let dataUri = data;
+                        if (format === 'svg' && !data.startsWith('data:')) {
+                          dataUri = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(data)))}`;
+                        } else if (format === 'base64_png' && !data.startsWith('data:')) {
+                          dataUri = `data:image/png;base64,${data}`;
+                        }
+                        handleImportImage(dataUri);
                       };
-                      
-                      // If content is empty/undefined and we have agent_type, show agent name
-                      const displayContent = (!message.content || message.content.trim() === '') && message.metadata?.agent_type
-                        ? formatAgentName(message.metadata.agent_type)
-                        : (message.content || '');
-                      
+
                       return (
                         <ReactMarkdown 
                           className="markdown-content"
-                          components={markdownComponents}
+                          components={{
+                            ...markdownComponents,
+                            code: (props) => markdownComponents.code({
+                              ...props,
+                              staticData: message.metadata?.static_visualization_data,
+                              staticFormat: message.metadata?.static_format,
+                              onImport: handleChartImport,
+                              onFullScreen: (html) => setFullScreenChart(html)
+                            })
+                          }}
                           remarkPlugins={[remarkBreaks, remarkGfm]}
                         >
                           {displayContent}
@@ -1381,17 +1615,62 @@ ${message.content}
               </Box>
             </Paper>
           </Box>
-        ))}
+          );
+        })}
 
         {/* Loading indicator */}
         {isLoading && (
           <Box sx={{ 
             display: 'flex', 
             alignItems: 'center', 
-            justifyContent: 'center',
-            py: 2
+            justifyContent: 'flex-start',
+            gap: 1.5,
+            py: 1.5,
+            px: 2,
+            ml: 1,
+            mb: 2,
+            backgroundColor: 'background.paper',
+            borderRadius: 2,
+            boxShadow: 1,
+            width: 'fit-content',
+            maxWidth: '85%',
+            border: '1px solid',
+            borderColor: 'divider',
           }}>
-            <CircularProgress size={20} />
+            <Box sx={{ position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <CircularProgress size={28} thickness={4} sx={{ color: 'secondary.main' }} />
+              <Box 
+                component="img" 
+                src="/images/favicon.ico" 
+                sx={{ 
+                  position: 'absolute', 
+                  width: 16, 
+                  height: 16, 
+                  objectFit: 'contain' 
+                }} 
+              />
+            </Box>
+            <Box>
+              <Typography variant="caption" sx={{ fontWeight: 600, color: 'text.primary', display: 'block', lineHeight: 1.2 }}>
+                {aiName}
+              </Typography>
+              {(() => {
+                const lastMessage = messages[messages.length - 1];
+                const agentType = lastMessage?.metadata?.agent_type || lastMessage?.agent_type;
+                if (agentType) {
+                  return (
+                    <Typography variant="caption" sx={{ color: 'secondary.main', fontSize: '0.65rem', fontWeight: 600 }}>
+                      {agentType.split('_').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')} is chewing on it...
+                    </Typography>
+                  );
+                }
+                return (
+                  <Typography variant="caption" sx={{ color: 'text.secondary', fontSize: '0.65rem' }}>
+                    Chewing on it...
+                  </Typography>
+                );
+              })()}
+            </Box>
           </Box>
         )}
 
@@ -1433,6 +1712,42 @@ ${message.content}
         }}
         onSelect={handleFolderSelect}
       />
+
+      {/* Full Screen Chart Dialog */}
+      <Dialog
+        fullScreen
+        open={!!fullScreenChart}
+        onClose={() => setFullScreenChart(null)}
+      >
+        <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+          <Box sx={{ 
+            p: 1, 
+            display: 'flex', 
+            justifyContent: 'space-between', 
+            alignItems: 'center',
+            borderBottom: '1px solid',
+            borderColor: 'divider',
+            bgcolor: 'background.paper'
+          }}>
+            <Typography variant="h6" sx={{ ml: 2 }}>Visualization Full Screen</Typography>
+            <IconButton onClick={() => setFullScreenChart(null)}>
+              <Close />
+            </IconButton>
+          </Box>
+          <Box sx={{ flexGrow: 1, bgcolor: '#fff' }}>
+            {fullScreenChart && (
+              <iframe
+                srcDoc={fullScreenChart}
+                title="Full Screen Visualization"
+                width="100%"
+                height="100%"
+                style={{ border: 'none' }}
+                sandbox="allow-scripts allow-same-origin"
+              />
+            )}
+          </Box>
+        </Box>
+      </Dialog>
 
       {/* ROOSEVELT'S "RETURN TO BOTTOM" CAVALRY BUTTON - Show when user has scrolled up */}
       {userHasScrolled && !shouldAutoScroll && (

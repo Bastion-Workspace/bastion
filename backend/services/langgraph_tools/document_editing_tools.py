@@ -553,6 +553,26 @@ async def propose_document_edit_tool(
         
         logger.info(f"✅ Document edit proposal created: {proposal_id} for document {document_id}")
         
+        # Send WebSocket notification for real-time suggestion display
+        try:
+            if container.websocket_manager:
+                await container.websocket_manager.send_document_status_update(
+                    document_id=document_id,
+                    status="edit_proposal",
+                    user_id=user_id,
+                    filename=None,
+                    proposal_data={
+                        "proposal_id": proposal_id,
+                        "edit_type": edit_type,
+                        "operations": operations or [],
+                        "content_edit": content_edit,
+                        "agent_name": agent_name,
+                        "summary": summary
+                    }
+                )
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to send edit proposal notification: {e}")
+        
         return {
             "success": True,
             "proposal_id": proposal_id,

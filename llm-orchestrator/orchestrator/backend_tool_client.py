@@ -4,6 +4,7 @@ Backend Tool Client - gRPC client for accessing backend data services
 
 import logging
 import os
+import json
 from typing import List, Dict, Any, Optional
 import asyncio
 
@@ -890,7 +891,8 @@ class BackendToolClient:
                 'current_conditions': response.current_conditions,
                 'forecast': list(response.forecast),
                 'alerts': list(response.alerts),
-                'metadata': dict(response.metadata)
+                'metadata': dict(response.metadata),
+                'success': True
             }
             
         except grpc.RpcError as e:
@@ -899,6 +901,96 @@ class BackendToolClient:
         except Exception as e:
             logger.error(f"Unexpected error getting weather: {e}")
             return None
+    
+    # ===== Image Generation Operations =====
+    
+    async def generate_image(
+        self,
+        prompt: str,
+        size: str = "1024x1024",
+        format: str = "png",
+        seed: Optional[int] = None,
+        num_images: int = 1,
+        negative_prompt: Optional[str] = None,
+        user_id: str = "system"
+    ) -> Dict[str, Any]:
+        """
+        Generate images using backend image generation service
+        
+        Args:
+            prompt: Image generation prompt
+            size: Image size (e.g., "1024x1024")
+            format: Image format (png, jpg, etc.)
+            seed: Optional random seed for reproducibility
+            num_images: Number of images to generate (1-4)
+            negative_prompt: Optional negative prompt
+            user_id: User ID
+            
+        Returns:
+            Dict with success, images, and metadata
+        """
+        try:
+            await self._ensure_connected()
+            
+            request = tool_service_pb2.ImageGenerationRequest(
+                prompt=prompt,
+                size=size,
+                format=format,
+                num_images=num_images,
+                user_id=user_id
+            )
+            
+            # Add optional fields
+            if seed is not None:
+                request.seed = seed
+            if negative_prompt is not None:
+                request.negative_prompt = negative_prompt
+            
+            logger.info(f"Calling backend GenerateImage: prompt={prompt[:100]}...")
+            
+            response = await self._stub.GenerateImage(request)
+            
+            # Convert proto response to dict
+            result = {
+                "success": response.success,
+                "model": response.model,
+                "prompt": response.prompt,
+                "size": response.size,
+                "format": response.format,
+                "images": []
+            }
+            
+            if response.success:
+                for img in response.images:
+                    result["images"].append({
+                        "filename": img.filename,
+                        "path": img.path,
+                        "url": img.url,
+                        "width": img.width,
+                        "height": img.height,
+                        "format": img.format
+                    })
+                logger.info(f"Generated {len(result['images'])} image(s)")
+            else:
+                result["error"] = response.error
+                logger.error(f"Image generation failed: {response.error}")
+            
+            return result
+            
+        except grpc.RpcError as e:
+            logger.error(f"GenerateImage failed: {e.code()} - {e.details()}")
+            return {
+                "success": False,
+                "error": f"gRPC error: {e.details()}",
+                "images": []
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error in image generation: {e}")
+            return {
+                "success": False,
+                "error": f"gRPC call failed: {str(e)}",
+                "images": []
+            }
     
     # ===== Entity Operations =====
     
@@ -1544,6 +1636,183 @@ class BackendToolClient:
                 "success": False,
                 "error": str(e),
                 "message": "Failed to update conversation title"
+            }
+    
+    # ===== Visualization Operations =====
+    
+    async def create_chart(
+        self,
+        chart_type: str,
+        data: Dict[str, Any],
+        title: str = "",
+        x_label: str = "",
+        y_label: str = "",
+        interactive: bool = True,
+        color_scheme: str = "plotly",
+        width: int = 800,
+        height: int = 600
+    ) -> Dict[str, Any]:
+        """
+        Create a chart or graph from structured data
+        
+        Args:
+            chart_type: Type of chart (bar, line, pie, scatter, area, heatmap, box_plot, histogram)
+            data: Chart data (format depends on chart type)
+            title: Chart title (optional)
+            x_label: X-axis label (optional)
+            y_label: Y-axis label (optional)
+            interactive: Generate interactive chart (default: True)
+            color_scheme: Color scheme to use (default: "plotly")
+            width: Chart width in pixels (default: 800)
+            height: Chart height in pixels (default: 600)
+            
+        Returns:
+            Dict with success status, output format, and chart_data
+        """
+        try:
+            await self._ensure_connected()
+            
+            # Serialize data to JSON
+            data_json = json.dumps(data)
+            
+            request = tool_service_pb2.CreateChartRequest(
+                chart_type=chart_type,
+                data_json=data_json,
+                title=title,
+                x_label=x_label,
+                y_label=y_label,
+                interactive=interactive,
+                color_scheme=color_scheme,
+                width=width,
+                height=height
+            )
+            
+            response = await self._stub.CreateChart(request)
+            
+            if response.success:
+                # Parse metadata JSON
+                metadata = {}
+                if response.metadata_json:
+                    try:
+                        metadata = json.loads(response.metadata_json)
+                    except json.JSONDecodeError:
+                        pass
+                
+                return {
+                    "success": True,
+                    "chart_type": response.chart_type,
+                    "output_format": response.output_format,
+                    "chart_data": response.chart_data,
+                    "metadata": metadata
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": response.error if response.error else "Unknown error"
+                }
+            
+        except grpc.RpcError as e:
+            logger.error(f"Create chart failed: {e.code()} - {e.details()}")
+            return {
+                "success": False,
+                "error": f"{e.code()}: {e.details()}"
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error creating chart: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    # ===== File Analysis Operations =====
+    
+    async def analyze_text_content(
+        self,
+        content: str,
+        include_advanced: bool = False,
+        user_id: str = "system"
+    ) -> Dict[str, Any]:
+        """
+        Analyze text content and return metrics
+        
+        Args:
+            content: Text content to analyze
+            include_advanced: If True, include advanced metrics (averages, etc.)
+            user_id: User ID for logging
+            
+        Returns:
+            Dict with text analysis metrics:
+            - word_count: int
+            - line_count: int
+            - non_empty_line_count: int
+            - character_count: int
+            - character_count_no_spaces: int
+            - paragraph_count: int
+            - sentence_count: int
+            - avg_words_per_sentence: float (if include_advanced)
+            - avg_words_per_paragraph: float (if include_advanced)
+        """
+        try:
+            await self._ensure_connected()
+            
+            request = tool_service_pb2.TextAnalysisRequest(
+                content=content,
+                include_advanced=include_advanced,
+                user_id=user_id
+            )
+            
+            response = await self._stub.AnalyzeTextContent(request)
+            
+            # Convert proto response to dict
+            metrics = {
+                "word_count": response.word_count,
+                "line_count": response.line_count,
+                "non_empty_line_count": response.non_empty_line_count,
+                "character_count": response.character_count,
+                "character_count_no_spaces": response.character_count_no_spaces,
+                "paragraph_count": response.paragraph_count,
+                "sentence_count": response.sentence_count,
+            }
+            
+            # Add advanced metrics if requested
+            if include_advanced:
+                metrics["avg_words_per_sentence"] = response.avg_words_per_sentence
+                metrics["avg_words_per_paragraph"] = response.avg_words_per_paragraph
+            
+            # Parse metadata JSON if present
+            if response.metadata_json:
+                try:
+                    metadata = json.loads(response.metadata_json)
+                    metrics["metadata"] = metadata
+                except json.JSONDecodeError:
+                    pass
+            
+            return metrics
+            
+        except grpc.RpcError as e:
+            logger.error(f"Analyze text content failed: {e.code()} - {e.details()}")
+            # Return empty metrics on error
+            return {
+                "word_count": 0,
+                "line_count": 0,
+                "non_empty_line_count": 0,
+                "character_count": 0,
+                "character_count_no_spaces": 0,
+                "paragraph_count": 0,
+                "sentence_count": 0,
+                "error": f"{e.code()}: {e.details()}"
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error analyzing text content: {e}")
+            return {
+                "word_count": 0,
+                "line_count": 0,
+                "non_empty_line_count": 0,
+                "character_count": 0,
+                "character_count_no_spaces": 0,
+                "paragraph_count": 0,
+                "sentence_count": 0,
+                "error": str(e)
             }
 
 

@@ -1,0 +1,26 @@
+# Celery Beat - Ultra-Minimal Requirements
+# Scheduler only, no task processing
+
+# Core Celery
+celery==5.5.3
+redis==6.4.0
+
+# PostgreSQL database (for connection to check schedules and task module imports)
+psycopg2-binary==2.9.10
+asyncpg==0.30.0
+sqlalchemy==2.0.36
+
+# gRPC tools (needed to generate protobuf code for task module imports)
+grpcio-tools==1.76.0
+
+# Configuration and logging
+pydantic==2.10.3
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+structlog==24.4.0
+
+# Authentication (needed for service_container imports)
+PyJWT==2.9.0
+passlib[bcrypt]==1.7.4
+bcrypt==3.2.2
+

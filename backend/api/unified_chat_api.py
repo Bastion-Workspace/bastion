@@ -16,10 +16,10 @@ from utils.auth_middleware import get_current_user, AuthenticatedUserResponse
 logger = logging.getLogger(__name__)
 
 
-router = APIRouter(prefix="/api/v2/chat/unified", tags=["Unified Chat V2"])
+router = APIRouter(tags=["Unified Chat V2"])
 
 
-@router.post("/job/{job_id}/cancel")
+@router.post("/api/v2/chat/unified/job/{job_id}/cancel")
 async def cancel_unified_job(
     job_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)

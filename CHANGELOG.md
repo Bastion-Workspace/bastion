@@ -13,6 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Feature: 'Cover' frontmatter type support in Fiction documents
 
 ## [Unreleased]
+- Refactor: Modularized monolithic backend/main.py into domain-specific API routers
+- Refactor: Simplified PDF processing to focus on automated text extraction and vectorization
+- Cleanup: Decommissioned obsolete manual OCR, coordinate-based PDF editing, and layout segmentation units
+- Feature: Moved ePub cover page to the end of the spine to prevent "double cover" in readers
+- Fix: Enhanced ePub cover resolution to support relative paths in frontmatter and database lookups
+- Fix: Resolved XML syntax error in ePub cover page generation
+- Update: Created Org-Mode enhancement roadmap in dev-notes
+- Fix: Resolved issue where 'Filter by Tag' in All TODOs view was empty by correcting data property access
+- Update: Centralized all weather intelligence logic into dedicated gRPC Tools Service
+- Refactor: Migrated Weather Agent and Status Bar API to use gRPC weather service, eliminating redundant logic
+- Feature: Added real-time moon phase and meteorological metadata to central weather tool
+- Feature: Extracted dedicated gRPC Tools Service container from backend monolith
+- Update: Reconfigured LLM Orchestrator to communicate directly with Tools Service via gRPC
+- Refactor: Trimmed backend container size by moving tool logic to microservice
 - Feature: Added image import functionality for generated images - users can now import images directly into document library folders
 - Feature: Automatic cleanup of generated images when conversations are deleted - imported images are preserved, non-imported images are removed
 - Fix: Implemented "Smart Validation" for editor diffs to prevent invalidation during full-document syncs

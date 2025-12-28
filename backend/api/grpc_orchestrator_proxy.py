@@ -160,6 +160,7 @@ async def stream_from_grpc_orchestrator(
             accumulated_response = ""  # Accumulate full response content
             editor_operations_received = None  # Track editor operations for metadata
             manuscript_edit_received = None  # Track manuscript edit for metadata
+            metadata_received = {}  # Track all metadata received from chunks
             
             async for chunk in stub.StreamChat(grpc_request):
                 chunk_count += 1
@@ -167,6 +168,10 @@ async def stream_from_grpc_orchestrator(
                 # Track agent name from chunks (use the most specific one, not "orchestrator" or "system")
                 if chunk.agent_name and chunk.agent_name not in ["orchestrator", "system"]:
                     agent_name_used = chunk.agent_name
+                
+                # Capture all metadata from chunks for persistence
+                if chunk.metadata:
+                    metadata_received.update(dict(chunk.metadata))
                 
                 # Accumulate content chunks for saving as last_response
                 if chunk.type == "content" and chunk.message:
@@ -192,7 +197,8 @@ async def stream_from_grpc_orchestrator(
                     yield format_sse_message({
                         'type': 'complete',
                         'content': chunk.message,
-                        'agent': chunk.agent_name
+                        'agent': chunk.agent_name,
+                        'metadata': dict(chunk.metadata) if chunk.metadata else {}
                     })
                 
                 elif chunk.type == "error":
@@ -263,6 +269,22 @@ async def stream_from_grpc_orchestrator(
                     })
                     logger.info(f"🔤 Forwarded title chunk to frontend: {chunk.message}")
                 
+                elif chunk.type == "notification":
+                    # Forward notification chunks for spontaneous alerts and status messages
+                    notification_metadata = dict(chunk.metadata) if chunk.metadata else {}
+                    browser_notify = notification_metadata.get('browser_notify', 'false').lower() == 'true'
+                    yield format_sse_message({
+                        'type': 'notification',
+                        'message': chunk.message,
+                        'severity': notification_metadata.get('severity', 'info'),  # info, success, warning, error
+                        'temporary': notification_metadata.get('temporary', 'false').lower() == 'true',
+                        'timestamp': chunk.timestamp,
+                        'agent': chunk.agent_name,
+                        'browser_notify': browser_notify,  # Allow agents to explicitly request browser notifications
+                        'metadata': notification_metadata  # Forward full metadata for extensibility
+                    })
+                    logger.info(f"📢 Forwarded notification chunk to frontend: {chunk.message} (severity: {notification_metadata.get('severity', 'info')})")
+                
                 # Flush immediately
                 await asyncio.sleep(0)
             
@@ -280,7 +302,8 @@ async def stream_from_grpc_orchestrator(
                         "orchestrator_system": True,
                         "streaming": True,
                         "delegated_agent": agent_name_used or "unknown",
-                        "chunk_count": chunk_count
+                        "chunk_count": chunk_count,
+                        **metadata_received  # Include all metadata received from gRPC chunks
                     }
                     
                     # Add editor_operations and manuscript_edit to metadata for persistence

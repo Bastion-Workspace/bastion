@@ -21,10 +21,10 @@ from utils.auth_middleware import get_current_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/entertainment/sync", tags=["entertainment_sync"])
+router = APIRouter(tags=["entertainment_sync"])
 
 
-@router.post("/config", response_model=SyncConfig)
+@router.post("/api/entertainment/sync/config", response_model=SyncConfig)
 async def create_sync_config(
     config: SyncConfigCreate,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -54,7 +54,7 @@ async def create_sync_config(
         raise HTTPException(status_code=500, detail=f"Failed to create sync configuration: {str(e)}")
 
 
-@router.get("/config", response_model=List[SyncConfig])
+@router.get("/api/entertainment/sync/config", response_model=List[SyncConfig])
 async def list_sync_configs(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ) -> List[SyncConfig]:
@@ -70,7 +70,7 @@ async def list_sync_configs(
         raise HTTPException(status_code=500, detail="Failed to retrieve sync configurations")
 
 
-@router.get("/config/{config_id}", response_model=SyncConfig)
+@router.get("/api/entertainment/sync/config/{config_id}", response_model=SyncConfig)
 async def get_sync_config(
     config_id: UUID,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -91,7 +91,7 @@ async def get_sync_config(
         raise HTTPException(status_code=500, detail="Failed to retrieve configuration")
 
 
-@router.put("/config/{config_id}", response_model=SyncConfig)
+@router.put("/api/entertainment/sync/config/{config_id}", response_model=SyncConfig)
 async def update_sync_config(
     config_id: UUID,
     updates: SyncConfigUpdate,
@@ -120,7 +120,7 @@ async def update_sync_config(
         raise HTTPException(status_code=500, detail=f"Failed to update configuration: {str(e)}")
 
 
-@router.delete("/config/{config_id}")
+@router.delete("/api/entertainment/sync/config/{config_id}")
 async def delete_sync_config(
     config_id: UUID,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -143,7 +143,7 @@ async def delete_sync_config(
         raise HTTPException(status_code=500, detail=f"Failed to delete configuration: {str(e)}")
 
 
-@router.post("/config/{config_id}/test", response_model=ConnectionTestResult)
+@router.post("/api/entertainment/sync/config/{config_id}/test", response_model=ConnectionTestResult)
 async def test_connection(
     config_id: UUID,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -184,7 +184,7 @@ async def test_connection(
         )
 
 
-@router.post("/config/{config_id}/trigger", response_model=SyncTriggerResult)
+@router.post("/api/entertainment/sync/config/{config_id}/trigger", response_model=SyncTriggerResult)
 async def trigger_manual_sync(
     config_id: UUID,
     background_tasks: BackgroundTasks,
@@ -218,7 +218,7 @@ async def trigger_manual_sync(
         )
 
 
-@router.get("/config/{config_id}/status", response_model=SyncStatus)
+@router.get("/api/entertainment/sync/config/{config_id}/status", response_model=SyncStatus)
 async def get_sync_status(
     config_id: UUID,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -254,7 +254,7 @@ async def get_sync_status(
         raise HTTPException(status_code=500, detail="Failed to retrieve sync status")
 
 
-@router.get("/config/{config_id}/items", response_model=List[SyncItem])
+@router.get("/api/entertainment/sync/config/{config_id}/items", response_model=List[SyncItem])
 async def list_synced_items(
     config_id: UUID,
     filters: ItemFilters = Depends(),

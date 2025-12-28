@@ -20,10 +20,10 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/auth", tags=["authentication"])
+router = APIRouter(tags=["authentication"])
 
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/api/auth/login", response_model=LoginResponse)
 async def login(login_request: LoginRequest):
     """Authenticate user and return JWT token"""
     try:
@@ -40,7 +40,7 @@ async def login(login_request: LoginRequest):
         raise HTTPException(status_code=500, detail="Authentication failed")
 
 
-@router.post("/logout")
+@router.post("/api/auth/logout")
 async def logout(current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     """Logout user by invalidating session"""
     try:
@@ -53,13 +53,13 @@ async def logout(current_user: AuthenticatedUserResponse = Depends(get_current_u
         raise HTTPException(status_code=500, detail="Logout failed")
 
 
-@router.get("/me", response_model=AuthenticatedUserResponse)
+@router.get("/api/auth/me", response_model=AuthenticatedUserResponse)
 async def get_current_user_info(current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     """Get current user information"""
     return current_user
 
 
-@router.post("/refresh", response_model=LoginResponse)
+@router.post("/api/auth/refresh", response_model=LoginResponse)
 async def refresh_token(request: Request):
     """Refresh JWT token"""
     try:
@@ -84,7 +84,7 @@ async def refresh_token(request: Request):
 
 
 # User management endpoints (admin only)
-@router.get("/users", response_model=UsersListResponse)
+@router.get("/api/auth/users", response_model=UsersListResponse)
 async def get_users(
     skip: int = 0, 
     limit: int = 100,
@@ -98,7 +98,7 @@ async def get_users(
         raise HTTPException(status_code=500, detail="Failed to retrieve users")
 
 
-@router.post("/users", response_model=UserResponse)
+@router.post("/api/auth/users", response_model=UserResponse)
 async def create_user(
     user_request: UserCreateRequest,
     current_user: AuthenticatedUserResponse = Depends(require_admin())
@@ -125,7 +125,7 @@ async def create_user(
         raise HTTPException(status_code=500, detail="Failed to create user")
 
 
-@router.put("/users/{user_id}", response_model=UserResponse)
+@router.put("/api/auth/users/{user_id}", response_model=UserResponse)
 async def update_user(
     user_id: str,
     update_request: UserUpdateRequest,
@@ -146,7 +146,7 @@ async def update_user(
         raise HTTPException(status_code=500, detail="Failed to update user")
 
 
-@router.post("/users/{user_id}/change-password")
+@router.post("/api/auth/users/{user_id}/change-password")
 async def change_user_password(
     user_id: str,
     password_request: PasswordChangeRequest,
@@ -184,7 +184,7 @@ async def change_user_password(
         raise HTTPException(status_code=500, detail="Failed to change password")
 
 
-@router.delete("/users/{user_id}")
+@router.delete("/api/auth/users/{user_id}")
 async def delete_user(
     user_id: str,
     current_user: AuthenticatedUserResponse = Depends(require_admin())
@@ -208,7 +208,7 @@ async def delete_user(
         raise HTTPException(status_code=500, detail="Failed to delete user")
 
 
-@router.post("/users/{user_id}/avatar")
+@router.post("/api/auth/users/{user_id}/avatar")
 async def upload_user_avatar(
     user_id: str,
     file: UploadFile = File(...),
@@ -275,7 +275,7 @@ async def upload_user_avatar(
         raise HTTPException(status_code=500, detail="Failed to upload avatar")
 
 
-@router.get("/users/{user_id}/avatar/{filename}")
+@router.get("/api/auth/users/{user_id}/avatar/{filename}")
 async def get_user_avatar(
     user_id: str,
     filename: str,
@@ -310,7 +310,7 @@ async def get_user_avatar(
 
 
 # Email verification endpoints
-@router.post("/verify-email")
+@router.post("/api/auth/verify-email")
 async def verify_email(token: str, request: Request):
     """Verify email address using verification token"""
     try:
@@ -332,7 +332,7 @@ async def verify_email(token: str, request: Request):
         raise HTTPException(status_code=500, detail="Email verification failed")
 
 
-@router.post("/resend-verification")
+@router.post("/api/auth/resend-verification")
 async def resend_verification(
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
     request: Request = None
@@ -361,7 +361,7 @@ async def resend_verification(
         raise HTTPException(status_code=500, detail="Failed to resend verification email")
 
 
-@router.get("/email-status")
+@router.get("/api/auth/email-status")
 async def get_email_status(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):

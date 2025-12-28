@@ -1430,7 +1430,17 @@ class DocumentService:
             '.mkv': 'mkv',
             '.avi': 'avi',
             '.mov': 'mov',
-            '.webm': 'webm'
+            '.webm': 'webm',
+            # Image extensions - should not be vectorized
+            '.jpg': 'image',
+            '.jpeg': 'image',
+            '.png': 'image',
+            '.gif': 'image',
+            '.bmp': 'image',
+            '.tiff': 'image',
+            '.tif': 'image',
+            '.webp': 'image',
+            '.svg': 'image'
         }
         
         return type_map.get(extension, 'txt')

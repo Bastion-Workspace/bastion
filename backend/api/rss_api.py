@@ -19,10 +19,10 @@ from utils.auth_middleware import get_current_user
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/rss", tags=["RSS"])
+router = APIRouter(tags=["RSS"])
 
 
-@router.post("/feeds", response_model=RSSFeed)
+@router.post("/api/rss/feeds", response_model=RSSFeed)
 async def create_rss_feed(
     feed_data: RSSFeedCreate,
     update_if_exists: bool = False,
@@ -63,7 +63,7 @@ async def create_rss_feed(
         raise HTTPException(status_code=500, detail="Failed to create RSS feed")
 
 
-@router.post("/feeds/global", response_model=RSSFeed)
+@router.post("/api/rss/feeds/global", response_model=RSSFeed)
 async def create_global_rss_feed(
     feed_data: RSSFeedCreate,
     update_if_exists: bool = False,
@@ -98,7 +98,7 @@ async def create_global_rss_feed(
         raise HTTPException(status_code=500, detail="Failed to create global RSS feed")
 
 
-@router.get("/feeds", response_model=List[RSSFeed])
+@router.get("/api/rss/feeds", response_model=List[RSSFeed])
 async def get_rss_feeds(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -122,7 +122,7 @@ async def get_rss_feeds(
         raise HTTPException(status_code=500, detail="Failed to get RSS feeds")
 
 
-@router.get("/feeds/categorized")
+@router.get("/api/rss/feeds/categorized")
 async def get_categorized_rss_feeds(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -163,7 +163,7 @@ async def get_categorized_rss_feeds(
         raise HTTPException(status_code=500, detail="Failed to get categorized RSS feeds")
 
 
-@router.get("/feeds/{feed_id}", response_model=RSSFeed)
+@router.get("/api/rss/feeds/{feed_id}", response_model=RSSFeed)
 async def get_rss_feed(
     feed_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -196,7 +196,7 @@ async def get_rss_feed(
         raise HTTPException(status_code=500, detail="Failed to get RSS feed")
 
 
-@router.get("/feeds/validate")
+@router.get("/api/rss/feeds/validate")
 async def validate_feed_url(
     feed_url: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -245,7 +245,7 @@ async def validate_feed_url(
         raise HTTPException(status_code=500, detail="Failed to validate RSS feed URL")
 
 
-@router.delete("/feeds/{feed_id}")
+@router.delete("/api/rss/feeds/{feed_id}")
 async def delete_rss_feed(
     feed_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -275,7 +275,7 @@ async def delete_rss_feed(
         raise HTTPException(status_code=500, detail="Failed to delete RSS feed")
 
 
-@router.put("/feeds/{feed_id}", response_model=RSSFeed)
+@router.put("/api/rss/feeds/{feed_id}", response_model=RSSFeed)
 async def update_rss_feed(
     feed_id: str,
     feed_data: RSSFeedCreate,
@@ -322,7 +322,7 @@ async def update_rss_feed(
         raise HTTPException(status_code=500, detail="Failed to update RSS feed")
 
 
-@router.get("/feeds/{feed_id}/articles", response_model=List[RSSArticle])
+@router.get("/api/rss/feeds/{feed_id}/articles", response_model=List[RSSArticle])
 async def get_feed_articles(
     feed_id: str,
     limit: int = 100,
@@ -347,7 +347,7 @@ async def get_feed_articles(
         raise HTTPException(status_code=500, detail="Failed to get feed articles")
 
 
-@router.post("/articles/{article_id}/import")
+@router.post("/api/rss/articles/{article_id}/import")
 async def import_rss_article(
     article_id: str,
     import_data: RSSArticleImport,
@@ -384,7 +384,7 @@ async def import_rss_article(
         raise HTTPException(status_code=500, detail="Failed to import article")
 
 
-@router.put("/articles/{article_id}/read")
+@router.put("/api/rss/articles/{article_id}/read")
 async def mark_article_read(
     article_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -413,7 +413,7 @@ async def mark_article_read(
         raise HTTPException(status_code=500, detail="Failed to mark article as read")
 
 
-@router.delete("/articles/{article_id}")
+@router.delete("/api/rss/articles/{article_id}")
 async def delete_rss_article(
     article_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -442,7 +442,7 @@ async def delete_rss_article(
         raise HTTPException(status_code=500, detail="Failed to delete article")
 
 
-@router.post("/feeds/{feed_id}/poll")
+@router.post("/api/rss/feeds/{feed_id}/poll")
 async def poll_rss_feed(
     feed_id: str,
     force_poll: bool = False,
@@ -477,7 +477,7 @@ async def poll_rss_feed(
         logger.error(f"❌ RSS API ERROR: Failed to poll feed {feed_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to poll RSS feed")
 
-@router.post("/articles/extract-full-content")
+@router.post("/api/rss/articles/extract-full-content")
 async def extract_full_content_for_existing_articles(
     background_tasks: BackgroundTasks,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -547,7 +547,7 @@ async def extract_full_content_for_existing_articles(
         raise HTTPException(status_code=500, detail="Failed to poll RSS feed")
 
 
-@router.get("/unread-count")
+@router.get("/api/rss/unread-count")
 async def get_unread_count(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
@@ -570,7 +570,7 @@ async def get_unread_count(
         raise HTTPException(status_code=500, detail="Failed to get unread count")
 
 
-@router.post("/feeds/{feed_id}/subscribe")
+@router.post("/api/rss/feeds/{feed_id}/subscribe")
 async def subscribe_to_feed(
     feed_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -599,7 +599,7 @@ async def subscribe_to_feed(
         raise HTTPException(status_code=500, detail="Failed to subscribe to feed")
 
 
-@router.delete("/feeds/{feed_id}/subscribe")
+@router.delete("/api/rss/feeds/{feed_id}/subscribe")
 async def unsubscribe_from_feed(
     feed_id: str,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)

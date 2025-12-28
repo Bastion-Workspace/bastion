@@ -24,14 +24,16 @@ from orchestrator.tools import (
 )
 from orchestrator.tools.dynamic_tool_analyzer import analyze_tool_needs_for_research
 from orchestrator.backend_tool_client import get_backend_tool_client
-from orchestrator.utils.formatting_detection import detect_formatting_need
+from orchestrator.utils.formatting_detection import detect_formatting_need, detect_post_processing_needs
 from orchestrator.models import ResearchAssessmentResult, ResearchGapAnalysis, QuickAnswerAssessment, QueryTypeDetection
 from orchestrator.agents.base_agent import BaseAgent
 from orchestrator.subgraphs import (
     build_research_workflow_subgraph, 
     build_gap_analysis_subgraph,
     build_web_research_subgraph,
-    build_assessment_subgraph
+    build_assessment_subgraph,
+    build_data_formatting_subgraph,
+    build_visualization_subgraph
 )
 from config.settings import settings
 
@@ -117,6 +119,12 @@ class ResearchState(TypedDict):
     sources_used: List[str]
     routing_recommendation: Optional[str]
     
+    # Post-processing recommendations
+    formatting_recommendations: Optional[Dict[str, Any]]
+    visualization_results: Optional[Dict[str, Any]]
+    formatted_output: Optional[str]
+    format_type: Optional[str]
+    
     # Full document analysis
     full_doc_analysis_needed: bool
     document_ids_to_analyze: List[str]
@@ -146,7 +154,7 @@ class FullResearchAgent(BaseAgent):
     """
     
     def __init__(self):
-        super().__init__("full_research_agent")
+        super().__init__("research_agent")
         # LLMs will be created lazily using _get_llm() to respect user model preferences
         self._research_subgraphs = {}  # Cache subgraphs by (skip_cache, skip_expansion) config
         self._full_doc_analysis_subgraph = None  # Full document analysis subgraph
@@ -177,6 +185,18 @@ class FullResearchAgent(BaseAgent):
         if self._assessment_subgraph is None:
             self._assessment_subgraph = build_assessment_subgraph(checkpointer)
         return self._assessment_subgraph
+    
+    def _get_data_formatting_subgraph(self, checkpointer):
+        """Get or build data formatting subgraph"""
+        if not hasattr(self, '_data_formatting_subgraph') or self._data_formatting_subgraph is None:
+            self._data_formatting_subgraph = build_data_formatting_subgraph(checkpointer)
+        return self._data_formatting_subgraph
+    
+    def _get_visualization_subgraph(self, checkpointer):
+        """Get or build visualization subgraph"""
+        if not hasattr(self, '_visualization_subgraph') or self._visualization_subgraph is None:
+            self._visualization_subgraph = build_visualization_subgraph(checkpointer)
+        return self._visualization_subgraph
     
     async def _call_research_subgraph_node(self, state: ResearchState) -> Dict[str, Any]:
         """Call research workflow subgraph to perform core research"""
@@ -360,21 +380,21 @@ class FullResearchAgent(BaseAgent):
         # Query type detection always goes to synthesis
         workflow.add_edge("detect_query_type", "final_synthesis")
         
-        # Add data formatting node (if formatting is needed)
-        workflow.add_node("format_data", self._format_data_node)
+        # Add post-processing node (for formatting and/or visualization)
+        workflow.add_node("post_process", self._post_process_results_node)
         
-        # After synthesis, check if formatting is needed
+        # After synthesis, check if post-processing is needed
         workflow.add_conditional_edges(
             "final_synthesis",
             self._route_from_synthesis,
             {
-                "format": "format_data",
+                "post_process": "post_process",
                 "complete": END
             }
         )
         
-        # Formatting node goes to end
-        workflow.add_edge("format_data", END)
+        # Post-processing node goes to end
+        workflow.add_edge("post_process", END)
         
         return workflow.compile(checkpointer=checkpointer)
     
@@ -1064,8 +1084,8 @@ When answering, you can reference data from the user's document above."""
                     
                     # Update shared_memory to track agent selection for conversation continuity
                     shared_memory = state.get("shared_memory", {}) or {}
-                    shared_memory["primary_agent_selected"] = "full_research_agent"
-                    shared_memory["last_agent"] = "full_research_agent"
+                    shared_memory["primary_agent_selected"] = "research_agent"
+                    shared_memory["last_agent"] = "research_agent"
                     
                     return {
                         "quick_answer_provided": True,
@@ -1678,11 +1698,21 @@ When synthesizing your answer, integrate information from the user's reference d
             
             logger.info(f"Synthesis complete: {len(final_response)} characters")
             
-            # Detect if data formatting would improve the response
-            routing_recommendation = await detect_formatting_need(query, final_response)
+            # Detect what post-processing would improve the response
+            formatting_recommendations = await detect_post_processing_needs(query, final_response)
             
-            if routing_recommendation:
-                logger.info(f"📊 Formatting agent recommended for this research")
+            if formatting_recommendations:
+                logger.info(f"Post-processing recommended: table={formatting_recommendations.get('table_recommended')}, "
+                           f"chart={formatting_recommendations.get('chart_recommended')}, "
+                           f"timeline={formatting_recommendations.get('timeline_recommended')}")
+                if formatting_recommendations.get('chart_recommended'):
+                    logger.info(f"📊 Visualization requested for query: '{query}' - will route to visualization subgraph")
+            
+            # Legacy routing_recommendation for backward compatibility
+            routing_recommendation = None
+            if formatting_recommendations and (formatting_recommendations.get("table_recommended") or 
+                                               formatting_recommendations.get("timeline_recommended")):
+                routing_recommendation = "data_formatting"
             
             # Extract citations (simplified)
             sources_used = []
@@ -1697,8 +1727,8 @@ When synthesizing your answer, integrate information from the user's reference d
             
             # Update shared_memory to track agent selection for conversation continuity
             shared_memory = state.get("shared_memory", {}) or {}
-            shared_memory["primary_agent_selected"] = "full_research_agent"
-            shared_memory["last_agent"] = "full_research_agent"
+            shared_memory["primary_agent_selected"] = "research_agent"
+            shared_memory["last_agent"] = "research_agent"
             
             return {
                 "final_response": final_response,
@@ -1706,6 +1736,7 @@ When synthesizing your answer, integrate information from the user's reference d
                 "sources_used": sources_used,
                 "current_round": ResearchRound.FINAL_SYNTHESIS.value,
                 "routing_recommendation": routing_recommendation,
+                "formatting_recommendations": formatting_recommendations,
                 "citations": [],  # TODO: Implement citation extraction
                 "shared_memory": shared_memory
             }
@@ -1714,8 +1745,8 @@ When synthesizing your answer, integrate information from the user's reference d
             logger.error(f"Synthesis error: {e}")
             # Update shared_memory even on error to track agent selection
             shared_memory = state.get("shared_memory", {}) or {}
-            shared_memory["primary_agent_selected"] = "full_research_agent"
-            shared_memory["last_agent"] = "full_research_agent"
+            shared_memory["primary_agent_selected"] = "research_agent"
+            shared_memory["last_agent"] = "research_agent"
             return {
                 "final_response": f"Research completed but synthesis failed: {str(e)}",
                 "research_complete": True,
@@ -1724,61 +1755,208 @@ When synthesizing your answer, integrate information from the user's reference d
             }
     
     def _route_from_synthesis(self, state: ResearchState) -> str:
-        """Route from synthesis: check if formatting is needed"""
-        routing_recommendation = state.get("routing_recommendation")
-        if routing_recommendation == "data_formatting":
-            logger.info("📊 Routing to data formatting agent")
-            return "format"
+        """Route from synthesis: check if post-processing is needed"""
+        formatting_recommendations = state.get("formatting_recommendations")
+        if formatting_recommendations and (formatting_recommendations.get("table_recommended") or 
+                                           formatting_recommendations.get("chart_recommended") or 
+                                           formatting_recommendations.get("timeline_recommended")):
+            logger.info("Routing to post-processing (formatting and/or visualization)")
+            return "post_process"
         return "complete"
     
-    async def _format_data_node(self, state: ResearchState) -> Dict[str, Any]:
-        """Format research results using data formatting agent"""
+    async def _post_process_results_node(self, state: ResearchState) -> Dict[str, Any]:
+        """Post-process research results using formatting and/or visualization subgraphs in parallel"""
         try:
-            logger.info("📊 Formatting research results with data formatting agent...")
+            import asyncio
             
-            # Import data formatting agent
-            from orchestrator.agents import DataFormattingAgent
-            
-            # Get the research response and query
+            formatting_recommendations = state.get("formatting_recommendations", {})
             query = state.get("query", "")
             final_response = state.get("final_response", "")
             
-            # Build formatting request
-            formatting_query = f"Format the following research results into a well-organized structure:\n\n{final_response}"
-            
-            # Get messages from state for context
+            # Get workflow and checkpointer
+            workflow = await self._get_workflow()
+            checkpointer = workflow.checkpointer
+            metadata = state.get("metadata", {})
             messages = state.get("messages", [])
+            shared_memory = state.get("shared_memory", {})
+            config = self._get_checkpoint_config(metadata)
             
-            # Create data formatting agent instance
-            formatting_agent = DataFormattingAgent()
+            # Determine what post-processing is needed
+            needs_formatting = formatting_recommendations.get("table_recommended") or formatting_recommendations.get("timeline_recommended")
+            needs_visualization = formatting_recommendations.get("chart_recommended")
             
-            # Call data formatting agent
-            formatting_result = await formatting_agent.process(
-                query=formatting_query,
-                metadata={"user_id": "system"},
-                messages=messages
+            logger.info(f"Post-processing: formatting={needs_formatting}, visualization={needs_visualization}")
+            
+            # Prepare tasks for parallel execution
+            formatting_task = None
+            visualization_task = None
+            
+            if needs_formatting:
+                formatting_sg = self._get_data_formatting_subgraph(checkpointer)
+                formatting_query = f"Format the following research results into a well-organized structure:\n\n{final_response}"
+                formatting_state = {
+                    "query": formatting_query,
+                    "messages": messages,
+                    "shared_memory": shared_memory,
+                    "user_id": state.get("user_id", shared_memory.get("user_id", "system")),
+                    "metadata": metadata
+                }
+                formatting_task = formatting_sg.ainvoke(formatting_state, config)
+            
+            if needs_visualization:
+                visualization_sg = self._get_visualization_subgraph(checkpointer)
+                
+                # **BULLY!** For follow-up visualization requests, ensure we have research data!
+                # If final_response is short or empty, try to extract from previous messages
+                research_data_for_viz = final_response
+                if not research_data_for_viz or len(research_data_for_viz) < 200:
+                    # Look for previous research results in conversation history
+                    for msg in reversed(messages[-10:]):
+                        if hasattr(msg, 'content'):
+                            content = msg.content
+                            is_assistant = (hasattr(msg, 'type') and msg.type == "ai") or (hasattr(msg, 'role') and msg.role == "assistant")
+                            if is_assistant and len(content) > 200:
+                                research_data_for_viz = content
+                                logger.info(f"Using previous research data from conversation ({len(content)} chars) for visualization")
+                                break
+                
+                visualization_state = {
+                    "query": query,
+                    "messages": messages,
+                    "research_data": research_data_for_viz,  # Use extracted data if available
+                    "shared_memory": shared_memory,
+                    "user_id": state.get("user_id", shared_memory.get("user_id", "system")),
+                    "metadata": metadata
+                }
+                logger.info(f"📊 Calling visualization subgraph with {len(research_data_for_viz)} chars of research data")
+                visualization_task = visualization_sg.ainvoke(visualization_state, config)
+            
+            # Execute tasks in parallel
+            tasks = []
+            task_indices = {}
+            if formatting_task:
+                task_indices['formatting'] = len(tasks)
+                tasks.append(formatting_task)
+            if visualization_task:
+                task_indices['visualization'] = len(tasks)
+                tasks.append(visualization_task)
+            
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+            else:
+                results = []
+            
+            # Extract results
+            formatting_result = None
+            visualization_result = None
+            
+            if 'formatting' in task_indices:
+                idx = task_indices['formatting']
+                if idx < len(results) and not isinstance(results[idx], Exception):
+                    formatting_result = results[idx]
+            
+            if 'visualization' in task_indices:
+                idx = task_indices['visualization']
+                if idx < len(results) and not isinstance(results[idx], Exception):
+                    visualization_result = results[idx]
+            
+            # Handle formatting result
+            formatted_output = final_response
+            format_type = None
+            if formatting_result:
+                formatted_output = formatting_result.get("formatted_output", final_response)
+                format_type = formatting_result.get("format_type", "structured_text")
+                logger.info(f"Data formatting complete: {format_type}")
+            
+            # Handle visualization result
+            visualization_data = None
+            chart_type = None
+            chart_output_format = None
+            static_visualization_data = None
+            static_format = None
+            
+            if visualization_result:
+                viz_result = visualization_result.get("visualization_result", {})
+                if viz_result.get("success"):
+                    visualization_data = viz_result.get("chart_data")
+                    chart_type = viz_result.get("chart_type")
+                    chart_output_format = viz_result.get("output_format")
+                    static_visualization_data = viz_result.get("static_visualization_data")
+                    static_format = viz_result.get("static_format")
+                    logger.info(f"Visualization complete: {chart_type}, format: {chart_output_format}, static: {bool(static_visualization_data)}")
+                else:
+                    logger.warning(f"Visualization failed: {viz_result.get('error')}")
+            
+            # Combine results
+            combined_response = self._combine_post_processed_results(
+                formatted_output, format_type, visualization_data, chart_type, chart_output_format
             )
             
-            # Extract formatted output
-            formatted_output = formatting_result.get("response", final_response)
-            format_type = formatting_result.get("format_type", "structured_text")
-            
-            logger.info(f"✅ Data formatting complete: {format_type}")
-            
             return {
-                "final_response": formatted_output,
+                "final_response": combined_response,
                 "format_type": format_type,
-                "formatted": True
+                "formatted": needs_formatting and formatting_result is not None,
+                "visualization_results": {
+                    "success": visualization_result is not None and visualization_result.get("visualization_result", {}).get("success", False),
+                    "chart_type": chart_type,
+                    "chart_data": visualization_data,
+                    "output_format": chart_output_format,
+                    "static_visualization_data": static_visualization_data,
+                    "static_format": static_format
+                } if visualization_result else None,
+                "static_visualization_data": static_visualization_data,
+                "static_format": static_format,
+                # Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
             
         except Exception as e:
-            logger.error(f"❌ Data formatting failed: {e}")
-            # Return original response if formatting fails
+            logger.error(f"Post-processing failed: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            # Return original response if post-processing fails
             return {
                 "final_response": state.get("final_response", ""),
                 "formatted": False,
-                "formatting_error": str(e)
+                "post_processing_error": str(e),
+                # Preserve critical state keys even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
             }
+    
+    def _combine_post_processed_results(
+        self, 
+        formatted_output: str, 
+        format_type: Optional[str],
+        visualization_data: Optional[str],
+        chart_type: Optional[str],
+        chart_output_format: Optional[str]
+    ) -> str:
+        """Combine formatted output and visualization into final response"""
+        combined = formatted_output
+        
+        # Append visualization if available
+        if visualization_data and chart_type:
+            combined += "\n\n"
+            if chart_output_format == "html":
+                # **BULLY!** Wrap interactive HTML in special chart code block for frontend rendering!
+                combined += f"## Chart: {chart_type.title()}\n\n"
+                combined += f"```html:chart\n{visualization_data}\n```"
+            elif chart_output_format == "base64_png":
+                combined += f"## Chart: {chart_type.title()}\n\n"
+                combined += f"![Chart: {chart_type}]({visualization_data})"
+            else:
+                combined += f"## Chart: {chart_type.title()}\n\n"
+                combined += f"Chart generated successfully (format: {chart_output_format})"
+        
+        return combined
     
     async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
         """
@@ -1878,7 +2056,7 @@ When synthesizing your answer, integrate information from the user's reference d
             return {
                 "task_status": "complete" if research_complete else "incomplete",
                 "response": final_response,
-                "agent_type": "full_research_agent",
+                "agent_type": "research_agent",
                 "sources_used": result.get("sources_used", []),
                 "quick_answer_provided": result.get("quick_answer_provided", False)
             }

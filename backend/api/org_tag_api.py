@@ -11,10 +11,10 @@ from services.org_tag_service import get_org_tag_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/org/tag", tags=["org-mode"])
+router = APIRouter(tags=["org-mode"])
 
 
-@router.post("", response_model=OrgTagResponse)
+@router.post("/api/org/tag", response_model=OrgTagResponse)
 async def add_tags(
     request: OrgTagRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)

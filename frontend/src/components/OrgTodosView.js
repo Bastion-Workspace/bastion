@@ -175,21 +175,43 @@ const OrgTodosView = ({ onOpenDocument }) => {
   }, [todosData, sortBy, groupByFile]);
 
   // Handle clicking a TODO item
-  const handleItemClick = (item) => {
+  const handleItemClick = async (item) => {
     if (!onOpenDocument) return;
 
-    // document_id is already in the search results!
-    if (!item.document_id) {
+    let documentId = item.document_id;
+
+    // If document_id is missing, try to look it up from filename
+    if (!documentId && item.filename) {
+      try {
+        console.log(`🔍 Looking up document_id for: ${item.filename}`);
+        const lookupResult = await apiService.get(`/api/org/lookup-document?filename=${encodeURIComponent(item.filename)}`);
+        
+        if (lookupResult.success && lookupResult.document_id) {
+          documentId = lookupResult.document_id;
+          console.log(`✅ Found document_id: ${documentId}`);
+        } else {
+          console.error('❌ Could not find document ID for:', item.filename);
+          alert(`❌ Could not find document ID for: ${item.filename}`);
+          return;
+        }
+      } catch (err) {
+        console.error('❌ Failed to lookup document:', err);
+        alert(`❌ Failed to find document: ${item.filename}`);
+        return;
+      }
+    }
+
+    if (!documentId) {
       console.error('❌ TODO item missing document_id:', item);
       alert(`❌ Could not find document ID for: ${item.filename}`);
       return;
     }
 
-    console.log('✅ ROOSEVELT: Opening org file:', item.document_id);
+    console.log('✅ Opening org file:', documentId);
     
     // Open document with scroll parameters
     onOpenDocument({
-      documentId: item.document_id,
+      documentId: documentId,
       documentName: item.filename,
       scrollToLine: item.line_number,
       scrollToHeading: item.heading
@@ -642,7 +664,7 @@ const OrgTodosView = ({ onOpenDocument }) => {
               onChange={(e) => setTagFilter(e.target.value)}
             >
               <MenuItem value="">All Tags</MenuItem>
-              {getAllTags(todosData?.todos || []).map(tag => (
+              {getAllTags(todosData?.results || []).map(tag => (
                 <MenuItem key={tag} value={tag}>
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                     <LocalOffer sx={{ fontSize: 14 }} />

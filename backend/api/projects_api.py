@@ -27,7 +27,7 @@ async def get_folder_service() -> FolderService:
         await _folder_service_instance.initialize()
     return _folder_service_instance
 
-router = APIRouter(prefix="/api/projects", tags=["projects"])
+router = APIRouter(tags=["projects"])
 
 
 class CreateProjectRequest(BaseModel):
@@ -44,7 +44,7 @@ class CreateProjectResponse(BaseModel):
     project_type: str
 
 
-@router.post("/create", response_model=CreateProjectResponse)
+@router.post("/api/projects/create", response_model=CreateProjectResponse)
 async def create_project(
     request: CreateProjectRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)

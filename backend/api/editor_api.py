@@ -12,10 +12,10 @@ from services.editor_suggestion_service import editor_suggestion_service
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/editor", tags=["Editor"])
+router = APIRouter(tags=["Editor"])
 
 
-@router.post("/suggest", response_model=EditorSuggestionResponse)
+@router.post("/api/editor/suggest", response_model=EditorSuggestionResponse)
 async def suggest_inline(
     req: EditorSuggestionRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)

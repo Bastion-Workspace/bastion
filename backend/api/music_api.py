@@ -27,7 +27,7 @@ from models.music_models import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/music", tags=["Music"])
+router = APIRouter(tags=["Music"])
 
 
 def _get_content_type_from_url(url: str) -> str:
@@ -54,7 +54,7 @@ def _get_content_type_from_url(url: str) -> str:
         return 'audio/mpeg'
 
 
-@router.post("/config", response_model=Dict[str, Any])
+@router.post("/api/music/config", response_model=Dict[str, Any])
 async def save_music_config(
     request: MusicServiceConfigRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -80,7 +80,7 @@ async def save_music_config(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/config", response_model=MusicServiceConfigResponse)
+@router.get("/api/music/config", response_model=MusicServiceConfigResponse)
 async def get_music_config(
     service_type: Optional[str] = None,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -104,7 +104,7 @@ async def get_music_config(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/sources", response_model=MediaSourceListResponse)
+@router.get("/api/music/sources", response_model=MediaSourceListResponse)
 async def get_media_sources(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ) -> MediaSourceListResponse:
@@ -137,7 +137,7 @@ async def get_media_sources(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.delete("/config")
+@router.delete("/api/music/config")
 async def delete_music_config(
     service_type: Optional[str] = None,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -156,7 +156,7 @@ async def delete_music_config(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/test-connection")
+@router.post("/api/music/test-connection")
 async def test_connection(
     service_type: Optional[str] = None,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -170,7 +170,7 @@ async def test_connection(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/refresh")
+@router.post("/api/music/refresh")
 async def refresh_cache(
     service_type: Optional[str] = None,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -184,7 +184,7 @@ async def refresh_cache(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/library", response_model=MusicLibraryResponse)
+@router.get("/api/music/library", response_model=MusicLibraryResponse)
 async def get_library(
     service_type: Optional[str] = None,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -209,7 +209,7 @@ async def get_library(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/albums/artist/{artist_id}", response_model=MusicLibraryResponse)
+@router.get("/api/music/albums/artist/{artist_id}", response_model=MusicLibraryResponse)
 async def get_albums_by_artist(
     artist_id: str,
     service_type: Optional[str] = None,
@@ -233,7 +233,7 @@ async def get_albums_by_artist(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/series/author/{author_id}")
+@router.get("/api/music/series/author/{author_id}")
 async def get_series_by_author(
     author_id: str,
     service_type: Optional[str] = None,
@@ -248,7 +248,7 @@ async def get_series_by_author(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/albums/series/{series_name}")
+@router.get("/api/music/albums/series/{series_name}")
 async def get_albums_by_series(
     series_name: str,
     author_name: str,
@@ -277,7 +277,7 @@ async def get_albums_by_series(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/tracks/{parent_id}")
+@router.get("/api/music/tracks/{parent_id}")
 async def get_tracks(
     parent_id: str,
     parent_type: str = "album",
@@ -308,7 +308,7 @@ async def get_tracks(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/stream/{track_id}", response_model=StreamUrlResponse)
+@router.get("/api/music/stream/{track_id}", response_model=StreamUrlResponse)
 async def get_stream_url(
     track_id: str,
     service_type: Optional[str] = None,
@@ -327,7 +327,7 @@ async def get_stream_url(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/stream-proxy/{track_id}")
+@router.get("/api/music/stream-proxy/{track_id}")
 async def stream_proxy(
     track_id: str,
     request: Request,
@@ -533,7 +533,7 @@ class SearchRequest(BaseModel):
     limit: int = 25
 
 
-@router.post("/playlist/{playlist_id}/add-tracks")
+@router.post("/api/music/playlist/{playlist_id}/add-tracks")
 async def add_tracks_to_playlist(
     playlist_id: str,
     request: PlaylistModifyRequest,
@@ -563,7 +563,7 @@ async def add_tracks_to_playlist(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/playlist/{playlist_id}/remove-tracks")
+@router.post("/api/music/playlist/{playlist_id}/remove-tracks")
 async def remove_tracks_from_playlist(
     playlist_id: str,
     request: PlaylistModifyRequest,
@@ -593,7 +593,7 @@ async def remove_tracks_from_playlist(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/search/tracks")
+@router.post("/api/music/search/tracks")
 async def search_tracks(
     request: SearchRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -619,7 +619,7 @@ async def search_tracks(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/search/albums")
+@router.post("/api/music/search/albums")
 async def search_albums(
     request: SearchRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -646,7 +646,7 @@ async def search_albums(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/search/artists")
+@router.post("/api/music/search/artists")
 async def search_artists(
     request: SearchRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)

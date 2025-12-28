@@ -22,7 +22,6 @@ from orchestrator.tools.document_tools import (
     find_documents_by_tags_tool,
     search_documents_structured
 )
-from orchestrator.clients.backend_tool_client import get_backend_tool_client
 from orchestrator.models.content_analysis_models import (
     ArticleAnalysisResult,
     ComparisonAnalysisResult,
@@ -88,11 +87,6 @@ class ContentAnalysisAgent(BaseAgent):
         
         return workflow.compile(checkpointer=checkpointer)
     
-    async def _get_grpc_client(self):
-        """Get or create gRPC client for backend tools"""
-        if self._grpc_client is None:
-            self._grpc_client = await get_backend_tool_client()
-        return self._grpc_client
     
     async def _get_model_context_window(self, model_name: str) -> int:
         """
@@ -173,6 +167,14 @@ class ContentAnalysisAgent(BaseAgent):
             "You are a content analysis expert evaluating both fiction and non-fiction works. "
             "For fiction: Focus on plot, characters, themes, pacing, and story elements.\n"
             "For non-fiction: Focus on thesis clarity, argument structure, evidentiary support, counterarguments, tone/audience fit, and actionable improvements.\n\n"
+            "VISUALIZATION TOOL:\n"
+            "You have access to a chart generation tool that can create visual representations of data.\n"
+            "Use this tool when analyzing data that would benefit from visualization:\n"
+            "- Comparing metrics across documents\n"
+            "- Showing trends or patterns in content analysis\n"
+            "- Displaying distributions of themes, topics, or characteristics\n"
+            "- User explicitly requests a chart or graph\n\n"
+            "Available chart types: bar, line, pie, scatter, area, heatmap, box_plot, histogram\n\n"
             "STRUCTURED OUTPUT REQUIRED: Return ONLY valid JSON matching this exact schema:\n"
             "{\n"
             '  "task_status": "complete",\n'

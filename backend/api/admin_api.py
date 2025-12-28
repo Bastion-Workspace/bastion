@@ -17,12 +17,12 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/admin", tags=["admin"])
+router = APIRouter(tags=["admin"])
 
 
 # ===== USER MANAGEMENT ENDPOINTS =====
 
-@router.get("/users", response_model=UsersListResponse)
+@router.get("/api/admin/users", response_model=UsersListResponse)
 async def get_users(
     skip: int = 0, 
     limit: int = 100,
@@ -37,7 +37,7 @@ async def get_users(
         raise HTTPException(status_code=500, detail="Failed to retrieve users")
 
 
-@router.post("/users", response_model=UserResponse)
+@router.post("/api/admin/users", response_model=UserResponse)
 async def create_user(
     user_request: UserCreateRequest,
     current_user: AuthenticatedUserResponse = Depends(require_admin())
@@ -67,7 +67,7 @@ async def create_user(
         raise HTTPException(status_code=500, detail="Failed to create user")
 
 
-@router.put("/users/{user_id}", response_model=UserResponse)
+@router.put("/api/admin/users/{user_id}", response_model=UserResponse)
 async def update_user(
     user_id: str,
     update_request: UserUpdateRequest,
@@ -91,7 +91,7 @@ async def update_user(
         raise HTTPException(status_code=500, detail="Failed to update user")
 
 
-@router.post("/users/{user_id}/change-password")
+@router.post("/api/admin/users/{user_id}/change-password")
 async def change_user_password(
     user_id: str,
     password_request: PasswordChangeRequest,
@@ -124,7 +124,7 @@ async def change_user_password(
         raise HTTPException(status_code=500, detail="Failed to change password")
 
 
-@router.delete("/users/{user_id}")
+@router.delete("/api/admin/users/{user_id}")
 async def delete_user(
     user_id: str,
     current_user: AuthenticatedUserResponse = Depends(require_admin())
@@ -153,7 +153,7 @@ async def delete_user(
 
 # ===== SYSTEM ADMINISTRATION ENDPOINTS =====
 
-@router.post("/clear-documents")
+@router.post("/api/admin/clear-documents")
 async def clear_all_documents(
     current_user: AuthenticatedUserResponse = Depends(require_admin())
 ):
@@ -172,7 +172,7 @@ async def clear_all_documents(
         raise HTTPException(status_code=500, detail=f"Failed to clear documents: {str(e)}")
 
 
-@router.post("/clear-neo4j")
+@router.post("/api/admin/clear-neo4j")
 async def clear_neo4j(
     current_user: AuthenticatedUserResponse = Depends(require_admin())
 ):
@@ -191,7 +191,7 @@ async def clear_neo4j(
         raise HTTPException(status_code=500, detail=f"Failed to clear Neo4j: {str(e)}")
 
 
-@router.post("/clear-qdrant")
+@router.post("/api/admin/clear-qdrant")
 async def clear_qdrant(
     current_user: AuthenticatedUserResponse = Depends(require_admin())
 ):
@@ -216,7 +216,7 @@ async def clear_qdrant(
 
 # ===== CAPABILITIES MANAGEMENT =====
 
-@router.get("/users/{user_id}/capabilities")
+@router.get("/api/admin/users/{user_id}/capabilities")
 async def get_user_capabilities(
     user_id: str,
     current_user: AuthenticatedUserResponse = Depends(require_admin())
@@ -230,7 +230,7 @@ async def get_user_capabilities(
         raise HTTPException(status_code=500, detail="Failed to get capabilities")
 
 
-@router.post("/users/{user_id}/capabilities")
+@router.post("/api/admin/users/{user_id}/capabilities")
 async def set_user_capabilities(
     user_id: str,
     capabilities: dict,
