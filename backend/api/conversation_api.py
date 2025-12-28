@@ -524,7 +524,7 @@ async def _cleanup_conversation_images(conversation_id: str, user_id: str):
         # Get all messages from the conversation before deletion
         messages = await fetch_all(
             """
-            SELECT content, role 
+            SELECT content
             FROM conversation_messages 
             WHERE conversation_id = $1
             ORDER BY created_at
