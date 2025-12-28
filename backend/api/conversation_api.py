@@ -208,6 +208,7 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
                         c.checkpoint_id
                     FROM checkpoints c
                     WHERE c.thread_id = $1 
+                    AND c.checkpoint -> 'channel_values' IS NOT NULL
                     AND c.checkpoint -> 'channel_values' ->> 'user_id' = $2
                     ORDER BY c.thread_id, c.checkpoint_id DESC
                     LIMIT 1
@@ -246,8 +247,7 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
                     # CRITICAL FIX: Always check database for title, even when checkpoint exists
                     # Database is source of truth for conversation metadata
                     try:
-                        from services.conversation_service import ConversationService
-                        conversation_service = ConversationService()
+                        conversation_service = await _get_conversation_service()
                         conversation_service.set_current_user(current_user.user_id)
                         db_conversation = await conversation_service.lifecycle_manager.get_conversation_lifecycle(conversation_id, current_user.user_id)
                         if db_conversation:
@@ -282,8 +282,7 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
         if not conversation_dict:
             logger.info(f"📚 Conversation not found in checkpoint, falling back to conversation database for {conversation_id}")
             try:
-                from services.conversation_service import ConversationService
-                conversation_service = ConversationService()
+                conversation_service = await _get_conversation_service()
                 conversation_service.set_current_user(current_user.user_id)
                 
                 # Get conversation from database
@@ -384,6 +383,7 @@ async def update_conversation(conversation_id: str, request: UpdateConversationR
                         c.checkpoint_id
                     FROM checkpoints c
                     WHERE c.thread_id = $1 
+                      AND c.checkpoint -> 'channel_values' IS NOT NULL
                       AND c.checkpoint -> 'channel_values' ->> 'user_id' = $2
                     ORDER BY c.thread_id, c.checkpoint_id DESC
                     LIMIT 1
@@ -401,6 +401,7 @@ async def update_conversation(conversation_id: str, request: UpdateConversationR
                             c.checkpoint_id
                         FROM checkpoints c
                         WHERE c.thread_id = $1 
+                          AND c.checkpoint -> 'channel_values' IS NOT NULL
                           AND c.checkpoint -> 'channel_values' ->> 'user_id' = $2
                         ORDER BY c.thread_id, c.checkpoint_id DESC
                         LIMIT 1
@@ -438,6 +439,7 @@ async def update_conversation(conversation_id: str, request: UpdateConversationR
                         UPDATE checkpoints
                         SET checkpoint = $1
                         WHERE thread_id = $2
+                          AND checkpoint -> 'channel_values' IS NOT NULL
                           AND checkpoint -> 'channel_values' ->> 'user_id' = $3
                         """,
                         checkpoint_data,
@@ -698,8 +700,7 @@ async def get_conversation_messages(conversation_id: str, skip: int = 0, limit: 
         
         # PRIORITY 1: Read from conversation database (primary source for orchestrator conversations)
         try:
-            from services.conversation_service import ConversationService
-            conversation_service = ConversationService()
+            conversation_service = await _get_conversation_service()
             conversation_service.set_current_user(current_user.user_id)
             
             db_messages_result = await conversation_service.get_conversation_messages(
@@ -995,6 +996,7 @@ async def delete_conversation(conversation_id: str, current_user: AuthenticatedU
             deleted_checkpoints = await conn.execute("""
                 DELETE FROM checkpoints 
                 WHERE thread_id = $1 
+                AND checkpoint -> 'channel_values' IS NOT NULL
                 AND checkpoint -> 'channel_values' ->> 'user_id' = $2
             """, conversation_id, current_user.user_id)
             
@@ -1067,14 +1069,16 @@ async def delete_all_conversations(current_user: AuthenticatedUserResponse = Dep
             # Delete all checkpoints for this user
             deleted_checkpoints = await conn.execute("""
                 DELETE FROM checkpoints 
-                WHERE checkpoint -> 'channel_values' ->> 'user_id' = $1
+                WHERE checkpoint -> 'channel_values' IS NOT NULL
+                AND checkpoint -> 'channel_values' ->> 'user_id' = $1
             """, current_user.user_id)
             
             # Also delete from checkpoint_blobs and checkpoint_writes for this user
             # First get all thread_ids for this user
             user_threads = await conn.fetch("""
                 SELECT DISTINCT thread_id FROM checkpoints 
-                WHERE checkpoint -> 'channel_values' ->> 'user_id' = $1
+                WHERE checkpoint -> 'channel_values' IS NOT NULL
+                AND checkpoint -> 'channel_values' ->> 'user_id' = $1
             """, current_user.user_id)
             
             thread_ids = [row['thread_id'] for row in user_threads]
@@ -1117,4 +1121,3 @@ async def delete_all_conversations(current_user: AuthenticatedUserResponse = Dep
     except Exception as e:
         logger.error(f"❌ Failed to delete all conversations: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
