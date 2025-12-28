@@ -389,7 +389,7 @@ class FileManagerService:
             dest_folder = await self.folder_service.get_folder(
                 request.new_folder_id,
                 user_id=request.user_id,
-                user_role=request.current_user_role
+                current_user_role=request.current_user_role
             )
             if not dest_folder:
                 raise ValueError(f"Destination folder not found: {request.new_folder_id}")
