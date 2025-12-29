@@ -1675,6 +1675,11 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 if "primary_agent_selected" in base_shared_memory:
                     shared_memory["primary_agent_selected"] = base_shared_memory["primary_agent_selected"]
                 
+                # Ensure user_chat_model is in metadata (not just shared_memory) for agent model selection
+                if "user_chat_model" in shared_memory and "user_chat_model" not in metadata:
+                    metadata["user_chat_model"] = shared_memory["user_chat_model"]
+                    logger.info(f"🎯 FICTION METADATA: Added user_chat_model to metadata: {shared_memory['user_chat_model']}")
+                
                 fiction_metadata = {
                     "user_id": request.user_id,
                     "shared_memory": shared_memory,

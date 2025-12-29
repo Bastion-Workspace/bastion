@@ -158,6 +158,8 @@ class FullResearchAgent(BaseAgent):
         # LLMs will be created lazily using _get_llm() to respect user model preferences
         self._research_subgraphs = {}  # Cache subgraphs by (skip_cache, skip_expansion) config
         self._full_doc_analysis_subgraph = None  # Full document analysis subgraph
+        self._web_research_subgraph = None  # Web research subgraph
+        self._assessment_subgraph = None  # Assessment subgraph
     
     def _get_research_subgraph(self, checkpointer, skip_cache: bool = False, skip_expansion: bool = False):
         """Get or build research workflow subgraph"""

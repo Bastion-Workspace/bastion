@@ -1980,11 +1980,26 @@ class FictionEditingAgent(BaseAgent):
             if editor_ops_from_state and not editor_ops_from_response:
                 logger.warning(f"⚠️ Process: editor_operations missing from response dict but present in state - using state")
             
-            # Build result dict matching character_development_agent pattern
-            response_value = response.get("response", "Fiction editing complete") if isinstance(response, dict) else str(response)
+            # Extract response text - ensure it's never empty
+            if isinstance(response, dict):
+                response_text = response.get("response", "")
+                # Fallback to summary from manuscript_edit if response text is empty
+                if not response_text:
+                    manuscript_edit = response.get("manuscript_edit")
+                    if manuscript_edit and isinstance(manuscript_edit, dict):
+                        response_text = manuscript_edit.get("summary", "")
+                # Final fallback
+                if not response_text:
+                    if editor_operations:
+                        response_text = f"Generated {len(editor_operations)} edit(s) to the manuscript."
+                    else:
+                        response_text = "Fiction editing complete"
+            else:
+                response_text = str(response) if response else "Fiction editing complete"
             
+            # Build result dict matching character_development_agent pattern
             result = {
-                "response": response_value,
+                "response": response_text,
                 "task_status": task_status,
                 "agent_results": {
                     "editor_operations": editor_operations,
@@ -2002,7 +2017,7 @@ class FictionEditingAgent(BaseAgent):
             if isinstance(response, dict) and response.get("manuscript_edit"):
                 result["manuscript_edit"] = response["manuscript_edit"]
             
-            logger.info(f"Fiction editing agent completed: {task_status}, result has editor_operations: {bool(result.get('editor_operations'))}")
+            logger.info(f"Fiction editing agent completed: {task_status}, result has editor_operations: {bool(result.get('editor_operations'))}, response_text length: {len(response_text)}")
             return result
             
         except Exception as e:
