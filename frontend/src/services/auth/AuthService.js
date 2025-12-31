@@ -25,8 +25,8 @@ class AuthService extends ApiServiceBase {
     return this.post('/api/auth/register', userData);
   }
 
-  changePassword = async (currentPassword, newPassword) => {
-    return this.post('/api/auth/change-password', {
+  changePassword = async (userId, currentPassword, newPassword) => {
+    return this.post(`/api/auth/users/${userId}/change-password`, {
       current_password: currentPassword,
       new_password: newPassword,
     });

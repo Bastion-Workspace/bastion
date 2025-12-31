@@ -167,7 +167,7 @@ Structured Response → User
 ```
 
 All agents:
-- Extend `BaseAgent` for consistent interface
+- Extend `BaseAgent` from `llm-orchestrator/orchestrator/agents/base_agent.py` for consistent interface
 - Use `backend_tool_client` for data access via gRPC
 - Return structured Pydantic models (not raw strings)
 - Support streaming responses where appropriate

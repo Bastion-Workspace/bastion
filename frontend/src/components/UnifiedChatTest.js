@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useChatManagerUnified } from '../hooks/useChatManagerUnified';
 import { Box, TextField, Button, Typography, Paper, List, ListItem, ListItemText, Chip, CircularProgress } from '@mui/material';
+import { formatTimestamp } from '../utils/chatUtils';
 
 /**
  * Test component for the unified background processing system
@@ -227,7 +228,7 @@ const UnifiedChatTest = () => {
                         />
                       )}
                       <Typography variant="caption" color="text.secondary">
-                        {new Date(message.timestamp).toLocaleTimeString()}
+                        {formatTimestamp(message.timestamp)}
                       </Typography>
                     </Box>
                   }

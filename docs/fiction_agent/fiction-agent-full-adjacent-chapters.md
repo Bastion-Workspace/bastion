@@ -370,7 +370,7 @@ Expected:
 
 ## Files Modified
 
-**`backend/services/langgraph_agents/fiction_editing_agent.py`**
+**`llm-orchestrator/orchestrator/agents/fiction_editing_agent.py`**
 
 **Changes:**
 1. **Context building** (lines 357-402)

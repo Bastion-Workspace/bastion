@@ -10,6 +10,8 @@ from models.conversation_models import (
     MessageListResponse,
     MessageResponse,
     UpdateConversationRequest,
+    ReactionRequest,
+    ReactionResponse,
 )
 from utils.auth_middleware import get_current_user, validate_conversation_access
 from models.api_models import AuthenticatedUserResponse
@@ -509,6 +511,52 @@ async def update_conversation(conversation_id: str, request: UpdateConversationR
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.patch("/api/conversations/{conversation_id}/metadata")
+async def update_conversation_metadata(
+    conversation_id: str,
+    request: dict,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Update conversation metadata (model, editor preference, etc.)"""
+    try:
+        # Check edit permission
+        has_access = await validate_conversation_access(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            required_permission="edit"
+        )
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have permission to edit this conversation")
+        
+        logger.info(f"💬 Updating metadata for conversation: {conversation_id} for user: {current_user.user_id}")
+        
+        # Get conversation service
+        conversation_service = await _get_conversation_service()
+        conversation_service.set_current_user(current_user.user_id)
+        
+        # Get metadata updates from request
+        metadata_updates = request.get("metadata", {})
+        
+        if not metadata_updates:
+            raise HTTPException(status_code=400, detail="metadata field is required")
+        
+        # Use lifecycle manager's update_conversation_metadata method
+        success = await conversation_service.lifecycle_manager.update_conversation_metadata(
+            conversation_id=conversation_id,
+            updates=metadata_updates
+        )
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Conversation not found")
+        
+        logger.info(f"✅ Updated metadata for conversation {conversation_id}: {metadata_updates}")
+        return {"status": "success", "conversation_id": conversation_id}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to update conversation metadata {conversation_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Helper function for image cleanup
@@ -968,6 +1016,50 @@ async def add_message_to_conversation(conversation_id: str, request: CreateMessa
         
     except Exception as e:
         logger.error(f"❌ Failed to add message to conversation: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/conversations/{conversation_id}/messages/{message_id}/react", response_model=ReactionResponse)
+async def react_to_message(conversation_id: str, message_id: str, request: ReactionRequest, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
+    """Add or remove a reaction to a message"""
+    conversation_service = await _get_conversation_service()
+    try:
+        # Check read permission (users need to be able to see the message to react)
+        has_access = await validate_conversation_access(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            required_permission="read"
+        )
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have access to this conversation")
+        
+        logger.info(f"💬 Adding reaction to message: {message_id} in conversation: {conversation_id}")
+        
+        # Set the current user for this operation
+        conversation_service.set_current_user(current_user.user_id)
+        
+        # Use the user_id from the authenticated user, not the request
+        result = await conversation_service.add_reaction(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            user_id=current_user.user_id,
+            emoji=request.emoji
+        )
+        
+        if not result:
+            raise HTTPException(status_code=404, detail="Message not found")
+        
+        logger.info(f"✅ Reaction added to message {message_id}")
+        return ReactionResponse(
+            success=True,
+            message_id=message_id,
+            reactions=result.get("reactions", {})
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to add reaction to message: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

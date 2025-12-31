@@ -40,7 +40,7 @@ The Entertainment Agent now leverages Neo4j's knowledge graph capabilities for r
    - Added `get_entertainment_recommendations()`
    - Added `get_actor_collaborations()`
 
-2. **`backend/services/langgraph_agents/entertainment_agent.py`**
+2. **`llm-orchestrator/orchestrator/agents/entertainment_agent.py`**
    - Added `_get_graph_recommendations()`
    - Enhanced response generation with graph data
    - Integrated Neo4j queries for recommendation type queries

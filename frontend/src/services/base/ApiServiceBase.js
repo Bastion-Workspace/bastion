@@ -240,6 +240,14 @@ class ApiServiceBase {
     });
   }
 
+  patch = async (url, data, options = {}) => {
+    return this.request(url, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+      ...options,
+    });
+  }
+
   delete = async (url, options = {}) => {
     return this.request(url, { method: 'DELETE', ...options });
   }

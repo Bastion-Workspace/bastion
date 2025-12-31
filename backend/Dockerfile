@@ -41,6 +41,10 @@ COPY VERSION /app/VERSION
 # Copy application code
 COPY backend /app
 
+# Copy tools-service code (needed for imports like tools_service.models.rss_models)
+# NOTE: Directory is tools-service but we copy as tools_service so Python can import it
+COPY tools-service /app/tools_service
+
 # Generate gRPC code from shared proto files (after dependencies installed)
 RUN python -m grpc_tools.protoc \
     -I/app \
@@ -58,6 +62,9 @@ RUN chmod +x docker-entrypoint.sh
 
 # Create necessary directories
 RUN mkdir -p /app/uploads /app/processed /app/logs
+
+# Set PYTHONPATH to include tools_service for imports
+ENV PYTHONPATH=/app:/app/tools_service
 
 # Expose ports (8000 for FastAPI)
 EXPOSE 8000

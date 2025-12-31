@@ -116,6 +116,19 @@ class WeatherAgent(BaseAgent):
             # Get user preferences from shared memory and state persona  
             user_preferences = shared_memory.get("user_preferences", {})
             
+            # Load user ZIP code from metadata into shared_memory if available (for weather location fallback)
+            metadata = state.get("metadata", {})
+            user_id = state.get("user_id", "system")
+            if user_id and user_id != "system":
+                # Check if ZIP code is in metadata (passed from frontend)
+                user_zip_code = metadata.get("user_zip_code")
+                if user_zip_code:
+                    # Store in shared_memory for weather request analyzer
+                    weather_data = shared_memory.setdefault("weather_data", {})
+                    location_prefs = weather_data.setdefault("location_preferences", {})
+                    location_prefs["user_home_zip"] = user_zip_code
+                    logger.info(f"📍 Loaded user ZIP code from metadata: {user_zip_code}")
+            
             # Extract persona_style using centralized approach
             persona_style = "professional"  # Default
             if persona:
@@ -168,8 +181,11 @@ class WeatherAgent(BaseAgent):
             # Get analyzer instance
             analyzer = await self._get_analyzer()
             
+            # Get user_id for ZIP code fallback
+            user_id = state.get("user_id", "system")
+            
             # Analyze the weather request
-            weather_request = await analyzer.analyze_weather_request(query, shared_memory)
+            weather_request = await analyzer.analyze_weather_request(query, shared_memory, user_id)
             
             return {
                 "weather_request": weather_request,
@@ -521,9 +537,153 @@ class WeatherAgent(BaseAgent):
             # Get gRPC client from BaseAgent
             grpc_client = await self._get_grpc_client()
             
-            # Determine data types
+            request_type = weather_request.get("request_type", "current")
+            
+            # Handle historical requests
+            if request_type == "history":
+                date_str = weather_request.get("date_str", "")
+                if not date_str:
+                    return {"success": False, "error": "Historical request missing date_str"}
+                
+                # Check if this is a year-only query (needs multi-month expansion)
+                is_year_only = weather_request.get("is_year_only", False)
+                
+                if is_year_only:
+                    # Expand year into 12 monthly queries
+                    year = int(date_str)
+                    monthly_results = []
+                    
+                    for month in range(1, 13):
+                        month_str = f"{year}-{month:02d}"
+                        logger.info(f"📅 Fetching monthly data for {month_str}...")
+                        
+                        month_result = await grpc_client.get_weather(
+                            location=weather_request["location"],
+                            user_id=user_id,
+                            data_types=["history"],
+                            date_str=month_str
+                        )
+                        
+                        if month_result and month_result.get("success"):
+                            # Extract monthly average data
+                            metadata = month_result.get('metadata', {})
+                            if metadata.get("period_type") == "monthly_average":
+                                monthly_results.append({
+                                    "month": month,
+                                    "month_str": month_str,
+                                    "average_temperature": float(metadata.get("average_temperature", 0)),
+                                    "min_temperature": float(metadata.get("min_temperature", 0)),
+                                    "max_temperature": float(metadata.get("max_temperature", 0)),
+                                    "average_humidity": float(metadata.get("humidity", 0)),
+                                    "average_wind_speed": float(metadata.get("wind_speed", 0)),
+                                    "most_common_conditions": metadata.get("conditions", "")
+                                })
+                    
+                    if not monthly_results:
+                        return {
+                            "success": False,
+                            "error": f"Could not retrieve historical data for {year}. Historical weather data requires an OpenWeatherMap One Call API 3.0 subscription."
+                        }
+                    
+                    # Aggregate year data
+                    all_temps = [m["average_temperature"] for m in monthly_results if m["average_temperature"] > 0]
+                    all_mins = [m["min_temperature"] for m in monthly_results if m["min_temperature"] > 0]
+                    all_maxs = [m["max_temperature"] for m in monthly_results if m["max_temperature"] > 0]
+                    
+                    formatted = {
+                        "success": True,
+                        "location": {
+                            "name": weather_request["location"],
+                            "query": weather_request["location"]
+                        },
+                        "period": {
+                            "type": "yearly_summary",
+                            "date_str": date_str,
+                            "year": year
+                        },
+                        "historical": {
+                            "yearly_average_temperature": sum(all_temps) / len(all_temps) if all_temps else 0,
+                            "yearly_min_temperature": min(all_mins) if all_mins else 0,
+                            "yearly_max_temperature": max(all_maxs) if all_maxs else 0,
+                            "monthly_data": monthly_results,
+                            "months_available": len(monthly_results)
+                        },
+                        "units": {
+                            "temperature": "°F",
+                            "wind_speed": "mph"
+                        }
+                    }
+                    
+                    return formatted
+                
+                # Single month or day query
+                result = await grpc_client.get_weather(
+                    location=weather_request["location"],
+                    user_id=user_id,
+                    data_types=["history"],
+                    date_str=date_str
+                )
+                
+                if not result or not result.get("success"):
+                    return {"success": False, "error": "Historical weather service unavailable or failed"}
+                
+                # Reconstruct expected format for historical data
+                metadata = result.get('metadata', {})
+                period_type = metadata.get("period_type", "daily")
+                
+                if period_type == "monthly_average":
+                    formatted = {
+                        "success": True,
+                        "location": {
+                            "name": result.get("location", weather_request["location"]),
+                            "query": weather_request["location"]
+                        },
+                        "period": {
+                            "type": "monthly_average",
+                            "date_str": date_str
+                        },
+                        "historical": {
+                            "average_temperature": float(metadata.get("average_temperature", 0)),
+                            "min_temperature": float(metadata.get("min_temperature", 0)),
+                            "max_temperature": float(metadata.get("max_temperature", 0)),
+                            "average_humidity": float(metadata.get("humidity", 0)),
+                            "average_wind_speed": float(metadata.get("wind_speed", 0)),
+                            "most_common_conditions": metadata.get("conditions", ""),
+                            "sample_days": int(metadata.get("sample_days", 0))
+                        },
+                        "units": {
+                            "temperature": "°F",
+                            "wind_speed": "mph"
+                        }
+                    }
+                else:
+                    formatted = {
+                        "success": True,
+                        "location": {
+                            "name": result.get("location", weather_request["location"]),
+                            "query": weather_request["location"]
+                        },
+                        "period": {
+                            "type": "daily",
+                            "date_str": date_str
+                        },
+                        "historical": {
+                            "temperature": float(metadata.get("temperature", 0)),
+                            "conditions": metadata.get("conditions", ""),
+                            "humidity": float(metadata.get("humidity", 0)),
+                            "wind_speed": float(metadata.get("wind_speed", 0))
+                        },
+                        "units": {
+                            "temperature": "°F",
+                            "wind_speed": "mph"
+                        }
+                    }
+                
+                return formatted
+            
+            # Determine data types for current/forecast
             data_types = ["current"]
-            if weather_request.get("request_type") != "current":
+            if request_type != "current":
                 data_types.append("forecast")
             
             # Fetch via gRPC

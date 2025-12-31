@@ -368,7 +368,7 @@ LLM can consider:
 
 ## Files Modified
 
-- `backend/services/langgraph_agents/fiction_editing_agent.py` - Complete refactor
+- `llm-orchestrator/orchestrator/agents/fiction_editing_agent.py` - Complete refactor
   - Enhanced system prompt with operation teaching
   - Removed intent detection pattern matching
   - Removed mode-specific guidance

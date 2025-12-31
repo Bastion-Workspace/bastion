@@ -37,6 +37,7 @@ class ApiService {
   get = (url, options = {}) => this.auth.get(url, options);
   post = (url, data, options = {}) => this.auth.post(url, data, options);
   put = (url, data, options = {}) => this.auth.put(url, data, options);
+  patch = (url, data, options = {}) => this.auth.patch(url, data, options);
   delete = (url, options = {}) => this.auth.delete(url, options);
 
   // Legacy method proxies for backward compatibility
@@ -48,7 +49,7 @@ class ApiService {
   logout = () => this.auth.logout();
   getCurrentUser = () => this.auth.getCurrentUser();
   register = (userData) => this.auth.register(userData);
-  changePassword = (currentPassword, newPassword) => this.auth.changePassword(currentPassword, newPassword);
+  changePassword = (userId, currentPassword, newPassword) => this.auth.changePassword(userId, currentPassword, newPassword);
   adminChangePassword = (userId, passwordData) => this.auth.adminChangePassword(userId, passwordData);
 
   // ===== DOCUMENT METHODS =====

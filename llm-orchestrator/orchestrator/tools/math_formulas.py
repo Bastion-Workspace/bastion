@@ -10,6 +10,207 @@ from typing import Dict, Any, Callable, List
 logger = logging.getLogger(__name__)
 
 
+def _calculate_manual_j_heat_loss(inputs: Dict[str, Any]) -> float:
+    """
+    Calculate heat loss according to Manual J methodology
+    
+    Formula components:
+    1. Conduction losses: Q = U × A × ΔT
+    2. Infiltration losses: Q = 0.018 × V × ACH × ΔT × (1 - ERV_efficiency)
+    3. Ventilation losses: Q = 1.08 × CFM × ΔT × (1 - HRV_efficiency)
+    4. Internal gains: Subtracted from total losses
+    
+    Where:
+    - U = 1/R (thermal transmittance)
+    - A = area in sq ft
+    - ΔT = temperature difference (indoor - outdoor)
+    - V = volume in cubic feet
+    - ACH = air changes per hour
+    - CFM = cubic feet per minute
+    """
+    # Temperature difference
+    delta_t = inputs["indoor_design_temp"] - inputs["outdoor_design_temp"]
+    
+    # Building volume
+    floor_area = inputs["floor_area"]
+    ceiling_height = inputs.get("ceiling_height", 8.0)
+    volume = floor_area * ceiling_height
+    
+    total_loss = 0.0
+    loss_components = {}
+    
+    # 1. Wall conduction losses
+    wall_area = inputs.get("wall_area", 0.0)
+    if wall_area > 0:
+        wall_r = inputs.get("wall_r_value", 13.0)
+        wall_u = 1.0 / wall_r if wall_r > 0 else 0
+        wall_loss = wall_u * wall_area * delta_t
+        total_loss += wall_loss
+        loss_components["wall_loss"] = wall_loss
+    
+    # 2. Roof/Ceiling conduction losses
+    roof_area = inputs.get("roof_area", 0.0)
+    if roof_area == 0:
+        roof_area = floor_area  # Default to floor area if not specified
+    roof_r = inputs.get("roof_r_value", 30.0)
+    roof_u = 1.0 / roof_r if roof_r > 0 else 0
+    roof_loss = roof_u * roof_area * delta_t
+    total_loss += roof_loss
+    loss_components["roof_loss"] = roof_loss
+    
+    # 3. Floor conduction losses
+    floor_over_unconditioned = inputs.get("floor_over_unconditioned", False)
+    if floor_over_unconditioned:
+        floor_r = inputs.get("floor_r_value", 19.0)
+        floor_u = 1.0 / floor_r if floor_r > 0 else 0
+        floor_loss = floor_u * floor_area * delta_t
+        total_loss += floor_loss
+        loss_components["floor_loss"] = floor_loss
+    
+    # 4. Window conduction losses
+    window_area = inputs.get("window_area", 0.0)
+    if window_area > 0:
+        window_u = inputs.get("window_u_value", 0.5)
+        window_loss = window_u * window_area * delta_t
+        total_loss += window_loss
+        loss_components["window_loss"] = window_loss
+    
+    # 5. Door conduction losses
+    door_area = inputs.get("door_area", 0.0)
+    if door_area > 0:
+        door_u = inputs.get("door_u_value", 0.2)
+        door_loss = door_u * door_area * delta_t
+        total_loss += door_loss
+        loss_components["door_loss"] = door_loss
+    
+    # 6. Infiltration losses
+    # Q = 0.018 × V × ACH × ΔT (BTU/hr)
+    # 0.018 = air density × specific heat conversion factor
+    ach = inputs.get("air_changes_per_hour", 0.5)
+    infiltration_loss = 0.018 * volume * ach * delta_t
+    total_loss += infiltration_loss
+    loss_components["infiltration_loss"] = infiltration_loss
+    
+    # 7. Ventilation losses
+    # Q = 1.08 × CFM × ΔT (BTU/hr)
+    # 1.08 = air density × specific heat × 60 min/hr conversion
+    ventilation_cfm = inputs.get("ventilation_cfm", 0.0)
+    if ventilation_cfm > 0:
+        ventilation_loss = 1.08 * ventilation_cfm * delta_t
+        total_loss += ventilation_loss
+        loss_components["ventilation_loss"] = ventilation_loss
+    
+    # 8. Internal heat gains (subtract from losses)
+    internal_gains = 0.0
+    
+    # Occupant heat gain: ~400 BTU/hr per person
+    occupant_count = inputs.get("occupant_count", 0)
+    if occupant_count > 0:
+        occupant_gain = occupant_count * 400
+        internal_gains += occupant_gain
+        loss_components["occupant_gain"] = occupant_gain
+    
+    # Appliance heat gain
+    appliance_gain = inputs.get("appliance_heat_gain", 0.0)
+    if appliance_gain > 0:
+        internal_gains += appliance_gain
+        loss_components["appliance_gain"] = appliance_gain
+    
+    # Lighting heat gain
+    lighting_gain = inputs.get("lighting_heat_gain", 0.0)
+    if lighting_gain > 0:
+        internal_gains += lighting_gain
+        loss_components["lighting_gain"] = lighting_gain
+    
+    # Net heat loss (losses minus gains)
+    net_heat_loss = max(0.0, total_loss - internal_gains)
+    loss_components["total_conduction_loss"] = total_loss - infiltration_loss - (loss_components.get("ventilation_loss", 0.0))
+    loss_components["total_loss_before_gains"] = total_loss
+    loss_components["total_internal_gains"] = internal_gains
+    loss_components["net_heat_loss"] = net_heat_loss
+    
+    # Store components in inputs for step generator
+    inputs["_loss_components"] = loss_components
+    inputs["_delta_t"] = delta_t
+    inputs["_volume"] = volume
+    
+    return net_heat_loss
+
+
+def _generate_manual_j_steps(inputs: Dict[str, Any], result: float) -> List[str]:
+    """Generate detailed calculation steps for Manual J heat loss"""
+    components = inputs.get("_loss_components", {})
+    delta_t = inputs.get("_delta_t", 0)
+    volume = inputs.get("_volume", 0)
+    
+    steps = [
+        f"Manual J Heat Loss Calculation",
+        f"Design Conditions: Indoor {inputs['indoor_design_temp']}°F, Outdoor {inputs['outdoor_design_temp']}°F",
+        f"Temperature Difference (ΔT): {delta_t:.1f}°F",
+        f"Building Volume: {inputs['floor_area']:.0f} sq ft × {inputs.get('ceiling_height', 8.0):.1f} ft = {volume:.0f} cu ft"
+    ]
+    
+    # Conduction losses
+    steps.append("\nConduction Losses (Q = U × A × ΔT):")
+    
+    if components.get("wall_loss", 0) > 0:
+        wall_r = inputs.get("wall_r_value", 13.0)
+        wall_area = inputs.get("wall_area", 0.0)
+        steps.append(f"  Walls: U={1.0/wall_r:.4f} × {wall_area:.0f} sq ft × {delta_t:.1f}°F = {components['wall_loss']:.0f} BTU/hr")
+    
+    if components.get("roof_loss", 0) > 0:
+        roof_r = inputs.get("roof_r_value", 30.0)
+        roof_area = inputs.get("roof_area", inputs["floor_area"])
+        steps.append(f"  Roof/Ceiling: U={1.0/roof_r:.4f} × {roof_area:.0f} sq ft × {delta_t:.1f}°F = {components['roof_loss']:.0f} BTU/hr")
+    
+    if components.get("floor_loss", 0) > 0:
+        floor_r = inputs.get("floor_r_value", 19.0)
+        steps.append(f"  Floor: U={1.0/floor_r:.4f} × {inputs['floor_area']:.0f} sq ft × {delta_t:.1f}°F = {components['floor_loss']:.0f} BTU/hr")
+    
+    if components.get("window_loss", 0) > 0:
+        window_u = inputs.get("window_u_value", 0.5)
+        window_area = inputs.get("window_area", 0.0)
+        steps.append(f"  Windows: U={window_u:.2f} × {window_area:.0f} sq ft × {delta_t:.1f}°F = {components['window_loss']:.0f} BTU/hr")
+    
+    if components.get("door_loss", 0) > 0:
+        door_u = inputs.get("door_u_value", 0.2)
+        door_area = inputs.get("door_area", 0.0)
+        steps.append(f"  Doors: U={door_u:.2f} × {door_area:.0f} sq ft × {delta_t:.1f}°F = {components['door_loss']:.0f} BTU/hr")
+    
+    total_conduction = components.get("total_conduction_loss", 0)
+    steps.append(f"  Total Conduction Loss: {total_conduction:.0f} BTU/hr")
+    
+    # Infiltration
+    if components.get("infiltration_loss", 0) > 0:
+        ach = inputs.get("air_changes_per_hour", 0.5)
+        steps.append(f"\nInfiltration Loss: 0.018 × {volume:.0f} cu ft × {ach:.2f} ACH × {delta_t:.1f}°F = {components['infiltration_loss']:.0f} BTU/hr")
+    
+    # Ventilation
+    if components.get("ventilation_loss", 0) > 0:
+        cfm = inputs.get("ventilation_cfm", 0.0)
+        steps.append(f"Ventilation Loss: 1.08 × {cfm:.0f} CFM × {delta_t:.1f}°F = {components['ventilation_loss']:.0f} BTU/hr")
+    
+    # Total before gains
+    total_before = components.get("total_loss_before_gains", 0)
+    steps.append(f"\nTotal Heat Loss (before gains): {total_before:.0f} BTU/hr")
+    
+    # Internal gains
+    if components.get("total_internal_gains", 0) > 0:
+        steps.append("\nInternal Heat Gains (subtracted):")
+        if components.get("occupant_gain", 0) > 0:
+            steps.append(f"  Occupants: {inputs.get('occupant_count', 0)} × 400 BTU/hr = {components['occupant_gain']:.0f} BTU/hr")
+        if components.get("appliance_gain", 0) > 0:
+            steps.append(f"  Appliances: {components['appliance_gain']:.0f} BTU/hr")
+        if components.get("lighting_gain", 0) > 0:
+            steps.append(f"  Lighting: {components['lighting_gain']:.0f} BTU/hr")
+        steps.append(f"  Total Internal Gains: {components['total_internal_gains']:.0f} BTU/hr")
+    
+    # Net result
+    steps.append(f"\nNet Heat Loss: {total_before:.0f} - {components.get('total_internal_gains', 0):.0f} = {result:.0f} BTU/hr")
+    
+    return steps
+
+
 # Formula library structure
 FORMULA_LIBRARY: Dict[str, Dict[str, Any]] = {
     # HVAC/BTU Calculations
@@ -37,6 +238,44 @@ FORMULA_LIBRARY: Dict[str, Dict[str, Any]] = {
             f"Apply ceiling height factor: × {inputs.get('ceiling_height_factor', 1.0)} = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25) * inputs.get('climate_factor', 1.0) * inputs.get('ceiling_height_factor', 1.0)} BTU/hr",
             f"Apply insulation factor: × {inputs.get('insulation_factor', 1.0)} = {result} BTU/hr"
         ]
+    },
+    "manual_j_heat_loss": {
+        "description": "Calculate heat loss according to ACCA Manual J methodology. Includes conduction losses through building envelope, infiltration losses, ventilation losses, and subtracts internal heat gains.",
+        "formula": lambda inputs: _calculate_manual_j_heat_loss(inputs),
+        "required_inputs": ["outdoor_design_temp", "indoor_design_temp", "floor_area"],
+        "optional_inputs": {
+            "ceiling_height": 8.0,  # feet, default 8ft
+            # Wall losses
+            "wall_area": 0.0,  # sq ft
+            "wall_r_value": 13.0,  # R-value, default R-13
+            # Roof/Ceiling losses
+            "roof_area": 0.0,  # sq ft (if 0, uses floor_area)
+            "roof_r_value": 30.0,  # R-value, default R-30
+            # Floor losses
+            "floor_r_value": 19.0,  # R-value, default R-19
+            "floor_over_unconditioned": False,  # True if floor over unconditioned space
+            # Window losses
+            "window_area": 0.0,  # sq ft
+            "window_u_value": 0.5,  # U-value, default U-0.5 (double pane)
+            # Door losses
+            "door_area": 0.0,  # sq ft
+            "door_u_value": 0.2,  # U-value, default U-0.2 (insulated door)
+            # Infiltration
+            "air_changes_per_hour": 0.5,  # ACH, default 0.5 (tight construction)
+            # Ventilation
+            "ventilation_cfm": 0.0,  # CFM of mechanical ventilation
+            # Internal heat gains (subtracted from losses)
+            "occupant_count": 0,  # number of occupants
+            "appliance_heat_gain": 0.0,  # BTU/hr from appliances
+            "lighting_heat_gain": 0.0,  # BTU/hr from lighting
+        },
+        "output_unit": "BTU/hr",
+        "validation": lambda inputs: (
+            inputs["outdoor_design_temp"] < inputs["indoor_design_temp"] and
+            inputs["floor_area"] > 0 and
+            inputs.get("ceiling_height", 8.0) > 0
+        ),
+        "step_generator": lambda inputs, result: _generate_manual_j_steps(inputs, result)
     },
     
     # Electrical Calculations

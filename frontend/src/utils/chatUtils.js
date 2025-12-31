@@ -18,10 +18,26 @@ import {
 
 /**
  * Format timestamp for display
+ * Shows time only if within 24 hours, otherwise shows full date and time
  */
 export const formatTimestamp = (timestamp) => {
   const date = new Date(timestamp);
-  return date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
+  const now = new Date();
+  const diffInHours = (now - date) / (1000 * 60 * 60);
+  
+  if (diffInHours < 24) {
+    // Within 24 hours: show time only
+    return date.toLocaleTimeString();
+  } else {
+    // More than 24 hours ago: show MM/DD/YYYY HH:MM:SS
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const year = date.getFullYear();
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${month}/${day}/${year} ${hours}:${minutes}:${seconds}`;
+  }
 };
 
 /**

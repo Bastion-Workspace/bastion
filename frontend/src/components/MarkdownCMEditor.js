@@ -9,11 +9,12 @@ import { useEditor } from '../contexts/EditorContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { parseFrontmatter as parseMarkdownFrontmatter } from '../utils/frontmatterUtils';
 import { Box, TextField, Button, Tooltip, Drawer, IconButton, Typography, Stack, Switch, FormControlLabel } from '@mui/material';
-import { Add, Delete } from '@mui/icons-material';
+import { Add, Delete, ArrowUpward, ArrowDownward } from '@mui/icons-material';
 import { createGhostTextExtension } from './editor/extensions/ghostTextExtension';
 import { createInlineEditSuggestionsExtension } from './editor/extensions/inlineEditSuggestionsExtension';
-import { createLiveEditDiffExtension } from './editor/extensions/liveEditDiffExtension';
+import { createLiveEditDiffExtension, getLiveEditDiffPlugin } from './editor/extensions/liveEditDiffExtension';
 import { editorSuggestionService } from '../services/editor/EditorSuggestionService';
+import { documentDiffStore } from '../services/documentDiffStore';
 
 const createMdTheme = (darkMode) => EditorView.baseTheme({
   '&': {
@@ -198,6 +199,26 @@ function buildFrontmatter(data) {
 const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath, documentId, initialScrollPosition = 0, onScrollChange }, ref) => {
   const { darkMode } = useTheme();
   
+  const [diffCount, setDiffCount] = useState(0);
+
+  // Track diff count for UI visibility
+  useEffect(() => {
+    if (!documentId) {
+      setDiffCount(0);
+      return;
+    }
+    
+    const updateCount = () => {
+      const count = documentDiffStore.getDiffCount(documentId);
+      console.log(`📊 MarkdownCMEditor: Diff count for ${documentId} is ${count}`);
+      setDiffCount(count);
+    };
+    
+    updateCount();
+    documentDiffStore.subscribe(updateCount);
+    return () => documentDiffStore.unsubscribe(updateCount);
+  }, [documentId]);
+
   // Refs for scroll position preservation
   const editorViewRef = useRef(null);
   const savedScrollPosRef = useRef(null);
@@ -301,6 +322,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
 
   const { setEditorState } = useEditor();
   const [fmOpen, setFmOpen] = useState(false);
+
   const { data: initialData, lists: initialLists, raw: initialRaw, order: initialOrder, body: initialBody } = useMemo(() => {
     const parsed = parseFrontmatter((value || '').replace(/\r\n/g, '\n'));
     // Debug logging removed for performance - fires on every keystroke
@@ -582,41 +604,25 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     };
   }, []);
 
-  // ROOSEVELT'S EDITOR OPS APPLY: Listen for editor operations and apply to content with optimistic concurrency
+  // Editor operations apply: Listen for editor operations and apply via CodeMirror transactions
   useEffect(() => {
-    // Simple undo stack for apply batches
-    if (!window.__editorUndoStack) window.__editorUndoStack = [];
-    if (!window.__pushEditorUndo) {
-      window.__pushEditorUndo = (text) => {
-        try {
-          const arr = window.__editorUndoStack;
-          arr.push({ text, ts: Date.now() });
-          if (arr.length > 50) arr.shift();
-        } catch {}
-      };
-    }
-    if (!window.__undoEditorOnce) {
-      window.__undoEditorOnce = () => {
-        try {
-          const arr = window.__editorUndoStack;
-          const last = arr.pop();
-          if (last && typeof last.text === 'string') {
-            onChange && onChange(last.text);
-            return true;
-          }
-          return false;
-        } catch { return false; }
-      };
-    }
 
     function applyOperations(e) {
       try {
         const detail = e.detail || {};
         const operations = Array.isArray(detail.operations) ? detail.operations : [];
         if (!operations.length) return;
+        
+        const view = editorViewRef.current;
+        if (!view) {
+          console.warn('⚠️ No editor view available for applying operations');
+          return;
+        }
+        
         const current = (value || '').replace(/\r\n/g, '\n');
-        // Push undo snapshot before applying batch
-        window.__pushEditorUndo(current);
+        const doc = view.state.doc;
+        const docText = doc.toString();
+        
         // Verify pre_hash for each operation (if provided)
         function sliceHash(s) {
           // lightweight consistent hash for UI (not cryptographic, backend uses SHA-256)
@@ -624,55 +630,89 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
           for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
           return h.toString(16);
         }
+        
         // Prepare transforms; apply from highest index to lowest to keep offsets stable
-        const ops = operations.slice().sort((a, b) => (b.start || 0) - (a.start || 0));
-        let nextText = current;
+        // For operations with the same start position (text chunks), sort by chunk_index ascending
+        const ops = operations.slice().sort((a, b) => {
+          const startDiff = (b.start || 0) - (a.start || 0);
+          if (startDiff !== 0) return startDiff; // Different positions: highest first
+          
+          // Same position: check if they're text chunks (have is_text_chunk and chunk_index)
+          const aIsChunk = a.is_text_chunk && a.chunk_index !== undefined;
+          const bIsChunk = b.is_text_chunk && b.chunk_index !== undefined;
+          
+          if (aIsChunk && bIsChunk) {
+            // Both are chunks: sort by chunk_index ascending (chunk 0, then 1, then 2...)
+            return (a.chunk_index || 0) - (b.chunk_index || 0);
+          }
+          
+          return 0; // Keep original order for non-chunks at same position
+        });
+        
+        // Build ChangeSet from operations
+        const changes = [];
+        let hasValidChanges = false;
+        
         for (const op of ops) {
-          const start = Math.max(0, Math.min(nextText.length, Number(op.start || 0)));
-          const end = Math.max(start, Math.min(nextText.length, Number(op.end || start)));
-          const before = nextText.slice(0, start);
-          const mid = nextText.slice(start, end);
-          const after = nextText.slice(end);
+          const start = Math.max(0, Math.min(doc.length, Number(op.start || 0)));
+          const end = Math.max(start, Math.min(doc.length, Number(op.end || start)));
+          
           // pre_hash check if present (skip for insert operations where start == end)
           if (op.pre_hash && op.pre_hash.length > 0 && start !== end) {
-            const ph = sliceHash(mid);
+            const currentSlice = docText.slice(start, end);
+            const ph = sliceHash(currentSlice);
             if (ph !== op.pre_hash) {
               console.warn('⚠️ Pre-hash mismatch, skipping operation to avoid conflict:', { start, end });
               continue;
             }
           }
+          
+          let newText = '';
           if (op.op_type === 'delete_range') {
-            nextText = before + after;
+            newText = '';
           } else if (op.op_type === 'insert_after_heading' || op.op_type === 'insert_after') {
             // Insert operation: start === end, insert text at that position
-            const text = typeof op.text === 'string' ? op.text : '';
-            nextText = before + text + after;
+            newText = typeof op.text === 'string' ? op.text : '';
           } else { // replace_range default
-            const text = typeof op.text === 'string' ? op.text : '';
-            nextText = before + text + after;
+            newText = typeof op.text === 'string' ? op.text : '';
+          }
+          
+          // Only add change if it's different from current content
+          const currentSlice = docText.slice(start, end);
+          if (currentSlice !== newText) {
+            changes.push({ from: start, to: end, insert: newText });
+            hasValidChanges = true;
           }
         }
-        if (nextText !== current) {
-          console.log('✅ Applying operations: text changed', { 
-            originalLength: current.length, 
-            newLength: nextText.length,
+        
+        if (hasValidChanges && changes.length > 0) {
+          console.log('✅ Applying operations via CodeMirror transactions:', { 
+            originalLength: doc.length, 
             operationsCount: operations.length,
-            diff: nextText.length - current.length
+            changesCount: changes.length
           });
           
           // Save scroll position before applying changes
-          if (editorViewRef.current) {
-            const scrollDOM = editorViewRef.current.scrollDOM;
-            if (scrollDOM) {
-              savedScrollPosRef.current = scrollDOM.scrollTop;
-              shouldRestoreScrollRef.current = true;
-              console.log('💾 Saved scroll position:', savedScrollPosRef.current);
-            }
+          if (view.scrollDOM) {
+            savedScrollPosRef.current = view.scrollDOM.scrollTop;
+            shouldRestoreScrollRef.current = true;
+            console.log('💾 Saved scroll position:', savedScrollPosRef.current);
           }
           
+          // Dispatch as single transaction using the changes array directly
+          // This integrates edits into native undo/redo history
+          view.dispatch({
+            changes: changes,
+            userEvent: 'agent-edit'
+          });
+          
+          // Get the new document text after transaction
+          const nextText = view.state.doc.toString();
+          
+          // Update React state via onChange to keep it in sync
           if (onChange) {
             onChange(nextText);
-            console.log('✅ onChange called with new text');
+            console.log('✅ onChange called with new text from transaction');
             
             // CRITICAL: Force immediate cache update after operations (bypass debounce)
             // This ensures chat messages sent immediately after accepting diffs use fresh content
@@ -706,7 +746,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
             console.warn('⚠️ onChange callback is not defined');
           }
         } else {
-          console.warn('⚠️ Operations did not change text', { 
+          console.warn('⚠️ Operations did not produce valid changes', { 
             operationsCount: operations.length,
             operations: operations.map(op => ({ 
               op_type: op.op_type, 
@@ -715,8 +755,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
               textLength: op.text?.length,
               textPreview: op.text?.substring(0, 30)
             })),
-            currentLength: current.length,
-            nextTextLength: nextText.length
+            docLength: doc.length
           });
         }
       } catch (err) {
@@ -744,10 +783,6 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
             textPreview: operation.text?.substring(0, 50) + '...' 
           } 
         });
-        
-        // Apply the single operation
-        const current = (value || '').replace(/\r\n/g, '\n');
-        window.__pushEditorUndo(current);
         
         // Ensure operation has all required fields
         const normalizedOp = {
@@ -1007,10 +1042,105 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
         style={{ height: '60vh' }}
       />), [value, filename, canonicalPath, extensions, frontmatterHider, ghostExt, liveEditDiffExt, setEditorState])}
       {/* Removed floating Accept/Dismiss UI */}
-      {/* Undo bar */}
-      <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 1 }}>
-        <Button size="small" variant="text" onClick={() => { try { if (!window.__undoEditorOnce || !window.__undoEditorOnce()) { /* no-op */ } } catch {} }}>Undo Apply</Button>
-      </Box>
+      {/* Diff navigation and batch operations */}
+      {diffCount > 0 && (
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1, mt: 1 }}>
+          <Box sx={{ display: 'flex', gap: 1 }}>
+            <Button 
+              size="small" 
+              variant="outlined" 
+              startIcon={<ArrowUpward />}
+              onClick={() => {
+                try {
+                  const plugin = documentId ? getLiveEditDiffPlugin(documentId) : null;
+                  const view = editorViewRef.current;
+                  if (plugin && view) {
+                    const cursorPos = view.state.selection.main.head;
+                    const prevDiff = plugin.findPreviousDiff(cursorPos);
+                    if (prevDiff) {
+                      plugin.jumpToPosition(prevDiff.position);
+                    } else {
+                      console.log('No previous diff found');
+                    }
+                  } else {
+                    console.warn('⚠️ Cannot navigate: plugin or view not available');
+                  }
+                } catch (err) {
+                  console.error('Failed to jump to previous diff:', err);
+                }
+              }}
+            >
+              Previous Edit
+            </Button>
+            <Button 
+              size="small" 
+              variant="outlined" 
+              startIcon={<ArrowDownward />}
+              onClick={() => {
+                try {
+                  const plugin = documentId ? getLiveEditDiffPlugin(documentId) : null;
+                  const view = editorViewRef.current;
+                  if (plugin && view) {
+                    const cursorPos = view.state.selection.main.head;
+                    const nextDiff = plugin.findNextDiff(cursorPos);
+                    if (nextDiff) {
+                      plugin.jumpToPosition(nextDiff.position);
+                    } else {
+                      console.log('No next diff found');
+                    }
+                  } else {
+                    console.warn('⚠️ Cannot navigate: plugin or view not available');
+                  }
+                } catch (err) {
+                  console.error('Failed to jump to next diff:', err);
+                }
+              }}
+            >
+              Next Edit
+            </Button>
+          </Box>
+          <Box sx={{ display: 'flex', gap: 1 }}>
+            <Button 
+              size="small" 
+              variant="outlined" 
+              color="success"
+              onClick={() => {
+                try {
+                  const plugin = documentId ? getLiveEditDiffPlugin(documentId) : null;
+                  if (plugin && plugin.acceptAllOperations) {
+                    plugin.acceptAllOperations();
+                  } else {
+                    console.warn('⚠️ Cannot accept all: plugin not available');
+                  }
+                } catch (err) {
+                  console.error('Failed to accept all operations:', err);
+                }
+              }}
+            >
+              Accept All
+            </Button>
+            <Button 
+              size="small" 
+              variant="outlined" 
+              color="error"
+              onClick={() => {
+                try {
+                  const plugin = documentId ? getLiveEditDiffPlugin(documentId) : null;
+                  if (plugin && plugin.rejectAllOperations) {
+                    plugin.rejectAllOperations();
+                  } else {
+                    console.warn('⚠️ Cannot reject all: plugin not available');
+                  }
+                } catch (err) {
+                  console.error('Failed to reject all operations:', err);
+                }
+              }}
+            >
+              Reject All
+            </Button>
+          </Box>
+        </Box>
+      )}
     </Box>
   );
 });

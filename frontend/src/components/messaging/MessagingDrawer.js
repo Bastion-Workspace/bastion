@@ -322,6 +322,8 @@ const MessagingDrawer = () => {
               width: { xs: '100%', sm: 400, md: 480 },
               display: 'flex',
               flexDirection: 'column',
+              bottom: '32px',
+              height: 'calc(100% - 32px)',
             },
           }}
         >

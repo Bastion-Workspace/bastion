@@ -52,7 +52,9 @@ import {
   FolderOpen,
   MusicNote,
   Movie,
-  Info
+  Info,
+  Visibility,
+  VisibilityOff
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
@@ -167,6 +169,18 @@ const SettingsPage = () => {
   const [userTimeFormat, setUserTimeFormat] = useState('24h');
   const [userPreferredName, setUserPreferredName] = useState('');
   const [userAiContext, setUserAiContext] = useState('');
+  
+  // Password change state
+  const [passwordChange, setPasswordChange] = useState({
+    current_password: '',
+    new_password: '',
+    confirm_password: ''
+  });
+  const [showPasswords, setShowPasswords] = useState({
+    current: false,
+    new: false,
+    confirm: false
+  });
 
 
   // AI Personality state
@@ -513,6 +527,85 @@ const SettingsPage = () => {
       }
     }
   );
+
+  // Password change mutation
+  const passwordChangeMutation = useMutation(
+    ({ userId, currentPassword, newPassword }) => apiService.changePassword(userId, currentPassword, newPassword),
+    {
+      onSuccess: (data) => {
+        setSnackbar({
+          open: true,
+          message: 'Password changed successfully',
+          severity: 'success'
+        });
+        setPasswordChange({
+          current_password: '',
+          new_password: '',
+          confirm_password: ''
+        });
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to change password: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  // Toggle password visibility
+  const togglePasswordVisibility = (field) => {
+    setShowPasswords(prev => ({
+      ...prev,
+      [field]: !prev[field]
+    }));
+  };
+
+  // Handle password change submit
+  const handlePasswordChange = () => {
+    if (!passwordChange.current_password || !passwordChange.new_password || !passwordChange.confirm_password) {
+      setSnackbar({
+        open: true,
+        message: 'Please fill in all password fields',
+        severity: 'error'
+      });
+      return;
+    }
+
+    if (passwordChange.new_password !== passwordChange.confirm_password) {
+      setSnackbar({
+        open: true,
+        message: 'New password and confirm password do not match',
+        severity: 'error'
+      });
+      return;
+    }
+
+    if (passwordChange.new_password.length < 8) {
+      setSnackbar({
+        open: true,
+        message: 'Password must be at least 8 characters long',
+        severity: 'error'
+      });
+      return;
+    }
+
+    if (!user?.user_id) {
+      setSnackbar({
+        open: true,
+        message: 'User information not available',
+        severity: 'error'
+      });
+      return;
+    }
+
+    passwordChangeMutation.mutate({
+      userId: user.user_id,
+      currentPassword: passwordChange.current_password,
+      newPassword: passwordChange.new_password
+    });
+  };
 
   // Prompt settings update mutation
   const promptSettingsMutation = useMutation(
@@ -1179,6 +1272,89 @@ const SettingsPage = () => {
                       startIcon={timeFormatMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
                     >
                       {timeFormatMutation.isLoading ? 'Updating...' : 'Update Time Format'}
+                    </Button>
+                  </Box>
+
+                  {/* Password Change Setting */}
+                  <Box mb={3}>
+                    <Box display="flex" alignItems="center" mb={1}>
+                      <Security sx={{ mr: 1, color: 'primary.main' }} />
+                      <Typography variant="h6" gutterBottom sx={{ mb: 0 }}>
+                        Change Password
+                      </Typography>
+                    </Box>
+                    <Typography variant="body2" color="text.secondary" paragraph>
+                      Update your account password. You will be logged out of all sessions after changing your password.
+                    </Typography>
+                    
+                    <TextField
+                      fullWidth
+                      label="Current Password"
+                      type={showPasswords.current ? 'text' : 'password'}
+                      value={passwordChange.current_password}
+                      onChange={(e) => setPasswordChange({ ...passwordChange, current_password: e.target.value })}
+                      sx={{ mb: 2 }}
+                      disabled={passwordChangeMutation.isLoading}
+                      InputProps={{
+                        endAdornment: (
+                          <IconButton
+                            onClick={() => togglePasswordVisibility('current')}
+                            edge="end"
+                          >
+                            {showPasswords.current ? <VisibilityOff /> : <Visibility />}
+                          </IconButton>
+                        )
+                      }}
+                    />
+
+                    <TextField
+                      fullWidth
+                      label="New Password"
+                      type={showPasswords.new ? 'text' : 'password'}
+                      value={passwordChange.new_password}
+                      onChange={(e) => setPasswordChange({ ...passwordChange, new_password: e.target.value })}
+                      sx={{ mb: 2 }}
+                      disabled={passwordChangeMutation.isLoading}
+                      helperText="Must be at least 8 characters long"
+                      InputProps={{
+                        endAdornment: (
+                          <IconButton
+                            onClick={() => togglePasswordVisibility('new')}
+                            edge="end"
+                          >
+                            {showPasswords.new ? <VisibilityOff /> : <Visibility />}
+                          </IconButton>
+                        )
+                      }}
+                    />
+
+                    <TextField
+                      fullWidth
+                      label="Confirm New Password"
+                      type={showPasswords.confirm ? 'text' : 'password'}
+                      value={passwordChange.confirm_password}
+                      onChange={(e) => setPasswordChange({ ...passwordChange, confirm_password: e.target.value })}
+                      sx={{ mb: 2 }}
+                      disabled={passwordChangeMutation.isLoading}
+                      InputProps={{
+                        endAdornment: (
+                          <IconButton
+                            onClick={() => togglePasswordVisibility('confirm')}
+                            edge="end"
+                          >
+                            {showPasswords.confirm ? <VisibilityOff /> : <Visibility />}
+                          </IconButton>
+                        )
+                      }}
+                    />
+
+                    <Button
+                      variant="contained"
+                      onClick={handlePasswordChange}
+                      disabled={passwordChangeMutation.isLoading}
+                      startIcon={passwordChangeMutation.isLoading ? <CircularProgress size={20} /> : <Security />}
+                    >
+                      {passwordChangeMutation.isLoading ? 'Changing Password...' : 'Change Password'}
                     </Button>
                   </Box>
 

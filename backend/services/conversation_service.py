@@ -905,3 +905,79 @@ class ConversationService:
         except Exception as e:
             logger.debug(f"⚠️ Failed to get agent metadata for conversation {conversation_id}: {e}")
             return {}
+    
+    async def add_reaction(self, conversation_id: str, message_id: str, user_id: str, emoji: str) -> Optional[Dict[str, Any]]:
+        """
+        Add or remove a reaction to a message
+        
+        If the user has already reacted with this emoji, remove it (toggle behavior).
+        Otherwise, add the reaction.
+        
+        Args:
+            conversation_id: The conversation ID
+            message_id: The message ID
+            user_id: The user ID reacting
+            emoji: The emoji reaction (👍, 👎, 😂, ❤️, 😢)
+            
+        Returns:
+            Dict with reactions map, or None if message not found
+        """
+        try:
+            pool = await self.lifecycle_manager._get_db_pool()
+            async with pool.acquire() as conn:
+                # Set user context for RLS policies
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                
+                # Get the message
+                message = await conn.fetchrow(
+                    "SELECT * FROM conversation_messages WHERE message_id = $1 AND conversation_id = $2",
+                    message_id, conversation_id
+                )
+                
+                if not message:
+                    logger.warning(f"⚠️ Message {message_id} not found in conversation {conversation_id}")
+                    return None
+                
+                # Parse existing metadata
+                metadata = json.loads(message['metadata_json'] or "{}")
+                
+                # Get or initialize reactions
+                reactions = metadata.get("reactions", {})
+                if not isinstance(reactions, dict):
+                    reactions = {}
+                
+                # Get current users for this emoji
+                emoji_users = reactions.get(emoji, [])
+                if not isinstance(emoji_users, list):
+                    emoji_users = []
+                
+                # Toggle: if user already reacted, remove; otherwise add
+                if user_id in emoji_users:
+                    emoji_users.remove(user_id)
+                    logger.info(f"🔄 Removed reaction {emoji} from message {message_id} by user {user_id}")
+                else:
+                    emoji_users.append(user_id)
+                    logger.info(f"✅ Added reaction {emoji} to message {message_id} by user {user_id}")
+                
+                # Update reactions (remove emoji if no users left)
+                if emoji_users:
+                    reactions[emoji] = emoji_users
+                else:
+                    reactions.pop(emoji, None)
+                
+                # Update metadata
+                metadata["reactions"] = reactions
+                
+                # Save back to database
+                await conn.execute(
+                    "UPDATE conversation_messages SET metadata_json = $1, updated_at = NOW() WHERE message_id = $2",
+                    json.dumps(metadata),
+                    message_id
+                )
+                
+                logger.info(f"✅ Updated reactions for message {message_id}: {reactions}")
+                return {"reactions": reactions}
+                
+        except Exception as e:
+            logger.error(f"❌ Failed to add reaction to message {message_id}: {e}")
+            raise

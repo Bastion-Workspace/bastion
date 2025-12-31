@@ -117,7 +117,6 @@ class CentralizedToolRegistry:
             await self._register_analysis_tools()
             await self._register_math_tools()
             await self._register_weather_tools()
-            await self._register_aws_pricing_tools()
             await self._register_expansion_tools()
             await self._register_org_inbox_tools()
             await self._register_org_search_tools()  # **BULLY!** Org file search across all .org files!
@@ -285,85 +284,46 @@ class CentralizedToolRegistry:
     
     async def _register_weather_tools(self):
         """Register weather information tools"""
-        from services.langgraph_tools.weather_tools import weather_conditions, weather_forecast
+        from services.langgraph_tools.weather_tools import weather_conditions, weather_forecast, weather_history
         
         self._tools["weather_conditions"] = ToolDefinition(
             name="weather_conditions",
             function=weather_conditions,
-            description="Get current weather conditions",
+            description="Get current weather conditions. Location is optional - if not provided or vague (e.g., 'user's location', 'my location', empty) and user_id is provided, automatically uses user's ZIP code from profile. Returns clear error if user_id provided but no ZIP code found in profile.",
             access_level=ToolAccessLevel.WEB_ACCESS,
             parameters={
-                "location": {"type": "string", "required": True}
+                "location": {"type": "string", "required": False, "default": None},
+                "units": {"type": "string", "required": False, "default": "imperial"},
+                "user_id": {"type": "string", "required": False, "default": None}
             }
         )
         
         self._tools["weather_forecast"] = ToolDefinition(
             name="weather_forecast",
             function=weather_forecast,
-            description="Get weather forecast",
+            description="Get weather forecast. Location is optional - if not provided or vague (e.g., 'user's location', 'my location', empty) and user_id is provided, automatically uses user's ZIP code from profile. Returns clear error if user_id provided but no ZIP code found in profile.",
             access_level=ToolAccessLevel.WEB_ACCESS,
             parameters={
-                "location": {"type": "string", "required": True},
-                "days": {"type": "integer", "default": 5}
+                "location": {"type": "string", "required": False, "default": None},
+                "days": {"type": "integer", "default": 3},
+                "units": {"type": "string", "required": False, "default": "imperial"},
+                "user_id": {"type": "string", "required": False, "default": None}
+            }
+        )
+        
+        self._tools["weather_history"] = ToolDefinition(
+            name="weather_history",
+            function=weather_history,
+            description="Get historical weather data. Supports: YYYY-MM-DD (specific day), YYYY-MM (monthly average), or YYYY-MM to YYYY-MM (date range, max 24 months). Location is optional - if not provided or vague and user_id is provided, automatically uses user's ZIP code from profile. Returns clear error if user_id provided but no ZIP code found in profile.",
+            access_level=ToolAccessLevel.WEB_ACCESS,
+            parameters={
+                "location": {"type": "string", "required": False, "default": None},
+                "date_str": {"type": "string", "required": True},
+                "units": {"type": "string", "required": False, "default": "imperial"},
+                "user_id": {"type": "string", "required": False, "default": None}
             }
         )
     
-    async def _register_aws_pricing_tools(self):
-        """Register AWS pricing calculator tools"""
-        from services.langgraph_tools.aws_pricing_tools import (
-            estimate_aws_costs, get_aws_service_pricing, compare_aws_regions, estimate_aws_workload
-        )
-        
-        self._tools["estimate_aws_costs"] = ToolDefinition(
-            name="estimate_aws_costs",
-            function=estimate_aws_costs,
-            description="Calculate estimated AWS costs for specific service configurations and usage patterns",
-            access_level=ToolAccessLevel.WEB_ACCESS,
-            parameters={
-                "service_type": {"type": "string", "required": True},
-                "configuration": {"type": "object", "required": True},
-                "usage_metrics": {"type": "object", "required": True},
-                "region": {"type": "string", "default": "us-east-1"}
-            }
-        )
-        
-        self._tools["get_aws_service_pricing"] = ToolDefinition(
-            name="get_aws_service_pricing",
-            function=get_aws_service_pricing,
-            description="Get current AWS pricing information for specific services and configurations",
-            access_level=ToolAccessLevel.WEB_ACCESS,
-            parameters={
-                "service_type": {"type": "string", "required": True},
-                "region": {"type": "string", "default": "us-east-1"},
-                "filters": {"type": "object", "default": {}}
-            }
-        )
-        
-        self._tools["compare_aws_regions"] = ToolDefinition(
-            name="compare_aws_regions", 
-            function=compare_aws_regions,
-            description="Compare AWS service costs across different regions for cost optimization",
-            access_level=ToolAccessLevel.WEB_ACCESS,
-            parameters={
-                "service_type": {"type": "string", "required": True},
-                "configuration": {"type": "object", "required": True},
-                "regions": {"type": "array", "items": {"type": "string"}, "default": ["us-east-1", "us-west-2", "eu-west-1"]},
-                "usage_metrics": {"type": "object", "default": {"hours_per_month": 730}}
-            }
-        )
-        
-        self._tools["estimate_aws_workload"] = ToolDefinition(
-            name="estimate_aws_workload",
-            function=estimate_aws_workload,
-            description="Estimate total costs for complete AWS workloads with multiple services",
-            access_level=ToolAccessLevel.WEB_ACCESS,
-            parameters={
-                "workload_name": {"type": "string", "required": True},
-                "services": {"type": "array", "items": {"type": "object"}, "required": True},
-                "region": {"type": "string", "default": "us-east-1"}
-            }
-        )
-
     async def _register_expansion_tools(self):
         """Register query expansion tools"""
         from services.langgraph_tools.query_expansion_tool import expand_query_universal
@@ -732,10 +692,6 @@ class CentralizedToolRegistry:
             "summarize_content": ToolAccessLevel.READ_ONLY,
             "analyze_documents": ToolAccessLevel.READ_ONLY,
             # format_data removed - DataFormattingAgent migrated to llm-orchestrator gRPC service
-            "get_aws_service_pricing": ToolAccessLevel.WEB_ACCESS,  # AWS pricing research
-            "compare_aws_regions": ToolAccessLevel.WEB_ACCESS,  # Regional cost analysis
-            "estimate_aws_costs": ToolAccessLevel.WEB_ACCESS,  # Cost estimation research
-            "estimate_aws_workload": ToolAccessLevel.WEB_ACCESS,  # Workload cost research
             # **BULLY!** ORG-MODE SEARCH TOOLS - Search user's reference org files!
             "search_org_files": ToolAccessLevel.READ_ONLY,  # Search across all .org files
             "list_org_todos": ToolAccessLevel.READ_ONLY,  # List TODO items
@@ -752,8 +708,6 @@ class CentralizedToolRegistry:
             "calculate": ToolAccessLevel.READ_ONLY,
             "convert_units": ToolAccessLevel.READ_ONLY,
             # format_data removed - DataFormattingAgent migrated to llm-orchestrator gRPC service
-            "get_aws_service_pricing": ToolAccessLevel.WEB_ACCESS,  # Basic AWS pricing queries
-            "estimate_aws_costs": ToolAccessLevel.WEB_ACCESS,  # Simple cost estimates
             # **BULLY!** Quick org-mode TODO queries for casual questions
             "list_org_todos": ToolAccessLevel.READ_ONLY,  # "What's on my TODO list?"
             "search_org_by_tag": ToolAccessLevel.READ_ONLY  # "What's tagged @work?"
@@ -773,11 +727,7 @@ class CentralizedToolRegistry:
         self._agent_permissions[AgentType.CALCULATE_AGENT] = {
             "calculate": ToolAccessLevel.READ_ONLY,
             "convert_units": ToolAccessLevel.READ_ONLY,
-            "solve_equation": ToolAccessLevel.READ_ONLY,
-            "estimate_aws_costs": ToolAccessLevel.WEB_ACCESS,  # Cost calculations
-            "get_aws_service_pricing": ToolAccessLevel.WEB_ACCESS,  # Pricing data for calculations
-            "compare_aws_regions": ToolAccessLevel.WEB_ACCESS,  # Regional cost analysis
-            "estimate_aws_workload": ToolAccessLevel.WEB_ACCESS  # Complex workload calculations
+            "solve_equation": ToolAccessLevel.READ_ONLY
         }
         
         # CodingAgent removed - not fully fleshed out
@@ -1163,7 +1113,6 @@ class CentralizedToolRegistry:
             "analysis": ["analyze_documents"],
             "math": ["calculate"],
             "weather": ["get_weather"],
-            "aws_pricing": ["get_aws_service_pricing", "compare_aws_regions", "estimate_aws_costs", "estimate_aws_workload"],
             "org_files": ["search_org_files", "list_org_todos", "search_org_by_tag"],
             "messaging": ["send_room_message", "get_user_rooms"],
             "file_creation": ["create_file", "create_folder"],

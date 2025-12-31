@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     # OpenAI Configuration (for embeddings)
     OPENAI_API_KEY: Optional[str] = None
     
+    # Tool Collection Name (Knowledge Hub Maneuver!)
+    TOOL_COLLECTION_NAME: str = "tools"
+    
+    # Vector Service Configuration (for Knowledge Hub ops)
+    VECTOR_SERVICE_HOST: str = "vector-service"
+    VECTOR_SERVICE_PORT: int = 50053
+    
     # Feature Flags
     ENABLE_STREAMING: bool = True
     ENABLE_TOOL_CALLBACKS: bool = True

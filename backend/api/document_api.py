@@ -1777,6 +1777,22 @@ async def get_document_content(
                     file_path = Path(file_path_str)
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to compute file path for image: {e}")
+            # Skip content loading for DocX files - they're binary and served via /file endpoint
+            elif filename and filename.lower().endswith('.docx'):
+                logger.info(f"📄 API: Skipping content load for DocX: {filename} (use /file endpoint instead)")
+                full_content = ""  # Empty content for DocX files
+                content_source = "docx_binary"
+                # Still compute file path for metadata
+                try:
+                    file_path_str = await folder_service.get_document_file_path(
+                        filename=filename,
+                        folder_id=folder_id,
+                        user_id=user_id,
+                        collection_type=collection_type
+                    )
+                    file_path = Path(file_path_str)
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to compute file path for DocX: {e}")
             elif filename:
                 # Try new folder structure first
                 try:

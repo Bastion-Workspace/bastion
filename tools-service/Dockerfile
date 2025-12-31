@@ -25,7 +25,8 @@ COPY VERSION /app/VERSION
 COPY backend /app/backend
 
 # Copy tools service code
-COPY tools-service /app/tools-service
+# NOTE: Directory is tools-service but we copy as tools_service so Python can import it
+COPY tools-service /app/tools_service
 
 # Generate gRPC code from shared proto files
 RUN python -m grpc_tools.protoc \
@@ -43,13 +44,14 @@ RUN python -m grpc_tools.protoc \
 RUN mkdir -p /app/uploads /app/logs
 
 # Set PYTHONPATH to include /app and /app/backend for imports
-ENV PYTHONPATH=/app:/app/backend
+# CRITICAL: /app/backend must be first so 'from models.xxx' imports work
+ENV PYTHONPATH=/app/backend:/app:/app/tools_service
 
 # Expose gRPC port
 EXPOSE 50052
 
-# Change to backend directory so relative imports work
-# Then run the tools service script
-WORKDIR /app/backend
-CMD ["python", "/app/tools-service/main.py"]
+# Run from /app so paths are consistent
+# The tools_service/main.py will handle path setup
+WORKDIR /app
+CMD ["python", "/app/tools_service/main.py"]
 

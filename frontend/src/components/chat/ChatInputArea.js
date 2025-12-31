@@ -33,6 +33,8 @@ const ChatInputArea = () => {
     createNewConversation,
     currentJobId,
     cancelCurrentJob,
+    replyToMessage,
+    setReplyToMessage,
   } = useChatSidebar();
   const { selectedModel, setSelectedModel } = useModel();
 
@@ -340,7 +342,43 @@ const ChatInputArea = () => {
         </Box>
       )}
 
-
+      {/* Reply Indicator */}
+      {replyToMessage && (
+        <Box sx={{ 
+          mb: 1, 
+          p: 1, 
+          bgcolor: 'action.hover', 
+          borderRadius: 1,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 1
+        }}>
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+              Replying to:
+            </Typography>
+            <Typography 
+              variant="body2" 
+              sx={{ 
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap'
+              }}
+            >
+              {replyToMessage.content?.substring(0, 100) || 'Message'}
+              {replyToMessage.content && replyToMessage.content.length > 100 ? '...' : ''}
+            </Typography>
+          </Box>
+          <IconButton
+            size="small"
+            onClick={() => setReplyToMessage(null)}
+            sx={{ flexShrink: 0 }}
+          >
+            <Clear fontSize="small" />
+          </IconButton>
+        </Box>
+      )}
 
       {/* Input Area */}
       <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>

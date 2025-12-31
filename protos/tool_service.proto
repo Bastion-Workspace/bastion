@@ -82,6 +82,11 @@ service ToolService {
   
   // File analysis operations
   rpc AnalyzeTextContent(TextAnalysisRequest) returns (TextAnalysisResponse);
+  
+  // System modeling operations
+  rpc DesignSystemComponent(DesignSystemComponentRequest) returns (DesignSystemComponentResponse);
+  rpc SimulateSystemFailure(SimulateSystemFailureRequest) returns (SimulateSystemFailureResponse);
+  rpc GetSystemTopology(GetSystemTopologyRequest) returns (GetSystemTopologyResponse);
 }
 
 // Document Messages
@@ -339,7 +344,8 @@ message FindCoOccurringEntitiesResponse {
 message WeatherRequest {
   string location = 1;
   string user_id = 2;
-  repeated string data_types = 3;  // "current", "forecast", "alerts"
+  repeated string data_types = 3;  // "current", "forecast", "alerts", "history"
+  optional string date_str = 4;  // For historical data: "YYYY-MM-DD" for specific day, "YYYY-MM" for monthly average
 }
 
 message WeatherResponse {
@@ -864,6 +870,7 @@ message CreateChartRequest {
   string color_scheme = 7;
   int32 width = 8;
   int32 height = 9;
+  bool include_static = 10;
 }
 
 message CreateChartResponse {
@@ -873,6 +880,8 @@ message CreateChartResponse {
   string chart_data = 4;
   optional string error = 5;
   string metadata_json = 6;  // JSON string with metadata
+  optional string static_svg = 7;
+  optional string static_format = 8;
 }
 
 // File Analysis Messages
@@ -894,4 +903,86 @@ message TextAnalysisResponse {
   float avg_words_per_sentence = 8;
   float avg_words_per_paragraph = 9;
   string metadata_json = 10;  // For extensibility
+}
+
+// System Modeling Messages
+message DesignSystemComponentRequest {
+  string user_id = 1;
+  string component_id = 2;
+  string component_type = 3;
+  repeated string requires = 4;  // Dependencies this component needs
+  repeated string provides = 5;  // Functionalities this component enables
+  optional string redundancy_group = 6;  // Group for N+1 redundancy calculation
+  int32 criticality = 7;  // 1-5 scale for safety reporting
+  map<string, string> metadata = 8;  // Additional component properties
+  string dependency_logic = 9;  // "AND", "OR", "MAJORITY", "M_OF_N", "WEIGHTED_INTEGRITY"
+  int32 m_of_n_threshold = 10;  // Threshold for M_OF_N logic
+  map<string, float> dependency_weights = 11; // Contribution of each dependency (0.0 to 1.0)
+  float integrity_threshold = 12; // Threshold for WEIGHTED_INTEGRITY logic (0.0 to 1.0)
+}
+
+message DesignSystemComponentResponse {
+  bool success = 1;
+  string component_id = 2;
+  string message = 3;
+  optional string error = 4;
+  string topology_json = 5;  // Updated system topology as JSON
+}
+
+message SimulateSystemFailureRequest {
+  string user_id = 1;
+  repeated string failed_component_ids = 2;  // Components to fail
+  repeated string failure_modes = 3;  // "sabotage", "maintenance_neglect", "wear", "random"
+  optional string simulation_type = 4;  // "single", "cascade", "monte_carlo"
+  optional int32 monte_carlo_iterations = 5;  // For Monte Carlo simulations
+  map<string, string> failure_parameters = 6;  // Additional simulation parameters
+}
+
+message SimulateSystemFailureResponse {
+  bool success = 1;
+  string simulation_id = 2;
+  repeated ComponentState component_states = 3;  // State of all components after simulation
+  repeated FailurePath failure_paths = 4;  // Paths of cascading failures
+  SystemHealthMetrics health_metrics = 5;  // Overall system health
+  string topology_json = 6;  // Updated topology with failure states
+  optional string error = 7;
+}
+
+message ComponentState {
+  string component_id = 1;
+  string state = 2;  // "operational", "degraded", "failed", "offline"
+  repeated string failed_dependencies = 3;  // Which dependencies caused this failure
+  float failure_probability = 4;  // For Monte Carlo: probability of failure
+  map<string, string> metadata = 5;
+}
+
+message FailurePath {
+  string source_component_id = 1;
+  repeated string affected_component_ids = 2;
+  string failure_type = 3;  // "direct", "cascade", "redundancy_exhausted"
+  int32 path_length = 4;  // Number of hops in cascade
+}
+
+message SystemHealthMetrics {
+  int32 total_components = 1;
+  int32 operational_components = 2;
+  int32 degraded_components = 3;
+  int32 failed_components = 4;
+  float system_health_score = 5;  // 0.0 to 1.0
+  repeated string critical_vulnerabilities = 6;  // Single points of failure
+  repeated string redundancy_groups_at_risk = 7;  // Groups approaching N-1 limit
+}
+
+message GetSystemTopologyRequest {
+  string user_id = 1;
+  optional string system_name = 2;  // Optional: filter by system name
+}
+
+message GetSystemTopologyResponse {
+  bool success = 1;
+  string topology_json = 2;  // Full system graph as JSON
+  int32 component_count = 3;
+  int32 edge_count = 4;
+  repeated string redundancy_groups = 5;
+  optional string error = 6;
 }

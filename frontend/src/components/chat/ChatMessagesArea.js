@@ -12,6 +12,9 @@ import {
   useTheme,
   Dialog,
   DialogContent,
+  Menu,
+  MenuItem,
+  Popover,
 } from '@mui/material';
 import {
   Person,
@@ -115,7 +118,8 @@ const ChatMessagesArea = () => {
     isLoading, 
     currentConversationId, 
     executingPlans,
-
+    replyToMessage,
+    setReplyToMessage,
     cancelAsyncTask,
     sendMessage,
     backgroundJobService
@@ -338,6 +342,10 @@ const ChatMessagesArea = () => {
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [imageToImport, setImageToImport] = useState(null);
   const [importing, setImporting] = useState(false);
+  const [contextMenu, setContextMenu] = useState(null);
+  const [contextMenuMessage, setContextMenuMessage] = useState(null);
+  const [reactionAnchor, setReactionAnchor] = useState(null);
+  const [reactionMessage, setReactionMessage] = useState(null);
 
   const handleCopyMessage = async (message) => {
     try {
@@ -458,6 +466,73 @@ ${message.content}
       alert(`Failed to import image: ${error.message || 'Unknown error'}`);
     } finally {
       setImporting(false);
+    }
+  };
+
+  const handleContextMenu = (event, message) => {
+    event.preventDefault();
+    setContextMenu(
+      contextMenu === null
+        ? {
+            mouseX: event.clientX + 2,
+            mouseY: event.clientY - 6,
+          }
+        : null,
+    );
+    setContextMenuMessage(message);
+  };
+
+  const handleCloseContextMenu = () => {
+    setContextMenu(null);
+    setContextMenuMessage(null);
+  };
+
+  const handleReply = () => {
+    if (contextMenuMessage) {
+      setReplyToMessage(contextMenuMessage);
+      handleCloseContextMenu();
+    }
+  };
+
+  const handleReact = () => {
+    if (contextMenuMessage) {
+      setReactionMessage(contextMenuMessage);
+      setReactionAnchor(contextMenu);
+      handleCloseContextMenu();
+    }
+  };
+
+  const handleReactionSelect = async (emoji) => {
+    if (!reactionMessage || !currentConversationId) {
+      return;
+    }
+
+    try {
+      const messageId = reactionMessage.message_id || reactionMessage.id;
+      const response = await apiService.post(`/api/conversations/${currentConversationId}/messages/${messageId}/react`, {
+        emoji: emoji
+      });
+
+      // Update local message state to reflect reaction from backend response
+      if (response && response.reactions) {
+        setMessages(prev => prev.map(msg => {
+          if (msg.id === reactionMessage.id || msg.message_id === messageId) {
+            const metadata = msg.metadata || msg.metadata_json || {};
+            return {
+              ...msg,
+              metadata: { ...metadata, reactions: response.reactions },
+              metadata_json: { ...metadata, reactions: response.reactions }
+            };
+          }
+          return msg;
+        }));
+      }
+
+      setReactionAnchor(null);
+      setReactionMessage(null);
+    } catch (error) {
+      console.error('Failed to add reaction:', error);
+      alert('Failed to add reaction. Please try again.');
     }
   };
 
@@ -1157,6 +1232,7 @@ ${message.content}
             >
             <Paper
               elevation={1}
+              onContextMenu={(e) => handleContextMenu(e, message)}
               sx={{
                 p: 2,
                 maxWidth: '85%',
@@ -1171,6 +1247,7 @@ ${message.content}
                       : 'background.paper',
                 border: message.isError ? '1px solid' : message.isToolStatus ? '1px dashed' : 'none',
                 borderColor: message.isError ? 'error.main' : message.isToolStatus ? 'primary.main' : 'transparent',
+                cursor: 'context-menu',
               }}
             >
               {/* Message Header */}
@@ -1589,13 +1666,51 @@ ${message.content}
                 </Box>
               )}
 
+              {/* Reactions Display */}
+              {(() => {
+                const metadata = message.metadata || message.metadata_json || {};
+                const reactions = metadata.reactions || {};
+                const hasReactions = Object.keys(reactions).length > 0;
+                
+                if (!hasReactions) return null;
+                
+                return (
+                  <Box sx={{ 
+                    display: 'flex', 
+                    flexWrap: 'wrap', 
+                    gap: 0.5, 
+                    mt: 1,
+                    pt: 1,
+                    borderTop: '1px solid',
+                    borderColor: 'divider'
+                  }}>
+                    {Object.entries(reactions).map(([emoji, userIds]) => {
+                      if (!userIds || userIds.length === 0) return null;
+                      return (
+                        <Chip
+                          key={emoji}
+                          label={`${emoji} ${userIds.length}`}
+                          size="small"
+                          sx={{ 
+                            height: 24,
+                            fontSize: '0.75rem',
+                            '& .MuiChip-label': { px: 0.5 }
+                          }}
+                        />
+                      );
+                    })}
+                  </Box>
+                );
+              })()}
+
               {/* Message Footer */}
               <Box sx={{ 
                 display: 'flex', 
                 alignItems: 'center', 
                 justifyContent: 'space-between',
                 gap: 1,
-                userSelect: 'none'
+                userSelect: 'none',
+                mt: 1
               }}>
                 <Typography variant="caption" color="text.secondary">
                   {formatTimestamp(message.timestamp)}
@@ -1785,6 +1900,48 @@ ${message.content}
           </Button>
         </Box>
       )}
+
+      {/* Context Menu for Reply and React */}
+      <Menu
+        open={contextMenu !== null}
+        onClose={handleCloseContextMenu}
+        anchorReference="anchorPosition"
+        anchorPosition={
+          contextMenu !== null
+            ? { top: contextMenu.mouseY, left: contextMenu.mouseX }
+            : undefined
+        }
+      >
+        <MenuItem onClick={handleReply}>Reply</MenuItem>
+        <MenuItem onClick={handleReact}>React</MenuItem>
+      </Menu>
+
+      {/* Reaction Selection Popover */}
+      <Popover
+        open={Boolean(reactionAnchor)}
+        anchorReference="anchorPosition"
+        anchorPosition={
+          reactionAnchor !== null
+            ? { top: reactionAnchor.mouseY, left: reactionAnchor.mouseX }
+            : undefined
+        }
+        onClose={() => {
+          setReactionAnchor(null);
+          setReactionMessage(null);
+        }}
+      >
+        <Box sx={{ p: 1, display: 'flex', gap: 1 }}>
+          {['👍', '👎', '😂', '❤️', '😢'].map((emoji) => (
+            <IconButton
+              key={emoji}
+              onClick={() => handleReactionSelect(emoji)}
+              sx={{ fontSize: '1.5rem', p: 1 }}
+            >
+              {emoji}
+            </IconButton>
+          ))}
+        </Box>
+      </Popover>
     </Box>
   );
 };

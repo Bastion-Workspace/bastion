@@ -71,10 +71,133 @@ const diffTheme = EditorView.baseTheme({
   },
   '.cm-edit-diff-reject:hover': {
     backgroundColor: '#da190b'
+  },
+  '.cm-edit-diff-info': {
+    cursor: 'help',
+    marginLeft: '4px',
+    color: '#666',
+    fontSize: '12px',
+    verticalAlign: 'middle',
+    opacity: 0.7,
+    transition: 'opacity 0.2s'
+  },
+  '.cm-edit-diff-info:hover': {
+    opacity: 1,
+    color: '#1976d2'
+  },
+  '.cm-edit-diff-tooltip': {
+    position: 'absolute',
+    background: '#333',
+    color: '#fff',
+    padding: '8px 12px',
+    borderRadius: '4px',
+    fontSize: '12px',
+    maxWidth: '300px',
+    zIndex: 10000,
+    pointerEvents: 'none',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
+    whiteSpace: 'pre-wrap',
+    wordWrap: 'break-word'
   }
 });
 
-// Widget for showing proposed addition text
+// Combined widget for proposed text, info icon, and buttons
+class DiffActionWidget extends WidgetType {
+  constructor(operationId, text, note, onAccept, onReject) {
+    super();
+    this.operationId = operationId;
+    this.text = String(text || '');
+    this.note = note || '';
+    this.onAccept = onAccept;
+    this.onReject = onReject;
+  }
+  
+  eq(other) {
+    return this.operationId === other.operationId && 
+           this.text === other.text && 
+           this.note === other.note;
+  }
+  
+  toDOM() {
+    const container = document.createElement('span');
+    container.className = 'cm-edit-diff-container';
+    container.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; vertical-align: middle;';
+    
+    // 1. Proposed text (if any)
+    if (this.text) {
+      const textSpan = document.createElement('span');
+      textSpan.className = 'cm-edit-diff-addition';
+      textSpan.textContent = this.text;
+      textSpan.setAttribute('data-operation-id', this.operationId);
+      container.appendChild(textSpan);
+    }
+    
+    // 2. Info icon (if note exists)
+    if (this.note && this.note.trim().length > 0) {
+      const infoIcon = document.createElement('span');
+      infoIcon.className = 'cm-edit-diff-info';
+      infoIcon.innerHTML = 'ℹ';
+      infoIcon.title = this.note;
+      infoIcon.setAttribute('aria-label', `Edit reason: ${this.note}`);
+      
+      // Hover tooltip logic
+      let tooltip = null;
+      infoIcon.addEventListener('mouseenter', () => {
+        if (tooltip) return;
+        tooltip = document.createElement('div');
+        tooltip.className = 'cm-edit-diff-tooltip';
+        tooltip.textContent = this.note;
+        document.body.appendChild(tooltip);
+        const rect = infoIcon.getBoundingClientRect();
+        tooltip.style.left = `${rect.left}px`;
+        tooltip.style.bottom = `${window.innerHeight - rect.top + 8}px`;
+      });
+      
+      infoIcon.addEventListener('mouseleave', () => {
+        if (tooltip) {
+          document.body.removeChild(tooltip);
+          tooltip = null;
+        }
+      });
+      
+      container.appendChild(infoIcon);
+    }
+    
+    // 3. Accept/Reject buttons
+    const buttonsWrapper = document.createElement('span');
+    buttonsWrapper.className = 'cm-edit-diff-buttons';
+    
+    const acceptBtn = document.createElement('button');
+    acceptBtn.innerHTML = '✓';
+    acceptBtn.className = 'cm-edit-diff-accept';
+    acceptBtn.title = this.note ? `Accept edit: ${this.note}` : 'Accept edit';
+    acceptBtn.onclick = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (this.onAccept) this.onAccept(this.operationId);
+    };
+    
+    const rejectBtn = document.createElement('button');
+    rejectBtn.innerHTML = '✕';
+    rejectBtn.className = 'cm-edit-diff-reject';
+    rejectBtn.title = this.note ? `Reject edit: ${this.note}` : 'Reject edit';
+    rejectBtn.onclick = (e) => {
+      e.preventDefault(); e.stopPropagation();
+      if (this.onReject) this.onReject(this.operationId);
+    };
+    
+    buttonsWrapper.appendChild(acceptBtn);
+    buttonsWrapper.appendChild(rejectBtn);
+    container.appendChild(buttonsWrapper);
+    
+    return container;
+  }
+  
+  ignoreEvent() {
+    return false;
+  }
+}
+
+// Widget for proposed addition text (kept for backward compatibility or simple use cases)
 class DiffAdditionWidget extends WidgetType {
   constructor(text, operationId) {
     super();
@@ -99,17 +222,86 @@ class DiffAdditionWidget extends WidgetType {
   }
 }
 
+// Widget for info icon with tooltip showing operation note/reasoning
+class DiffInfoWidget extends WidgetType {
+  constructor(note) {
+    super();
+    this.note = note || '';
+  }
+  
+  eq(other) {
+    return this.note === other.note;
+  }
+  
+  toDOM() {
+    if (!this.note || this.note.trim().length === 0) {
+      // Return empty span if no note
+      return document.createElement('span');
+    }
+    
+    const infoIcon = document.createElement('span');
+    infoIcon.className = 'cm-edit-diff-info';
+    infoIcon.innerHTML = 'ℹ';
+    infoIcon.title = this.note;
+    infoIcon.setAttribute('aria-label', `Edit reason: ${this.note}`);
+    infoIcon.style.cssText = 'cursor: help; margin-left: 4px; color: #666; font-size: 12px; vertical-align: middle;';
+    
+    // Add hover tooltip
+    let tooltip = null;
+    infoIcon.addEventListener('mouseenter', (e) => {
+      if (tooltip) return; // Already showing
+      
+      tooltip = document.createElement('div');
+      tooltip.className = 'cm-edit-diff-tooltip';
+      tooltip.textContent = this.note;
+      tooltip.style.cssText = `
+        position: absolute;
+        background: #333;
+        color: #fff;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-size: 12px;
+        max-width: 300px;
+        z-index: 10000;
+        pointer-events: none;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+      `;
+      
+      document.body.appendChild(tooltip);
+      
+      // Position tooltip above the icon
+      const rect = infoIcon.getBoundingClientRect();
+      tooltip.style.left = `${rect.left}px`;
+      tooltip.style.bottom = `${window.innerHeight - rect.top + 8}px`;
+    });
+    
+    infoIcon.addEventListener('mouseleave', () => {
+      if (tooltip) {
+        document.body.removeChild(tooltip);
+        tooltip = null;
+      }
+    });
+    
+    return infoIcon;
+  }
+  
+  ignoreEvent() {
+    return false;
+  }
+}
+
 // Widget for accept/reject buttons
 class DiffButtonWidget extends WidgetType {
-  constructor(operationId, onAccept, onReject) {
+  constructor(operationId, onAccept, onReject, note) {
     super();
     this.operationId = operationId;
     this.onAccept = onAccept;
     this.onReject = onReject;
+    this.note = note || '';
   }
   
   eq(other) {
-    return this.operationId === other.operationId;
+    return this.operationId === other.operationId && this.note === other.note;
   }
   
   toDOM() {
@@ -120,7 +312,7 @@ class DiffButtonWidget extends WidgetType {
     const acceptBtn = document.createElement('button');
     acceptBtn.innerHTML = '✓';
     acceptBtn.className = 'cm-edit-diff-accept';
-    acceptBtn.title = 'Accept edit';
+    acceptBtn.title = this.note ? `Accept edit: ${this.note}` : 'Accept edit';
     acceptBtn.setAttribute('aria-label', 'Accept edit');
     acceptBtn.onclick = (e) => {
       e.preventDefault();
@@ -134,7 +326,7 @@ class DiffButtonWidget extends WidgetType {
     const rejectBtn = document.createElement('button');
     rejectBtn.innerHTML = '✕';
     rejectBtn.className = 'cm-edit-diff-reject';
-    rejectBtn.title = 'Reject edit';
+    rejectBtn.title = this.note ? `Reject edit: ${this.note}` : 'Reject edit';
     rejectBtn.setAttribute('aria-label', 'Reject edit');
     rejectBtn.onclick = (e) => {
       e.preventDefault();
@@ -179,6 +371,11 @@ const liveDiffField = StateField.define({
 // Plugin class for managing live diffs
 // Singleton registry: one plugin instance per document
 const documentPluginRegistry = new Map(); // documentId -> plugin instance
+
+// Helper function to get plugin instance by documentId (for batch operations)
+export function getLiveEditDiffPlugin(documentId) {
+  return documentPluginRegistry.get(documentId) || null;
+}
 
 const LiveEditDiffPluginClass = class {
   constructor(view, documentId) {
@@ -329,8 +526,9 @@ const LiveEditDiffPluginClass = class {
           console.log('🔍 Calling addOperations with', operations.length, 'operations');
           this.addOperations(operations, messageId);
           
-          // ✅ NOTE: ChatSidebarContext already saved to documentDiffStore
-          // No need to save again here - that would create duplicates!
+          // ✅ NOTE: ChatSidebarContext saves to documentDiffStore BEFORE dispatching event
+          // This ensures operations persist even if this document isn't currently open
+          // Plugin will also save after generating operation IDs and when adjusting positions
         } else {
           console.warn('⚠️ No operations array or empty array received');
         }
@@ -721,7 +919,8 @@ const LiveEditDiffPluginClass = class {
         opType: opType,
         messageId: messageId,
         start: start,
-        end: end
+        end: end,
+        note: op.note || op.reasoning || '' // ✅ Store note/reasoning for explainable diffs
       });
     });
     
@@ -819,27 +1018,18 @@ const LiveEditDiffPluginClass = class {
               );
             }
             
-            // Add proposed text as widget after the range
-            if (op.proposed && op.proposed.length > 0) {
-              decos.push(
-                Decoration.widget({
-                  widget: new DiffAdditionWidget(op.proposed, id),
-                  side: 1,
-                  block: false  // Ensure not treated as block widget
-                }).range(to)
-              );
-            }
-
-            // Add accept/reject buttons
+            // Add action group widget (addition text + info + buttons)
             decos.push(
               Decoration.widget({
-                widget: new DiffButtonWidget(
+                widget: new DiffActionWidget(
                   id,
+                  op.proposed,
+                  op.note || op.reasoning || '',
                   () => this.acceptOperation(id),
                   () => this.rejectOperation(id)
                 ),
                 side: 1,
-                block: false  // Ensure not treated as block widget
+                block: false
               }).range(to)
             );
           } else if (op.opType === 'delete_range') {
@@ -853,11 +1043,13 @@ const LiveEditDiffPluginClass = class {
               );
             }
             
-            // Add accept/reject buttons
+            // Add action group widget (buttons + info, no addition text)
             decos.push(
               Decoration.widget({
-                widget: new DiffButtonWidget(
+                widget: new DiffActionWidget(
                   id,
+                  '',
+                  op.note || op.reasoning || '',
                   () => this.acceptOperation(id),
                   () => this.rejectOperation(id)
                 ),
@@ -866,26 +1058,18 @@ const LiveEditDiffPluginClass = class {
             );
           } else if (op.opType === 'insert_after_heading' || op.opType === 'insert_after') {
             // For insert operations, show proposed text at the insertion point
-            if (op.proposed && op.proposed.length > 0) {
-              decos.push(
-                Decoration.widget({
-                  widget: new DiffAdditionWidget(op.proposed, id),
-                  side: 1
-                }).range(from)
-              );
-              
-              // Add accept/reject buttons
-              decos.push(
-                Decoration.widget({
-                  widget: new DiffButtonWidget(
-                    id,
-                    () => this.acceptOperation(id),
-                    () => this.rejectOperation(id)
-                  ),
-                  side: 1
-                }).range(from)
-              );
-            }
+            decos.push(
+              Decoration.widget({
+                widget: new DiffActionWidget(
+                  id,
+                  op.proposed,
+                  op.note || op.reasoning || '',
+                  () => this.acceptOperation(id),
+                  () => this.rejectOperation(id)
+                ),
+                side: 1
+              }).range(from)
+            );
           }
         } catch (e) {
           console.warn('Error creating decoration for operation:', id, e);
@@ -1186,6 +1370,150 @@ const LiveEditDiffPluginClass = class {
     // Remove from active diffs
     this.removeOperation(operationId);
   }
+  
+  acceptAllOperations() {
+    const operationIds = Array.from(this.operations.keys());
+    console.log(`✅ Accepting all ${operationIds.length} operations`);
+    
+    // Accept operations in reverse order (highest position first) to maintain position stability
+    // For operations with the same start position (text chunks), sort by chunk_index ascending
+    const sortedOps = operationIds.map(id => {
+      const op = this.operations.get(id);
+      return {
+        id,
+        op,
+        start: op?.start ?? op?.from ?? 0,
+        chunk_index: op?.chunk_index,
+        is_text_chunk: op?.is_text_chunk
+      };
+    }).sort((a, b) => {
+      const startDiff = b.start - a.start;
+      if (startDiff !== 0) return startDiff; // Different positions: highest first
+      
+      // Same position: check if they're text chunks
+      const aIsChunk = a.is_text_chunk && a.chunk_index !== undefined;
+      const bIsChunk = b.is_text_chunk && b.chunk_index !== undefined;
+      
+      if (aIsChunk && bIsChunk) {
+        // Both are chunks: sort by chunk_index ascending (chunk 0, then 1, then 2...)
+        return a.chunk_index - b.chunk_index;
+      }
+      
+      return 0; // Keep original order for non-chunks at same position
+    });
+    
+    // Accept each operation sequentially
+    sortedOps.forEach(({ id }) => {
+      this.acceptOperation(id);
+    });
+  }
+  
+  rejectAllOperations() {
+    const operationIds = Array.from(this.operations.keys());
+    console.log(`❌ Rejecting all ${operationIds.length} operations`);
+    
+    // Reject all operations
+    operationIds.forEach(id => {
+      this.rejectOperation(id);
+    });
+  }
+  
+  /**
+   * Find the next diff position after the current cursor
+   * @param {number} currentPosition - Current cursor position
+   * @returns {Object|null} { operationId, position } or null if no next diff
+   */
+  findNextDiff(currentPosition = 0) {
+    if (this.operations.size === 0) return null;
+    
+    const docLength = this.view.state.doc.length;
+    const cursorPos = Math.max(0, Math.min(docLength, currentPosition));
+    
+    // Get all operation positions
+    const positions = Array.from(this.operations.entries()).map(([id, op]) => {
+      const start = op.start !== undefined ? op.start : op.from || 0;
+      const end = op.end !== undefined ? op.end : op.to || start;
+      return {
+        id,
+        start: Math.max(0, Math.min(docLength, start)),
+        end: Math.max(0, Math.min(docLength, end))
+      };
+    }).filter(pos => pos.start >= 0 && pos.end >= pos.start);
+    
+    if (positions.length === 0) return null;
+    
+    // Find next position after cursor
+    const nextPos = positions
+      .filter(pos => pos.start > cursorPos)
+      .sort((a, b) => a.start - b.start)[0];
+    
+    // If no next position, wrap to first
+    const target = nextPos || positions.sort((a, b) => a.start - b.start)[0];
+    
+    return {
+      operationId: target.id,
+      position: target.start
+    };
+  }
+  
+  /**
+   * Find the previous diff position before the current cursor
+   * @param {number} currentPosition - Current cursor position
+   * @returns {Object|null} { operationId, position } or null if no previous diff
+   */
+  findPreviousDiff(currentPosition = 0) {
+    if (this.operations.size === 0) return null;
+    
+    const docLength = this.view.state.doc.length;
+    const cursorPos = Math.max(0, Math.min(docLength, currentPosition));
+    
+    // Get all operation positions
+    const positions = Array.from(this.operations.entries()).map(([id, op]) => {
+      const start = op.start !== undefined ? op.start : op.from || 0;
+      const end = op.end !== undefined ? op.end : op.to || start;
+      return {
+        id,
+        start: Math.max(0, Math.min(docLength, start)),
+        end: Math.max(0, Math.min(docLength, end))
+      };
+    }).filter(pos => pos.start >= 0 && pos.end >= pos.start);
+    
+    if (positions.length === 0) return null;
+    
+    // Find previous position before cursor
+    const prevPos = positions
+      .filter(pos => pos.start < cursorPos)
+      .sort((a, b) => b.start - a.start)[0];
+    
+    // If no previous position, wrap to last
+    const target = prevPos || positions.sort((a, b) => b.start - a.start)[0];
+    
+    return {
+      operationId: target.id,
+      position: target.start
+    };
+  }
+  
+  /**
+   * Jump to a specific diff position
+   * @param {number} position - Position to jump to
+   */
+  jumpToPosition(position) {
+    if (!this.view || this.view.isDestroyed) return;
+    
+    const docLength = this.view.state.doc.length;
+    const targetPos = Math.max(0, Math.min(docLength, position));
+    
+    // Scroll to position with margin
+    this.view.dispatch({
+      effects: EditorView.scrollIntoView(targetPos, { y: 'center', yMargin: 100 })
+    });
+    
+    // Set cursor position
+    this.view.dispatch({
+      selection: { anchor: targetPos, head: targetPos }
+    });
+  }
 };
 
 // Create default plugin instance (for backward compatibility)
@@ -1236,9 +1564,7 @@ export function createLiveEditDiffExtension(documentId = null) {
     const extension = [
       diffTheme,
       liveDiffField,
-      ViewPlugin.fromClass(DocumentAwareDiffPlugin, {
-        decorations: v => v.decorations
-      })
+      ViewPlugin.fromClass(DocumentAwareDiffPlugin)
     ];
     console.log('🔍 Live edit diff extension created:', extension.length, 'items');
     return extension;

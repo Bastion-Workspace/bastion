@@ -716,10 +716,7 @@ logger.info("✅ Category API routes registered")
 
 
 # Conversation create endpoint moved to api/conversation_api.py
-# Include Agent Chaining API routes
-from api.agent_chaining_api import router as agent_chaining_router
-app.include_router(agent_chaining_router, prefix="/api/v1/agents")
-logger.info("✅ Agent chaining API routes registered")
+# Agent Chaining API removed - deprecated functionality, all agents migrated to llm-orchestrator
 
 # Include RSS API routes
 from api.rss_api import router as rss_router

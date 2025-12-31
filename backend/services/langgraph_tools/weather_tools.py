@@ -1,638 +1,271 @@
 """
-Weather Tools Module
-Weather operations and forecasting for LangGraph agents using OpenWeatherMap API
+Weather Tools Module - gRPC Wrapper
+Lightweight wrapper that calls the Tools Service via gRPC for weather operations
 """
 
 import logging
-import aiohttp
-import asyncio
-from typing import Dict, Any, List, Optional
-from datetime import datetime, timedelta
-import json
-import math
+from typing import Dict, Any, Optional
+
+from clients.tool_service_client import get_tool_service_client
 
 logger = logging.getLogger(__name__)
 
 
-class WeatherTools:
-    """Weather tools for LangGraph agents using OpenWeatherMap API"""
+async def weather_conditions(location: Optional[str] = None, units: str = "imperial", user_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    LangGraph tool function: Get current weather conditions via gRPC
     
-    def __init__(self):
-        self.base_url = "https://api.openweathermap.org/data/2.5"
-        self.geocoding_url = "https://api.openweathermap.org/geo/1.0"
-        self.cache = {}  # Simple in-memory cache
-        self.cache_duration = timedelta(minutes=10)
+    Args:
+        location: Optional location (ZIP code, city name, or 'city,country' format).
+                  If None/empty/vague and user_id provided, uses user's ZIP from profile.
+        units: Temperature units (default: "imperial")
+        user_id: User ID for automatic location fallback to profile ZIP code
+    
+    Returns:
+        Dict with weather data or error message
+    """
+    try:
+        tool_client = await get_tool_service_client()
         
-    def get_tools(self) -> Dict[str, Any]:
-        """Get all weather tools"""
+        # Call Tools Service via gRPC
+        weather_data = await tool_client.get_weather_data(
+            location=location or "",
+            user_id=user_id or "system",
+            data_types=["current"]
+        )
+        
+        if not weather_data:
+            return {
+                "success": False,
+                "error": "Weather service unavailable",
+                "location": location
+            }
+        
+        # Extract data from gRPC response and format to match expected structure
+        metadata = weather_data.get("metadata", {})
+        
         return {
-            "weather_conditions": self.get_weather_conditions,
-            "weather_forecast": self.get_weather_forecast,
-        }
-    
-    def get_schemas(self) -> List[Dict[str, Any]]:
-        """Get schemas for all weather tools"""
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": "weather_conditions",
-                    "description": "Get current weather conditions for a specific location",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "location": {
-                                "type": "string", 
-                                "description": "Location (ZIP code, city name, or 'city,country' format). Examples: '90210', 'Los Angeles', 'London,UK'"
-                            },
-                            "units": {
-                                "type": "string", 
-                                "description": "Temperature units: 'imperial' (Fahrenheit), 'metric' (Celsius), or 'kelvin'",
-                                "enum": ["imperial", "metric", "kelvin"],
-                                "default": "imperial"
-                            }
-                        },
-                        "required": ["location"]
-                    }
-                }
+            "success": True,
+            "location": {
+                "name": weather_data.get("location", location or "Unknown"),
+                "query": location or ""
             },
-            {
-                "type": "function",
-                "function": {
-                    "name": "weather_forecast",
-                    "description": "Get weather forecast for a specific location (up to 5 days)",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "location": {
-                                "type": "string",
-                                "description": "Location (ZIP code, city name, or 'city,country' format). Examples: '90210', 'Los Angeles', 'London,UK'"
-                            },
-                            "days": {
-                                "type": "integer",
-                                "description": "Number of days to forecast (1-5)",
-                                "minimum": 1,
-                                "maximum": 5,
-                                "default": 3
-                            },
-                            "units": {
-                                "type": "string",
-                                "description": "Temperature units: 'imperial' (Fahrenheit), 'metric' (Celsius), or 'kelvin'",
-                                "enum": ["imperial", "metric", "kelvin"],
-                                "default": "imperial"
-                            }
-                        },
-                        "required": ["location"]
-                    }
-                }
+            "current": {
+                "temperature": float(metadata.get("temperature", 0)),
+                "conditions": metadata.get("conditions", ""),
+                "humidity": float(metadata.get("humidity", 0)),
+                "wind_speed": float(metadata.get("wind_speed", 0)),
+                "feels_like": float(metadata.get("feels_like", 0))
+            },
+            "moon_phase": {
+                "phase_name": metadata.get("moon_phase_name", ""),
+                "phase_icon": metadata.get("moon_phase_icon", ""),
+                "phase_value": int(metadata.get("moon_phase_value", 0))
+            },
+            "units": {
+                "temperature": "°F" if units == "imperial" else "°C" if units == "metric" else "K",
+                "wind_speed": "mph" if units == "imperial" else "m/s"
             }
-        ]
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Weather conditions request failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "location": location
+        }
+
+
+async def weather_forecast(location: Optional[str] = None, days: int = 3, units: str = "imperial", user_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    LangGraph tool function: Get weather forecast via gRPC
     
-    async def get_weather_conditions(self, location: str, units: str = "imperial", user_id: str = None) -> Dict[str, Any]:
-        """Get current weather conditions for a location"""
-        try:
-            logger.info(f"🌤️ Getting current weather for: {location}")
-            
-            # Import config here to avoid circular imports
-            from config import settings
-            
-            if not settings.OPENWEATHERMAP_API_KEY:
-                return {
-                    "success": False,
-                    "error": "OpenWeatherMap API key not configured",
-                    "location": location
-                }
-            
-            # Check cache first
-            cache_key = f"current_{location}_{units}"
-            if self._is_cached(cache_key):
-                logger.info(f"🎯 Using cached weather data for {location}")
-                return self.cache[cache_key]["data"]
-            
-            # Get coordinates for the location
-            coords = await self._get_coordinates(location, settings.OPENWEATHERMAP_API_KEY)
-            if not coords["success"]:
-                return coords
-            
-            lat, lon = coords["lat"], coords["lon"]
-            
-            # Get current weather
-            url = f"{self.base_url}/weather"
-            params = {
-                "lat": lat,
-                "lon": lon,
-                "appid": settings.OPENWEATHERMAP_API_KEY,
-                "units": units
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        return {
-                            "success": False,
-                            "error": f"OpenWeatherMap API error: {response.status} - {error_text}",
-                            "location": location
-                        }
-                    
-                    data = await response.json()
-            
-            # Format the response
-            result = self._format_current_weather(data, location, units)
-            
-            # Cache the result
-            self._cache_result(cache_key, result)
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"❌ Weather conditions request failed: {e}")
+    Args:
+        location: Optional location (ZIP code, city name, or 'city,country' format).
+                  If None/empty/vague and user_id provided, uses user's ZIP from profile.
+        days: Number of days to forecast (1-5, default: 3)
+        units: Temperature units (default: "imperial")
+        user_id: User ID for automatic location fallback to profile ZIP code
+    
+    Returns:
+        Dict with forecast data or error message
+    """
+    try:
+        tool_client = await get_tool_service_client()
+        
+        # Call Tools Service via gRPC
+        weather_data = await tool_client.get_weather_data(
+            location=location or "",
+            user_id=user_id or "system",
+            data_types=["forecast"]
+        )
+        
+        if not weather_data:
             return {
                 "success": False,
-                "error": str(e),
-                "location": location
-            }
-    
-    async def get_weather_forecast(self, location: str, days: int = 3, units: str = "imperial", user_id: str = None) -> Dict[str, Any]:
-        """Get weather forecast for a location"""
-        try:
-            logger.info(f"🌦️ Getting {days}-day forecast for: {location}")
-            
-            # Import config here to avoid circular imports
-            from config import settings
-            
-            if not settings.OPENWEATHERMAP_API_KEY:
-                return {
-                    "success": False,
-                    "error": "OpenWeatherMap API key not configured",
-                    "location": location
-                }
-            
-            # Validate days parameter
-            if days < 1 or days > 5:
-                return {
-                    "success": False,
-                    "error": "Days must be between 1 and 5",
-                    "location": location,
-                    "days": days
-                }
-            
-            # Check cache first
-            cache_key = f"forecast_{location}_{days}_{units}"
-            if self._is_cached(cache_key):
-                logger.info(f"🎯 Using cached forecast data for {location}")
-                return self.cache[cache_key]["data"]
-            
-            # Get coordinates for the location
-            coords = await self._get_coordinates(location, settings.OPENWEATHERMAP_API_KEY)
-            if not coords["success"]:
-                return coords
-            
-            lat, lon = coords["lat"], coords["lon"]
-            
-            # Get forecast
-            url = f"{self.base_url}/forecast"
-            params = {
-                "lat": lat,
-                "lon": lon,
-                "appid": settings.OPENWEATHERMAP_API_KEY,
-                "units": units
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        return {
-                            "success": False,
-                            "error": f"OpenWeatherMap API error: {response.status} - {error_text}",
-                            "location": location
-                        }
-                    
-                    data = await response.json()
-            
-            # Format the response
-            result = self._format_forecast(data, location, days, units)
-            
-            # Cache the result
-            self._cache_result(cache_key, result)
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"❌ Weather forecast request failed: {e}")
-            return {
-                "success": False,
-                "error": str(e),
+                "error": "Weather service unavailable",
                 "location": location,
                 "days": days
             }
-    
-    async def _get_coordinates(self, location: str, api_key: str) -> Dict[str, Any]:
-        """Get latitude and longitude for a location with enhanced geocoding"""
-        try:
-            # Check if location is a ZIP code (US format)
-            if location.isdigit() and len(location) == 5:
-                # Use ZIP code geocoding
-                url = f"{self.geocoding_url}/zip"
-                params = {
-                    "zip": f"{location},US",
-                    "appid": api_key
-                }
-            else:
-                # ROOSEVELT'S ENHANCED GEOCODING: Try multiple location formats
-                location_variants = self._generate_location_variants(location)
-                
-                for variant in location_variants:
-                    logger.info(f"🎯 Trying location variant: '{variant}'")
-                    url = f"{self.geocoding_url}/direct"
-                    params = {
-                        "q": variant,
-                        "limit": 1,
-                        "appid": api_key
-                    }
-                    
-                    # Try this variant
-                    coords = await self._try_geocoding_request(url, params, variant)
-                    if coords["success"]:
-                        logger.info(f"✅ Successfully geocoded: '{location}' → '{variant}'")
-                        return coords
-                    else:
-                        logger.info(f"❌ Failed variant: '{variant}' - {coords.get('error', 'Unknown error')}")
-                
-                # If all variants failed, return the last error
-                return {
-                    "success": False,
-                    "error": f"Location not found after trying {len(location_variants)} variants: {location}",
-                    "location": location,
-                    "variants_tried": location_variants
-                }
-            
-            # Handle ZIP code request (simple case)
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params) as response:
-                    if response.status != 200:
-                        return {
-                            "success": False,
-                            "error": f"Could not find ZIP code: {location}",
-                            "location": location
-                        }
-                    
-                    data = await response.json()
-            
-            # ZIP code response format
-            if not data:
-                return {
-                    "success": False,
-                    "error": f"Invalid ZIP code: {location}",
-                    "location": location
-                }
-            return {
-                "success": True,
-                "lat": data["lat"],
-                "lon": data["lon"],
-                "name": data.get("name", location),
-                "country": data.get("country", "US")
-            }
-                
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Geocoding error: {str(e)}",
-                "location": location
-            }
-    
-    def _generate_location_variants(self, location: str) -> List[str]:
-        """ROOSEVELT'S ENHANCED GEOCODING: Generate multiple location format variants"""
-        variants = [location]  # Always try original first
         
-        # State abbreviation expansion mapping
-        state_abbreviations = {
-            "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
-            "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia",
-            "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois", "IN": "Indiana", "IA": "Iowa",
-            "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
-            "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi", "MO": "Missouri",
-            "MT": "Montana", "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey",
-            "NM": "New Mexico", "NY": "New York", "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio",
-            "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
-            "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont",
-            "VA": "Virginia", "WA": "Washington", "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming"
-        }
+        # Extract forecast data from gRPC response
+        metadata = weather_data.get("metadata", {})
+        forecast_data_json = metadata.get("forecast_data", "[]")
         
-        # Try different formats for "City, State" patterns
-        if "," in location:
-            parts = [part.strip() for part in location.split(",")]
-            if len(parts) == 2:
-                city, state = parts
-                
-                # If state is abbreviation, try full name
-                if state.upper() in state_abbreviations:
-                    full_state = state_abbreviations[state.upper()]
-                    variants.append(f"{city}, {full_state}")
-                    variants.append(f"{city},{full_state}")  # No space after comma
-                    variants.append(f"{city} {full_state}")   # No comma
-                
-                # Try without spaces around comma
-                variants.append(f"{city},{state}")
-                
-                # Try with "US" country code
-                variants.append(f"{city}, {state}, US")
-                variants.append(f"{city},{state},US")
-                
-                # Try just the city name
-                variants.append(city)
+        import json
+        forecast_days = json.loads(forecast_data_json) if forecast_data_json else []
         
-        # Try with "US" suffix if not already present
-        if ",US" not in location.upper() and ",United States" not in location:
-            variants.append(f"{location}, US")
-            variants.append(f"{location},US")
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_variants = []
-        for variant in variants:
-            if variant not in seen:
-                seen.add(variant)
-                unique_variants.append(variant)
-        
-        return unique_variants
-    
-    async def _try_geocoding_request(self, url: str, params: Dict[str, Any], location_variant: str) -> Dict[str, Any]:
-        """ROOSEVELT'S GEOCODING REQUEST: Try a single geocoding request"""
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params) as response:
-                    if response.status != 200:
-                        return {
-                            "success": False,
-                            "error": f"API error {response.status}",
-                            "location": location_variant
-                        }
-                    
-                    data = await response.json()
-                    
-                    # Handle empty response
-                    if not data or len(data) == 0:
-                        return {
-                            "success": False,
-                            "error": "No results found",
-                            "location": location_variant
-                        }
-                    
-                    # Extract coordinates from first result
-                    result = data[0]
-                    return {
-                        "success": True,
-                        "lat": result["lat"],
-                        "lon": result["lon"],
-                        "name": result.get("name", location_variant),
-                        "country": result.get("country", "Unknown"),
-                        "state": result.get("state", ""),
-                        "original_query": location_variant
-                    }
-                    
-        except Exception as e:
-            return {
-                "success": False,
-                "error": f"Request error: {str(e)}",
-                "location": location_variant
-            }
-    
-    def _calculate_moon_phase(self, date: datetime = None) -> Dict[str, Any]:
-        """Calculate moon phase for a given date"""
-        if date is None:
-            date = datetime.utcnow()
-        
-        # Known new moon date (January 6, 2000 18:14 UTC)
-        known_new_moon = datetime(2000, 1, 6, 18, 14, 0)
-        
-        # Calculate days since known new moon
-        days_since_new_moon = (date - known_new_moon).total_seconds() / 86400.0
-        
-        # Lunar cycle is approximately 29.53 days
-        lunar_cycle = 29.53058867
-        phase = (days_since_new_moon % lunar_cycle) / lunar_cycle
-        
-        # Determine phase name and icon
-        if phase < 0.0625:
-            phase_name = "New Moon"
-            phase_icon = "🌑"
-            phase_value = 0
-        elif phase < 0.1875:
-            phase_name = "Waxing Crescent"
-            phase_icon = "🌒"
-            phase_value = 1
-        elif phase < 0.3125:
-            phase_name = "First Quarter"
-            phase_icon = "🌓"
-            phase_value = 2
-        elif phase < 0.4375:
-            phase_name = "Waxing Gibbous"
-            phase_icon = "🌔"
-            phase_value = 3
-        elif phase < 0.5625:
-            phase_name = "Full Moon"
-            phase_icon = "🌕"
-            phase_value = 4
-        elif phase < 0.6875:
-            phase_name = "Waning Gibbous"
-            phase_icon = "🌖"
-            phase_value = 5
-        elif phase < 0.8125:
-            phase_name = "Last Quarter"
-            phase_icon = "🌗"
-            phase_value = 6
-        else:
-            phase_name = "Waning Crescent"
-            phase_icon = "🌘"
-            phase_value = 7
+        # Limit to requested days
+        forecast_days = forecast_days[:days]
         
         return {
-            "phase_name": phase_name,
-            "phase_icon": phase_icon,
-            "phase_value": phase_value,
-            "illumination": round((1 - abs(phase - 0.5) * 2) * 100, 1)
+            "success": True,
+            "location": {
+                "name": weather_data.get("location", location or "Unknown"),
+                "query": location or ""
+            },
+            "forecast": forecast_days,
+            "units": {
+                "temperature": "°F" if units == "imperial" else "°C" if units == "metric" else "K",
+                "wind_speed": "mph" if units == "imperial" else "m/s"
+            },
+            "days_requested": days
         }
+        
+    except Exception as e:
+        logger.error(f"❌ Weather forecast request failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "location": location,
+            "days": days
+        }
+
+
+async def weather_history(location: Optional[str] = None, date_str: str = "", units: str = "imperial", user_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    LangGraph tool function: Get historical weather data via gRPC
     
-    def _format_current_weather(self, data: Dict[str, Any], location: str, units: str) -> Dict[str, Any]:
-        """Format current weather data into a user-friendly response"""
-        try:
-            # Determine temperature unit symbol
-            temp_unit = "°F" if units == "imperial" else "°C" if units == "metric" else "K"
-            wind_unit = "mph" if units == "imperial" else "m/s"
-            
-            # Extract key information
-            main = data["main"]
-            weather = data["weather"][0]
-            wind = data.get("wind", {})
-            
-            # Calculate moon phase
-            moon_phase = self._calculate_moon_phase()
-            
-            return {
-                "success": True,
-                "location": {
-                    "name": data["name"],
-                    "country": data["sys"]["country"],
-                    "query": location
-                },
-                "current": {
-                    "temperature": main["temp"],
-                    "feels_like": main["feels_like"],
-                    "humidity": main["humidity"],
-                    "pressure": main["pressure"],
-                    "conditions": weather["description"].title(),
-                    "conditions_code": weather["main"],
-                    "wind_speed": wind.get("speed", 0),
-                    "wind_direction": wind.get("deg", 0),
-                    "visibility": data.get("visibility", 0) / 1000 if data.get("visibility") else None,  # Convert to km
-                    "cloudiness": data["clouds"]["all"] if "clouds" in data else 0
-                },
-                "moon_phase": moon_phase,
-                "units": {
-                    "temperature": temp_unit,
-                    "wind_speed": wind_unit,
-                    "pressure": "hPa",
-                    "visibility": "km"
-                },
-                "timestamp": datetime.utcnow().isoformat(),
-                "data_source": "OpenWeatherMap"
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Error formatting current weather data: {e}")
+    Args:
+        location: Optional location (ZIP code, city name, or 'city,country' format).
+                  If None/empty/vague and user_id provided, uses user's ZIP from profile.
+        date_str: Date string - 'YYYY-MM-DD' (specific day), 'YYYY-MM' (monthly average),
+                  or 'YYYY-MM to YYYY-MM' (date range, max 24 months)
+        units: Temperature units (default: "imperial")
+        user_id: User ID for automatic location fallback to profile ZIP code
+    
+    Returns:
+        Dict with historical weather data or error message
+    """
+    try:
+        tool_client = await get_tool_service_client()
+        
+        # Call Tools Service via gRPC
+        weather_data = await tool_client.get_weather_data(
+            location=location or "",
+            user_id=user_id or "system",
+            data_types=["history"],
+            date_str=date_str
+        )
+        
+        if not weather_data:
             return {
                 "success": False,
-                "error": f"Error formatting weather data: {str(e)}",
-                "location": location
-            }
-    
-    def _format_forecast(self, data: Dict[str, Any], location: str, days: int, units: str) -> Dict[str, Any]:
-        """Format forecast data into a user-friendly response"""
-        try:
-            # Determine temperature unit symbol
-            temp_unit = "°F" if units == "imperial" else "°C" if units == "metric" else "K"
-            wind_unit = "mph" if units == "imperial" else "m/s"
-            
-            # Group forecast data by day
-            daily_forecasts = {}
-            
-            for item in data["list"]:
-                dt = datetime.fromtimestamp(item["dt"])
-                date_key = dt.strftime("%Y-%m-%d")
-                
-                if date_key not in daily_forecasts:
-                    daily_forecasts[date_key] = {
-                        "date": date_key,
-                        "day_name": dt.strftime("%A"),
-                        "temperatures": [],
-                        "conditions": [],
-                        "humidity": [],
-                        "wind_speeds": [],
-                        "precipitation": []
-                    }
-                
-                daily_forecasts[date_key]["temperatures"].append(item["main"]["temp"])
-                daily_forecasts[date_key]["conditions"].append(item["weather"][0]["description"])
-                daily_forecasts[date_key]["humidity"].append(item["main"]["humidity"])
-                daily_forecasts[date_key]["wind_speeds"].append(item["wind"].get("speed", 0))
-                
-                # Check for precipitation
-                rain = item.get("rain", {}).get("3h", 0)
-                snow = item.get("snow", {}).get("3h", 0)
-                daily_forecasts[date_key]["precipitation"].append(rain + snow)
-            
-            # Process and limit to requested days
-            forecast_days = []
-            for date_key in sorted(daily_forecasts.keys())[:days]:
-                day_data = daily_forecasts[date_key]
-                
-                forecast_days.append({
-                    "date": day_data["date"],
-                    "day_name": day_data["day_name"],
-                    "temperature": {
-                        "high": max(day_data["temperatures"]),
-                        "low": min(day_data["temperatures"]),
-                        "average": sum(day_data["temperatures"]) / len(day_data["temperatures"])
-                    },
-                    "conditions": max(set(day_data["conditions"]), key=day_data["conditions"].count),  # Most common condition
-                    "humidity": sum(day_data["humidity"]) / len(day_data["humidity"]),
-                    "wind_speed": sum(day_data["wind_speeds"]) / len(day_data["wind_speeds"]),
-                    "precipitation_total": sum(day_data["precipitation"]),
-                    "precipitation_probability": min(100, len([p for p in day_data["precipitation"] if p > 0]) / len(day_data["precipitation"]) * 100)
-                })
-            
-            return {
-                "success": True,
-                "location": {
-                    "name": data["city"]["name"],
-                    "country": data["city"]["country"],
-                    "query": location
-                },
-                "forecast": forecast_days,
-                "units": {
-                    "temperature": temp_unit,
-                    "wind_speed": wind_unit,
-                    "precipitation": "mm"
-                },
-                "days_requested": days,
-                "timestamp": datetime.utcnow().isoformat(),
-                "data_source": "OpenWeatherMap"
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Error formatting forecast data: {e}")
-            return {
-                "success": False,
-                "error": f"Error formatting forecast data: {str(e)}",
+                "error": "Weather service unavailable",
                 "location": location,
-                "days": days
+                "date_str": date_str
             }
-    
-    def _is_cached(self, cache_key: str) -> bool:
-        """Check if data is in cache and still valid"""
-        if cache_key not in self.cache:
-            return False
         
-        cached_time = self.cache[cache_key]["timestamp"]
-        return datetime.utcnow() - cached_time < self.cache_duration
-    
-    def _cache_result(self, cache_key: str, data: Dict[str, Any]) -> None:
-        """Cache result with timestamp"""
-        self.cache[cache_key] = {
-            "data": data,
-            "timestamp": datetime.utcnow()
+        # Extract historical data from gRPC response
+        metadata = weather_data.get("metadata", {})
+        period_type = metadata.get("period_type", "daily")
+        
+        # Reconstruct expected format for historical data
+        if period_type == "monthly_average":
+            formatted = {
+                "success": True,
+                "location": {
+                    "name": weather_data.get("location", location or "Unknown"),
+                    "query": location or ""
+                },
+                "period": {
+                    "type": "monthly_average",
+                    "date_str": date_str
+                },
+                "historical": {
+                    "average_temperature": float(metadata.get("average_temperature", 0)),
+                    "min_temperature": float(metadata.get("min_temperature", 0)),
+                    "max_temperature": float(metadata.get("max_temperature", 0)),
+                    "average_humidity": float(metadata.get("humidity", 0)),
+                    "average_wind_speed": float(metadata.get("wind_speed", 0)),
+                    "most_common_conditions": metadata.get("conditions", ""),
+                    "sample_days": int(metadata.get("sample_days", 0))
+                },
+                "units": {
+                    "temperature": "°F" if units == "imperial" else "°C" if units == "metric" else "K",
+                    "wind_speed": "mph" if units == "imperial" else "m/s"
+                }
+            }
+        elif period_type == "date_range":
+            formatted = {
+                "success": True,
+                "location": {
+                    "name": weather_data.get("location", location or "Unknown"),
+                    "query": location or ""
+                },
+                "period": {
+                    "type": "date_range",
+                    "date_str": date_str,
+                    "start_date": metadata.get("start_date", ""),
+                    "end_date": metadata.get("end_date", ""),
+                    "months_in_range": int(metadata.get("months_in_range", 0)),
+                    "months_retrieved": int(metadata.get("months_retrieved", 0))
+                },
+                "historical": {
+                    "average_temperature": float(metadata.get("average_temperature", 0)),
+                    "min_temperature": float(metadata.get("min_temperature", 0)),
+                    "max_temperature": float(metadata.get("max_temperature", 0)),
+                    "average_humidity": float(metadata.get("humidity", 0)),
+                    "average_wind_speed": float(metadata.get("wind_speed", 0)),
+                    "most_common_conditions": metadata.get("conditions", "")
+                },
+                "units": {
+                    "temperature": "°F" if units == "imperial" else "°C" if units == "metric" else "K",
+                    "wind_speed": "mph" if units == "imperial" else "m/s"
+                }
+            }
+        else:
+            # Daily historical data
+            formatted = {
+                "success": True,
+                "location": {
+                    "name": weather_data.get("location", location or "Unknown"),
+                    "query": location or ""
+                },
+                "period": {
+                    "type": "daily",
+                    "date_str": date_str
+                },
+                "historical": {
+                    "temperature": float(metadata.get("temperature", 0)),
+                    "conditions": metadata.get("conditions", ""),
+                    "humidity": float(metadata.get("humidity", 0)),
+                    "wind_speed": float(metadata.get("wind_speed", 0))
+                },
+                "units": {
+                    "temperature": "°F" if units == "imperial" else "°C" if units == "metric" else "K",
+                    "wind_speed": "mph" if units == "imperial" else "m/s"
+                }
+            }
+        
+        return formatted
+        
+    except Exception as e:
+        logger.error(f"❌ Historical weather request failed: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+            "location": location,
+            "date_str": date_str
         }
-        
-        # Simple cache cleanup - remove old entries
-        if len(self.cache) > 100:  # Limit cache size
-            # Remove oldest entries
-            oldest_keys = sorted(self.cache.keys(), 
-                               key=lambda k: self.cache[k]["timestamp"])[:20]
-            for key in oldest_keys:
-                del self.cache[key]
-
-
-# Global instance for use by tool registry
-_weather_tools_instance = None
-
-
-async def _get_weather_tools():
-    """Get global weather tools instance"""
-    global _weather_tools_instance
-    if _weather_tools_instance is None:
-        _weather_tools_instance = WeatherTools()
-    return _weather_tools_instance
-
-
-async def weather_conditions(location: str, units: str = "imperial", user_id: str = None) -> Dict[str, Any]:
-    """LangGraph tool function: Get current weather conditions"""
-    tools_instance = await _get_weather_tools()
-    return await tools_instance.get_weather_conditions(location, units, user_id)
-
-
-async def weather_forecast(location: str, days: int = 3, units: str = "imperial", user_id: str = None) -> Dict[str, Any]:
-    """LangGraph tool function: Get weather forecast"""
-    tools_instance = await _get_weather_tools()
-    return await tools_instance.get_weather_forecast(location, days, units, user_id)

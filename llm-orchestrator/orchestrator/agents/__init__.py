@@ -16,6 +16,7 @@ from orchestrator.agents.podcast_script_agent import PodcastScriptAgent, get_pod
 from orchestrator.agents.entertainment_agent import EntertainmentAgent, get_entertainment_agent
 from orchestrator.agents.website_crawler_agent import WebsiteCrawlerAgent, get_website_crawler_agent
 from orchestrator.agents.electronics_agent import ElectronicsAgent, get_electronics_agent
+from orchestrator.agents.technical_hyperspace_agent import TechnicalHyperspaceAgent, get_technical_hyperspace_agent
 from orchestrator.agents.character_development_agent import CharacterDevelopmentAgent, get_character_development_agent
 from orchestrator.agents.content_analysis_agent import ContentAnalysisAgent, get_content_analysis_agent
 from orchestrator.agents.fiction_editing_agent import FictionEditingAgent, get_fiction_editing_agent
@@ -77,6 +78,8 @@ __all__ = [
     'ReferenceAgent',
     'get_reference_agent',
     'KnowledgeBuilderAgent',
-    'get_knowledge_builder_agent'
+    'get_knowledge_builder_agent',
+    'TechnicalHyperspaceAgent',
+    'get_technical_hyperspace_agent'
 ]
 

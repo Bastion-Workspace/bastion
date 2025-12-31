@@ -123,25 +123,72 @@ class DocumentDiffStore {
 
   /**
    * Validate diffs against current document content
-   * Removes diffs that are invalid due to content changes
+   * Marks diffs as stale when content hash changes significantly
    * @param {string} documentId - Document identifier
    * @param {string} currentContent - Current document content
-   * @returns {Array} Array of invalidated operation IDs
+   * @returns {Object} { invalidated: Array of operation IDs, isStale: boolean }
    */
   validateDiffs(documentId, currentContent) {
-    if (!documentId) return [];
+    if (!documentId) return { invalidated: [], isStale: false };
 
     const docDiffs = this.diffs[documentId];
-    if (!docDiffs) return [];
+    if (!docDiffs) return { invalidated: [], isStale: false };
 
     const currentHash = this._hashContent(currentContent || '');
+    const storedHash = docDiffs.contentHash || '';
     const invalidated = [];
+    let isStale = false;
 
-    // If content hash changed significantly, all diffs may be stale
-    // For now, we keep them and let the plugin handle position validation
-    // This method can be extended for more sophisticated validation
+    // Compare hashes: if they differ, content has changed
+    if (currentHash !== storedHash) {
+      // Parse hash components to determine severity
+      const currentParts = currentHash.split('_');
+      const storedParts = storedHash.split('_');
+      
+      if (currentParts.length === storedParts.length && currentParts.length >= 2) {
+        const currentLength = parseInt(currentParts[0], 10) || 0;
+        const storedLength = parseInt(storedParts[0], 10) || 0;
+        
+        // Calculate length change percentage
+        const lengthChange = Math.abs(currentLength - storedLength);
+        const maxLength = Math.max(currentLength, storedLength, 1);
+        const changePercent = (lengthChange / maxLength) * 100;
+        
+        // Check if sample hashes match (indicates where change occurred)
+        let matchingSamples = 0;
+        for (let i = 1; i < Math.min(currentParts.length, storedParts.length); i++) {
+          if (currentParts[i] === storedParts[i]) {
+            matchingSamples++;
+          }
+        }
+        
+        // Mark as stale if:
+        // - Length changed by more than 5%
+        // - OR less than 3 out of 5 samples match (major structural change)
+        if (changePercent > 5 || matchingSamples < 3) {
+          isStale = true;
+          console.warn(`⚠️ Document content has drifted significantly:`, {
+            documentId,
+            lengthChange: `${changePercent.toFixed(1)}%`,
+            matchingSamples: `${matchingSamples}/${currentParts.length - 1}`,
+            storedLength,
+            currentLength
+          });
+        }
+      } else {
+        // Hash format changed - assume stale
+        isStale = true;
+      }
+      
+      // Update stored hash
+      docDiffs.contentHash = currentHash;
+      this.saveToStorage();
+    }
 
-    return invalidated;
+    // Store stale status for UI to display
+    docDiffs.isStale = isStale;
+
+    return { invalidated, isStale };
   }
 
   /**
@@ -268,17 +315,43 @@ class DocumentDiffStore {
   }
 
   /**
-   * Hash content for validation (simple hash)
+   * Hash content for validation using multi-point sampling
+   * Samples content at multiple positions to detect drift even when middle sections change
    * @param {string} content - Content to hash
    * @returns {string} Hash string
    * @private
    */
   _hashContent(content) {
     if (!content) return '';
-    // Simple hash: first 100 chars + length + last 100 chars
-    const start = content.substring(0, 100);
-    const end = content.substring(Math.max(0, content.length - 100));
-    return `${start.length}_${content.length}_${end.length}`;
+    
+    const length = content.length;
+    if (length === 0) return '0_0_0_0_0_0';
+    
+    // Sample at multiple points: 0%, 25%, 50%, 75%, 100%
+    // Sample size: 50 chars at each position (or available chars if near boundaries)
+    const sampleSize = 50;
+    const positions = [
+      0, // Start
+      Math.floor(length * 0.25), // Quarter
+      Math.floor(length * 0.5), // Middle
+      Math.floor(length * 0.75), // Three-quarters
+      Math.max(0, length - sampleSize) // End
+    ];
+    
+    // Extract samples and compute simple hash for each
+    const samples = positions.map(pos => {
+      const end = Math.min(length, pos + sampleSize);
+      const sample = content.substring(pos, end);
+      // Simple hash: sum of char codes (fast, not cryptographic)
+      let hash = 0;
+      for (let i = 0; i < sample.length; i++) {
+        hash = (hash * 31 + sample.charCodeAt(i)) >>> 0;
+      }
+      return hash.toString(16);
+    });
+    
+    // Combine: length + all sample hashes
+    return `${length}_${samples.join('_')}`;
   }
 
   /**

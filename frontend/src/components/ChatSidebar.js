@@ -50,7 +50,7 @@ const ChatSidebar = () => {
   const editorOpen = !!editorState?.isEditable;
   const { 
     editorPreference, 
-    setEditorPreference
+    handleEditorPreferenceChange
   } = useChatSidebar();
 
   const [historyWindowOpen, setHistoryWindowOpen] = useState(false);
@@ -368,7 +368,7 @@ const ChatSidebar = () => {
           {editorOpen && (
             <Tooltip title={editorPreference === 'prefer' ? 'Prefer Editor (on)' : 'Prefer Editor (off)'}>
               <IconButton
-                onClick={() => setEditorPreference(editorPreference === 'prefer' ? 'ignore' : 'prefer')}
+                onClick={() => handleEditorPreferenceChange(editorPreference === 'prefer' ? 'ignore' : 'prefer')}
                 size="small"
                 color={editorPreference === 'prefer' ? 'primary' : 'default'}
                 sx={{ 

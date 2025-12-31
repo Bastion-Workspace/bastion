@@ -45,6 +45,7 @@ import OrgArchiveDialog from './OrgArchiveDialog';
 import OrgTagDialog from './OrgTagDialog';
 import PDFDocumentViewer from './PDFDocumentViewer';
 import AudioPlayer from './AudioPlayer';
+import DocxViewer from './DocxViewer';
 import { useEditor } from '../contexts/EditorContext';
 import { parseFrontmatter } from '../utils/frontmatterUtils';
 import { useTheme } from '../contexts/ThemeContext';
@@ -1094,6 +1095,23 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
     }
   };
 
+  // Export as PDF handler
+  const handleExportPdf = async () => {
+    handleDownloadMenuClose();
+    try {
+      setExporting(true);
+      const content = editContent || document.content || '';
+      await exportService.exportMarkdownAsPDF(content, {
+        filename: document.filename || 'document'
+      });
+    } catch (error) {
+      console.error('PDF export failed:', error);
+      alert(`PDF export failed: ${error.message}`);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   // Export as EPUB handler
   const handleExportEpub = () => {
     handleDownloadMenuClose();
@@ -1244,6 +1262,16 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   }
 
   const fnameLower = (document.filename || '').toLowerCase();
+
+  // DocX files get specialized viewer with formatting preserved
+  if (fnameLower.endsWith('.docx')) {
+    return (
+      <DocxViewer 
+        documentId={documentId}
+        filename={document.filename}
+      />
+    );
+  }
 
   // **BULLY!** PDF files get special full-screen viewer treatment!
   if (fnameLower.endsWith('.pdf')) {
@@ -1683,12 +1711,20 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                 <ListItemText>Download</ListItemText>
               </MenuItem>
               {isEditing && document.filename && fnameLower.endsWith('.md') && (
-                <MenuItem onClick={handleExportEpub}>
-                  <ListItemIcon>
-                    <FileDownload fontSize="small" />
-                  </ListItemIcon>
-                  <ListItemText>Export as EPUB</ListItemText>
-                </MenuItem>
+                <>
+                  <MenuItem onClick={handleExportPdf}>
+                    <ListItemIcon>
+                      <FileDownload fontSize="small" />
+                    </ListItemIcon>
+                    <ListItemText>Export to PDF</ListItemText>
+                  </MenuItem>
+                  <MenuItem onClick={handleExportEpub}>
+                    <ListItemIcon>
+                      <FileDownload fontSize="small" />
+                    </ListItemIcon>
+                    <ListItemText>Export as EPUB</ListItemText>
+                  </MenuItem>
+                </>
               )}
             </Menu>
           </Box>

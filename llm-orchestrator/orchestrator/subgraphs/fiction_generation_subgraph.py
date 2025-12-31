@@ -30,6 +30,10 @@ from orchestrator.utils.fiction_utilities import (
     extract_story_overview,
     extract_book_map,
 )
+from orchestrator.utils.anchor_correction import (
+    auto_correct_operation_anchor,
+    batch_correct_operations,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +180,9 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                 if prev_chapter_last_line:
                     context_parts.append(f"**LAST LINE OF {prev_chapter_label.upper()}:**\n")
                     context_parts.append(f'"{prev_chapter_last_line}"\n\n')
-                    context_parts.append(f"This is your ANCHOR for insertion. Your new chapter will be inserted immediately after this line.\n\n")
+                    context_parts.append(f"⚠️ CRITICAL: Use this EXACT line as your 'anchor_text' for insertion!\n")
+                    context_parts.append(f"DO NOT paraphrase, summarize, or invent anchor text - copy this line VERBATIM!\n")
+                    context_parts.append(f"Your new chapter will be inserted immediately after this line.\n\n")
             
             context_parts.append(f"{prev_chapter_text}\n\n")
             context_structure["sections"].append({
@@ -211,8 +217,15 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         
         # Close manuscript section explicitly
         context_parts.append("=== END OF MANUSCRIPT CONTEXT ===\n")
-        context_parts.append("All text above this line is MANUSCRIPT TEXT (use for anchors and text matching)\n")
-        context_parts.append("All text below this line is REFERENCE DOCUMENTS (use for story context, NOT for text matching)\n\n")
+        context_parts.append("="*80 + "\n")
+        context_parts.append("⚠️ CRITICAL BOUNDARY: MANUSCRIPT TEXT ENDS HERE ⚠️\n")
+        context_parts.append("="*80 + "\n")
+        context_parts.append("All text ABOVE this line is MANUSCRIPT TEXT (use for anchors and text matching)\n")
+        context_parts.append("All text BELOW this line is REFERENCE DOCUMENTS (use for story context, NOT for text matching)\n\n")
+        context_parts.append("**REMINDER**: If you need to use 'original_text' or 'anchor_text' in your operations:\n")
+        context_parts.append("✅ Copy from MANUSCRIPT TEXT sections above (marked with chapter numbers)\n")
+        context_parts.append("❌ DO NOT copy from OUTLINE, STORY OVERVIEW, or CHARACTER PROFILES below\n")
+        context_parts.append("❌ Reference documents below do NOT exist in the manuscript file!\n\n")
         
         # Log manuscript section boundary
         manuscript_end_marker = "=== END OF MANUSCRIPT CONTEXT ==="
@@ -221,12 +234,18 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         # References (if present, add usage guidance)
         has_any_refs = bool(style_body or rules_body or characters_bodies or outline_body)
         if has_any_refs:
-            context_parts.append("=== REFERENCE DOCUMENTS (USE FOR CONSISTENCY) ===\n")
+            context_parts.append("=== REFERENCE DOCUMENTS (USE FOR CONSISTENCY, NOT FOR TEXT MATCHING) ===\n")
+            context_parts.append("="*80 + "\n")
+            context_parts.append("⚠️ WARNING: THESE ARE PLANNING DOCUMENTS - NOT MANUSCRIPT TEXT ⚠️\n")
+            context_parts.append("="*80 + "\n")
             context_parts.append("The following references are provided to ensure consistency. Use them when generating narrative prose:\n")
             context_parts.append("- Style Guide: Internalize voice, POV, tense, pacing BEFORE writing - permeate every sentence\n")
             context_parts.append("- Outline: Follow story structure and plot beats through natural storytelling\n")
             context_parts.append("- Character Profiles: Reference traits, actions, dialogue patterns when writing character moments\n")
             context_parts.append("- Universe Rules: Verify world-building elements align with established constraints\n\n")
+            context_parts.append("**CRITICAL**: These documents DO NOT exist in the manuscript file!\n")
+            context_parts.append("**DO NOT** copy text from these sections into 'original_text' or 'anchor_text' fields!\n")
+            context_parts.append("**ONLY** use them for understanding story context and maintaining consistency!\n\n")
         
         if style_body:
             context_parts.append("=== STYLE GUIDE (voice and tone - READ FIRST) ===\n")
@@ -270,6 +289,8 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                 context_parts.append("STORY OVERVIEW AND NARRATIVE THEMES\n")
                 context_parts.append("="*80 + "\n")
                 context_parts.append("=== STORY OVERVIEW (GLOBAL CONTEXT - READ FIRST) ===\n\n")
+                context_parts.append("⚠️ THIS IS A PLANNING DOCUMENT - NOT MANUSCRIPT TEXT ⚠️\n")
+                context_parts.append("DO NOT copy text from this section into 'original_text' or 'anchor_text' fields!\n\n")
                 context_parts.append("**CRITICAL**: This is the high-level overview of the entire story.\n")
                 context_parts.append("**PURPOSE**: Understand the overarching narrative, themes, and story goals BEFORE writing any chapter.\n")
                 context_parts.append("**USE THIS TO**: Ensure every chapter you write serves the larger story arc and maintains thematic consistency.\n")
@@ -298,15 +319,20 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                         context_parts.append(f"  Chapter {section_id}: {header_text}{marker}\n")
                 context_parts.append("\n=== END OF BOOK STRUCTURE MAP ===\n\n")
             
-            warning_banner = "\n" + "="*80 + "\n" + "WARNING: STORY OUTLINE BELOW - NOT MANUSCRIPT TEXT\n" + "="*80 + "\n"
+            warning_banner = "\n" + "="*80 + "\n" + "⚠️ WARNING: STORY OUTLINE BELOW - NOT MANUSCRIPT TEXT ⚠️\n" + "="*80 + "\n"
             context_parts.append(warning_banner)
             context_parts.append("=== STORY OUTLINE (FOR CONTINUITY CONTEXT - NOT EDITABLE, NOT FOR TEXT MATCHING) ===\n\n")
-            context_parts.append("ABSOLUTE PROHIBITION:\n")
+            context_parts.append("="*80 + "\n")
+            context_parts.append("⚠️ ABSOLUTE PROHIBITION: OUTLINE TEXT CANNOT BE USED AS ANCHOR TEXT ⚠️\n")
+            context_parts.append("="*80 + "\n")
             context_parts.append("The outline sections below tell you WHAT happens in the story.\n")
-            context_parts.append("**DO NOT** use outline text for anchors, original_text, or any text matching!\n")
+            context_parts.append("**THESE SECTIONS DO NOT EXIST IN THE MANUSCRIPT FILE!**\n")
+            context_parts.append("**DO NOT** use outline text for 'original_text', 'anchor_text', or any text matching!\n")
             context_parts.append("**DO NOT** copy, paraphrase, or reuse outline synopsis/beat text in your narrative prose!\n")
             context_parts.append("**DO** use the outline as inspiration for story structure and plot beats.\n")
-            context_parts.append("**DO** write original narrative prose that achieves the outline's story goals.\n\n")
+            context_parts.append("**DO** write original narrative prose that achieves the outline's story goals.\n")
+            context_parts.append("**REMEMBER**: For text matching, ONLY use text from MANUSCRIPT TEXT sections above!\n")
+            context_parts.append("="*80 + "\n\n")
             
             # Include previous chapter outline (extracted by context subgraph)
             outline_prev_chapter_text = state.get("outline_prev_chapter_text")
@@ -326,11 +352,13 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                 context_parts.append(f"CURRENT CHAPTER OUTLINE - PRIMARY FOCUS\n")
                 context_parts.append("="*80 + "\n")
                 context_parts.append(f"=== OUTLINE: CHAPTER {target_chapter_number} (CURRENT - THIS IS YOUR PRIMARY FOCUS) ===\n\n")
+                context_parts.append(f"⚠️ THIS IS OUTLINE TEXT - NOT MANUSCRIPT TEXT - DO NOT USE FOR ANCHORS ⚠️\n\n")
                 context_parts.append(f"**CRITICAL**: You are generating Chapter {target_chapter_number} RIGHT NOW.\n")
                 context_parts.append(f"**MANDATORY CHAPTER HEADER**: Your generated text MUST start with '## Chapter {target_chapter_number}' (NOT Chapter {target_chapter_number - 1}, NOT Chapter {target_chapter_number + 1}, ONLY Chapter {target_chapter_number}!)\n")
                 context_parts.append(f"**PRIMARY TASK**: Generate narrative prose for Chapter {target_chapter_number} based on these beats.\n")
                 context_parts.append(f"**DO NOT** include events, characters, or plot points from LATER chapters in this chapter!\n")
                 context_parts.append(f"**DO NOT** use a different chapter number in your header - it MUST be Chapter {target_chapter_number}!\n")
+                context_parts.append(f"**DO NOT** copy text from this outline into 'original_text' or 'anchor_text' fields!\n")
                 context_parts.append(f"**DO** use this outline to understand what should happen in THIS chapter.\n")
                 context_parts.append(f"**DO** write original narrative prose that achieves these story goals.\n\n")
                 context_parts.append(f"{outline_current_chapter_text}\n\n")
@@ -547,6 +575,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
             # PRESERVE manuscript context for next node!
             "manuscript": state.get("manuscript", ""),
             "filename": state.get("filename", ""),
+            "frontmatter": state.get("frontmatter", {}),  # CRITICAL: Preserve frontmatter for temperature access
             "current_chapter_text": state.get("current_chapter_text", ""),
             "current_chapter_number": state.get("current_chapter_number"),
             "chapter_ranges": state.get("chapter_ranges", []),
@@ -573,6 +602,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
             "prev_chapter_last_line": None,
             # CRITICAL: Preserve state even on error
             "system_prompt": state.get("system_prompt", ""),  # PRESERVE system_prompt!
+            "frontmatter": state.get("frontmatter", {}),  # CRITICAL: Preserve frontmatter for temperature access
             "datetime_context": state.get("datetime_context", ""),  # PRESERVE datetime_context!
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
@@ -825,6 +855,34 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
             
             # Build the message content as a single string ONCE
             # 🎯 ROOSEVELT DEBUG: Build incrementally to find where duplication occurs
+            # Check request type to determine if operations are required
+            request_type = state.get("request_type", "edit_request")
+            is_question = request_type == "question"
+            
+            # Build operations requirement message based on request type
+            if is_question:
+                operations_requirement = (
+                    "\n" + ("="*80) + "\n" +
+                    "QUESTION REQUEST: OPERATIONS ARE OPTIONAL\n" +
+                    ("="*80) + "\n\n" +
+                    "This is a QUESTION request. You may return empty operations if you are only analyzing/answering.\n"
+                    "- If the question requires edits: Provide operations to make the changes\n"
+                    "- If the question is informational only: Return empty operations array and answer in the 'summary' field\n"
+                    "- The summary field MUST contain your complete answer to the question\n\n"
+                )
+            else:
+                operations_requirement = (
+                    "\n" + ("="*80) + "\n" +
+                    "⚠️ CRITICAL: OPERATIONS ARE MANDATORY ⚠️\n" +
+                    ("="*80) + "\n\n" +
+                    "This is a GENERATION/EDITING request. You MUST provide at least one operation in the operations array.\n"
+                    "- **EMPTY OPERATIONS ARE NOT ALLOWED** for generation/editing requests\n"
+                    "- You MUST generate actual content changes (replace_range, insert_after_heading, or delete_range)\n"
+                    "- If you cannot find the exact text to edit, use the best available anchor and proceed\n"
+                    "- If you have concerns, include them in the summary but STILL provide operations\n"
+                    "- **DO NOT return empty operations** - the user expects actual changes to be made\n\n"
+                )
+            
             base_template = (
                 "\n" + ("="*80) + "\n" +
                 "OUTPUT FORMAT REQUIREMENTS\n" +
@@ -835,7 +893,8 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "DO NOT use any format other than JSON\n"
                 "ONLY return valid JSON with curly braces { }\n"
                 "ONLY return a JSON object matching ManuscriptEdit structure\n\n"
-                f"USER REQUEST: {current_request}\n\n"
+                f"USER REQUEST: {current_request}\n\n" +
+                operations_requirement
             )
             logger.info(f"📊 STEP 1 - base_template: {len(base_template):,} chars")
             
@@ -873,17 +932,46 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "**FOR insert_after_heading (NEW TEXT):**\n"
                 "- Use this when adding NEW content that doesn't exist in the manuscript\n"
                 "- **MANDATORY**: You MUST provide 'anchor_text' with EXACT text from the manuscript to insert after\n"
-                "- **CRITICAL**: If you don't provide 'anchor_text', the operation will FAIL to find the insertion point and your content will be lost\n"
-                "- Find the sentence/paragraph where the new text should go\n"
-                "- Copy that sentence/paragraph EXACTLY as 'anchor_text' (VERBATIM, no modifications)\n"
-                "- The new text will be inserted immediately after that anchor\n"
-                "- **FOR NEW CHAPTERS**: Your 'text' field MUST start with '## Chapter N' followed by two newlines, then your chapter content\n"
+                "- **CRITICAL**: If you don't provide 'anchor_text', the operation will FAIL to find the insertion point and your content will be lost\n\n"
+                "**WHAT IS VALID ANCHOR TEXT:**\n"
+                "✅ CORRECT: Text that ACTUALLY EXISTS in the MANUSCRIPT TEXT sections above\n"
+                "✅ CORRECT: The last line of the previous chapter (if provided as 'LAST LINE OF CHAPTER X')\n"
+                "✅ CORRECT: A chapter heading like '## Chapter 5' if inserting after that chapter\n"
+                "❌ WRONG: Text from the outline (it doesn't exist in the manuscript!)\n"
+                "❌ WRONG: Text you THINK should be in the manuscript but isn't shown above\n"
+                "❌ WRONG: Paraphrased or summarized text from the manuscript\n"
+                "❌ WRONG: Text you are generating yourself\n"
+                "❌ WRONG: Invented text that 'sounds right' but isn't in the manuscript\n\n"
+                "**HOW TO FIND VALID ANCHOR TEXT:**\n"
+                "1. Scroll UP to find MANUSCRIPT TEXT sections (marked with chapter numbers)\n"
+                "2. Locate the EXACT sentence/paragraph where new text should be inserted after\n"
+                "3. Copy that text VERBATIM (word-for-word, character-for-character) from the manuscript\n"
+                "4. Use Ctrl+F/Cmd+F to verify the text exists in the MANUSCRIPT TEXT sections above\n"
+                "5. **NEVER** use text from OUTLINE, STORY OVERVIEW, or CHARACTER PROFILES\n\n"
+                "**FOR NEW CHAPTERS AT END OF MANUSCRIPT:**\n"
+                "- Look for 'LAST LINE OF CHAPTER X' marker in the context\n"
+                "- Use that EXACT line as anchor_text with op_type='insert_after_heading'\n"
+                "- Your 'text' field MUST start with '## Chapter N' followed by two newlines, then your chapter content\n"
                 "- **MANDATORY**: All new chapter content must include the chapter header - do not omit it!\n\n"
+                "**FOR CONTINUING/EXTENDING EXISTING CHAPTERS:**\n"
+                "- **CRITICAL**: When user asks to 'continue chapter X' or 'finish chapter X', they want to ADD to existing content!\n"
+                "- **DO NOT** use 'insert_after_heading' with '## Chapter X' - this inserts AFTER the heading, causing duplication!\n"
+                "- **CORRECT APPROACH**: Use 'insert_after' (NOT insert_after_heading) with the LAST FEW WORDS of the existing chapter text\n"
+                "- Find the LAST SENTENCE/PARAGRAPH of the chapter in the MANUSCRIPT TEXT section\n"
+                "- Copy the LAST 15-30 WORDS of that chapter (the ending words before the next chapter or end of file)\n"
+                "- Use op_type='insert_after' with those words as anchor_text\n"
+                "- **DO NOT** include '## Chapter X' heading in your generated text - the chapter already exists!\n"
+                "- Your generated text should flow seamlessly from where the chapter ended\n"
+                "- Example: Chapter 3 ends with '...and walked out the door.'\n"
+                "  - CORRECT: {\"op_type\": \"insert_after\", \"anchor_text\": \"walked out the door.\", \"text\": \"\\n\\nThe morning air was crisp...\"}\n"
+                "  - WRONG: {\"op_type\": \"insert_after_heading\", \"anchor_text\": \"## Chapter 3\", \"text\": \"## Chapter 3\\n\\nThe morning air...\"}\n\n"
                 "**DECISION RULE:**\n"
                 "- Editing EXISTING text? → Use 'replace_range' with 'original_text' (MANDATORY)\n"
-                "- Adding NEW text? → Use 'insert_after_heading' with 'anchor_text' (MANDATORY)\n"
+                "- Adding NEW chapter? → Use 'insert_after_heading' with last line of previous chapter as anchor (MANDATORY)\n"
+                "- Continuing EXISTING chapter? → Use 'insert_after' with last words of that chapter as anchor (MANDATORY)\n"
                 "- **NEVER** use 'replace_range' without 'original_text' - it will fail!\n"
-                "- **NEVER** use 'insert_after_heading' without 'anchor_text' - it will fail!\n\n"
+                "- **NEVER** use 'insert_after_heading' or 'insert_after' without 'anchor_text' - it will fail!\n"
+                "- **NEVER** use 'insert_after_heading' to continue existing chapters - use 'insert_after' instead!\n\n"
                 "**VERIFICATION CHECKLIST BEFORE GENERATING JSON:**\n"
                 "☐ I found the text in a 'MANUSCRIPT TEXT: CHAPTER N' section\n"
                 "☐ I copied it EXACTLY as written in that section (VERBATIM, no changes)\n"
@@ -891,7 +979,9 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "☐ The text I copied is BEFORE the '=== END OF MANUSCRIPT CONTEXT ===' marker\n"
                 "☐ For replace_range/delete_range: I verified my 'original_text' exists in the MANUSCRIPT TEXT section above\n"
                 "☐ For insert_after_heading: I verified my 'anchor_text' exists in the MANUSCRIPT TEXT section above\n"
-                "☐ I did NOT use outline text, chapter headers, or any text that doesn't appear in the manuscript\n\n" +
+                "☐ I did a mental Ctrl+F search and confirmed I can find my anchor_text/original_text in the manuscript sections above\n"
+                "☐ I did NOT invent, paraphrase, or generate anchor text - I COPIED it EXACTLY from what's shown\n"
+                "☐ I did NOT use outline text, chapter headers (except '## Chapter N'), or any text that doesn't appear in the manuscript\n\n" +
                 ("="*80) + "\n" +
                 "NOW GENERATE YOUR JSON RESPONSE:\n" +
                 ("="*80) + "\n\n" +
@@ -931,10 +1021,27 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "- For sentence changes: Just the sentence(s) that need changing (15-30 words)\n"
                 "- Only use 30-40 words when smaller matches aren't unique enough\n"
                 "- **SMALLER IS BETTER** - precise alignment is more important than large context\n\n"
+                + ("="*80) + "\n"
+                "⚠️ CRITICAL: OUTLINE TEXT CANNOT BE USED AS ANCHOR TEXT ⚠️\n"
+                + ("="*80) + "\n"
+                "The outline is a PLANNING DOCUMENT ONLY - it does NOT exist in the manuscript file!\n"
+                "If you use outline text as 'original_text' or 'anchor_text', the operation will FAIL.\n\n"
+                "**WHERE TO COPY TEXT FROM:**\n"
+                "✅ CORRECT: Copy from 'MANUSCRIPT TEXT' sections (labeled with chapter numbers)\n"
+                "✅ CORRECT: Copy from user's selected text if provided\n"
+                "✅ CORRECT: Copy from 'Previous Chapter End' if provided\n"
+                "❌ WRONG: Copy from 'Outline' sections\n"
+                "❌ WRONG: Copy from 'Story Overview' sections\n"
+                "❌ WRONG: Invent text that doesn't exist in manuscript\n\n"
+                "**OUTLINE IS FOR GUIDANCE ONLY:**\n"
+                "- Use outline to understand story direction and what to write\n"
+                "- DO NOT copy outline text into original_text/anchor_text fields\n"
+                "- Outline text does not exist in the actual manuscript file\n"
+                + ("="*80) + "\n\n"
                 "**OPTION 1 (BEST): Use selection as anchor**\n"
                 "- If user selected text, match it EXACTLY in 'original_text'\n"
                 "- Use the selection plus minimal surrounding context (10-15 words) if needed for uniqueness\n"
-                "- Copy from manuscript text, NOT from outline!\n\n"
+                "- Copy from MANUSCRIPT TEXT sections, NOT from outline!\n\n"
                 "**OPTION 2: Use left_context + right_context**\n"
                 "- left_context: 30-50 chars BEFORE the target (exact text from manuscript)\n"
                 "- right_context: 30-50 chars AFTER the target (exact text from manuscript)\n"
@@ -942,11 +1049,13 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "**OPTION 3: Use long original_text**\n"
                 "- Include 20-40 words of EXACT, VERBATIM text to replace\n"
                 "- Include complete sentences with natural boundaries\n"
-                "- Copy from manuscript text above, NEVER from outline text!\n\n"
+                "- Copy from MANUSCRIPT TEXT sections above, NEVER from outline/story overview text!\n\n"
                 "**ABSOLUTE PROHIBITIONS:**\n"
                 "- **NEVER** include chapter headers (##) in original_text - they will be deleted!\n"
-                "- **NEVER** use outline text as anchor - it doesn't exist in the manuscript and will fail to match!\n"
-                "- **NEVER** create operations without proper anchors - operations will fail and content will be lost!\n\n" +
+                "- **NEVER** use outline text as anchor - THE OUTLINE DOES NOT EXIST IN THE MANUSCRIPT FILE!\n"
+                "- **NEVER** use story overview text as anchor - IT DOES NOT EXIST IN THE MANUSCRIPT FILE!\n"
+                "- **NEVER** create operations without proper anchors - operations will fail and content will be lost!\n"
+                "- **NEVER** invent text that doesn't exist in the manuscript - copy EXACTLY from MANUSCRIPT TEXT sections!\n\n" +
                 ("="*80) + "\n" +
                 "FINAL REMINDER: RETURN JSON ONLY\n" +
                 ("="*80) + "\n\n" +
@@ -983,6 +1092,7 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # CRITICAL: Preserve state for subsequent nodes
             "system_prompt": state.get("system_prompt", ""),
             "datetime_context": state.get("datetime_context", ""),
+            "generation_context_parts": state.get("generation_context_parts", []),  # CRITICAL: Needed for self-healing!
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
             "shared_memory": state.get("shared_memory", {}),
@@ -991,6 +1101,7 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # PRESERVE manuscript context!
             "manuscript": state.get("manuscript", ""),
             "filename": state.get("filename", ""),
+            "frontmatter": state.get("frontmatter", {}),  # CRITICAL: Preserve frontmatter for temperature access
             "current_chapter_text": state.get("current_chapter_text", ""),
             "current_chapter_number": state.get("current_chapter_number"),
             "chapter_ranges": state.get("chapter_ranges", []),
@@ -1012,6 +1123,7 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # CRITICAL: Preserve state even on error
             "system_prompt": state.get("system_prompt", ""),  # PRESERVE system_prompt!
             "datetime_context": state.get("datetime_context", ""),  # PRESERVE datetime_context!
+            "generation_context_parts": state.get("generation_context_parts", []),  # CRITICAL: Needed for self-healing!
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
             "shared_memory": state.get("shared_memory", {}),
@@ -1020,6 +1132,7 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # PRESERVE manuscript context even on error!
             "manuscript": state.get("manuscript", ""),
             "filename": state.get("filename", ""),
+            "frontmatter": state.get("frontmatter", {}),  # CRITICAL: Preserve frontmatter for temperature access
             "current_chapter_text": state.get("current_chapter_text", ""),
             "current_chapter_number": state.get("current_chapter_number"),
             "chapter_ranges": state.get("chapter_ranges", []),
@@ -1052,6 +1165,7 @@ async def call_generation_llm_node(state: Dict[str, Any], llm_factory) -> Dict[s
                 "query": state.get("query", ""),
                 "manuscript": state.get("manuscript", ""),
                 "filename": state.get("filename", ""),
+                "frontmatter": state.get("frontmatter", {}),  # CRITICAL: Preserve frontmatter for temperature access
                 "current_chapter_text": state.get("current_chapter_text", ""),
                 "current_chapter_number": state.get("current_chapter_number"),
                 "chapter_ranges": state.get("chapter_ranges", []),
@@ -1073,8 +1187,14 @@ async def call_generation_llm_node(state: Dict[str, Any], llm_factory) -> Dict[s
         logger.info(f"📊 TOTAL: {total_chars:,} chars (~{total_chars // 4:,} tokens)")
         logger.info(f"📊 Expected token count: ~{total_chars // 4:,} (limit: 200,000)")
         
+        # Check frontmatter for temperature override (default: 0.4 for fiction generation)
+        frontmatter = state.get("frontmatter", {})
+        temperature = frontmatter.get("temperature", 0.4)
+        if temperature != 0.4:
+            logger.info(f"🌡️ Using frontmatter temperature: {temperature} (default: 0.4)")
+        
         # Get LLM from factory
-        llm = llm_factory(temperature=0.4, state=state)
+        llm = llm_factory(temperature=temperature, state=state)
         
         start_time = datetime.now()
         response = await llm.ainvoke(generation_messages)
@@ -1092,6 +1212,7 @@ async def call_generation_llm_node(state: Dict[str, Any], llm_factory) -> Dict[s
             # CRITICAL: Preserve state for subsequent nodes
             "system_prompt": state.get("system_prompt", ""),
             "datetime_context": state.get("datetime_context", ""),
+            "generation_context_parts": state.get("generation_context_parts", []),  # CRITICAL: Needed for self-healing!
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
             "shared_memory": state.get("shared_memory", {}),
@@ -1099,6 +1220,7 @@ async def call_generation_llm_node(state: Dict[str, Any], llm_factory) -> Dict[s
             "query": state.get("query", ""),
             "manuscript": state.get("manuscript", ""),
             "filename": state.get("filename", ""),
+            "frontmatter": state.get("frontmatter", {}),  # CRITICAL: Preserve frontmatter for temperature access
             "current_chapter_text": state.get("current_chapter_text", ""),
             "current_chapter_number": state.get("current_chapter_number"),
             "chapter_ranges": state.get("chapter_ranges", []),
@@ -1120,6 +1242,7 @@ async def call_generation_llm_node(state: Dict[str, Any], llm_factory) -> Dict[s
             # CRITICAL: Preserve state even on error
             "system_prompt": state.get("system_prompt", ""),
             "datetime_context": state.get("datetime_context", ""),
+            "generation_context_parts": state.get("generation_context_parts", []),  # CRITICAL: Needed for self-healing!
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
             "shared_memory": state.get("shared_memory", {}),
@@ -1127,6 +1250,7 @@ async def call_generation_llm_node(state: Dict[str, Any], llm_factory) -> Dict[s
             "query": state.get("query", ""),
             "manuscript": state.get("manuscript", ""),
             "filename": state.get("filename", ""),
+            "frontmatter": state.get("frontmatter", {}),  # CRITICAL: Preserve frontmatter for temperature access
             "current_chapter_text": state.get("current_chapter_text", ""),
             "current_chapter_number": state.get("current_chapter_number"),
             "chapter_ranges": state.get("chapter_ranges", []),
@@ -1153,6 +1277,7 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                 "task_status": "error",
                 "system_prompt": state.get("system_prompt", ""),
                 "datetime_context": state.get("datetime_context", ""),
+                "generation_context_parts": state.get("generation_context_parts", []),
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
@@ -1217,10 +1342,14 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                 operations_count = len(manuscript_edit.operations)
                 logger.info(f"Validated ManuscriptEdit with {operations_count} operations")
                 
-                # For questions: empty operations is valid (analysis-only response)
+                # Check if empty operations are appropriate for this request type
                 request_type = state.get("request_type", "")
                 if request_type == "question" and operations_count == 0:
                     logger.info("Question request with no operations - this is valid (analysis in summary field)")
+                elif request_type != "question" and operations_count == 0:
+                    logger.warning(f"⚠️ Non-question request ({request_type}) returned 0 operations - this may indicate the LLM misunderstood the task")
+                    logger.warning(f"⚠️ User request was: {state.get('current_request', 'unknown')}")
+                    logger.warning(f"⚠️ LLM summary: {manuscript_edit.summary[:200] if manuscript_edit.summary else 'No summary'}")
             except ValidationError as ve:
                 # Provide detailed validation error
                 error_details = []
@@ -1238,6 +1367,7 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                     "task_status": "error",
                     "system_prompt": state.get("system_prompt", ""),
                     "datetime_context": state.get("datetime_context", ""),
+                    "generation_context_parts": state.get("generation_context_parts", []),
                     "metadata": state.get("metadata", {}),
                     "user_id": state.get("user_id", "system"),
                     "shared_memory": state.get("shared_memory", {}),
@@ -1264,6 +1394,7 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                 "task_status": "error",
                 "system_prompt": state.get("system_prompt", ""),
                 "datetime_context": state.get("datetime_context", ""),
+                "generation_context_parts": state.get("generation_context_parts", []),
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
@@ -1291,6 +1422,7 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                 "task_status": "error",
                 "system_prompt": state.get("system_prompt", ""),
                 "datetime_context": state.get("datetime_context", ""),
+                "generation_context_parts": state.get("generation_context_parts", []),
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
@@ -1316,6 +1448,7 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                 "task_status": "error",
                 "system_prompt": state.get("system_prompt", ""),
                 "datetime_context": state.get("datetime_context", ""),
+                "generation_context_parts": state.get("generation_context_parts", []),
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
@@ -1338,6 +1471,7 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
             "structured_edit": structured_edit,
             "system_prompt": state.get("system_prompt", ""),
             "datetime_context": state.get("datetime_context", ""),
+            "generation_context_parts": state.get("generation_context_parts", []),
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
             "shared_memory": state.get("shared_memory", {}),
@@ -1365,6 +1499,7 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
             "task_status": "error",
             "system_prompt": state.get("system_prompt", ""),
             "datetime_context": state.get("datetime_context", ""),
+            "generation_context_parts": state.get("generation_context_parts", []),
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
             "shared_memory": state.get("shared_memory", {}),
@@ -1380,6 +1515,556 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
             "selection_end": state.get("selection_end", -1),
             "cursor_offset": state.get("cursor_offset", -1),
             "requested_chapter_number": state.get("requested_chapter_number"),
+        }
+
+
+async def validate_anchors_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Validate that anchor_text and original_text actually exist in the manuscript.
+    Separate operations into validated and invalid lists.
+    Uses context-aware fuzzy matching limited to relevant chapters.
+    """
+    try:
+        logger.info("Validating anchor texts against manuscript...")
+        
+        structured_edit = state.get("structured_edit")
+        manuscript = state.get("manuscript", "")
+        
+        # CRITICAL: Get chapter context for scoped fuzzy matching
+        current_chapter_text = state.get("current_chapter_text", "")
+        prev_chapter_text = state.get("prev_chapter_text", "")
+        next_chapter_text = state.get("next_chapter_text", "")
+        
+        # Build context-aware search scope (current + adjacent chapters only)
+        # This prevents fuzzy matching from finding text in wrong chapters!
+        search_scope_parts = []
+        if prev_chapter_text:
+            search_scope_parts.append(prev_chapter_text)
+        if current_chapter_text:
+            search_scope_parts.append(current_chapter_text)
+        if next_chapter_text:
+            search_scope_parts.append(next_chapter_text)
+        
+        # Fallback to full manuscript only if no chapter context available
+        search_scope = "\n\n".join(search_scope_parts) if search_scope_parts else manuscript
+        
+        if search_scope_parts:
+            logger.info(f"🎯 Context-aware fuzzy matching enabled: searching {len(search_scope)} chars across {len(search_scope_parts)} chapters")
+        else:
+            logger.warning(f"⚠️ No chapter context available - fuzzy matching will search entire manuscript ({len(manuscript)} chars)")
+        
+        # Handle both dict and Pydantic object
+        if not structured_edit:
+            logger.info("No structured_edit to validate")
+            return {
+                "validated_operations": [],
+                "invalid_operations": [],
+                "anchor_validation_passed": True,
+                "anchor_validation_report": "No structured_edit to validate",
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "structured_edit": state.get("structured_edit"),
+                "system_prompt": state.get("system_prompt", ""),
+                "datetime_context": state.get("datetime_context", ""),
+                "generation_context_parts": state.get("generation_context_parts", []),
+            }
+        
+        # Extract operations (handle both dict and Pydantic object)
+        if isinstance(structured_edit, dict):
+            operations = structured_edit.get("operations", [])
+        else:
+            operations = structured_edit.operations if hasattr(structured_edit, 'operations') else []
+        
+        if not operations:
+            logger.info("No operations to validate")
+            return {
+                "validated_operations": [],
+                "invalid_operations": [],
+                "anchor_validation_passed": True,
+                "anchor_validation_report": "No operations to validate",
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "structured_edit": state.get("structured_edit"),
+                "system_prompt": state.get("system_prompt", ""),
+                "datetime_context": state.get("datetime_context", ""),
+                "generation_context_parts": state.get("generation_context_parts", []),
+            }
+        
+        validated_operations = []
+        invalid_operations = []
+        validation_report_lines = []
+        
+        # Check if file is empty (only frontmatter) - if so, anchor_text is optional for insert operations
+        body_only = _strip_frontmatter_block(manuscript)
+        is_empty_file = not body_only.strip()
+        
+        for i, op in enumerate(operations, 1):
+            op_dict = op.dict() if hasattr(op, 'dict') else op
+            op_type = op_dict.get("op_type", "")
+            original_text = op_dict.get("original_text", "")
+            anchor_text = op_dict.get("anchor_text", "")
+            text = op_dict.get("text", "")
+            
+            # Determine what text needs validation
+            text_to_validate = None
+            text_type = None
+            
+            if op_type in ("replace_range", "delete_range"):
+                if original_text and original_text.strip():
+                    text_to_validate = original_text.strip()
+                    text_type = "original_text"
+                else:
+                    # Missing required original_text
+                    invalid_operations.append({
+                        "operation_index": i,
+                        "op_type": op_type,
+                        "error": "Missing required 'original_text'",
+                        "original_operation": op_dict,
+                        "intended_text": text[:200] if text else ""
+                    })
+                    validation_report_lines.append(f"❌ Operation {i} ({op_type}): Missing required 'original_text'")
+                    continue
+                    
+            elif op_type in ("insert_after_heading", "insert_after"):
+                if is_empty_file:
+                    # Empty file - anchor_text is optional
+                    logger.info(f"✅ Operation {i} ({op_type}): Empty file, anchor_text optional")
+                    validated_operations.append(op_dict)
+                    validation_report_lines.append(f"✅ Operation {i} ({op_type}): Empty file, anchor_text optional")
+                    continue
+                elif anchor_text and anchor_text.strip():
+                    text_to_validate = anchor_text.strip()
+                    text_type = "anchor_text"
+                else:
+                    # Missing required anchor_text for non-empty file
+                    invalid_operations.append({
+                        "operation_index": i,
+                        "op_type": op_type,
+                        "error": "Missing required 'anchor_text' for non-empty file",
+                        "original_operation": op_dict,
+                        "intended_text": text[:200] if text else ""
+                    })
+                    validation_report_lines.append(f"❌ Operation {i} ({op_type}): Missing required 'anchor_text'")
+                    continue
+            
+            # Validate the text exists in manuscript
+            if text_to_validate:
+                # Try exact match first
+                if text_to_validate in manuscript:
+                    logger.info(f"✅ Operation {i} ({op_type}): {text_type} found in manuscript (exact match)")
+                    validated_operations.append(op_dict)
+                    validation_report_lines.append(f"✅ Operation {i} ({op_type}): {text_type} found (exact match)")
+                else:
+                    # Try normalized match (whitespace normalization)
+                    normalized_text = " ".join(text_to_validate.split())
+                    normalized_manuscript = " ".join(manuscript.split())
+                    
+                    if normalized_text in normalized_manuscript:
+                        logger.info(f"✅ Operation {i} ({op_type}): {text_type} found in manuscript (normalized match)")
+                        validated_operations.append(op_dict)
+                        validation_report_lines.append(f"✅ Operation {i} ({op_type}): {text_type} found (normalized match)")
+                    else:
+                        # Text not found - try fuzzy matching for auto-correction
+                        logger.warning(f"⚠️ Operation {i} ({op_type}): {text_type} NOT FOUND - attempting fuzzy match...")
+                        logger.warning(f"   Searched for: {text_to_validate[:100]}...")
+                        
+                        # Try auto-correction with fuzzy matching (85% similarity threshold)
+                        # CRITICAL: Use search_scope (current + adjacent chapters) NOT entire manuscript!
+                        corrected_op, was_corrected = auto_correct_operation_anchor(
+                            op_dict, 
+                            search_scope,  # ✅ Context-aware: only current/prev/next chapters
+                            threshold=0.85
+                        )
+                        
+                        if was_corrected:
+                            # Fuzzy match succeeded! Use corrected operation
+                            logger.info(f"✅ Operation {i} ({op_type}): AUTO-CORRECTED via fuzzy match")
+                            score = corrected_op.get("_anchor_correction_score", 0.0)
+                            original_attempt = corrected_op.get("_anchor_original_attempt", "")
+                            logger.info(f"   Original attempt: {original_attempt[:100]}...")
+                            logger.info(f"   Auto-corrected to: {corrected_op.get(text_type, '')[:100]}...")
+                            logger.info(f"   Similarity score: {score:.2%}")
+                            validated_operations.append(corrected_op)
+                            validation_report_lines.append(f"✅ Operation {i} ({op_type}): AUTO-CORRECTED (fuzzy match, score={score:.2%})")
+                        else:
+                            # Fuzzy match failed - mark as invalid for self-healing
+                            logger.warning(f"❌ Operation {i} ({op_type}): {text_type} NOT FOUND (fuzzy match below threshold)")
+                            invalid_operations.append({
+                                "operation_index": i,
+                                "op_type": op_type,
+                                "error": f"{text_type} not found in manuscript (fuzzy match failed)",
+                                "invalid_text": text_to_validate,
+                                "original_operation": op_dict,
+                                "intended_text": text[:200] if text else ""
+                            })
+                            validation_report_lines.append(f"❌ Operation {i} ({op_type}): {text_type} NOT FOUND in manuscript")
+                            validation_report_lines.append(f"   Searched for: {text_to_validate[:100]}...")
+                            validation_report_lines.append(f"   Fuzzy match failed (similarity below 85%)")
+            else:
+                # No text to validate (shouldn't reach here, but handle gracefully)
+                validated_operations.append(op_dict)
+                validation_report_lines.append(f"✅ Operation {i} ({op_type}): No anchor validation needed")
+        
+        validation_report = "\n".join(validation_report_lines)
+        validation_passed = len(invalid_operations) == 0
+        
+        logger.info(f"Anchor validation complete: {len(validated_operations)} valid, {len(invalid_operations)} invalid")
+        if not validation_passed:
+            logger.warning(f"⚠️ Anchor validation FAILED - {len(invalid_operations)} operations have invalid anchors")
+        
+        return {
+            "validated_operations": validated_operations,
+            "invalid_operations": invalid_operations,
+            "anchor_validation_passed": validation_passed,
+            "anchor_validation_report": validation_report,
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "structured_edit": state.get("structured_edit"),
+            "system_prompt": state.get("system_prompt", ""),
+            "datetime_context": state.get("datetime_context", ""),
+            "generation_context_parts": state.get("generation_context_parts", []),
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to validate anchors: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        # On error, pass through without validation
+        return {
+            "validated_operations": [],
+            "invalid_operations": [],
+            "anchor_validation_passed": True,  # Pass through on error
+            "anchor_validation_report": f"Validation error: {str(e)}",
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "structured_edit": state.get("structured_edit"),
+            "system_prompt": state.get("system_prompt", ""),
+            "datetime_context": state.get("datetime_context", ""),
+            "generation_context_parts": state.get("generation_context_parts", []),
+        }
+
+
+async def self_heal_anchors_node(state: Dict[str, Any], llm_factory) -> Dict[str, Any]:
+    """
+    Self-healing node: Ask LLM to fix invalid operations by finding REAL anchor text.
+    Provides feedback about what failed and asks for corrections.
+    """
+    try:
+        logger.info("Self-healing invalid anchor texts...")
+        
+        invalid_operations = state.get("invalid_operations", [])
+        validated_operations = state.get("validated_operations", [])
+        generation_context_parts = state.get("generation_context_parts", [])
+        system_prompt = state.get("system_prompt", "")
+        
+        if not invalid_operations:
+            logger.info("No invalid operations to heal")
+            # Just return validated operations as final
+            return {
+                "healed_operations": [],
+                "healing_successful": True,
+                "invalid_operations": [],  # No invalid operations to preserve
+                "validated_operations": state.get("validated_operations", []),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "structured_edit": state.get("structured_edit"),
+            }
+        
+        logger.info(f"Attempting to heal {len(invalid_operations)} invalid operations")
+        
+        # Build healing prompt
+        healing_prompt_parts = []
+        healing_prompt_parts.append("="*80 + "\n")
+        healing_prompt_parts.append("⚠️ ANCHOR TEXT VALIDATION FAILED - SELF-HEALING REQUIRED ⚠️\n")
+        healing_prompt_parts.append("="*80 + "\n\n")
+        healing_prompt_parts.append("Your previous operations contained anchor texts that DO NOT EXIST in the manuscript.\n")
+        healing_prompt_parts.append("This means you either:\n")
+        healing_prompt_parts.append("1. Copied text from the OUTLINE instead of the MANUSCRIPT\n")
+        healing_prompt_parts.append("2. Invented/hallucinated text that isn't in the manuscript\n")
+        healing_prompt_parts.append("3. Paraphrased manuscript text instead of copying it EXACTLY\n\n")
+        healing_prompt_parts.append("**YOUR TASK**: Fix these operations by finding REAL anchor text from the manuscript.\n\n")
+        healing_prompt_parts.append("**FAILED OPERATIONS:**\n\n")
+        
+        for invalid_op in invalid_operations:
+            op_idx = invalid_op.get("operation_index")
+            op_type = invalid_op.get("op_type")
+            error = invalid_op.get("error")
+            invalid_text = invalid_op.get("invalid_text", "")
+            intended_text = invalid_op.get("intended_text", "")
+            
+            healing_prompt_parts.append(f"Operation {op_idx} ({op_type}):\n")
+            healing_prompt_parts.append(f"- **Error**: {error}\n")
+            if invalid_text:
+                healing_prompt_parts.append(f"- **Invalid anchor text you provided**: \"{invalid_text[:200]}...\"\n")
+            if intended_text:
+                healing_prompt_parts.append(f"- **Content you wanted to insert/edit**: \"{intended_text}...\"\n")
+            healing_prompt_parts.append(f"- **What you need to do**: Find REAL text from the MANUSCRIPT TEXT sections above that exists where you want to insert/edit\n\n")
+        
+        healing_prompt_parts.append("\n" + "="*80 + "\n")
+        healing_prompt_parts.append("HOW TO FIX THESE OPERATIONS:\n")
+        healing_prompt_parts.append("="*80 + "\n\n")
+        healing_prompt_parts.append("1. **Scroll UP** to the MANUSCRIPT TEXT sections (before '=== END OF MANUSCRIPT CONTEXT ===')\n")
+        healing_prompt_parts.append("2. **Find the location** where you want to insert/edit content\n")
+        healing_prompt_parts.append("3. **Copy EXACT text** from that location (VERBATIM, word-for-word)\n")
+        healing_prompt_parts.append("4. **Use that EXACT text** as your anchor_text or original_text\n")
+        healing_prompt_parts.append("5. **DO NOT** use text from OUTLINE, STORY OVERVIEW, or invent text\n\n")
+        healing_prompt_parts.append("**RETURN ONLY THE CORRECTED OPERATIONS** in the same JSON format:\n\n")
+        healing_prompt_parts.append("{\n")
+        healing_prompt_parts.append('  "operations": [\n')
+        healing_prompt_parts.append("    {\n")
+        healing_prompt_parts.append('      "op_type": "insert_after_heading" or "replace_range",\n')
+        healing_prompt_parts.append('      "anchor_text": "EXACT TEXT FROM MANUSCRIPT",  // for insert operations\n')
+        healing_prompt_parts.append('      "original_text": "EXACT TEXT FROM MANUSCRIPT",  // for replace operations\n')
+        healing_prompt_parts.append('      "text": "Your content to insert/replace"\n')
+        healing_prompt_parts.append("    }\n")
+        healing_prompt_parts.append("  ]\n")
+        healing_prompt_parts.append("}\n\n")
+        healing_prompt_parts.append("Return ONLY the corrected operations - do not include operations that were already valid.\n")
+        
+        healing_prompt = "".join(healing_prompt_parts)
+        
+        # Reconstruct context for healing (reuse generation context)
+        context_text = "".join(generation_context_parts) if generation_context_parts else ""
+        
+        # Build messages for LLM
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=context_text + "\n\n" + healing_prompt)
+        ]
+        
+        # Call LLM for healing
+        llm = llm_factory(temperature=0.3, state=state)  # Lower temperature for correction task
+        logger.info("Calling LLM for anchor healing...")
+        response = await llm.ainvoke(messages)
+        llm_response = response.content if hasattr(response, 'content') else str(response)
+        
+        logger.info(f"LLM healing response received ({len(llm_response)} chars)")
+        
+        # Parse healed operations
+        unwrapped = _unwrap_json_response(llm_response)
+        
+        try:
+            healed_data = json.loads(unwrapped)
+            healed_operations = healed_data.get("operations", [])
+            
+            logger.info(f"✅ Parsed {len(healed_operations)} healed operations")
+            
+            return {
+                "healed_operations": healed_operations,
+                "healing_successful": True,
+                "invalid_operations": state.get("invalid_operations", []),  # Preserve for merge node
+                "validated_operations": state.get("validated_operations", []),  # Preserve for merge node
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "structured_edit": state.get("structured_edit"),
+            }
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse healed operations JSON: {e}")
+            logger.error(f"LLM response: {llm_response[:500]}")
+            # Healing failed - return empty healed operations but PRESERVE invalid_operations
+            return {
+                "healed_operations": [],
+                "healing_successful": False,
+                "invalid_operations": state.get("invalid_operations", []),  # CRITICAL: Preserve for conversion to failed_operations!
+                "validated_operations": state.get("validated_operations", []),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "manuscript": state.get("manuscript", ""),
+                "filename": state.get("filename", ""),
+                "current_chapter_text": state.get("current_chapter_text", ""),
+                "current_chapter_number": state.get("current_chapter_number"),
+                "chapter_ranges": state.get("chapter_ranges", []),
+                "current_request": state.get("current_request", ""),
+                "structured_edit": state.get("structured_edit"),
+            }
+        
+    except Exception as e:
+        logger.error(f"Failed to heal anchors: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {
+            "healed_operations": [],
+            "healing_successful": False,
+            "invalid_operations": state.get("invalid_operations", []),  # CRITICAL: Preserve for conversion to failed_operations!
+            "validated_operations": state.get("validated_operations", []),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+            "structured_edit": state.get("structured_edit"),
+        }
+
+
+async def merge_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Merge validated and healed operations into final structured_edit.
+    Convert unhealed invalid operations to failed_operations for user display.
+    """
+    try:
+        logger.info("Merging validated and healed operations...")
+        
+        validated_operations = state.get("validated_operations", [])
+        healed_operations = state.get("healed_operations", [])
+        invalid_operations = state.get("invalid_operations", [])
+        healing_successful = state.get("healing_successful", True)
+        structured_edit = state.get("structured_edit")
+        
+        # Combine successfully resolved operations
+        final_operations = validated_operations + healed_operations
+        
+        logger.info(f"Final operations: {len(validated_operations)} validated + {len(healed_operations)} healed = {len(final_operations)} total")
+        
+        # CRITICAL: Convert unhealed invalid operations to failed_operations for user display
+        failed_operations = []
+        if invalid_operations and not healing_successful:
+            logger.warning(f"⚠️ Self-healing failed - converting {len(invalid_operations)} invalid operations to failed_operations for manual placement")
+            for invalid_op in invalid_operations:
+                # Extract the original operation with generated content
+                original_operation = invalid_op.get("original_operation", {})
+                failed_operations.append({
+                    "op_type": original_operation.get("op_type", "unknown"),
+                    "anchor_text": original_operation.get("anchor_text"),
+                    "original_text": original_operation.get("original_text"),
+                    "text": original_operation.get("text", ""),  # This is the generated content!
+                    "error": invalid_op.get("error", "Anchor text not found - healing failed")
+                })
+            logger.info(f"✅ Created {len(failed_operations)} failed_operations entries for chat sidebar display")
+        elif invalid_operations and len(healed_operations) < len(invalid_operations):
+            # Some operations weren't healed
+            unhealed_count = len(invalid_operations) - len(healed_operations)
+            logger.warning(f"⚠️ {unhealed_count} operations were not healed - converting to failed_operations")
+            # Take the last N invalid operations that weren't healed
+            for invalid_op in invalid_operations[-unhealed_count:]:
+                original_operation = invalid_op.get("original_operation", {})
+                failed_operations.append({
+                    "op_type": original_operation.get("op_type", "unknown"),
+                    "anchor_text": original_operation.get("anchor_text"),
+                    "original_text": original_operation.get("original_text"),
+                    "text": original_operation.get("text", ""),
+                    "error": invalid_op.get("error", "Anchor text not found")
+                })
+        
+        logger.info(f"📊 Merge summary: {len(final_operations)} successful operations, {len(failed_operations)} failed operations")
+        
+        logger.info(f"📊 Merge summary: {len(final_operations)} successful operations, {len(failed_operations)} failed operations")
+        
+        # Update structured_edit with merged operations
+        if structured_edit:
+            # Create new ManuscriptEdit with merged operations
+            updated_edit_dict = structured_edit.dict() if hasattr(structured_edit, 'dict') else structured_edit
+            updated_edit_dict["operations"] = final_operations
+            
+            try:
+                updated_structured_edit = ManuscriptEdit(**updated_edit_dict)
+                logger.info(f"✅ Updated ManuscriptEdit with {len(final_operations)} merged operations")
+            except ValidationError as e:
+                logger.error(f"Failed to create updated ManuscriptEdit: {e}")
+                # Keep original structured_edit
+                updated_structured_edit = structured_edit
+        else:
+            updated_structured_edit = None
+        
+        return {
+            "structured_edit": updated_structured_edit,
+            "failed_operations": failed_operations,  # CRITICAL: Pass failed ops for chat display!
+            "generation_context_parts": state.get("generation_context_parts", []),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to merge operations: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {
+            "structured_edit": state.get("structured_edit"),
+            "failed_operations": [],
+            "generation_context_parts": state.get("generation_context_parts", []),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", ""),
+            "manuscript": state.get("manuscript", ""),
+            "filename": state.get("filename", ""),
+            "current_chapter_text": state.get("current_chapter_text", ""),
+            "current_chapter_number": state.get("current_chapter_number"),
+            "chapter_ranges": state.get("chapter_ranges", []),
+            "current_request": state.get("current_request", ""),
         }
 
 
@@ -1411,6 +2096,14 @@ def build_generation_subgraph(checkpointer, llm_factory, get_datetime_context):
     
     workflow.add_node("call_llm", call_llm_wrapper)
     workflow.add_node("validate_output", validate_generated_output_node)
+    workflow.add_node("validate_anchors", validate_anchors_node)
+    
+    # Self-healing node needs llm_factory - create wrapper
+    async def self_heal_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
+        return await self_heal_anchors_node(state, llm_factory)
+    
+    workflow.add_node("self_heal_anchors", self_heal_wrapper)
+    workflow.add_node("merge_operations", merge_operations_node)
     
     # Set entry point
     workflow.set_entry_point("build_context")
@@ -1419,7 +2112,41 @@ def build_generation_subgraph(checkpointer, llm_factory, get_datetime_context):
     workflow.add_edge("build_context", "build_prompt")
     workflow.add_edge("build_prompt", "call_llm")
     workflow.add_edge("call_llm", "validate_output")
-    workflow.add_edge("validate_output", END)
+    
+    # Conditional routing after validate_output
+    # If validation passes, go to validate_anchors
+    # (validate_output always succeeds, it just validates Pydantic structure)
+    workflow.add_edge("validate_output", "validate_anchors")
+    
+    # Conditional routing after validate_anchors
+    def route_after_anchor_validation(state: Dict[str, Any]) -> str:
+        """Route based on anchor validation results"""
+        anchor_validation_passed = state.get("anchor_validation_passed", True)
+        
+        if anchor_validation_passed:
+            # All anchors valid - skip healing, go straight to merge (which will just use validated ops)
+            logger.info("✅ All anchor validations passed - proceeding to merge")
+            return "merge_operations"
+        else:
+            # Some anchors invalid - attempt self-healing
+            invalid_count = len(state.get("invalid_operations", []))
+            logger.info(f"⚠️ {invalid_count} invalid anchors detected - routing to self-healing")
+            return "self_heal_anchors"
+    
+    workflow.add_conditional_edges(
+        "validate_anchors",
+        route_after_anchor_validation,
+        {
+            "merge_operations": "merge_operations",
+            "self_heal_anchors": "self_heal_anchors"
+        }
+    )
+    
+    # After self-healing, always go to merge (whether healing succeeded or not)
+    workflow.add_edge("self_heal_anchors", "merge_operations")
+    
+    # After merge, we're done
+    workflow.add_edge("merge_operations", END)
     
     return workflow.compile(checkpointer=checkpointer)
 

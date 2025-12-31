@@ -59,13 +59,7 @@
    - API routes registered
    - Proper error handling
 
-8. **Messaging Agent** (`backend/services/langgraph_agents/messaging_agent.py`)
-   - Natural language message sending
-   - Room name matching (exact + fuzzy)
-   - Structured output with Pydantic validation
-   - Example: "Send a message to Linda: Hi there!"
-
-9. **Messaging Tools** (`backend/services/langgraph_tools/messaging_tools.py`)
+8. **Messaging Tools** (`backend/services/langgraph_tools/messaging_tools.py`)
    - `get_user_rooms_tool` - Get user's chat rooms
    - `send_room_message_tool` - Send message to room
 
@@ -108,33 +102,16 @@
 
 ### 🔧 Remaining Integration Work (~5%)
 
-#### 1. Register Messaging Agent in Tool Registry
+**Note:** If a messaging agent is needed for natural language message sending, it should be implemented in `llm-orchestrator/orchestrator/agents/`.
+
+#### 1. Register Messaging Tools in Tool Registry (if needed for llm-orchestrator agent)
 **File:** `backend/services/langgraph_tools/centralized_tool_registry.py`
 
-Add to tool mapping:
-```python
-AgentType.MESSAGING_AGENT: [
-    'get_user_rooms_tool',
-    'send_room_message_tool'
-]
-```
+Messaging tools are available for use by llm-orchestrator agents via gRPC:
+- `get_user_rooms_tool` - Get user's chat rooms
+- `send_room_message_tool` - Send message to room
 
-Import messaging tools:
-```python
-from .messaging_tools import get_user_rooms_tool, send_room_message_tool
-```
-
-#### 2. Register Messaging Agent Type
-**File:** `backend/services/langgraph_agents/base_agent.py`
-
-Add to `_get_agent_type_enum` method:
-```python
-"messaging_agent": AgentType.MESSAGING_AGENT,
-```
-
-**File:** `backend/models/agent_response_models.py` or intent classification
-
-Add `MESSAGING_AGENT` to AgentType enum if not already present.
+These tools can be accessed by agents in the llm-orchestrator service through the backend tool client.
 
 #### 3. Integrate MessagingProvider in App
 **File:** `frontend/src/App.js` (or main app file)
@@ -227,11 +204,13 @@ if intent_type == "MESSAGING":
     return "messaging_agent"
 ```
 
-Add messaging agent to workflow:
-```python
-from services.langgraph_agents.messaging_agent import messaging_agent
+**Note:** If a messaging agent is needed for natural language message sending, it should be implemented in `llm-orchestrator/orchestrator/agents/`.
 
-workflow.add_node("messaging_agent", messaging_agent.process)
+Example for llm-orchestrator agent:
+```python
+from orchestrator.agents.messaging_agent import MessagingAgent
+
+# In gRPC service, register agent and add routing
 ```
 
 ### 🏇 Architecture Decisions

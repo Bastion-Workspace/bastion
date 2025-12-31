@@ -1,198 +1,172 @@
-# Agent Integration Guide - Roosevelt's "Intelligence Sharing" Architecture
+# Agent Integration Guide - llm-orchestrator Agent Development
 
-## Overview
+## ⚠️ IMPORTANT: Agent Development Location
 
-This guide outlines how to integrate new agents into our LangGraph-based system with comprehensive shared state management. Our architecture ensures that **every agent has access to the full context** of what other agents have done and what the user has said.
+**All new agent development must use the llm-orchestrator service.**
 
-## Core Architecture Principles
+The only agents in the backend are RSS agents (`RSSAgent` and `RSSBackgroundAgent`) used for scheduled feed polling. All other agent development happens in `llm-orchestrator/orchestrator/agents/`.
 
-### 1. **Shared Memory First**
-- Every agent receives the complete `shared_memory` containing all previous agent results
-- No agent works in isolation - they build upon each other's work
-- State persistence across conversation turns via LangGraph's native checkpointing
+## Where to Develop New Agents
 
-### 2. **LangGraph Native**
-- Leverage LangGraph's `ConversationState` TypedDict with proper annotations
-- Use built-in message handling with `add_messages` annotation
-- Utilize native checkpointing for persistence (no custom mechanisms)
+**Location:** `llm-orchestrator/orchestrator/agents/`
 
-### 3. **Comprehensive Context**
-- Research findings, code artifacts, user preferences, and conversation history
-- Agent handoff tracking and tool result caching
-- Permission grants and failed operation learning
+**Base Agent:** `llm-orchestrator/orchestrator/agents/base_agent.py`
 
-## Shared Memory Structure
+**Orchestrator:** `llm-orchestrator/orchestrator/services/intent_classifier.py` (for routing)
 
-```python
-shared_memory = {
-    # Research & Analysis Results
-    "research_findings": {},          # Key research results by topic
-    "document_analyses": {},          # Document analysis results  
-    "web_search_results": {},         # Web search findings
-    "entity_insights": {},           # Entity extraction results
-    
-    # Code & Technical Artifacts
-    "code_artifacts": {},            # Generated code by purpose
-    "technical_solutions": {},       # Technical problem solutions
-    "calculations": {},              # Mathematical results
-    
-    # User Context & Preferences
-    "user_preferences": {
-        "communication_style": None,
-        "expertise_level": None,
-        "preferred_detail_level": None,
-        "domain_interests": []
-    },
-    
-    # Conversation Context
-    "conversation_context": {
-        "main_topics": [],           # Key topics discussed
-        "ongoing_projects": [],      # Multi-turn projects  
-        "decisions_made": [],        # User decisions/choices
-        "questions_asked": [],       # User's question history
-        "goals_identified": []       # User objectives identified
-    },
-    
-    # Agent Collaboration
-    "agent_handoffs": [],            # Track agent transitions
-    "tool_results": {},              # Cached tool outputs
-    "permission_grants": [],         # User permissions granted
-    "failed_operations": [],         # Operations that failed
-    
-    # Session Metadata
-    "session_start": "2025-01-01T00:00:00",
-    "last_updated": "2025-01-01T00:00:00", 
-    "agents_involved": [],           # Which agents have been active
-    "total_interactions": 0
-}
-```
+**gRPC Service:** `llm-orchestrator/orchestrator/grpc_service.py` (for agent registration)
 
-## How to Create a New Agent
+## Quick Start for llm-orchestrator Agents
 
 ### 1. **Agent Class Structure**
 
 ```python
-from services.langgraph_agents.base_agent import BaseAgent
-from models.shared_memory_models import SharedMemory, validate_shared_memory
+from orchestrator.agents.base_agent import BaseAgent, TaskStatus
+from typing import TypedDict, Dict, Any, List
+
+class YourAgentState(TypedDict):
+    """State for your agent LangGraph workflow"""
+    query: str
+    user_id: str
+    metadata: Dict[str, Any]
+    messages: List[Any]
+    shared_memory: Dict[str, Any]
+    response: Dict[str, Any]
+    task_status: str
+    error: str
 
 class YourNewAgent(BaseAgent):
-    def __init__(self):
-        super().__init__()
-        self.agent_name = "your_agent"
+    """Your new agent following LangGraph best practices"""
     
-    async def process(self, state: Dict[str, Any]) -> str:
-        # Extract shared memory
+    def __init__(self):
+        super().__init__("your_agent")
+    
+    def _build_workflow(self, checkpointer) -> StateGraph:
+        """Build LangGraph workflow for this agent"""
+        workflow = StateGraph(YourAgentState)
+        
+        # Add nodes
+        workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("process_request", self._process_request_node)
+        workflow.add_node("format_response", self._format_response_node)
+        
+        # Set entry point
+        workflow.set_entry_point("prepare_context")
+        
+        # Define edges
+        workflow.add_edge("prepare_context", "process_request")
+        workflow.add_edge("process_request", "format_response")
+        workflow.add_edge("format_response", END)
+        
+        return workflow.compile(checkpointer=checkpointer)
+    
+    async def _prepare_context_node(self, state: YourAgentState) -> Dict[str, Any]:
+        """Prepare context for processing"""
+        # Your logic here
+        return {"task_status": "in_progress"}
+    
+    async def _process_request_node(self, state: YourAgentState) -> Dict[str, Any]:
+        """Process the user request"""
+        # Use self._get_llm(temperature=0.7, state=state) for LLM calls
+        # Access shared_memory from state
         shared_memory = state.get("shared_memory", {})
         
-        # Access previous agent results
-        research_findings = shared_memory.get("research_findings", {})
-        code_artifacts = shared_memory.get("code_artifacts", {})
-        user_preferences = shared_memory.get("user_preferences", {})
-        
-        # Your agent logic here...
-        result = await self._your_agent_logic(state, shared_memory)
-        
-        # Update shared memory with your results - ROOSEVELT'S NEW APPROACH
-        shared_memory.setdefault("your_category", {})[result_key] = {
-            "data": result,
-            "agent": self.agent_name,
-            "timestamp": datetime.now().isoformat()
+        # Your processing logic
+        return {"task_status": "complete"}
+    
+    async def _format_response_node(self, state: YourAgentState) -> Dict[str, Any]:
+        """Format final response"""
+        return {
+            "response": {"content": "Your response"},
+            "task_status": "complete"
         }
-        
-        return result
 ```
 
-### 2. **Register in Orchestrator**
+### 2. **Register in gRPC Service**
 
-Add your agent to `langgraph_official_orchestrator.py`:
+Add your agent to `llm-orchestrator/orchestrator/grpc_service.py`:
 
 ```python
 # Import your agent
-from .langgraph_agents.your_new_agent import YourNewAgent
+from orchestrator.agents.your_new_agent import YourNewAgent, get_your_agent
 
-# Initialize in __init__
-self.your_agent = YourNewAgent()
+# In OrchestratorService.__init__, add:
+self.your_agent = None
 
-# Add node to graph
-self.graph.add_node("your_agent", self._your_agent_node)
+# In _get_your_agent method:
+if self.your_agent is None:
+    self.your_agent = get_your_agent()
 
-# Create node method
-async def _your_agent_node(self, state: ConversationState) -> ConversationState:
-    logger.info("🎯 YOUR AGENT: Processing...")
-    
-    # Convert state for agent compatibility
-    agent_state = self._convert_to_agent_state(state, "your_agent")
-    
-    # Process with your agent
-    response = await self.your_agent.process(agent_state)
-    
-    # Update state
-    state["messages"].append(AIMessage(content=response))
-    state["active_agent"] = "your_agent"
-    state["is_complete"] = True  # or logic to determine completion
-    
-    return state
+# In ProcessQuery method, add routing case:
+elif target_agent == "your_agent":
+    result = await self.your_agent.process(
+        query=query,
+        metadata=metadata,
+        messages=messages
+    )
 ```
 
-### 3. **Add Routing Logic**
+### 3. **Add Intent Classification**
 
-Update intent classification in `capability_based_intent_service.py`:
+Update `llm-orchestrator/orchestrator/services/intent_classifier.py`:
 
 ```python
-class IntentType(str, Enum):
-    # ... existing intents ...
-    YOUR_INTENT = "your_intent"
+# Add to agent routing logic
+"your_agent": "generation",  # or appropriate intent type
 
-# Add routing in orchestrator routing logic
+# Add routing rules in system prompt
+- **your_agent**
+  - USE FOR: [describe when to use]
+  - AVOID: [describe when not to use]
 ```
+
+## Key Requirements
+
+1. **Location**: `llm-orchestrator/orchestrator/agents/`
+2. **Base Agent**: `orchestrator.agents.base_agent.BaseAgent`
+3. **Workflow Pattern**: Must implement `_build_workflow()` with LangGraph StateGraph
+4. **State Management**: Use TypedDict state classes, not Dict[str, Any]
+5. **LLM Access**: Use `self._get_llm(temperature=X, state=state)` not direct ChatOpenAI
+6. **Registration**: Register in gRPC service
+7. **Routing**: Intent classification in llm-orchestrator
 
 ## Best Practices
 
-### **State Updates**
-- Always update shared_memory directly with structured data and return it from agent nodes
-- Include timestamp and agent attribution automatically
-- Store results in appropriate categories for discoverability
+### **State Preservation**
+- Every node must return all critical state keys (metadata, user_id, shared_memory, messages, query)
+- Preserve state even in error paths
 
-### **Context Awareness**
-- Check `shared_memory` for relevant previous work before starting
-- Build upon previous agent findings rather than repeating work
-- Respect user preferences learned by other agents
+### **LLM Access**
+- Always use `self._get_llm(temperature=X, state=state)` to respect user model preferences
+- Never create ChatOpenAI directly
+- Never use `chat_service.openai_client`
+
+### **Shared Memory**
+- Access via `state.get("shared_memory", {})`
+- Update by returning updated dict in node return
+- Preserve existing shared_memory keys
 
 ### **Error Handling**
-- Log failed operations to `shared_memory["failed_operations"]` for learning
-- Provide graceful fallbacks when shared context is incomplete
-- Never break the state structure
+- Nodes should return error states, not raise exceptions
+- Always preserve critical state keys even on error
 
-### **Performance**
-- Cache expensive tool results in `shared_memory["tool_results"]`
-- Avoid re-running identical operations across agents
-- Keep shared memory reasonably sized (consider cleanup strategies)
+### **File Size**
+- Keep agent files under 500 lines
+- Split complex agents into subgraphs
 
-## Example Agent Chaining Scenarios
+## Documentation References
 
-### **Research → Code → Chat Flow**
-1. **Research Agent**: Finds information about a topic, stores in `research_findings`
-2. **Coding Agent**: Uses research findings to generate code, stores in `code_artifacts`  
-3. **Chat Agent**: Explains the code in context of the research, with user's preferred communication style
+- **LangGraph Best Practices**: `.cursor/rules/langgraph-best-practices.mdc`
+- **Agent Architecture**: `.cursor/rules/agent-architecture-patterns.mdc`
+- **gRPC Architecture**: `docs/GRPC_MICROSERVICES_ARCHITECTURE.md`
 
-### **Multi-turn Project Flow**
-1. **User**: "Help me analyze this dataset"
-2. **Research Agent**: Analyzes data structure, stores findings
-3. **User**: "Create a visualization"
-4. **Coding Agent**: Uses data analysis to create appropriate visualization code
-5. **User**: "Explain the insights"
-6. **Chat Agent**: Uses both data analysis and visualization context to explain insights
+## RSS Agents (Backend Only)
 
-## Migration Notes
+The following RSS agents remain in the backend for scheduled tasks:
 
-- Existing agents automatically receive enhanced shared memory via `_convert_to_agent_state`
-- Legacy `agent_handoff_context` still supported for backward compatibility
-- No breaking changes to existing agent interfaces
+- `RSSAgent` - RSS feed management (interactive)
+- `RSSBackgroundAgent` - RSS feed polling (scheduled Celery tasks)
 
-## File Size Guidelines
+These are the only agents that remain in the backend. All other agents are in llm-orchestrator.
 
-- Keep individual agent files under 500 lines [[memory:4115124]]
-- Use inheritance and composition to share common functionality
-- Leverage existing `BaseAgent` infrastructure
-
-**By George!** This architecture ensures every agent has the **full intelligence context** of the conversation!
+For questions about agent development, refer to the llm-orchestrator documentation and LangGraph best practices.

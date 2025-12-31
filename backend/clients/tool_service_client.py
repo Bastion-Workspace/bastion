@@ -64,7 +64,8 @@ class ToolServiceClient:
         self,
         location: str,
         user_id: str = "system",
-        data_types: Optional[list] = None
+        data_types: Optional[list] = None,
+        date_str: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Get weather data for a location
@@ -72,10 +73,11 @@ class ToolServiceClient:
         Args:
             location: Location (ZIP code, city name, etc.)
             user_id: User ID for access control
-            data_types: Types of data to retrieve (e.g., ["current", "forecast"])
+            data_types: Types of data to retrieve (e.g., ["current", "forecast", "history"])
+            date_str: Optional date string for historical data (YYYY-MM-DD or YYYY-MM)
             
         Returns:
-            Weather data dict with location, temperature, conditions, moon_phase, etc.
+            Weather data dict with location, temperature, conditions, moon_phase, forecast, etc.
         """
         try:
             await self.initialize()
@@ -86,14 +88,24 @@ class ToolServiceClient:
                 data_types=data_types or ["current"]
             )
             
+            # Add date_str if provided (for historical requests)
+            if date_str:
+                request.date_str = date_str
+            
             response = await self.stub.GetWeatherData(request)
             
             # Extract data from response
             metadata = dict(response.metadata)
             
-            # Build weather data dict matching the format expected by status bar API
+            # Build weather data dict with full metadata for comprehensive access
+            # Also maintain backward compatibility format for status bar API
             weather_data = {
                 "location": response.location,
+                "current_conditions": response.current_conditions,
+                "forecast": list(response.forecast),
+                "alerts": list(response.alerts),
+                "metadata": metadata,
+                # Backward compatibility fields for status bar API
                 "temperature": int(metadata.get("temperature", 0)),
                 "conditions": metadata.get("conditions", ""),
                 "moon_phase": {

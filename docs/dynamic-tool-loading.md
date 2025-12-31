@@ -49,7 +49,6 @@ class ToolCategory(str, Enum):
     ANALYSIS = "analysis"              # Content analysis
     MATH = "math"                      # Calculations
     WEATHER = "weather"                # Weather queries
-    AWS_PRICING = "aws_pricing"        # AWS cost tools
     ORG_FILES = "org_files"            # Org-mode search
     MESSAGING = "messaging"            # Room messaging
     FILE_CREATION = "file_creation"    # File/folder ops
@@ -199,10 +198,15 @@ category_to_tools = {
 
 ## Code Examples
 
+**Note:** These examples are for llm-orchestrator agents (`llm-orchestrator/orchestrator/agents/`).
+
 ### Example 1: Research Agent with Dynamic Loading
 
 ```python
-class ResearchAgent(BaseAgent):
+# Location: llm-orchestrator/orchestrator/agents/full_research_agent.py
+from orchestrator.agents.base_agent import BaseAgent
+
+class FullResearchAgent(BaseAgent):
     async def _process_request_node(self, state: ResearchState) -> Dict[str, Any]:
         query = state.get("query", "")
         

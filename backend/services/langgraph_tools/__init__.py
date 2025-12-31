@@ -12,7 +12,8 @@ from .web_content_tools import WebContentTools
 from .crawl4ai_web_tools import Crawl4AIWebTools
 from .content_analysis_tools import ContentAnalysisTools
 from .math_tools import MathTools
-from .weather_tools import WeatherTools
+# WeatherTools removed - weather operations now use gRPC wrapper functions
+# from .weather_tools import WeatherTools
 
 # **ROOSEVELT'S MODERNIZED TOOL ACCESS**
 # Use CentralizedToolRegistry instead of legacy LangGraphToolRegistry

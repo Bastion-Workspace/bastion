@@ -13,6 +13,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Feature: 'Cover' frontmatter type support in Fiction documents
 
 ## [Unreleased]
+- Fix: Resolved fiction generation subgraph state preservation bug where generation_context_parts was dropped across nodes
+- Fix: Added failed_operations conversion in fiction generation to display unplaceable content in chat sidebar
+- Feature: Added context-aware fuzzy matching with auto-correction for fiction agent anchor texts to prevent LLM hallucination errors
+- Fix: Resolved message normalization bug where editor_operations buried in metadata were not extracted to top level for display
+- Feature: Implemented automatic text-splitting for large editor operations into 8K char chunks at paragraph boundaries to prevent nginx proxy truncation and maintain clean word boundaries
+- Fix: Added chunk_index sorting to frontend operation application to ensure text chunks are applied in correct sequence
+- Fix: Removed obsolete chunk reversal logic in backend that was causing text chunks to be sent in reverse order
+- Fix: Added explicit instructions for fiction agent to use insert_after (not insert_after_heading) when continuing existing chapters to prevent duplication
+- Fix: Resolved DOCX file reading errors in gRPC GetDocumentContent by using DocumentProcessor for binary formats
+- Feature: Added automatic location fallback to user ZIP code for weather tools
+- Feature: Added date range support for historical weather queries (e.g., "2022-10 to 2024-02")
+- Fix: Resolved visualization tool TypeError in orchestrator gRPC client
+- Fix: Enhanced chart generation to support static SVG versions via gRPC
+- Fix: Fixed gRPC double-abort error in weather service error handling
+- Feature: Added "Technical Hyperspace" Deterministic System Modeling Engine with gRPC topology service and NetworkX graph traversal
+- Feature: Added Systems Engineering Agent for technical design and failure simulation analysis
 - Refactor: Modularized monolithic backend/main.py into domain-specific API routers
 - Refactor: Simplified PDF processing to focus on automated text extraction and vectorization
 - Cleanup: Decommissioned obsolete manual OCR, coordinate-based PDF editing, and layout segmentation units
@@ -57,7 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix: Fiction agent continuity file creation now uses same folder resolution as electronics agent (folder_id or folder_path from canonical_path)
 - Fix: Enhanced cursor detection with complete gRPC proto support for fiction editing agent
 - Fix: Chat message copy now preserves markdown formatting as rich text (HTML) while keeping raw markdown syntax for plain text editors
-- Feature: Added Dictionary Agent with short-circuit routing for "define:" queries (instant lexicographic lookups)
+- Feature: Added Dictionary Agent with short-circuit routing for "/define" queries (instant lexicographic lookups)
+- Update: Changed dictionary agent trigger from "define:" to "/define" command format
 - Fix: Resolved conversation ID mismatch causing 403 errors when accessing conversations from checkpoint list
 - Feature: Added universal DocumentEditBatch system for atomic multi-edit operations
 - Feature: Added intelligent reference file creation to general and electronics agents (>1500 char threshold)

@@ -191,8 +191,8 @@ class ServiceContainer:
             "ChatService"
         )
         
-        # RSS service (single instance with shared database pool)
-        from services.rss_service import get_rss_service
+        # RSS service (migrated to tools-service)
+        from tools_service.services.rss_service import get_rss_service
         self.rss_service = await get_rss_service(shared_db_pool=self.db_pool)
 
         # News service (single instance)

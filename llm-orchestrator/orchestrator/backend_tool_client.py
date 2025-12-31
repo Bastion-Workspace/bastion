@@ -862,7 +862,8 @@ class BackendToolClient:
         self,
         location: str,
         user_id: str = "system",
-        data_types: List[str] = None
+        data_types: List[str] = None,
+        date_str: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Get weather data for location
@@ -870,7 +871,8 @@ class BackendToolClient:
         Args:
             location: Location name
             user_id: User ID
-            data_types: Types of data to retrieve (e.g., ["current", "forecast"])
+            data_types: Types of data to retrieve (e.g., ["current", "forecast", "history"])
+            date_str: Optional date string for historical data (YYYY-MM-DD or YYYY-MM)
             
         Returns:
             Weather data dict or None
@@ -883,6 +885,10 @@ class BackendToolClient:
                 user_id=user_id,
                 data_types=data_types or ["current"]
             )
+            
+            # Add date_str if provided (for historical requests)
+            if date_str:
+                request.date_str = date_str
             
             response = await self._stub.GetWeatherData(request)
             
@@ -1650,7 +1656,8 @@ class BackendToolClient:
         interactive: bool = True,
         color_scheme: str = "plotly",
         width: int = 800,
-        height: int = 600
+        height: int = 600,
+        include_static: bool = False
     ) -> Dict[str, Any]:
         """
         Create a chart or graph from structured data
@@ -1665,6 +1672,7 @@ class BackendToolClient:
             color_scheme: Color scheme to use (default: "plotly")
             width: Chart width in pixels (default: 800)
             height: Chart height in pixels (default: 600)
+            include_static: Also generate a static SVG version (default: False)
             
         Returns:
             Dict with success status, output format, and chart_data
@@ -1684,7 +1692,8 @@ class BackendToolClient:
                 interactive=interactive,
                 color_scheme=color_scheme,
                 width=width,
-                height=height
+                height=height,
+                include_static=include_static
             )
             
             response = await self._stub.CreateChart(request)
@@ -1698,13 +1707,20 @@ class BackendToolClient:
                     except json.JSONDecodeError:
                         pass
                 
-                return {
+                result = {
                     "success": True,
                     "chart_type": response.chart_type,
                     "output_format": response.output_format,
                     "chart_data": response.chart_data,
                     "metadata": metadata
                 }
+
+                if response.HasField("static_svg"):
+                    result["static_svg"] = response.static_svg
+                if response.HasField("static_format"):
+                    result["static_format"] = response.static_format
+                
+                return result
             else:
                 return {
                     "success": False,

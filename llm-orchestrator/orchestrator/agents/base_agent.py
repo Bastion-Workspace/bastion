@@ -250,6 +250,7 @@ class BaseAgent:
         # Use user model, explicit model, or default
         final_model = model or user_model or settings.DEFAULT_MODEL
         logger.info(f"🎯 SELECTED MODEL: {final_model} (explicit={model}, user={user_model}, default={settings.DEFAULT_MODEL})")
+        logger.info(f"🌡️ SELECTED TEMPERATURE: {temperature}")
         
         return ChatOpenAI(
             model=final_model,
@@ -1087,8 +1088,6 @@ class BaseAgent:
                 categories.append("weather")
             if any(kw in query_lower for kw in ["calculate", "compute", "math"]):
                 categories.append("math")
-            if any(kw in query_lower for kw in ["aws", "cost", "pricing"]):
-                categories.append("aws_pricing")
             if any(kw in query_lower for kw in ["search web", "look up", "find online"]):
                 categories.append("search_web")
             if any(kw in query_lower for kw in ["org file", "todo", "task"]):

@@ -365,7 +365,7 @@ They do exact find; we do progressive search.
 ---
 
 **Files Modified:**
-- `backend/services/langgraph_agents/fiction_editing_agent.py`
+- `llm-orchestrator/orchestrator/agents/fiction_editing_agent.py`
   - Added CRITICAL SCOPE ANALYSIS
   - Enhanced TEXT PRECISION REQUIREMENTS
   - Added CONTENT BOUNDARIES clarification

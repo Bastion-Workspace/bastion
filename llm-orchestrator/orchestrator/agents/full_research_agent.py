@@ -2093,7 +2093,7 @@ When synthesizing your answer, integrate information from the user's reference d
             conversation_context = {
                 "previous_tools_used": shared_memory.get("previous_tools_used", []) if shared_memory else []
             }
-            tool_analysis = analyze_tool_needs_for_research(query, conversation_context)
+            tool_analysis = await analyze_tool_needs_for_research(query, conversation_context)
             
             logger.info(
                 f"🎯 Dynamic tool analysis: {tool_analysis['tool_count']} tools needed "

@@ -262,7 +262,7 @@ User Query → Wargaming Override Check
 - `backend/services/orchestrator_nodes.py` - Intent classification node (bypass implemented here)
 - `backend/services/simple_intent_service.py` - LLM-based intent classifier (lines 389-424)
 - `backend/services/orchestrator_routing.py` - Route mapping logic
-- `backend/services/langgraph_agents/fiction_editing_agent.py` - Fiction editing with resolver integration
+- `llm-orchestrator/orchestrator/agents/fiction_editing_agent.py` - Fiction editing with resolver integration
 
 ---
 

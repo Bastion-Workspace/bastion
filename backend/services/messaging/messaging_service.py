@@ -840,13 +840,15 @@ class MessagingService:
     
     async def get_room_participant_presence(
         self, 
-        room_id: str
+        room_id: str,
+        user_id: str
     ) -> Dict[str, Dict[str, Any]]:
         """
         Get presence for all participants in a room
         
         Args:
             room_id: Room UUID
+            user_id: User ID requesting the presence (for RLS)
         
         Returns:
             Dict mapping user_id to presence info
@@ -855,6 +857,16 @@ class MessagingService:
         
         try:
             async with self.db_pool.acquire() as conn:
+                # Get user role for RLS
+                user_role_row = await conn.fetchrow("""
+                    SELECT role FROM users WHERE user_id = $1
+                """, user_id)
+                user_role = user_role_row["role"] if user_role_row else "user"
+                
+                # Set user context for RLS
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_role)
+                
                 rows = await conn.fetch("""
                     SELECT 
                         u.user_id, u.username, u.display_name,

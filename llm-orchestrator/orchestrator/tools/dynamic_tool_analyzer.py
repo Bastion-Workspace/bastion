@@ -1,6 +1,8 @@
 """
 Dynamic Tool Analyzer for LLM Orchestrator Agents
 Analyzes queries to determine which tools are needed for dynamic tool usage tracking
+
+Now includes hybrid semantic + keyword-based discovery for next-generation tool selection.
 """
 
 import logging
@@ -106,9 +108,12 @@ def get_tools_for_categories(categories: List[str]) -> List[str]:
     return tools
 
 
-def analyze_tool_needs_for_research(query: str, conversation_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+async def analyze_tool_needs_for_research(query: str, conversation_context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Analyze query to determine which tools are needed for research agent
+    
+    Hybrid approach: Combines keyword-based detection with semantic discovery
+    for next-generation tool selection.
     
     Args:
         query: User query string
@@ -117,9 +122,11 @@ def analyze_tool_needs_for_research(query: str, conversation_context: Optional[D
     Returns:
         {
             "core_tools": [...],  # Always needed
-            "conditional_tools": [...],  # Triggered by query
+            "conditional_tools": [...],  # Triggered by query (keyword + semantic)
             "all_tools": [...],  # Combined list
             "categories": [...],  # Detected categories
+            "semantic_discoveries": [...],  # Tools found via semantic search
+            "keyword_matches": [...],  # Tools found via keyword matching
             "reasoning": "..."
         }
     """
@@ -131,28 +138,67 @@ def analyze_tool_needs_for_research(query: str, conversation_context: Optional[D
         "search_conversation_cache_tool"
     ]
     
-    # Detect categories from query
+    # Keyword-based detection (existing logic)
     categories = detect_tool_categories_from_query(query)
-    
-    # Get conditional tools based on categories
-    conditional_tools = []
+    keyword_tools = []
     for category in categories:
         if category not in [OrchestratorToolCategory.SEARCH_LOCAL, 
                            OrchestratorToolCategory.DOCUMENT_OPS,
                            OrchestratorToolCategory.EXPANSION,
                            OrchestratorToolCategory.CACHE]:
             category_tools = get_tools_for_categories([category])
-            conditional_tools.extend(category_tools)
+            keyword_tools.extend(category_tools)
+    keyword_tools = list(set(keyword_tools))
     
-    # Remove duplicates
-    conditional_tools = list(set(conditional_tools))
+    # Semantic discovery (new hybrid approach)
+    semantic_tools = []
+    semantic_discoveries = []
+    try:
+        from orchestrator.utils.tool_discovery import get_tool_discovery_service
+        discovery_service = await get_tool_discovery_service()
+        semantic_results = await discovery_service.discover_tools(
+            query=query,
+            top_k=5,
+            min_confidence=0.6
+        )
+        
+        # Extract tool names from semantic results
+        for result in semantic_results:
+            tool_name = result.get("tool_name")
+            if tool_name and tool_name not in core_tools:
+                semantic_tools.append(tool_name)
+                semantic_discoveries.append({
+                    "tool": tool_name,
+                    "score": result.get("score", 0.0),
+                    "pack": result.get("pack", "unknown")
+                })
+        
+        semantic_tools = list(set(semantic_tools))
+        logger.info(
+            f"Semantic discovery: {len(semantic_tools)} tools found "
+            f"(keyword: {len(keyword_tools)})"
+        )
+        
+    except Exception as e:
+        logger.warning(f"Semantic discovery failed, using keyword-only: {e}")
+        # Fallback to keyword-only on failure
+    
+    # Merge keyword and semantic results (union, no duplicates)
+    conditional_tools = list(set(keyword_tools + semantic_tools))
     
     # Build reasoning
     reasoning_parts = []
     if conditional_tools:
-        reasoning_parts.append(
-            f"Query triggers additional tools: {', '.join(conditional_tools)}"
-        )
+        keyword_only = [t for t in conditional_tools if t in keyword_tools and t not in semantic_tools]
+        semantic_only = [t for t in conditional_tools if t in semantic_tools and t not in keyword_tools]
+        both = [t for t in conditional_tools if t in keyword_tools and t in semantic_tools]
+        
+        if both:
+            reasoning_parts.append(f"Both methods agree on: {', '.join(both)}")
+        if keyword_only:
+            reasoning_parts.append(f"Keyword detection found: {', '.join(keyword_only)}")
+        if semantic_only:
+            reasoning_parts.append(f"Semantic discovery found: {', '.join(semantic_only)}")
     else:
         reasoning_parts.append("Query requires only core research tools")
     
@@ -173,6 +219,8 @@ def analyze_tool_needs_for_research(query: str, conversation_context: Optional[D
         "conditional_tools": conditional_tools,
         "all_tools": all_tools,
         "categories": categories,
+        "semantic_discoveries": semantic_discoveries,
+        "keyword_matches": keyword_tools,
         "reasoning": "; ".join(reasoning_parts),
         "tool_count": len(all_tools),
         "core_count": len(core_tools),

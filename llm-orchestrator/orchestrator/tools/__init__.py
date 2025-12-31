@@ -54,6 +54,12 @@ from orchestrator.tools.visualization_tools import (
     VISUALIZATION_TOOLS
 )
 
+from orchestrator.tools.system_modeling_tools import (
+    design_system_component_tool,
+    simulate_system_failure_tool,
+    get_system_topology_tool
+)
+
 __all__ = [
     # Document tools
     'search_documents_tool',
@@ -86,6 +92,10 @@ __all__ = [
     'MATH_TOOLS',
     # Visualization tools
     'create_chart_tool',
-    'VISUALIZATION_TOOLS'
+    'VISUALIZATION_TOOLS',
+    # System modeling tools
+    'design_system_component_tool',
+    'simulate_system_failure_tool',
+    'get_system_topology_tool'
 ]
 

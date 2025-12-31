@@ -193,21 +193,36 @@ export const MessagingProvider = ({ children }) => {
       const response = await messagingService.getRoomMessages(roomId, 50, beforeMessageId);
       
       if (beforeMessageId) {
-        // Append older messages
-        setMessages(prev => ({
-          ...prev,
-          [roomId]: [...(prev[roomId] || []), ...response.messages]
-        }));
+        // Append older messages - filter out any duplicates
+        setMessages(prev => {
+          const existingMessages = prev[roomId] || [];
+          const existingIds = new Set(existingMessages.map(m => m.message_id));
+          const newMessages = response.messages.filter(m => m.message_id && !existingIds.has(m.message_id));
+          return {
+            ...prev,
+            [roomId]: [...existingMessages, ...newMessages]
+          };
+        });
       } else {
         // Replace with fresh messages
         setMessages(prev => ({
           ...prev,
           [roomId]: response.messages
         }));
+        // Add loaded message IDs to deduplication set
+        response.messages.forEach(msg => {
+          if (msg.message_id) {
+            processedMessageIds.current.add(msg.message_id);
+          }
+        });
       }
       
-      // Mark room as read
+      // Mark room as read - both locally and on backend
       setUnreadCounts(prev => ({ ...prev, [roomId]: 0 }));
+      // Only mark as read on backend when loading initial messages (not when loading older messages)
+      if (!beforeMessageId) {
+        messagingService.markAsRead(roomId).catch(err => console.error('❌ Failed to mark room as read:', err));
+      }
       
       return response;
     } catch (error) {
@@ -336,6 +351,17 @@ export const MessagingProvider = ({ children }) => {
     if (!isAuthenticated) return;
     
     const handleNewMessage = (message) => {
+      // De-duplication check: Skip if we've already processed this message ID
+      if (!message.message_id) {
+        console.warn('💬 Received message without message_id, skipping deduplication check');
+      } else if (processedMessageIds.current.has(message.message_id)) {
+        console.log(`💬 Skipping duplicate message ${message.message_id} in room WebSocket handler`);
+        return;
+      }
+      if (message.message_id) {
+        processedMessageIds.current.add(message.message_id);
+      }
+      
       setMessages(prev => ({
         ...prev,
         [roomId]: [...(prev[roomId] || []), message]
@@ -415,8 +441,9 @@ export const MessagingProvider = ({ children }) => {
     // Load presence
     loadRoomPresence(roomId);
     
-    // Mark as read
+    // Mark as read - both locally and on backend
     setUnreadCounts(prev => ({ ...prev, [roomId]: 0 }));
+    messagingService.markAsRead(roomId).catch(err => console.error('❌ Failed to mark room as read:', err));
   }, [currentRoomId, messages, loadMessages, connectToRoom, loadRoomPresence, disconnectFromRoom]);
 
   // =====================

@@ -18,6 +18,78 @@ from typing import Dict, Any, Optional, Tuple
 logger = logging.getLogger(__name__)
 
 
+def _fuzzy_match_in_window(
+    content: str,
+    search_text: str,
+    expected_start: int,
+    window_size: int = 1000,
+    min_similarity: float = 0.7
+) -> Optional[Tuple[int, int, float]]:
+    """
+    Fuzzy search for text within a window around the expected position.
+    
+    Uses a simple character-based similarity metric to find the best match
+    when exact matching fails due to document drift.
+    
+    Args:
+        content: Full document content
+        search_text: Text to search for
+        expected_start: Expected start position (from operation)
+        window_size: Search window size (default 1000 chars on each side)
+        min_similarity: Minimum similarity threshold (0.0-1.0)
+    
+    Returns:
+        Tuple of (start_pos, end_pos, similarity_score) or None if no good match found
+    """
+    if not search_text or len(search_text) < 10:
+        return None
+    
+    # Define search window around expected position
+    window_start = max(0, expected_start - window_size)
+    window_end = min(len(content), expected_start + len(search_text) + window_size)
+    search_window = content[window_start:window_end]
+    
+    if len(search_window) < len(search_text):
+        return None
+    
+    # Try sliding window approach: check each possible position
+    best_match = None
+    best_similarity = 0.0
+    
+    # Search for best match within window
+    for i in range(len(search_window) - len(search_text) + 1):
+        candidate = search_window[i:i + len(search_text)]
+        
+        # Calculate similarity: count matching characters
+        matches = sum(1 for a, b in zip(search_text, candidate) if a == b)
+        similarity = matches / len(search_text) if search_text else 0.0
+        
+        # Also check if key phrases match (first and last 20 chars)
+        if len(search_text) > 40:
+            first_20_match = search_text[:20] == candidate[:20]
+            last_20_match = search_text[-20:] == candidate[-20:]
+            if first_20_match:
+                similarity += 0.1
+            if last_20_match:
+                similarity += 0.1
+        
+        if similarity > best_similarity:
+            best_similarity = similarity
+            actual_start = window_start + i
+            actual_end = actual_start + len(search_text)
+            best_match = (actual_start, actual_end, similarity)
+    
+    # Return best match if it meets minimum similarity threshold
+    if best_match and best_similarity >= min_similarity:
+        logger.info(
+            f"   🔍 Fuzzy match found: similarity={best_similarity:.2f}, "
+            f"expected={expected_start}, actual={best_match[0]}"
+        )
+        return best_match
+    
+    return None
+
+
 # Import frontmatter utilities from shared module
 from orchestrator.utils.frontmatter_utils import strip_frontmatter_block, frontmatter_end_index
 
@@ -161,9 +233,29 @@ def resolve_editor_operation(
                     end_pos = pos_last + 30
                     return start_pos, end_pos, text, 0.6
             
-            logger.error(f"   ❌ Could not find original_text in content even with normalization")
+            # Strategy 2.5: Fuzzy match fallback - search within window around expected position
+            # This handles cases where document has shifted but text still exists nearby
+            expected_start = op_dict.get("start", 0)
+            if expected_start > 0:
+                fuzzy_result = _fuzzy_match_in_window(
+                    content, original_text, expected_start, window_size=1000, min_similarity=0.7
+                )
+                if fuzzy_result:
+                    fuzzy_start, fuzzy_end, fuzzy_similarity = fuzzy_result
+                    # Guard frontmatter
+                    fuzzy_start = max(fuzzy_start, frontmatter_end)
+                    fuzzy_end = max(fuzzy_end, fuzzy_start)
+                    # Convert similarity to confidence (0.7-0.85 range for fuzzy matches)
+                    confidence = 0.7 + (fuzzy_similarity - 0.7) * 0.5  # Scale 0.7-1.0 to 0.7-0.85
+                    logger.info(
+                        f"   ✅ Fuzzy match successful: position={fuzzy_start}, "
+                        f"similarity={fuzzy_similarity:.2f}, confidence={confidence:.2f}"
+                    )
+                    return fuzzy_start, fuzzy_end, text, confidence
+            
+            logger.error(f"   ❌ Could not find original_text in content even with fuzzy search")
             logger.error(f"   original_text length: {len(original_text)}, preview: {repr(original_text[:200])}")
-            logger.error(f"   Content length: {len(content)}")
+            logger.error(f"   Content length: {len(content)}, expected_start: {op_dict.get('start', 0)}")
             # Return failure signal
             return -1, -1, text, 0.0
     

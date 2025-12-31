@@ -49,6 +49,11 @@ class ReferenceAgentState(TypedDict):
     research_query: Optional[str]
     research_results: Optional[Dict[str, Any]]
     
+    # Weather tool integration
+    needs_weather: bool
+    weather_request: Optional[Dict[str, Any]]  # Structured weather request
+    weather_results: Optional[Dict[str, Any]]  # Weather data results
+    
     # Math tool integration
     needs_calculations: bool
     calculation_type: Optional[str]  # "expression", "formula", "conversion"
@@ -90,6 +95,7 @@ class ReferenceAgent(BaseAgent):
         workflow.add_node("process_insights", self._process_insights_node)
         workflow.add_node("perform_calculations", self._perform_calculations_node)
         workflow.add_node("perform_visualization", self._perform_visualization_node)
+        workflow.add_node("get_weather_data", self._get_weather_data_node)
         workflow.add_node("call_research_subgraph", self._call_research_subgraph_node)
         workflow.add_node("synthesize_response", self._synthesize_response_node)
         workflow.add_node("format_response", self._format_response_node)
@@ -115,13 +121,14 @@ class ReferenceAgent(BaseAgent):
         # Unrelated query goes directly to formatting
         workflow.add_edge("handle_unrelated_query", "format_response")
         
-        # All analysis nodes check if calculations, visualization, or research are needed
+        # All analysis nodes check if calculations, visualization, weather, or research are needed
         workflow.add_conditional_edges(
             "process_simple_qa",
             self._route_from_analysis,
             {
                 "calculations": "perform_calculations",
                 "visualization": "perform_visualization",
+                "weather": "get_weather_data",
                 "research": "call_research_subgraph",
                 "synthesize": "synthesize_response"
             }
@@ -133,6 +140,7 @@ class ReferenceAgent(BaseAgent):
             {
                 "calculations": "perform_calculations",
                 "visualization": "perform_visualization",
+                "weather": "get_weather_data",
                 "research": "call_research_subgraph",
                 "synthesize": "synthesize_response"
             }
@@ -144,26 +152,39 @@ class ReferenceAgent(BaseAgent):
             {
                 "calculations": "perform_calculations",
                 "visualization": "perform_visualization",
+                "weather": "get_weather_data",
                 "research": "call_research_subgraph",
                 "synthesize": "synthesize_response"
             }
         )
         
-        # After calculations, check if visualization or research is still needed
+        # After calculations, check if visualization, weather, or research is still needed
         workflow.add_conditional_edges(
             "perform_calculations",
             self._route_after_calculations,
             {
                 "visualization": "perform_visualization",
+                "weather": "get_weather_data",
                 "research": "call_research_subgraph",
                 "synthesize": "synthesize_response"
             }
         )
         
-        # After visualization, check if research is still needed
+        # After visualization, check if weather or research is still needed
         workflow.add_conditional_edges(
             "perform_visualization",
             self._route_after_visualization,
+            {
+                "weather": "get_weather_data",
+                "research": "call_research_subgraph",
+                "synthesize": "synthesize_response"
+            }
+        )
+        
+        # After weather, check if research is still needed
+        workflow.add_conditional_edges(
+            "get_weather_data",
+            self._route_after_weather,
             {
                 "research": "call_research_subgraph",
                 "synthesize": "synthesize_response"
@@ -190,26 +211,38 @@ class ReferenceAgent(BaseAgent):
         return complexity
     
     def _route_from_analysis(self, state: ReferenceAgentState) -> str:
-        """Route based on whether calculations, visualization, or research are needed"""
-        # Prioritize calculations first, then visualization, then research
+        """Route based on whether calculations, visualization, weather, or research are needed"""
+        # Prioritize calculations first, then visualization, then weather, then research
         if state.get("needs_calculations", False):
             return "calculations"
         if state.get("needs_visualization", False):
             return "visualization"
+        if state.get("needs_weather", False):
+            return "weather"
         if state.get("needs_external_info", False):
             return "research"
         return "synthesize"
     
     def _route_after_calculations(self, state: ReferenceAgentState) -> str:
-        """Route after calculations - check if visualization or research is still needed"""
+        """Route after calculations - check if visualization, weather, or research is still needed"""
         if state.get("needs_visualization", False):
             return "visualization"
+        if state.get("needs_weather", False):
+            return "weather"
         if state.get("needs_external_info", False):
             return "research"
         return "synthesize"
     
     def _route_after_visualization(self, state: ReferenceAgentState) -> str:
-        """Route after visualization - check if research is still needed"""
+        """Route after visualization - check if weather or research is still needed"""
+        if state.get("needs_weather", False):
+            return "weather"
+        if state.get("needs_external_info", False):
+            return "research"
+        return "synthesize"
+    
+    def _route_after_weather(self, state: ReferenceAgentState) -> str:
+        """Route after weather - check if research is still needed"""
         if state.get("needs_external_info", False):
             return "research"
         return "synthesize"
@@ -357,7 +390,9 @@ class ReferenceAgent(BaseAgent):
 5. **calculation_type**: If calculations needed, what type? "formula" (BTU, electrical formulas), "expression" (simple math), or "conversion" (unit conversion)
 6. **needs_external_info**: Does this query require external information (e.g., nutritional data, definitions, research)?
 7. **research_query**: If external info is needed, what should be researched? (e.g., "nutritional content of pizza")
-8. **needs_visualization**: Would this query benefit from a chart or graph? Consider:
+8. **needs_weather**: Does this query ask about weather conditions (current, forecast, or historical)? Examples: "What's the weather?", "Weather forecast", "What was the weather on [date]?"
+9. **weather_request**: If weather is needed, structure as: {{"location": "city name or location", "request_type": "current|forecast|history", "date_str": "YYYY-MM-DD or YYYY-MM" (for history)}}
+10. **needs_visualization**: Would this query benefit from a chart or graph? Consider:
    - Queries asking to "show", "graph", "chart", "plot", or "visualize" data
    - Queries about trends over time (weight, mood, food intake)
    - Queries comparing values across categories or time periods
@@ -371,13 +406,15 @@ class ReferenceAgent(BaseAgent):
 - "Show me all days I mentioned feeling anxious" → relevance: 0.9 (directly about document patterns)
 
 **COMPLEXITY EXAMPLES**:
-- "What did I write in my journal on December 5th?" → simple_qa, no calculations, no external info, no visualization
-- "Show me all days I mentioned feeling anxious" → pattern_analysis, no calculations, no external info, no visualization
-- "Graph my weight over time" → pattern_analysis, no calculations, no external info, needs visualization (line chart)
-- "Chart the frequency of different foods I ate" → pattern_analysis, no calculations, no external info, needs visualization (bar or pie chart)
-- "What BTU requirements do I need for these rooms?" → simple_qa, needs calculations (formula: btu_hvac), no external info, no visualization
-- "What's the calorie count of the foods I logged yesterday?" → simple_qa, no calculations, needs external info (nutritional data), no visualization
-- "What patterns do you notice in my logs?" → insights, no calculations, no external info, no visualization
+- "What did I write in my journal on December 5th?" → simple_qa, no calculations, no external info, no weather, no visualization
+- "Show me all days I mentioned feeling anxious" → pattern_analysis, no calculations, no external info, no weather, no visualization
+- "Graph my weight over time" → pattern_analysis, no calculations, no external info, no weather, needs visualization (line chart)
+- "Chart the frequency of different foods I ate" → pattern_analysis, no calculations, no external info, no weather, needs visualization (bar or pie chart)
+- "What BTU requirements do I need for these rooms?" → simple_qa, needs calculations (formula: btu_hvac), no external info, no weather, no visualization
+- "What's the calorie count of the foods I logged yesterday?" → simple_qa, no calculations, needs external info (nutritional data), no weather, no visualization
+- "What patterns do you notice in my logs?" → insights, no calculations, no external info, no weather, no visualization
+- "What's the weather today?" → simple_qa, no calculations, no external info, needs weather (current), no visualization
+- "What was the weather on December 5th?" → simple_qa, no calculations, no external info, needs weather (history, date_str: "2024-12-05"), no visualization
 
 Return ONLY valid JSON:
 {{
@@ -415,11 +452,13 @@ Return ONLY valid JSON:
                         "calculation_type": {"type": ["string", "null"]},
                         "needs_external_info": {"type": "boolean"},
                         "research_query": {"type": ["string", "null"]},
+                        "needs_weather": {"type": "boolean"},
+                        "weather_request": {"type": ["object", "null"]},
                         "needs_visualization": {"type": "boolean"},
                         "visualization_type": {"type": ["string", "null"]},
                         "reasoning": {"type": "string"}
                     },
-                    "required": ["query_relevance", "is_unrelated", "complexity_level", "needs_calculations", "needs_external_info", "needs_visualization"]
+                    "required": ["query_relevance", "is_unrelated", "complexity_level", "needs_calculations", "needs_external_info", "needs_weather", "needs_visualization"]
                 }
                 structured_llm = llm.with_structured_output(schema)
                 result = await structured_llm.ainvoke(llm_messages)
@@ -441,10 +480,12 @@ Return ONLY valid JSON:
             calculation_type = result_dict.get("calculation_type")
             needs_external = result_dict.get("needs_external_info", False)
             research_query = result_dict.get("research_query")
+            needs_weather = result_dict.get("needs_weather", False)
+            weather_request = result_dict.get("weather_request")
             needs_visualization = result_dict.get("needs_visualization", False)
             visualization_type = result_dict.get("visualization_type")
             
-            logger.info(f"📚 Query relevance: {query_relevance:.2f}, is_unrelated: {is_unrelated}, complexity: {complexity}, needs calculations: {needs_calculations}, needs external info: {needs_external}, needs visualization: {needs_visualization}")
+            logger.info(f"📚 Query relevance: {query_relevance:.2f}, is_unrelated: {is_unrelated}, complexity: {complexity}, needs calculations: {needs_calculations}, needs external info: {needs_external}, needs weather: {needs_weather}, needs visualization: {needs_visualization}")
             
             return {
                 "query_relevance": query_relevance,
@@ -454,6 +495,8 @@ Return ONLY valid JSON:
                 "calculation_type": calculation_type,
                 "needs_external_info": needs_external,
                 "research_query": research_query,
+                "needs_weather": needs_weather,
+                "weather_request": weather_request,
                 "needs_visualization": needs_visualization,
                 "visualization_request": {"chart_type": visualization_type} if visualization_type else None,
                 # ✅ CRITICAL: Preserve state for subsequent nodes
@@ -471,6 +514,7 @@ Return ONLY valid JSON:
                 "query_relevance": 1.0,
                 "is_unrelated": False,
                 "needs_external_info": False,
+                "needs_weather": False,
                 "needs_visualization": False,
                 # ✅ CRITICAL: Preserve state even on error
                 "metadata": state.get("metadata", {}),
@@ -1165,6 +1209,107 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 "query": state.get("query", "")
             }
     
+    async def _get_weather_data_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
+        """Get weather data using Tools Service via gRPC"""
+        try:
+            weather_request = state.get("weather_request")
+            user_id = state.get("user_id", "system")
+            
+            if not weather_request:
+                logger.warning("⚠️ Weather request not provided")
+                return {
+                    "weather_results": None,
+                    "needs_weather": False,
+                    # ✅ CRITICAL: Preserve state even on early return
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
+                }
+            
+            location = weather_request.get("location", "")
+            request_type = weather_request.get("request_type", "current")
+            date_str = weather_request.get("date_str")
+            
+            if not location:
+                # Try to extract location from query or document context
+                query = state.get("query", "")
+                # Simple location extraction - could be enhanced with LLM
+                # For now, default to a common location or ask user
+                logger.warning("⚠️ No location specified in weather request")
+                return {
+                    "weather_results": {
+                        "success": False,
+                        "error": "Location is required for weather queries. Please specify a location (e.g., 'What's the weather in Los Angeles?')."
+                    },
+                    "needs_weather": False,
+                    # ✅ CRITICAL: Preserve state even on error
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
+                }
+            
+            logger.info(f"🌤️ Getting weather data: location={location}, type={request_type}, date_str={date_str}")
+            
+            # Get gRPC client from BaseAgent
+            grpc_client = await self._get_grpc_client()
+            
+            # Determine data types based on request type
+            data_types = []
+            if request_type == "current":
+                data_types = ["current"]
+            elif request_type == "forecast":
+                data_types = ["forecast"]
+            elif request_type == "history":
+                data_types = ["history"]
+            else:
+                # Default to current if unknown
+                data_types = ["current"]
+            
+            # Call weather tool via gRPC
+            weather_result = await grpc_client.get_weather(
+                location=location,
+                user_id=user_id,
+                data_types=data_types,
+                date_str=date_str
+            )
+            
+            if weather_result and weather_result.get("success"):
+                logger.info(f"✅ Weather data retrieved successfully for {location}")
+            else:
+                error_msg = weather_result.get("error", "Unknown error") if weather_result else "Weather service unavailable"
+                logger.warning(f"⚠️ Weather fetch failed: {error_msg}")
+            
+            return {
+                "weather_results": weather_result,
+                "needs_weather": False,  # Weather completed
+                # ✅ CRITICAL: Preserve state for subsequent nodes
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Weather data fetch failed: {e}")
+            return {
+                "weather_results": {
+                    "success": False,
+                    "error": f"Weather service error: {str(e)}"
+                },
+                "needs_weather": False,
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
+    
     async def _call_research_subgraph_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
         """Call research agent as subgraph for external information"""
         try:
@@ -1268,11 +1413,12 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             }
     
     async def _synthesize_response_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
-        """Synthesize analysis results with calculations, visualization, and research (if any)"""
+        """Synthesize analysis results with calculations, visualization, weather, and research (if any)"""
         try:
             analysis_results = state.get("analysis_results", {})
             calculation_results = state.get("calculation_results")
             visualization_results = state.get("visualization_results")
+            weather_results = state.get("weather_results")
             research_results = state.get("research_results")
             query = state.get("query", "")
             query_complexity = state.get("query_complexity", "simple_qa")
@@ -1322,6 +1468,70 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 
                 logger.info(f"📚 Integrated visualization into response: {chart_type}, format: {output_format}")
             
+            # If weather data was retrieved, integrate it
+            if weather_results and weather_results.get("success"):
+                weather_data = weather_results.get("current") or weather_results.get("forecast") or weather_results.get("historical")
+                location_name = weather_results.get("location", {}).get("name", "Unknown")
+                
+                if weather_results.get("current"):
+                    # Current weather
+                    current = weather_results["current"]
+                    temp = current.get("temperature", "N/A")
+                    condition = current.get("condition", "N/A")
+                    humidity = current.get("humidity", "N/A")
+                    wind_speed = current.get("wind_speed", "N/A")
+                    
+                    weather_section = f"\n\n**Current Weather for {location_name}**:\n"
+                    weather_section += f"- Temperature: {temp}\n"
+                    weather_section += f"- Condition: {condition}\n"
+                    weather_section += f"- Humidity: {humidity}\n"
+                    weather_section += f"- Wind Speed: {wind_speed}\n"
+                    
+                    response_text = f"""{response_text}{weather_section}"""
+                    logger.info("📚 Integrated current weather into response")
+                    
+                elif weather_results.get("forecast"):
+                    # Forecast weather
+                    forecast = weather_results["forecast"]
+                    forecast_days = forecast.get("days", [])
+                    
+                    weather_section = f"\n\n**Weather Forecast for {location_name}**:\n"
+                    for day in forecast_days[:5]:  # Show next 5 days
+                        date = day.get("date", "Unknown")
+                        temp = day.get("temperature", "N/A")
+                        condition = day.get("condition", "N/A")
+                        weather_section += f"- {date}: {temp}, {condition}\n"
+                    
+                    response_text = f"""{response_text}{weather_section}"""
+                    logger.info("📚 Integrated weather forecast into response")
+                    
+                elif weather_results.get("historical"):
+                    # Historical weather
+                    historical = weather_results["historical"]
+                    date_str = weather_results.get("period", {}).get("date_str", "Unknown date")
+                    temp = historical.get("temperature", "N/A")
+                    condition = historical.get("condition", "N/A")
+                    
+                    weather_section = f"\n\n**Historical Weather for {location_name} on {date_str}**:\n"
+                    weather_section += f"- Temperature: {temp}\n"
+                    weather_section += f"- Condition: {condition}\n"
+                    
+                    response_text = f"""{response_text}{weather_section}"""
+                    logger.info(f"📚 Integrated historical weather into response for {date_str}")
+                else:
+                    # Generic weather data
+                    weather_section = f"\n\n**Weather Information for {location_name}**:\n"
+                    weather_section += f"{json.dumps(weather_data, indent=2)}\n"
+                    response_text = f"""{response_text}{weather_section}"""
+                    logger.info("📚 Integrated weather data into response")
+            
+            elif weather_results and not weather_results.get("success"):
+                # Weather request failed
+                error_msg = weather_results.get("error", "Unknown error")
+                weather_section = f"\n\n**Weather Information**: Unable to retrieve weather data: {error_msg}"
+                response_text = f"""{response_text}{weather_section}"""
+                logger.warning(f"⚠️ Weather request failed: {error_msg}")
+            
             # If research was used, integrate it
             if research_results:
                 research_response = research_results.get("response", "")
@@ -1349,6 +1559,8 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 "visualization_data": visualization_results if visualization_results and visualization_results.get("success") else None,
                 "static_visualization_data": visualization_results.get("static_svg") if visualization_results and visualization_results.get("success") else None,
                 "static_format": visualization_results.get("static_format") if visualization_results and visualization_results.get("success") else None,
+                "weather_used": weather_results is not None and weather_results.get("success", False),
+                "weather_data": weather_results if weather_results and weather_results.get("success") else None,
                 "research_used": research_results is not None,
                 "research_citations": research_results.get("citations", []) if research_results else None,
                 "confidence": 0.85,
@@ -1453,6 +1665,11 @@ Return ONLY the JSON object, no markdown, no code blocks."""
 - NON-JUDGMENTAL: Be supportive and analytical, not prescriptive
 - FACTUAL: Base responses on actual document content
 - MATH TOOL INTEGRATION: When calculations are needed (BTU, electrical, etc.), the system will automatically use the math tool for accurate results
+- WEATHER TOOL INTEGRATION: You have access to weather tools via the Tools Service. You can retrieve current weather conditions, forecasts, and historical weather data for any location. The system will automatically detect weather-related queries and fetch the data. Use weather tools when:
+  * User asks about current weather conditions
+  * User requests weather forecasts
+  * User asks about historical weather (specific dates or months)
+  * Weather information would enhance analysis of reference documents (e.g., correlating journal entries with weather conditions)
 - RESEARCH INTEGRATION: When you need external information, the system will automatically call the research agent
 - VISUALIZATION TOOL: You have access to a chart generation tool for visualizing data patterns, trends, and distributions. The system will automatically detect when visualizations would be helpful and generate them. Use visualizations when:
   * Showing trends over time (weight, mood, food intake, etc.)
@@ -1460,7 +1677,7 @@ Return ONLY the JSON object, no markdown, no code blocks."""
   * Displaying distributions or frequency patterns
   * User explicitly requests a chart, graph, or visualization
   Available chart types: bar (comparisons), line (trends over time), pie (proportions), scatter (correlations), area (cumulative trends), heatmap (2D patterns), box_plot (distributions), histogram (frequency distributions)
-- CLEAR COMMUNICATION: Be clear about what information comes from the document vs. calculations vs. visualizations vs. external research
+- CLEAR COMMUNICATION: Be clear about what information comes from the document vs. calculations vs. weather data vs. visualizations vs. external research
 
 **RESPONSE STYLE**:
 - Supportive and understanding tone
@@ -1525,6 +1742,9 @@ When providing pattern analysis or insights, use structured JSON with:
                 "needs_external_info": False,
                 "research_query": None,
                 "research_results": None,
+                "needs_weather": False,
+                "weather_request": None,
+                "weather_results": None,
                 "needs_calculations": False,
                 "calculation_type": None,
                 "calculation_request": None,

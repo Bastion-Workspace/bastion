@@ -215,11 +215,13 @@ queries = result["search_queries"]
 - Reusable across domains with appropriate context extraction
 
 ### Document Editing Tools (`orchestrator/tools/document_editing_tools.py`)
-**Backend gRPC tools for document editing**
+**Backend gRPC tools for document editing and proposals**
 
 - `update_document_metadata_tool(document_id, title, frontmatter_type, user_id)` - Update document metadata
 - `update_document_content_tool(document_id, content, user_id, append)` - Update document content
 - `propose_document_edit_tool(document_id, edit_type, operations, content_edit, agent_name, summary, requires_preview, user_id)` - Propose edits for user review
+- `apply_operations_directly_tool(document_id, operations, user_id, agent_name)` - Restricted! Apply operations directly to a file (bypass proposal)
+- `apply_document_edit_proposal_tool(proposal_id, selected_operation_indices, user_id)` - Apply an approved edit proposal
 
 **Usage**:
 ```python
@@ -260,19 +262,314 @@ result = await create_user_file_tool(
 )
 ```
 
-### Web Tools (`orchestrator/tools/web_tools.py`)
-**Backend gRPC tools for web search**
+### Math Tools (`orchestrator/tools/math_tools.py`, `orchestrator/tools/math_formulas.py`, `orchestrator/tools/unit_conversions.py`)
+**Deterministic mathematical calculations, formula execution, and unit conversions**
 
-- `search_web_structured(query, num_results)` - Structured web search
-- `crawl_web_content_tool(url)` - Crawl web content
-- `search_and_crawl_tool(query, num_results)` - Search and crawl
+- `calculate_expression_tool(expression, variables)` - Safely evaluate mathematical expressions
+- `evaluate_formula_tool(formula_name, inputs)` - Evaluate pre-defined formulas (HVAC, electrical, construction)
+- `convert_units_tool(value, from_unit, to_unit, quantity_type)` - Convert between different units
+- `list_available_formulas_tool()` - List all formulas in the library
+
+**Available Formulas**:
+- `manual_j_heat_loss` - ACCA Manual J heat loss calculation (see detailed documentation below)
+- `btu_hvac` - Simple BTU calculation for HVAC sizing
+- `ohms_law_voltage`, `ohms_law_current`, `ohms_law_resistance` - Electrical calculations
+- `power_dissipation` - Power calculation
+- `voltage_divider` - Resistor voltage divider
+- `capacitor_impedance` - Capacitor reactance
+- `area_rectangle`, `volume_rectangular` - Geometry calculations
+- `material_quantity` - Material estimation
 
 **Usage**:
 ```python
-from orchestrator.tools.web_tools import search_web_structured
+from orchestrator.tools.math_tools import calculate_expression_tool
+from orchestrator.tools.math_formulas import evaluate_formula_tool
+from orchestrator.tools.unit_conversions import convert_units_tool
+
+# Simple calculation
+calc = await calculate_expression_tool("300 * 25 * 1.2")
+
+# HVAC BTU calculation
+btu = await evaluate_formula_tool("btu_hvac", {"square_feet": 300, "climate_factor": 1.2})
+
+# Manual J heat loss calculation
+heat_loss = await evaluate_formula_tool(
+    formula_name="manual_j_heat_loss",
+    inputs={
+        "outdoor_design_temp": 10,
+        "indoor_design_temp": 70,
+        "floor_area": 2000,
+        "wall_area": 1200,
+        "wall_r_value": 19.0,
+        "roof_r_value": 38.0,
+        "window_area": 200,
+        "window_u_value": 0.35,
+        "air_changes_per_hour": 0.3,
+        "occupant_count": 4
+    }
+)
+
+# Unit conversion
+meters = await convert_units_tool(300, "sq_ft", "sq_m", "area")
+```
+
+**Manual J Heat Loss Calculation (`manual_j_heat_loss` formula)**:
+
+Performs comprehensive heat loss calculation according to ACCA Manual J methodology for residential HVAC sizing.
+
+**Required Inputs**:
+- `outdoor_design_temp` (float): Outdoor design temperature (°F) - typically 99% heating dry bulb for location
+- `indoor_design_temp` (float): Indoor design temperature (°F) - typically 70°F for heating
+- `floor_area` (float): Total conditioned floor area (sq ft)
+
+**Optional Inputs** (with defaults):
+- `ceiling_height` (float): Ceiling height in feet (default: 8.0)
+- **Wall Construction**:
+  - `wall_area` (float): Total wall area in sq ft (default: 0.0 - not included if 0)
+  - `wall_r_value` (float): Wall R-value (default: 13.0)
+- **Roof/Ceiling Construction**:
+  - `roof_area` (float): Roof/ceiling area in sq ft (default: uses floor_area if not specified)
+  - `roof_r_value` (float): Roof/ceiling R-value (default: 30.0)
+- **Floor Construction**:
+  - `floor_r_value` (float): Floor R-value (default: 19.0)
+  - `floor_over_unconditioned` (bool): True if floor over unconditioned space (default: False)
+- **Windows**:
+  - `window_area` (float): Total window area in sq ft (default: 0.0)
+  - `window_u_value` (float): Window U-value (default: 0.5 - double pane)
+- **Doors**:
+  - `door_area` (float): Total door area in sq ft (default: 0.0)
+  - `door_u_value` (float): Door U-value (default: 0.2 - insulated door)
+- **Infiltration**:
+  - `air_changes_per_hour` (float): ACH from air leakage (default: 0.5 - tight construction)
+- **Ventilation**:
+  - `ventilation_cfm` (float): Mechanical ventilation CFM (default: 0.0)
+- **Internal Heat Gains** (subtracted from losses):
+  - `occupant_count` (int): Number of occupants (default: 0)
+  - `appliance_heat_gain` (float): Heat gain from appliances in BTU/hr (default: 0.0)
+  - `lighting_heat_gain` (float): Heat gain from lighting in BTU/hr (default: 0.0)
+
+**Calculation Methodology**:
+1. **Conduction Losses**: Q = U × A × ΔT through walls, roof, floor, windows, doors
+   - U-value = 1/R-value (thermal transmittance)
+   - ΔT = indoor_design_temp - outdoor_design_temp
+2. **Infiltration Losses**: Q = 0.018 × V × ACH × ΔT
+   - V = building volume (floor_area × ceiling_height)
+   - ACH = air changes per hour
+3. **Ventilation Losses**: Q = 1.08 × CFM × ΔT
+   - CFM = mechanical ventilation rate
+4. **Internal Heat Gains**: 
+   - Occupants: 400 BTU/hr per person
+   - Appliances and lighting: user-specified
+5. **Net Heat Loss**: Total losses minus internal gains
+
+**Returns**: Dictionary with:
+- `result`: Net heat loss in BTU/hr
+- `unit`: "BTU/hr"
+- `formula_used`: "manual_j_heat_loss"
+- `steps`: Detailed calculation steps showing all components (conduction, infiltration, ventilation, gains)
+- `inputs_used`: All inputs used in calculation
+- `success`: Boolean
+
+**Example**:
+```python
+result = await evaluate_formula_tool(
+    formula_name="manual_j_heat_loss",
+    inputs={
+        "outdoor_design_temp": 10,  # 99% design temp for location
+        "indoor_design_temp": 70,
+        "floor_area": 2000,
+        "ceiling_height": 9.0,
+        "wall_area": 1200,
+        "wall_r_value": 19.0,  # R-19 walls
+        "roof_r_value": 38.0,  # R-38 roof
+        "window_area": 200,
+        "window_u_value": 0.35,  # Low-E windows
+        "door_area": 40,
+        "door_u_value": 0.2,
+        "air_changes_per_hour": 0.3,  # Very tight construction
+        "occupant_count": 4,
+        "appliance_heat_gain": 500
+    }
+)
+
+# Result includes detailed breakdown in steps:
+# - Conduction losses by component (walls, roof, floor, windows, doors)
+# - Infiltration and ventilation losses
+# - Internal gains (occupants, appliances, lighting)
+# - Net heat loss (total losses minus gains)
+```
+
+### File Analysis Tools (`orchestrator/tools/file_analysis_tools.py`)
+**Deterministic text analysis for precise word counts, character counts, and other text metrics**
+
+These tools provide accurate, consistent text measurements using pure Python algorithms (no LLM estimation).
+
+- `analyze_text_metrics(text, include_advanced, user_id)` - Analyze raw text content and return comprehensive metrics
+- `analyze_document_metrics(document_id, user_id, include_advanced)` - Analyze document by document_id and return metrics
+- `analyze_active_editor_metrics(active_editor, include_advanced, user_id)` - Analyze active editor content and return metrics
+
+**Available Metrics:**
+- `word_count`: Number of words (using word boundary detection)
+- `line_count`: Total lines (including empty lines)
+- `non_empty_line_count`: Lines with actual content
+- `character_count`: Total characters (including spaces)
+- `character_count_no_spaces`: Characters excluding spaces
+- `paragraph_count`: Number of paragraphs
+- `sentence_count`: Number of sentences
+- `avg_words_per_sentence`: Average words per sentence (if `include_advanced=True`)
+- `avg_words_per_paragraph`: Average words per paragraph (if `include_advanced=True`)
+
+**Usage**:
+```python
+from orchestrator.tools.file_analysis_tools import (
+    analyze_text_metrics,
+    analyze_document_metrics,
+    analyze_active_editor_metrics
+)
+
+# Analyze raw text
+metrics = await analyze_text_metrics(
+    text="Your text content here...",
+    include_advanced=True,
+    user_id=user_id
+)
+print(f"Word count: {metrics['word_count']:,}")
+print(f"Sentences: {metrics['sentence_count']:,}")
+
+# Analyze document by ID
+metrics = await analyze_document_metrics(
+    document_id=doc_id,
+    user_id=user_id,
+    include_advanced=True
+)
+
+# Analyze active editor content
+metrics = await analyze_active_editor_metrics(
+    active_editor=active_editor,
+    include_advanced=True,
+    user_id=user_id
+)
+```
+
+**Use Cases:**
+- **Story Analysis Agent**: Get precise word counts, chapter lengths, pacing metrics
+- **Content Analysis**: Measure document statistics for quality assessment
+- **Writing Metrics**: Track word counts, sentence/paragraph averages
+- **Comparative Analysis**: Compare metrics between different sections or documents
+
+**Key Features:**
+- ✅ **Deterministic**: Same text always produces same metrics
+- ✅ **Precise**: Uses regex word boundary detection (consistent with prose_quality.py)
+- ✅ **Fast**: Pure Python implementation, no external dependencies
+- ✅ **Comprehensive**: Basic metrics + optional advanced metrics (averages)
+
+### Web Tools (`orchestrator/tools/web_tools.py`)
+**Backend gRPC tools for web search**
+
+- `search_web_tool(query, num_results)` - Standard web search
+- `search_web_structured(query, num_results)` - Structured web search with snippets
+- `crawl_web_content_tool(url)` - Crawl web content and extract text
+- `search_and_crawl_tool(query, num_results)` - Combined search and crawl for better context
+
+**Usage**:
+```python
+from orchestrator.tools.web_tools import search_web_structured, crawl_web_content_tool
 
 results = await search_web_structured(query="Arduino ESP32 tutorial", num_results=10)
+content = await crawl_web_content_tool(url="https://example.com/guide")
 ```
+
+### Weather Tools (`backend/services/langgraph_tools/weather_tools.py`)
+**Backend tools for retrieving current, forecast, and historical weather data**
+
+- `weather_conditions(location, units, user_id)` - Get current weather conditions
+- `weather_forecast(location, days, units, user_id)` - Get weather forecast (up to 5 days)
+- `weather_history(location, date_str, units, user_id)` - Get historical weather data
+
+**Key Features:**
+- **Automatic location fallback**: If `user_id` is provided and location is vague (e.g., "user's location", "my location", empty string), the system automatically retrieves the user's ZIP code from their profile settings and uses it for geocoding
+- **Date range support**: Historical weather supports multiple date formats:
+  - `"YYYY-MM-DD"` - Specific day (e.g., `"2022-12-15"`)
+  - `"YYYY-MM"` - Monthly average (e.g., `"2022-12"`)
+  - `"YYYY-MM to YYYY-MM"` or `"YYYY-MM - YYYY-MM"` - Date range (e.g., `"2022-10 to 2024-02"`)
+    - Expands into monthly queries for each month in the range
+    - Returns aggregated averages across the entire range
+    - Maximum range: 24 months (2 years) to prevent excessive API calls
+
+**Usage**:
+```python
+from services.langgraph_tools.weather_tools import (
+    weather_conditions,
+    weather_forecast,
+    weather_history
+)
+
+# Current weather
+result = await weather_conditions(
+    location="Los Angeles, CA",
+    units="imperial",
+    user_id=user_id
+)
+
+# Automatic fallback to user's ZIP code
+result = await weather_conditions(
+    location="user's location",  # Will use user's ZIP from profile
+    units="imperial",
+    user_id=user_id
+)
+
+# Weather forecast
+result = await weather_forecast(
+    location="New York, NY",
+    days=5,
+    units="imperial",
+    user_id=user_id
+)
+
+# Historical weather - specific day
+result = await weather_history(
+    location="14532",
+    date_str="2022-12-15",
+    units="imperial",
+    user_id=user_id
+)
+
+# Historical weather - monthly average
+result = await weather_history(
+    location="90210",
+    date_str="2022-12",
+    units="imperial",
+    user_id=user_id
+)
+
+# Historical weather - date range (expands into monthly queries)
+result = await weather_history(
+    location="14532",
+    date_str="2022-10 to 2024-02",
+    units="imperial",
+    user_id=user_id
+)
+```
+
+**Return Formats:**
+- **Current weather**: Temperature, conditions, humidity, wind speed, moon phase
+- **Forecast**: Multi-day forecast with daily conditions
+- **Historical (daily)**: Temperature, conditions, humidity, wind speed, pressure for specific day
+- **Historical (monthly)**: Average, min, max temperatures, average humidity, average wind speed, most common conditions
+- **Historical (date range)**: Aggregated data across all months including `monthly_data` array with per-month averages
+
+**Location Fallback Behavior:**
+When `user_id` is provided and location is one of these vague values:
+- `"user's location"`, `"my location"`, `"current location"`, `""`, `"none"`, `"unknown"`
+
+The system will:
+1. Retrieve the user's ZIP code from their profile settings
+2. Use that ZIP code for geocoding
+3. Log the resolution: `"📍 Resolving vague location 'user's location' to user's ZIP: 14532"`
+
+If no ZIP code is found in the user's profile, the system will log a warning and attempt to geocode the original vague location (which will likely fail).
+
+**Note**: Requires OpenWeatherMap One Call API 3.0 subscription for historical data access
 
 ### Visualization Tools (`orchestrator/tools/visualization_tools.py`)
 **Pure utility tools for generating charts and graphs from structured data**
@@ -428,22 +725,27 @@ Agents should intelligently choose to use visualization when:
 5. Complex numerical data: When tabular data would be clearer as a chart
 
 ### Enhancement Tools (`orchestrator/tools/enhancement_tools.py`)
-**Backend gRPC tools for query enhancement**
+**Backend gRPC tools for query and context enhancement**
 
-- `expand_query_tool(query)` - Expand search query
-- `search_conversation_cache_tool(query, user_id)` - Search conversation history
+- `expand_query_tool(query)` - Expand search query into semantic variations
+- `search_conversation_cache_tool(query, user_id)` - Search conversation history for previous research/chat work before doing new searches
+
+**Usage**:
+```python
+from orchestrator.tools.enhancement_tools import expand_query_tool, search_conversation_cache_tool
+
+expanded = await expand_query_tool("keyboard matrix circuit")
+cached = await search_conversation_cache_tool("What did we discuss about ESP32?", user_id)
+```
 
 ### Project Content Management Tools (`orchestrator/tools/project_content_tools.py`)
 **Tools for intelligently managing project content across multiple files**
 
 - `save_or_update_project_content(result, project_plan_document_id, referenced_context, documents, user_id, metadata)` - Intelligently save/update content in appropriate files
 - `determine_content_target(response_text, frontmatter, referenced_context, documents)` - Determine which file and section to update based on content type
-- `enrich_documents_with_metadata(documents, referenced_context, user_id)` - Enrich documents with titles/descriptions from actual files
-- `check_if_new_file_needed(response_text, content_type, frontmatter, documents, referenced_context)` - Check if a new file should be created
+- `propose_section_update(document_id, existing_content, section_name, new_content, user_id, ...)` - Propose an update to an existing section
+- `append_project_content(document_id, section_name, content, user_id, ...)` - Append new content to a project file
 - `create_new_project_file(file_suggestion, project_plan_document_id, initial_content, project_plan_frontmatter, user_id, metadata)` - Create a new project file based on user approval
-- `should_update_existing_section(existing_content, section_name, new_content)` - Check if existing section should be updated vs appended
-- `propose_section_update(document_id, existing_content, section_name, new_content, user_id)` - Propose an update to an existing section
-- `append_project_content(document_id, section_name, content, user_id)` - Append new content to a project file
 
 **Usage**:
 ```python
@@ -690,14 +992,13 @@ from orchestrator.tools.project_structure_tools import (
 result = await plan_project_structure(
     query="I need to create a new electronics project for an Allen organ control system",
     user_id=user_id,
-    llm=llm_instance,  # Configured ChatOpenAI instance
+    llm=llm_instance,
     project_type="electronics",
     default_folder="Projects"
 )
 
 if result.get("success"):
     plan = result.get("plan")
-    # plan contains: project_name, folder_path, files[]
     
     # Execute the plan to create files
     execution_result = await execute_project_structure_plan(
@@ -707,11 +1008,26 @@ if result.get("success"):
         project_type="electronics",
         project_category="electronics"
     )
-    
-    if execution_result.get("success"):
-        project_plan_doc_id = execution_result.get("project_plan_document_id")
-        # Files created with proper frontmatter references using ./filename.md format
 ```
+
+### Org-Mode Tools (Backend)
+**BULLY! Tools for managing user's Org-mode inbox and searching reference files!**
+
+- `search_org_files(query, tags, todo_states, limit)` - Search across all user's .org files
+- `list_org_todos(todo_states, tags, limit)` - List all TODO items from org files
+- `search_org_by_tag(tag, limit)` - Search org files by specific tag
+- `org_inbox_list_items()` - List tasks from inbox.org
+- `org_inbox_add_item(text, kind)` - Add checkbox or TODO to inbox.org
+- `org_inbox_toggle_done(line_index)` - Toggle task state
+- `org_inbox_append_text(content)` - Append Org-mode content
+- `org_inbox_set_state(line_index, state)` - Set TODO state
+
+### Image & Messaging Tools (Backend)
+**BULLY! Tools for visual generation and messaging cavalry!**
+
+- `generate_image(prompt, size, format, num_images)` - Generate images via OpenRouter
+- `get_user_rooms(user_id, limit)` - Get list of chat rooms
+- `send_room_message(user_id, room_id, message_content, message_type)` - Send message to room
 
 ## Available Utilities by Category
 

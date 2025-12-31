@@ -34,7 +34,8 @@ from orchestrator.agents import (
     get_proofreading_agent,
     get_general_project_agent,
     get_reference_agent,
-    get_knowledge_builder_agent
+    get_knowledge_builder_agent,
+    get_technical_hyperspace_agent
 )
 from orchestrator.services import get_intent_classifier
 from langchain_core.messages import HumanMessage, AIMessage
@@ -82,6 +83,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         self.general_project_agent = None
         self.reference_agent = None
         self.knowledge_builder_agent = None
+        self.technical_hyperspace_agent = None
         logger.info("Initializing OrchestratorGRPCService...")
     
     def _ensure_agents_loaded(self):
@@ -188,6 +190,10 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             self.knowledge_builder_agent = get_knowledge_builder_agent()
             agents_loaded += 1
         
+        if self.technical_hyperspace_agent is None:
+            self.technical_hyperspace_agent = get_technical_hyperspace_agent()
+            agents_loaded += 1
+        
         if agents_loaded > 0:
             logger.info(f"✅ Loaded {agents_loaded}/{total_agents} agents")
     
@@ -208,8 +214,18 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         shared_memory = existing_shared_memory.copy() if existing_shared_memory else {}
         
         # Extract active_editor
-        logger.info(f"🔍 SHARED MEMORY EXTRACTION: HasField('active_editor')={request.HasField('active_editor')}")
-        if request.HasField("active_editor"):
+        # ROBUST CHECK: Check HasField first, but fallback to checking fields if False
+        has_active_editor = request.HasField("active_editor")
+        if not has_active_editor:
+            # Fallback: check if essential fields are non-empty
+            ae = request.active_editor
+            if ae.filename or ae.content or ae.document_id:
+                has_active_editor = True
+                logger.info(f"🔍 SHARED MEMORY EXTRACTION: HasField('active_editor') was False but fields are present")
+        
+        logger.info(f"🔍 SHARED MEMORY EXTRACTION: has_active_editor={has_active_editor}")
+        
+        if has_active_editor:
             logger.info(f"✅ ACTIVE EDITOR RECEIVED: filename={request.active_editor.filename}, type={request.active_editor.frontmatter.type}, content_length={len(request.active_editor.content)}")
             # Parse custom_fields, converting stringified lists back to actual lists
             # The backend converts YAML lists to strings (e.g., "['./file1.md', './file2.md']")
@@ -281,6 +297,13 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             document_id = request.active_editor.document_id if request.active_editor.document_id else None
             folder_id = request.active_editor.folder_id if request.active_editor.folder_id else None
             file_path = request.active_editor.file_path if request.active_editor.file_path else request.active_editor.filename
+            
+            # 🔒 LOCK target_document_id at request start to prevent race conditions
+            # This captures which document was active when the user sent the message
+            # Even if editor_ctx_cache changes mid-request (tab switch/shutdown), we use this locked value
+            if document_id:
+                shared_memory["target_document_id"] = document_id
+                logger.info(f"🔒 LOCKED target_document_id at request start: {document_id}")
             
             # Log cursor state for debugging
             if cursor_offset >= 0:
@@ -450,20 +473,25 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         if not isinstance(result, dict):
             return str(result)
         
-        # Try messages first (most common format)
+        # Try response field first (for agents like dictionary that structure response in response.message)
+        response = result.get("response", "")
+        if isinstance(response, dict):
+            # Check for message field first (dictionary agent format)
+            if "message" in response:
+                return response.get("message", "")
+            # Fallback to response field (other agents)
+            if "response" in response:
+                return response.get("response", "")
+        if isinstance(response, str):
+            return response
+        
+        # Try messages (for agents that use messages as primary response)
         agent_messages = result.get("messages", [])
         if agent_messages:
             last_message = agent_messages[-1]
             if hasattr(last_message, 'content'):
                 return last_message.content
             return str(last_message)
-        
-        # Try response field
-        response = result.get("response", "")
-        if isinstance(response, dict):
-            return response.get("response", "") or response.get("message", "")
-        if isinstance(response, str):
-            return response
         
         # Fallback
         return "Response generated"
@@ -729,6 +757,12 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             # Extract shared_memory from request (includes editor_preference)
             request_shared_memory = self._extract_shared_memory(request)
             
+            # 🔒 Extract target_document_id as top-level metadata field for easy agent access
+            # This locked document ID prevents race conditions during tab switches
+            if "target_document_id" in request_shared_memory:
+                metadata["target_document_id"] = request_shared_memory["target_document_id"]
+                logger.info(f"🔒 Added target_document_id to metadata: {metadata['target_document_id']}")
+            
             # Merge checkpoint shared_memory into context for intent classifier
             # Note: active_editor should NOT be in checkpoint (cleared by agents before save)
             # But we defensively clear it here if it somehow persists (safety net)
@@ -769,6 +803,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             
             # Determine which agent to use via intent classification
             primary_agent_name = None
+            agent_type = None  # Initialize to None - will be set by routing logic or intent classification
             
             # SHORT-CIRCUIT ROUTING: Check for "/help" prefix for instant help routing
             query_lower = request.query.lower().strip()
@@ -784,27 +819,95 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 # Update request.query for agent processing
                 request.query = cleaned_query
                 logger.info(f"❓ SHORT-CIRCUIT ROUTING: Help agent (query starts with '/help', cleaned: '{cleaned_query[:50]}...' if cleaned_query else 'empty')")
-                # Set primary_agent_selected in shared_memory for conversation continuity
+                
+                # Ensure shared_memory is in metadata and conversation_context
                 if "shared_memory" not in metadata:
                     metadata["shared_memory"] = {}
+                
+                # Merge the extracted request shared_memory (including active_editor!)
+                metadata["shared_memory"].update(request_shared_memory)
                 metadata["shared_memory"]["primary_agent_selected"] = agent_type
+                
                 if "shared_memory" not in conversation_context:
                     conversation_context["shared_memory"] = {}
+                conversation_context["shared_memory"].update(request_shared_memory)
                 conversation_context["shared_memory"]["primary_agent_selected"] = agent_type
+                
                 if checkpoint_shared_memory:
                     checkpoint_shared_memory["primary_agent_selected"] = agent_type
-                logger.info(f"📋 SET primary_agent_selected: {agent_type} (for conversation continuity)")
-            # SHORT-CIRCUIT ROUTING: Check for "define:" prefix for instant dictionary routing
-            elif query_lower.startswith("define:"):
+                
+                logger.info(f"📋 SET primary_agent_selected: {agent_type} (and merged {len(request_shared_memory)} shared_memory keys)")
+            # SHORT-CIRCUIT ROUTING: Check for "/define" prefix for instant dictionary routing
+            elif query_lower.startswith("/define"):
                 agent_type = "dictionary_agent"
                 primary_agent_name = agent_type
-                logger.info(f"📖 SHORT-CIRCUIT ROUTING: Dictionary agent (query starts with 'define:')")
+                # Strip "/define" prefix from query (with optional space after)
+                # Handle both "/define" and "/define " (with space)
+                cleaned_query = request.query[7:].strip()  # Remove "/define" (7 chars)
+                # If no query after "/define", use empty string (dictionary agent will handle it)
+                if not cleaned_query:
+                    cleaned_query = ""
+                # Update request.query for agent processing
+                request.query = cleaned_query
+                logger.info(f"📖 SHORT-CIRCUIT ROUTING: Dictionary agent (query starts with '/define', cleaned: '{cleaned_query[:50]}...' if cleaned_query else 'empty')")
+                
+                # Ensure shared_memory is in metadata and conversation_context
+                if "shared_memory" not in metadata:
+                    metadata["shared_memory"] = {}
+                
+                # Merge the extracted request shared_memory (including active_editor!)
+                metadata["shared_memory"].update(request_shared_memory)
+                metadata["shared_memory"]["primary_agent_selected"] = agent_type
+                
+                if "shared_memory" not in conversation_context:
+                    conversation_context["shared_memory"] = {}
+                conversation_context["shared_memory"].update(request_shared_memory)
+                conversation_context["shared_memory"]["primary_agent_selected"] = agent_type
+                
+                if checkpoint_shared_memory:
+                    checkpoint_shared_memory["primary_agent_selected"] = agent_type
+                
+                logger.info(f"📋 SET primary_agent_selected: {agent_type} (and merged {len(request_shared_memory)} shared_memory keys)")
+            # SHORT-CIRCUIT ROUTING: Check for "/hyperspace" prefix for Technical Hyperspace access
+            # ALWAYS routes to technical_hyperspace_agent regardless of editor preference or context
+            # The agent itself will handle missing editor cases with user-friendly error messages
+            elif query_lower.startswith("/hyperspace"):
+                agent_type = "technical_hyperspace_agent"
+                primary_agent_name = agent_type
+                # Strip "/hyperspace" prefix from query (with optional space after)
+                cleaned_query = request.query[11:].strip()  # Remove "/hyperspace" (11 chars)
+                # If no query after "/hyperspace", use empty string (agent will handle it)
+                if not cleaned_query:
+                    cleaned_query = ""
+                # Update request.query for agent processing
+                request.query = cleaned_query
+                logger.info(f"🚀 SHORT-CIRCUIT ROUTING: Technical Hyperspace (query starts with '/hyperspace', cleaned: '{cleaned_query[:50]}...' if cleaned_query else 'empty')")
+                
+                # Ensure shared_memory is in metadata and conversation_context
+                if "shared_memory" not in metadata:
+                    metadata["shared_memory"] = {}
+                
+                # Merge the extracted request shared_memory (including active_editor!)
+                metadata["shared_memory"].update(request_shared_memory)
+                metadata["shared_memory"]["primary_agent_selected"] = agent_type
+                
+                if "shared_memory" not in conversation_context:
+                    conversation_context["shared_memory"] = {}
+                conversation_context["shared_memory"].update(request_shared_memory)
+                conversation_context["shared_memory"]["primary_agent_selected"] = agent_type
+                
+                if checkpoint_shared_memory:
+                    checkpoint_shared_memory["primary_agent_selected"] = agent_type
+                
+                logger.info(f"📋 SET primary_agent_selected: {agent_type} (and merged {len(request_shared_memory)} shared_memory keys)")
             elif request.agent_type and request.agent_type != "auto":
                 # Explicit agent routing provided by backend
                 agent_type = request.agent_type
                 primary_agent_name = agent_type  # Store for next intent classification
                 logger.info(f"🎯 EXPLICIT ROUTING: {agent_type} (reason: {request.routing_reason or 'not specified'})")
-            else:
+            
+            # If agent_type is still None, use intent classification
+            if agent_type is None:
                 # Run intent classification to determine agent
                 logger.info(f"🎯 INTENT CLASSIFICATION: Running for query: {query_preview}")
                 intent_classifier = get_intent_classifier()
@@ -863,6 +966,142 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     messages.append(HumanMessage(content=msg.content))
                 elif msg.role == "assistant":
                     messages.append(AIMessage(content=msg.content))
+            
+            # Handle short-circuit routes FIRST (before normalization) - these bypass normalization
+            # This ensures /hyperspace always goes to technical_hyperspace_agent and /define goes to dictionary_agent
+            if agent_type == "dictionary_agent":
+                # Route directly to dictionary agent (short-circuit route)
+                yield orchestrator_pb2.ChatChunk(
+                    type="status",
+                    message="Dictionary agent looking up word definition...",
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="dictionary_agent"
+                )
+                
+                # Build metadata with shared_memory
+                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
+                
+                dictionary_metadata = {
+                    "user_id": request.user_id,
+                    "conversation_id": request.conversation_id,
+                    "shared_memory": shared_memory,
+                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
+                }
+                
+                result = await self._process_agent_with_cancellation(
+                    agent=self.dictionary_agent,
+                    query=request.query,
+                    metadata=dictionary_metadata,
+                    messages=messages,
+                    cancellation_token=cancellation_token
+                )
+                
+                response_text = self._extract_response_text(result)
+                
+                yield orchestrator_pb2.ChatChunk(
+                    type="content",
+                    message=response_text,
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="dictionary_agent"
+                )
+                
+                yield orchestrator_pb2.ChatChunk(
+                    type="complete",
+                    message=f"Dictionary lookup complete (word found: {result.get('response', {}).get('found', False) if isinstance(result.get('response'), dict) else False})",
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="system"
+                )
+                
+                return  # Exit early - short-circuit route handled
+            
+            elif agent_type == "technical_hyperspace_agent":
+                # Route directly to systems engineering agent (short-circuit route)
+                yield orchestrator_pb2.ChatChunk(
+                    type="status",
+                    message="🚀 Technical Hyperspace: Analyzing system topology and failure modes...",
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="technical_hyperspace_agent"
+                )
+                
+                # Build metadata with shared_memory
+                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
+                
+                se_metadata = {
+                    "user_id": request.user_id,
+                    "conversation_id": request.conversation_id,
+                    "shared_memory": shared_memory,
+                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
+                }
+                
+                result = await self._process_agent_with_cancellation(
+                    agent=self.technical_hyperspace_agent,
+                    query=request.query,
+                    metadata=se_metadata,
+                    messages=messages,
+                    cancellation_token=cancellation_token
+                )
+                
+                # Extract response
+                response_obj = result.get("response", {})
+                if isinstance(response_obj, dict):
+                    response_text = response_obj.get("response", "System modeling complete")
+                    simulation_results = response_obj.get("simulation_results")
+                    diagram_result = response_obj.get("diagram_result")
+                    chart_result = response_obj.get("chart_result")
+                    pending_questions = response_obj.get("pending_questions", [])
+                else:
+                    response_text = str(response_obj) if response_obj else "System modeling complete"
+                    simulation_results = None
+                    diagram_result = None
+                    chart_result = None
+                    pending_questions = []
+                
+                # Send diagram if available
+                if diagram_result and diagram_result.get("success"):
+                    import json
+                    yield orchestrator_pb2.ChatChunk(
+                        type="diagram",
+                        message=json.dumps(diagram_result),
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="technical_hyperspace_agent"
+                    )
+                
+                # Send chart if available
+                if chart_result and chart_result.get("success"):
+                    import json
+                    yield orchestrator_pb2.ChatChunk(
+                        type="chart",
+                        message=json.dumps(chart_result),
+                        timestamp=datetime.now().isoformat(),
+                        agent_name="technical_hyperspace_agent"
+                    )
+                
+                # Send main response
+                yield orchestrator_pb2.ChatChunk(
+                    type="content",
+                    message=response_text,
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="technical_hyperspace_agent"
+                )
+                
+                # Determine completion status
+                task_status = result.get("task_status", "complete")
+                if pending_questions:
+                    status_msg = f"Technical Hyperspace: {len(pending_questions)} questions require your input"
+                elif simulation_results and simulation_results.get("success"):
+                    health = simulation_results.get("health_metrics", {})
+                    status_msg = f"System simulation complete: {health.get('operational_components', 0)}/{health.get('total_components', 0)} components operational"
+                else:
+                    status_msg = "Technical Hyperspace analysis complete"
+                
+                yield orchestrator_pb2.ChatChunk(
+                    type="complete",
+                    message=status_msg,
+                    timestamp=datetime.now().isoformat(),
+                    agent_name="system"
+                )
+                
+                return  # Exit early - short-circuit route handled
             
             # Convert agent name from intent classifier format to routing format
             # Intent classifier returns names like "research_agent", routing uses "research"
@@ -984,53 +1223,6 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 yield orchestrator_pb2.ChatChunk(
                     type="complete",
                     message=f"Help complete (status: {result.get('task_status', 'complete')})",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-            
-            elif agent_type == "dictionary":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Dictionary agent looking up word definition...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="dictionary_agent"
-                )
-                
-                # Build metadata with shared_memory (STANDARD PATTERN)
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                dictionary_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                if cancellation_token.is_set():
-                    raise asyncio.CancelledError("Operation cancelled")
-                
-                result = await self._process_agent_with_cancellation(
-                    agent=self.dictionary_agent,
-                    query=request.query,
-                    metadata=dictionary_metadata,
-                    messages=messages,
-                    cancellation_token=cancellation_token
-                )
-                
-                response_text = self._extract_response_text(result)
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="dictionary_agent"
-                )
-                
-                # Title generation is now handled by intent classifier (parallel, faster)
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=f"Dictionary lookup complete (word found: {result.get('found', False)})",
                     timestamp=datetime.now().isoformat(),
                     agent_name="system"
                 )
@@ -1294,9 +1486,23 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 if editor_operations:
                     # Send editor operations as separate chunk
                     import json
+                    # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+                    document_id = (
+                        electronics_metadata.get("target_document_id") or 
+                        shared_memory.get("active_editor", {}).get("document_id")
+                    )
+                    filename = shared_memory.get("active_editor", {}).get("filename")
+                    
+                    # Defensive logging: warn if document_id differs from active_editor
+                    active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
+                    if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
+                        logger.warning(f"⚠️ RACE CONDITION DETECTED (electronics): target={document_id}, active_editor={active_editor_doc_id}")
+                    
                     editor_ops_data = {
                         "operations": editor_operations,
-                        "manuscript_edit": manuscript_edit
+                        "manuscript_edit": manuscript_edit,
+                        "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
+                        "filename": filename
                     }
                     yield orchestrator_pb2.ChatChunk(
                         type="editor_operations",
@@ -1395,9 +1601,23 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 if editor_operations:
                     # Send editor operations as separate chunk
                     import json
+                    # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+                    document_id = (
+                        general_project_metadata.get("target_document_id") or 
+                        shared_memory.get("active_editor", {}).get("document_id")
+                    )
+                    filename = shared_memory.get("active_editor", {}).get("filename")
+                    
+                    # Defensive logging: warn if document_id differs from active_editor
+                    active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
+                    if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
+                        logger.warning(f"⚠️ RACE CONDITION DETECTED (general_project): target={document_id}, active_editor={active_editor_doc_id}")
+                    
                     editor_ops_data = {
                         "operations": editor_operations,
-                        "manuscript_edit": manuscript_edit
+                        "manuscript_edit": manuscript_edit,
+                        "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
+                        "filename": filename
                     }
                     yield orchestrator_pb2.ChatChunk(
                         type="editor_operations",
@@ -1571,12 +1791,26 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                         logger.info(f"✅ GRPC SERVICE: Sending {len(editor_operations)} editor operation(s) to frontend")
                         # Send editor operations as separate chunk
                         import json
+                        # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+                        document_id = (
+                            character_metadata.get("target_document_id") or 
+                            shared_memory.get("active_editor", {}).get("document_id")
+                        )
+                        filename = shared_memory.get("active_editor", {}).get("filename")
+                        
+                        # Defensive logging: warn if document_id differs from active_editor
+                        active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
+                        if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
+                            logger.warning(f"⚠️ RACE CONDITION DETECTED (character): target={document_id}, active_editor={active_editor_doc_id}")
+                        
                         editor_ops_data = {
                             "operations": editor_operations,
-                            "manuscript_edit": manuscript_edit
+                            "manuscript_edit": manuscript_edit,
+                            "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
+                            "filename": filename
                         }
                         logger.info(f"✅ Sending {len(editor_operations)} editor_operations to frontend (first op: {editor_operations[0] if editor_operations else None})")
-                        logger.info(f"🔍 Editor operations data structure: operations_count={len(editor_operations)}, has_manuscript_edit={bool(manuscript_edit)}")
+                        logger.info(f"🔍 Editor operations data structure: operations_count={len(editor_operations)}, has_manuscript_edit={bool(manuscript_edit)}, document_id={document_id}, filename={filename}")
                         if editor_operations:
                             logger.info(f"🔍 First operation details: op_type={editor_operations[0].get('op_type') if editor_operations else 'none'}, start={editor_operations[0].get('start') if editor_operations else 'none'}, end={editor_operations[0].get('end') if editor_operations else 'none'}, has_text={bool(editor_operations[0].get('text')) if editor_operations else False}, text_preview={editor_operations[0].get('text', '')[:100] if editor_operations and editor_operations[0].get('text') else 'N/A'}")
                         yield orchestrator_pb2.ChatChunk(
@@ -1760,12 +1994,26 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     if editor_operations:
                         # Send editor operations as separate chunk
                         import json
+                        # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+                        document_id = (
+                            fiction_metadata.get("target_document_id") or 
+                            shared_memory.get("active_editor", {}).get("document_id")
+                        )
+                        filename = shared_memory.get("active_editor", {}).get("filename")
+                        
+                        # Defensive logging: warn if document_id differs from active_editor
+                        active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
+                        if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
+                            logger.warning(f"⚠️ RACE CONDITION DETECTED (fiction): target={document_id}, active_editor={active_editor_doc_id}")
+                        
                         editor_ops_data = {
                             "operations": editor_operations,
-                            "manuscript_edit": manuscript_edit
+                            "manuscript_edit": manuscript_edit,
+                            "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
+                            "filename": filename
                         }
                         logger.info(f"✅ Sending {len(editor_operations)} editor_operations to frontend (first op: {editor_operations[0] if editor_operations else None})")
-                        logger.info(f"🔍 Editor operations data structure: operations_count={len(editor_operations)}, has_manuscript_edit={bool(manuscript_edit)}")
+                        logger.info(f"🔍 Editor operations data structure: operations_count={len(editor_operations)}, has_manuscript_edit={bool(manuscript_edit)}, document_id={document_id}, filename={filename}")
                         logger.info(f"🔍 First operation details: op_type={editor_operations[0].get('op_type') if editor_operations else 'none'}, start={editor_operations[0].get('start') if editor_operations else 'none'}, end={editor_operations[0].get('end') if editor_operations else 'none'}, has_text={bool(editor_operations[0].get('text')) if editor_operations else False}")
                         yield orchestrator_pb2.ChatChunk(
                             type="editor_operations",
@@ -1902,11 +2150,25 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 # Send editor operations if present (after content, regardless of message structure)
                 if editor_operations and len(editor_operations) > 0:
                     import json
+                    # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+                    document_id = (
+                        outline_metadata.get("target_document_id") or 
+                        shared_memory.get("active_editor", {}).get("document_id")
+                    )
+                    filename = shared_memory.get("active_editor", {}).get("filename")
+                    
+                    # Defensive logging: warn if document_id differs from active_editor
+                    active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
+                    if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
+                        logger.warning(f"⚠️ RACE CONDITION DETECTED (outline): target={document_id}, active_editor={active_editor_doc_id}")
+                    
                     editor_ops_data = {
                         "operations": editor_operations,
-                        "manuscript_edit": manuscript_edit
+                        "manuscript_edit": manuscript_edit,
+                        "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
+                        "filename": filename
                     }
-                    logger.info(f"✅ Sending {len(editor_operations)} editor operations to frontend")
+                    logger.info(f"✅ Sending {len(editor_operations)} editor operations to frontend (document_id={document_id}, filename={filename})")
                     yield orchestrator_pb2.ChatChunk(
                         type="editor_operations",
                         message=json.dumps(editor_ops_data),
@@ -1987,10 +2249,25 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     if editor_operations:
                         # Send editor operations as separate chunk
                         import json
+                        # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+                        document_id = (
+                            rules_metadata.get("target_document_id") or 
+                            shared_memory.get("active_editor", {}).get("document_id")
+                        )
+                        filename = shared_memory.get("active_editor", {}).get("filename")
+                        
+                        # Defensive logging: warn if document_id differs from active_editor
+                        active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
+                        if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
+                            logger.warning(f"⚠️ RACE CONDITION DETECTED (rules): target={document_id}, active_editor={active_editor_doc_id}")
+                        
                         editor_ops_data = {
                             "operations": editor_operations,
-                            "manuscript_edit": manuscript_edit
+                            "manuscript_edit": manuscript_edit,
+                            "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
+                            "filename": filename
                         }
+                        logger.info(f"✅ RULES AGENT: Sending {len(editor_operations)} editor operations with document_id={document_id}, filename={filename}")
                         yield orchestrator_pb2.ChatChunk(
                             type="editor_operations",
                             message=json.dumps(editor_ops_data),
@@ -2083,10 +2360,25 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     if editor_operations:
                         # Send editor operations as separate chunk
                         import json
+                        # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+                        document_id = (
+                            style_metadata.get("target_document_id") or 
+                            shared_memory.get("active_editor", {}).get("document_id")
+                        )
+                        filename = shared_memory.get("active_editor", {}).get("filename")
+                        
+                        # Defensive logging: warn if document_id differs from active_editor
+                        active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
+                        if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
+                            logger.warning(f"⚠️ RACE CONDITION DETECTED (style): target={document_id}, active_editor={active_editor_doc_id}")
+                        
                         editor_ops_data = {
                             "operations": editor_operations,
-                            "manuscript_edit": manuscript_edit
+                            "manuscript_edit": manuscript_edit,
+                            "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
+                            "filename": filename
                         }
+                        logger.info(f"✅ STYLE AGENT: Sending {len(editor_operations)} editor operations with document_id={document_id}, filename={filename}")
                         yield orchestrator_pb2.ChatChunk(
                             type="editor_operations",
                             message=json.dumps(editor_ops_data),
@@ -2179,10 +2471,25 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     if editor_operations:
                         # Send editor operations as separate chunk
                         import json
+                        # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+                        document_id = (
+                            proofreading_metadata.get("target_document_id") or 
+                            shared_memory.get("active_editor", {}).get("document_id")
+                        )
+                        filename = shared_memory.get("active_editor", {}).get("filename")
+                        
+                        # Defensive logging: warn if document_id differs from active_editor
+                        active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
+                        if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
+                            logger.warning(f"⚠️ RACE CONDITION DETECTED (proofreading): target={document_id}, active_editor={active_editor_doc_id}")
+                        
                         editor_ops_data = {
                             "operations": editor_operations,
-                            "manuscript_edit": manuscript_edit
+                            "manuscript_edit": manuscript_edit,
+                            "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
+                            "filename": filename
                         }
+                        logger.info(f"✅ PROOFREADING AGENT: Sending {len(editor_operations)} editor operations with document_id={document_id}, filename={filename}")
                         yield orchestrator_pb2.ChatChunk(
                             type="editor_operations",
                             message=json.dumps(editor_ops_data),
@@ -2419,10 +2726,25 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 if editor_operations:
                     # Send editor operations as separate chunk
                     import json
+                    # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+                    document_id = (
+                        article_writing_metadata.get("target_document_id") or 
+                        shared_memory.get("active_editor", {}).get("document_id")
+                    )
+                    filename = shared_memory.get("active_editor", {}).get("filename")
+                    
+                    # Defensive logging: warn if document_id differs from active_editor
+                    active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
+                    if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
+                        logger.warning(f"⚠️ RACE CONDITION DETECTED (article): target={document_id}, active_editor={active_editor_doc_id}")
+                    
                     editor_ops_data = {
                         "operations": editor_operations,
-                        "manuscript_edit": manuscript_edit
+                        "manuscript_edit": manuscript_edit,
+                        "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
+                        "filename": filename
                     }
+                    logger.info(f"✅ ARTICLE AGENT: Sending {len(editor_operations)} editor operations with document_id={document_id}, filename={filename}")
                     yield orchestrator_pb2.ChatChunk(
                         type="editor_operations",
                         message=json.dumps(editor_ops_data),
@@ -2487,10 +2809,25 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 if editor_operations:
                     # Send editor operations as separate chunk
                     import json
+                    # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+                    document_id = (
+                        podcast_metadata.get("target_document_id") or 
+                        shared_memory.get("active_editor", {}).get("document_id")
+                    )
+                    filename = shared_memory.get("active_editor", {}).get("filename")
+                    
+                    # Defensive logging: warn if document_id differs from active_editor
+                    active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
+                    if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
+                        logger.warning(f"⚠️ RACE CONDITION DETECTED (podcast): target={document_id}, active_editor={active_editor_doc_id}")
+                    
                     editor_ops_data = {
                         "operations": editor_operations,
-                        "manuscript_edit": manuscript_edit
+                        "manuscript_edit": manuscript_edit,
+                        "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
+                        "filename": filename
                     }
+                    logger.info(f"✅ PODCAST AGENT: Sending {len(editor_operations)} editor operations with document_id={document_id}, filename={filename}")
                     yield orchestrator_pb2.ChatChunk(
                         type="editor_operations",
                         message=json.dumps(editor_ops_data),

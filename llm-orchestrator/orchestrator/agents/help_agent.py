@@ -207,6 +207,18 @@ status: draft
   - Automatically updates project files based on your input
   - Example: "Plan an HVAC system for my home", "Create a project plan for [project]"
   - Note: Maintains a project plan as the source of truth and organizes detailed specifications in referenced files
+  
+- `type: systems` - Enables **Systems Engineering Agent (Technical Hyperspace)** for system design and failure simulation
+  - **Technical Hyperspace**: Models system behavior in multi-dimensional space, analyzing systems across multiple dimensions (components, dependencies, failure modes, time, state transitions, etc.)
+  - System design and topology modeling
+  - Component definition and dependency analysis
+  - Failure mode simulation and cascade analysis
+  - System gap identification and requirements gathering
+  - Technical diagram generation (Mermaid flowcharts, state diagrams)
+  - Project management: Creates system documentation, organizes project files
+  - Automatically updates system documentation based on your input
+  - Example: "Design a distributed system", "Simulate failure modes", "Analyze system topology"
+  - Note: Uses `files` list in frontmatter to reference related system documentation. Maintains system components and topology in the primary document. Access via `/hyperspace` command for instant routing.
 
 **Reference Types:**
 - `type: reference` - Enables **Reference Agent** for personal reference documents
@@ -254,6 +266,17 @@ status: planning
 ---
 ```
 
+Systems Engineering:
+```yaml
+---
+type: systems
+title: Distributed System Architecture
+files:
+  - ./component-specs.md
+  - ./failure-modes.md
+---
+```
+
 When you have a document open with a matching type, agents automatically use it as project context!
 
 **ORG-MODE TASKS (Manage TODO items)**
@@ -279,6 +302,30 @@ In-dialog hotkeys:
 - **Enter** - Submit/Confirm in refile/tag dialogs
 - **Esc** - Cancel/Close any dialog
 
+**SPECIAL COMMANDS (Short-Circuit Routing)**
+These commands bypass normal intent classification and route directly to specific agents:
+
+- **/help** - Instantly access the Help Agent
+  - Usage: `/help` or `/help [topic]`
+  - Example: `/help keyboard shortcuts` → Direct help on that topic
+  - Bypasses intent classification for immediate help access
+
+- **/define** - Instantly access the Dictionary Agent
+  - Usage: `/define [word]`
+  - Example: `/define inveterate` → Direct word definition lookup
+  - Provides comprehensive lexicographic information (definitions, synonyms, antonyms, etymology)
+  - Bypasses intent classification for instant dictionary access
+
+- **/hyperspace** - Instantly access the Systems Engineering Agent (Technical Hyperspace)
+  - Usage: `/hyperspace` or `/hyperspace [query]`
+  - Example: `/hyperspace analyze system topology` → Direct systems engineering analysis
+  - **What is Technical Hyperspace?** Technical Hyperspace is a means of modeling system behavior in multi-dimensional space. The agent analyzes systems across multiple dimensions (components, dependencies, failure modes, time, state transitions, etc.) to understand complex system behavior and interactions.
+  - Provides system design, topology modeling, failure simulation, and technical diagrams
+  - Bypasses intent classification for immediate systems engineering access
+  - Note: Works best with a document open that has `type: systems` in frontmatter
+
+These commands are "short-circuit" routes that skip the normal agent selection process, giving you instant access to specific agents without waiting for intent classification.
+
 ═══════════════════════════════════════════════════════════════
 SYSTEM CAPABILITIES - AVAILABLE AGENTS
 ═══════════════════════════════════════════════════════════════
@@ -299,6 +346,16 @@ What it does:
 - Casual follow-up questions
 When to use: Conversational queries, "What do you think about...", "Explain...", "Help me understand..."
 Example: "What do you think is the best approach for this?" → Conversational response
+
+**DICTIONARY AGENT**
+What it does:
+- Provides word definitions, synonyms, antonyms, and etymology
+- Comprehensive lexicographic information
+- Pronunciation guides and usage examples
+- Multiple meanings and parts of speech
+When to use: `/define [word]` (short-circuit command), "Define [word]", "What does [word] mean?", "Synonyms for [word]"
+Example: `/define inveterate` → Comprehensive word definition with etymology and usage
+Note: Use `/define` command for instant access (bypasses intent classification)
 
 **FICTION EDITING AGENT**
 What it does:
@@ -435,6 +492,20 @@ When to use: "Plan a [project type]", "Create a project plan for [project]", "He
 Example: "Plan an HVAC system for my home" → Comprehensive project plan with requirements, design approach, timeline, and organized project files
 Note: Works best when you have a document open with `type: project` in frontmatter. Handles a wide variety of projects including HVAC, landscaping, gardening, home improvement, and more. The agent maintains a project plan as the source of truth and organizes detailed specifications in referenced files.
 
+**SYSTEMS ENGINEERING AGENT (Technical Hyperspace)**
+What it does:
+- **Technical Hyperspace Modeling**: Models system behavior in multi-dimensional space, analyzing systems across multiple dimensions (components, dependencies, failure modes, time, state transitions, etc.) to understand complex system behavior and interactions
+- System design and topology modeling
+- Component definition and dependency analysis
+- Failure mode simulation and cascade analysis
+- System gap identification and requirements gathering
+- Technical diagram generation (Mermaid flowcharts, state diagrams, sequence diagrams)
+- Project management: Creates system documentation, organizes project files
+- Automatically updates system documentation based on your input
+When to use: "Design a distributed system", "Simulate failure modes", "Analyze system topology", "Identify system gaps", "Create system diagrams", or use `/hyperspace` command for instant access
+Example: "Design a microservices architecture with failure simulation" → System design with component definitions, topology, and failure cascade analysis
+Note: Works best when you have a document open with `type: systems` in frontmatter (uses it as project context). The agent maintains system components and topology in the primary document and uses `files` list in frontmatter to reference related documentation. The "Technical Hyperspace" concept refers to modeling system behavior across multiple dimensions simultaneously.
+
 **REFERENCE AGENT**
 What it does:
 - Analyzes personal reference documents (journals, logs, records, tracking documents)
@@ -467,6 +538,7 @@ EDITOR-BASED AGENTS SUMMARY
 **Technical Editor Agents:**
 - **Electronics Agent** (`type: electronics`) - Circuit design, embedded programming, project management
 - **General Project Agent** (`type: project`) - Project planning, design, documentation (HVAC, landscaping, etc.)
+- **Systems Engineering Agent** (`type: systems`) - System design, topology modeling, failure simulation
 
 **Reference Editor Agents:**
 - **Reference Agent** (`type: reference`) - Analysis of journals, logs, records, pattern detection

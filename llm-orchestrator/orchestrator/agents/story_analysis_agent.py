@@ -14,7 +14,11 @@ from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from .base_agent import BaseAgent, TaskStatus
-from orchestrator.tools.file_analysis_tools import analyze_active_editor_metrics
+from orchestrator.tools.file_analysis_tools import (
+    analyze_active_editor_metrics,
+    analyze_text_metrics,
+    analyze_document_metrics
+)
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +168,7 @@ class StoryAnalysisAgent(BaseAgent):
             # Get file analysis metrics
             metrics = None
             try:
+                logger.info("📊 Calling analyze_active_editor_metrics tool...")
                 metrics = await analyze_active_editor_metrics(
                     active_editor=active_editor,
                     include_advanced=True,
@@ -172,6 +177,9 @@ class StoryAnalysisAgent(BaseAgent):
                 if "error" in metrics:
                     logger.warning(f"File analysis failed (non-fatal): {metrics['error']}")
                     metrics = None
+                else:
+                    word_count = metrics.get('word_count', 0)
+                    logger.info(f"✅ Analysis tools completed: {word_count:,} words, {metrics.get('paragraph_count', 0):,} paragraphs, {metrics.get('sentence_count', 0):,} sentences")
             except Exception as e:
                 logger.warning(f"File analysis error (non-fatal): {e}")
                 metrics = None
@@ -185,10 +193,16 @@ class StoryAnalysisAgent(BaseAgent):
                 "- If user asks a SPECIFIC QUESTION (e.g., 'Does Vivian have enough screen time?'), answer that question using evidence from the full manuscript\n"
                 "- If user asks about MULTIPLE CHAPTERS (e.g., 'Analyze chapters 3-5'), focus on those chapters\n"
                 "- If user asks for GENERAL REVIEW (e.g., 'Review the manuscript', 'Is this ready for publication?'), provide comprehensive analysis of the whole work\n\n"
+                "**TEXT ANALYSIS TOOLS AVAILABLE:**\n"
+                "- You have access to precise, deterministic text analysis tools for word counts, character counts, sentence counts, paragraph counts, and advanced metrics\n"
+                "- These tools provide accurate, consistent measurements for any text content\n"
+                "- Use these metrics when analyzing pacing, chapter length, dialogue density, or any quantitative aspects of the manuscript\n"
+                "- The manuscript statistics are provided above, but you can reference specific metrics when relevant to your analysis\n\n"
                 "**ALWAYS:**\n"
                 "- Start by acknowledging what you're analyzing (e.g., 'Analysis of Chapter 2:' or 'Assessment of Vivian's presence throughout the manuscript:')\n"
                 "- Provide specific, actionable recommendations\n"
                 "- Reference specific passages when helpful\n"
+                "- Use precise metrics (word counts, sentence counts, etc.) when they support your analysis\n"
                 "- Keep tone supportive and direct\n"
                 "- Use the full manuscript context to provide deeper insights, but stay focused on the user's specific request"
             )

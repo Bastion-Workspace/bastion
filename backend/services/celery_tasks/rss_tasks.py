@@ -72,9 +72,8 @@ def extract_full_content_task(
 async def _cleanup_stuck_polling_feeds():
     """Clean up feeds that have been stuck in polling state for too long"""
     try:
-        from services.service_container import get_service_container
-        service_container = await get_service_container()
-        rss_service = service_container.rss_service
+        from tools_service.services.rss_service import get_rss_service
+        rss_service = await get_rss_service()
 
         cleaned_count = await rss_service.cleanup_stuck_polling_feeds()
         if cleaned_count > 0:
@@ -89,9 +88,8 @@ async def _cleanup_stuck_polling_feeds():
 async def _get_feeds_summary():
     """Get a summary of RSS feeds status for monitoring"""
     try:
-        from services.service_container import get_service_container
-        service_container = await get_service_container()
-        rss_service = service_container.rss_service
+        from tools_service.services.rss_service import get_rss_service
+        rss_service = await get_rss_service()
 
         # Get total feeds count
         from services.database_manager.database_helpers import fetch_value
@@ -417,9 +415,8 @@ async def _async_process_rss_article(
         update_task_progress(task, 2, 5, "Retrieving article metadata...")
         
         # Retrieve article from database
-        from services.service_container import get_service_container
-        service_container = await get_service_container()
-        rss_service = service_container.rss_service
+        from tools_service.services.rss_service import get_rss_service
+        rss_service = await get_rss_service()
         
         # Add retry logic for database connection issues
         max_retries = 5
@@ -809,9 +806,8 @@ async def _async_extract_full_content(task, user_id: str, article_ids: List[str]
         update_task_progress(task, 2, 4, "Retrieving articles needing full content...")
         
         # Get RSS service
-        from services.service_container import get_service_container
-        service_container = await get_service_container()
-        rss_service = service_container.rss_service
+        from tools_service.services.rss_service import get_rss_service
+        rss_service = await get_rss_service()
         
         # Get articles that need full content
         articles = []

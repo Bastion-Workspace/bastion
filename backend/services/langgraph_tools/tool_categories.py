@@ -15,7 +15,6 @@ class ToolCategory(str, Enum):
     ANALYSIS = "analysis"  # Content analysis
     MATH = "math"  # Calculations
     WEATHER = "weather"  # Weather queries
-    AWS_PRICING = "aws_pricing"  # AWS cost tools
     ORG_FILES = "org_files"  # Org-mode search
     MESSAGING = "messaging"  # Room messaging
     FILE_CREATION = "file_creation"  # File/folder ops
@@ -33,10 +32,6 @@ CATEGORY_KEYWORDS: Dict[ToolCategory, List[str]] = {
     ToolCategory.MATH: [
         "calculate", "compute", "formula", "math", "equation", "solve",
         "arithmetic", "algebra", "geometry", "statistics", "percentage"
-    ],
-    ToolCategory.AWS_PRICING: [
-        "aws", "cost", "pricing", "ec2", "s3", "lambda", "rds", "cloudwatch",
-        "billing", "estimate", "price", "region", "instance", "service cost"
     ],
     ToolCategory.SEARCH_WEB: [
         "search web", "look up", "find online", "web search", "internet",

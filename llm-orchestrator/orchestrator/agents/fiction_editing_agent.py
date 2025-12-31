@@ -1590,10 +1590,13 @@ class FictionEditingAgent(BaseAgent):
         try:
             logger.info("Formatting response...")
             
+            # Extract operations from state FIRST (needed throughout function)
+            editor_operations = state.get("editor_operations", [])
+            failed_operations = state.get("failed_operations", [])
+            
             # Check if this is a question response (already formatted in answer_question_node)
             # BUT: If operations were generated, include them even for questions
             existing_response = state.get("response", {})
-            editor_operations = state.get("editor_operations", [])
             
             if existing_response and isinstance(existing_response, dict) and existing_response.get("response"):
                 # Question response already formatted - but check if we have operations to include
@@ -1640,17 +1643,23 @@ class FictionEditingAgent(BaseAgent):
                 if structured_edit and structured_edit.summary:
                     summary = structured_edit.summary
                     if len(editor_operations) == 0:
-                        # Pure question with no operations - return summary as response
-                        logger.info("Question request with no operations - using summary as response")
-                        return {
-                            "response": {
-                                "response": summary,
+                        # Check if we have failed_operations that should be converted for manual application
+                        if failed_operations:
+                            logger.info(f"Question request with no successful operations but {len(failed_operations)} failed_operations - will convert for manual application")
+                            # Don't return early - fall through to handle failed_operations conversion below
+                            response_text = summary
+                        else:
+                            # Pure question with no operations at all - return summary as response
+                            logger.info("Question request with no operations - using summary as response")
+                            return {
+                                "response": {
+                                    "response": summary,
+                                    "task_status": "complete",
+                                    "agent_type": "fiction_editing_agent"
+                                },
                                 "task_status": "complete",
-                                "agent_type": "fiction_editing_agent"
-                            },
-                            "task_status": "complete",
-                            "editor_operations": []
-                        }
+                                "editor_operations": []
+                            }
                     else:
                         # Question with operations - use summary as response text (conversational feedback)
                         logger.info(f"Question request with {len(editor_operations)} operations - using summary as conversational response")
@@ -1660,6 +1669,8 @@ class FictionEditingAgent(BaseAgent):
                     logger.warning("Question request but no summary in structured_edit - using fallback")
                     if editor_operations:
                         response_text = f"Analysis complete. Made {len(editor_operations)} edit(s) based on your question."
+                    elif failed_operations:
+                        response_text = f"Analysis complete. Generated {len(failed_operations)} edit(s) that require manual placement."
                     else:
                         response_text = "Analysis complete."
             # Build response text for edit requests - use summary, not full text
@@ -1727,8 +1738,7 @@ class FictionEditingAgent(BaseAgent):
                 warnings_section = "\n\n**⚠️ Validation Notices:**\n" + "\n".join(all_warnings)
                 response_text = response_text + warnings_section
             
-            # Add failed operations if present
-            failed_operations = state.get("failed_operations", [])
+            # Add failed operations if present (already extracted at top of function)
             if failed_operations:
                 failed_section = "\n\n**⚠️ UNRESOLVED EDITS (Manual Action Required)**\n"
                 failed_section += "The following generated content could not be automatically placed in the manuscript. You can copy and paste these sections manually:\n\n"
@@ -1787,20 +1797,72 @@ class FictionEditingAgent(BaseAgent):
                 }
             else:
                 logger.info(f"ℹ️ Format response: No editor_operations to include (editor_operations from state: {len(state.get('editor_operations', []))})")
-                # If no operations, use LLM's summary to explain why
-                if structured_edit and structured_edit.summary:
-                    # LLM provided explanation for empty operations - use it
-                    summary = structured_edit.summary
-                    logger.info(f"ℹ️ Using LLM's explanation for empty operations: {summary[:200]}")
-                    # If response_text is just default, replace with LLM's explanation
-                    if response.get("response") == "Fiction editing complete" or not response.get("response"):
-                        response["response"] = summary
+                
+                # Check if we have failed_operations that should be converted to editor_operations for manual application
+                if failed_operations:
+                    logger.info(f"⚠️ No successful editor_operations, but {len(failed_operations)} failed_operations found - converting to editor_operations for manual application")
+                    
+                    # Convert failed_operations to editor_operations format
+                    # These will be marked as requiring manual placement since they couldn't be auto-resolved
+                    manual_editor_operations = []
+                    for failed_op in failed_operations:
+                        op_type = failed_op.get("op_type", "insert_after")
+                        text = failed_op.get("text", "")
+                        original_text = failed_op.get("original_text", "")
+                        anchor_text = failed_op.get("anchor_text", "")
+                        
+                        # Create editor operation in standard format
+                        # Use -1 for start/end to indicate manual placement needed
+                        manual_op = {
+                            "op_type": op_type,
+                            "text": text,
+                            "original_text": original_text or anchor_text,  # Use anchor/original as context
+                            "anchor_text": anchor_text or original_text,
+                            "start": -1,  # Indicates manual placement required
+                            "end": -1,    # Indicates manual placement required
+                            "requires_manual_placement": True,  # Flag for frontend
+                            "error": failed_op.get("error", "Anchor or original text not found")
+                        }
+                        manual_editor_operations.append(manual_op)
+                    
+                    # Include converted operations as editor_operations
+                    response["editor_operations"] = manual_editor_operations
+                    logger.info(f"✅ Converted {len(manual_editor_operations)} failed_operations to editor_operations for manual application")
+                    
+                    # Create manuscript_edit structure for failed operations
+                    if structured_edit:
+                        response["manuscript_edit"] = {
+                            "target_filename": structured_edit.target_filename,
+                            "scope": structured_edit.scope,
+                            "summary": structured_edit.summary or "Generated content requires manual placement",
+                            "chapter_index": structured_edit.chapter_index,
+                            "safety": structured_edit.safety,
+                            "operations": manual_editor_operations
+                        }
                     else:
-                        # Append LLM's explanation to existing response
-                        response["response"] = f"{response.get('response', '')}\n\n{summary}"
-                elif not response.get("response") or response.get("response") == "Fiction editing complete":
-                    # No summary provided - generic message
-                    response["response"] = "No edits were generated. The agent may need more context or clarification. Please try rephrasing your request or providing more details."
+                        response["manuscript_edit"] = {
+                            "target_filename": state.get("filename", "manuscript.md"),
+                            "scope": "unknown",
+                            "summary": "Generated content requires manual placement - anchor text not found",
+                            "chapter_index": None,
+                            "safety": "medium",
+                            "operations": manual_editor_operations
+                        }
+                else:
+                    # If no operations, use LLM's summary to explain why
+                    if structured_edit and structured_edit.summary:
+                        # LLM provided explanation for empty operations - use it
+                        summary = structured_edit.summary
+                        logger.info(f"ℹ️ Using LLM's explanation for empty operations: {summary[:200]}")
+                        # If response_text is just default, replace with LLM's explanation
+                        if response.get("response") == "Fiction editing complete" or not response.get("response"):
+                            response["response"] = summary
+                        else:
+                            # Append LLM's explanation to existing response
+                            response["response"] = f"{response.get('response', '')}\n\n{summary}"
+                    elif not response.get("response") or response.get("response") == "Fiction editing complete":
+                        # No summary provided - generic message
+                        response["response"] = "No edits were generated. The agent may need more context or clarification. Please try rephrasing your request or providing more details."
             
             # Defensive check: ensure editor_operations are always in response if they exist in state
             if not response.get("editor_operations") and state.get("editor_operations"):

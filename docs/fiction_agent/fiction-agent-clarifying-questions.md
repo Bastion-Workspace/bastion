@@ -422,7 +422,7 @@ I nodded, already making mental notes about what to pack. If Fleet was wrong, at
 
 ### Response Processing
 
-**File:** `backend/services/langgraph_agents/fiction_editing_agent.py`
+**File:** `llm-orchestrator/orchestrator/agents/fiction_editing_agent.py`
 
 **Code:**
 ```python
@@ -534,7 +534,7 @@ Expected: Question about what truth Fleet discovers
 **1. `backend/models/agent_response_models.py`**
 - Added `clarifying_questions: Optional[List[str]]` field to `ManuscriptEdit` model
 
-**2. `backend/services/langgraph_agents/fiction_editing_agent.py`**
+**2. `llm-orchestrator/orchestrator/agents/fiction_editing_agent.py`**
 - Added "CLARIFYING QUESTIONS" section to system prompt (lines 264-304)
 - Added question handling in response processing (lines 821-828)
 

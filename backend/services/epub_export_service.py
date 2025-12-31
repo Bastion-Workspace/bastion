@@ -317,9 +317,19 @@ class EpubExportService:
             return f"<h{level}>{self._escape_html(title)}</h{level}>"
 
         text = self._heading_regex.sub(repl_heading, text)
-        # Bold and italic
+        
+        # Process formatting in order: bold before italic to handle nested formatting correctly
+        # Handle bold: **text** (asterisk-based, most common)
         text = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", text)
-        text = re.sub(r"\*(.+?)\*", r"<em>\1</em>", text)
+        # Handle bold: __text__ (underscore-based, requires word boundaries)
+        text = re.sub(r"(?<!\w)__(.+?)__(?!\w)", r"<strong>\1</strong>", text)
+        
+        # Handle italic: *text* (asterisk-based, single asterisk, not part of **)
+        # Use negative lookahead/lookbehind to ensure we don't match ** as *
+        text = re.sub(r"(?<!\*)\*([^*]+?)\*(?!\*)", r"<em>\1</em>", text)
+        # Handle italic: _text_ (underscore-based, requires word boundaries, not part of __)
+        text = re.sub(r"(?<!\w)(?<!_)_([^_]+?)_(?!_)(?!\w)", r"<em>\1</em>", text)
+        
         # Images and links
         text = re.sub(r"!\[([^\]]*)\]\(([^\)]+)\)", r"<img alt='\1' src='\2'/>", text)
         text = re.sub(r"\[([^\]]+)\]\(([^\)]+)\)", r"<a href='\2'>\1</a>", text)

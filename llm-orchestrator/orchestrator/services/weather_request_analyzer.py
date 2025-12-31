@@ -6,7 +6,7 @@ Analyzes user weather requests to determine intent, location, and preferences
 import logging
 import re
 import os
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from datetime import datetime
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -33,10 +33,41 @@ class WeatherRequestAnalyzer:
             temperature=temperature
         )
     
-    async def analyze_weather_request(self, user_message: str, shared_memory: Dict[str, Any]) -> Dict[str, Any]:
+    async def analyze_weather_request(self, user_message: str, shared_memory: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
         """Analyze user message to determine weather request type and location"""
         try:
             message_lower = user_message.lower()
+            
+            # Check for historical weather requests first
+            is_historical, date_str = await self._detect_historical_intent(user_message, shared_memory)
+            
+            if is_historical and date_str:
+                # Extract location from message or use defaults
+                location = await self._extract_location(user_message, shared_memory, user_id)
+                
+                # Determine units preference
+                units = "imperial"  # Default
+                if "celsius" in message_lower or "°c" in message_lower:
+                    units = "metric"
+                elif "fahrenheit" in message_lower or "°f" in message_lower:
+                    units = "imperial"
+                else:
+                    # Check user preferences from shared memory
+                    weather_prefs = shared_memory.get("weather_data", {}).get("user_preferences", {})
+                    units = weather_prefs.get("units", "imperial")
+                
+                # Check if this is a year-only query (needs multi-month expansion)
+                is_year_only = len(date_str.split("-")) == 1  # Just YYYY format
+                
+                return {
+                    "success": True,
+                    "request_type": "history",
+                    "location": location,
+                    "date_str": date_str,
+                    "is_year_only": is_year_only,
+                    "units": units,
+                    "original_message": user_message
+                }
             
             # Check for forecast vs current conditions
             is_forecast = any(word in message_lower for word in [
@@ -45,7 +76,7 @@ class WeatherRequestAnalyzer:
             ])
             
             # Extract location from message or use defaults
-            location = await self._extract_location(user_message, shared_memory)
+            location = await self._extract_location(user_message, shared_memory, user_id)
             
             # Determine forecast length if requesting forecast
             forecast_days = 1
@@ -86,19 +117,110 @@ class WeatherRequestAnalyzer:
                 "error": f"Could not understand weather request: {str(e)}"
             }
     
-    async def _extract_location(self, user_message: str, shared_memory: Dict[str, Any]) -> str:
+    async def _detect_historical_intent(self, user_message: str, shared_memory: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+        """Detect if user is requesting historical weather and extract date string"""
+        try:
+            message_lower = user_message.lower()
+            
+            # Check for historical keywords
+            historical_keywords = [
+                "historical", "history", "past", "previous", "last year", "last month",
+                "in december", "in january", "in february", "in march", "in april",
+                "in may", "in june", "in july", "in august", "in september",
+                "in october", "in november", "december", "january", "february",
+                "march", "april", "may", "june", "july", "august", "september",
+                "october", "november", "average", "was", "were", "back in"
+            ]
+            
+            has_historical_keyword = any(keyword in message_lower for keyword in historical_keywords)
+            
+            # Use LLM to extract date if historical intent detected
+            if has_historical_keyword:
+                date_str = await self._extract_date_with_llm(user_message, shared_memory)
+                if date_str:
+                    return (True, date_str)
+            
+            # Also check for explicit date patterns (YYYY-MM-DD or YYYY-MM)
+            import re
+            date_patterns = [
+                r'\b(\d{4}-\d{2}-\d{2})\b',  # YYYY-MM-DD
+                r'\b(\d{4}-\d{2})\b',        # YYYY-MM
+            ]
+            
+            for pattern in date_patterns:
+                match = re.search(pattern, user_message)
+                if match:
+                    return (True, match.group(1))
+            
+            return (False, None)
+            
+        except Exception as e:
+            logger.error(f"❌ Error detecting historical intent: {e}")
+            return (False, None)
+    
+    async def _extract_date_with_llm(self, user_message: str, shared_memory: Dict[str, Any]) -> Optional[str]:
+        """Use LLM to extract date string from historical weather request"""
+        try:
+            llm = self._get_llm(temperature=0.1, model=settings.FAST_MODEL)
+            
+            date_extraction_prompt = f"""Extract the date from this historical weather request. Return ONLY the date in one of these formats:
+- YYYY-MM-DD for a specific day (e.g., "2022-12-15")
+- YYYY-MM for a monthly average (e.g., "2022-12")
+- YYYY for a full year (e.g., "2022") - use when user asks for "all of 2022", "throughout 2022", "average for 2022", etc.
+
+USER MESSAGE: "{user_message}"
+
+EXTRACTION RULES:
+- If specific day mentioned: return YYYY-MM-DD
+- If only month/year mentioned: return YYYY-MM
+- If user asks for "all of [year]", "throughout [year]", "average for [year]", "monthly temps in [year]": return YYYY (year only)
+- If relative date (e.g., "last December"): infer the year (assume recent past if not specified)
+- If no clear date: return "NONE"
+
+EXAMPLES:
+"weather in December 2022" → "2022-12"
+"temperature on December 15, 2022" → "2022-12-15"
+"average temperature last December" → "2023-12" (if current year is 2024)
+"average monthly temps in 2022" → "2022" (year only - indicates all months needed)
+"all of 2022" → "2022" (year only)
+"throughout 2022" → "2022" (year only)
+"weather in 2022" (ambiguous) → "2022" (year only - safer to assume all months)
+
+Return ONLY the date string or "NONE", nothing else."""
+
+            response = await llm.ainvoke([HumanMessage(content=date_extraction_prompt)])
+            extracted_date = response.content if hasattr(response, 'content') else str(response)
+            extracted_date = extracted_date.strip()
+            
+            if extracted_date.upper() == "NONE" or not extracted_date:
+                return None
+            
+            # Validate date format (now supports YYYY, YYYY-MM, or YYYY-MM-DD)
+            import re
+            if re.match(r'^\d{4}(-\d{2}(-\d{2})?)?$', extracted_date):
+                logger.info(f"🧠 LLM extracted date: '{extracted_date}'")
+                return extracted_date
+            else:
+                logger.warning(f"⚠️ Invalid date format extracted: '{extracted_date}'")
+                return None
+                
+        except Exception as e:
+            logger.error(f"❌ LLM date extraction failed: {e}")
+            return None
+    
+    async def _extract_location(self, user_message: str, shared_memory: Dict[str, Any], user_id: Optional[str] = None) -> str:
         """Extract location using LLM intelligence instead of crude regex patterns"""
         try:
             # LLM-powered location extraction
-            location_result = await self._extract_location_with_llm(user_message, shared_memory)
+            location_result = await self._extract_location_with_llm(user_message, shared_memory, user_id)
             return location_result["location"]
             
         except Exception as e:
             logger.error(f"❌ LLM location extraction failed: {e}")
             # Graceful fallback to basic patterns only as last resort
-            return await self._extract_location_fallback(user_message, shared_memory)
+            return await self._extract_location_fallback(user_message, shared_memory, user_id)
     
-    async def _extract_location_with_llm(self, user_message: str, shared_memory: Dict[str, Any]) -> Dict[str, Any]:
+    async def _extract_location_with_llm(self, user_message: str, shared_memory: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
         """Use LLM intelligence for contextual location extraction"""
         try:
             # Use centralized LLM access
@@ -110,23 +232,30 @@ class WeatherRequestAnalyzer:
             # Get recent location context from shared memory
             weather_data = shared_memory.get("weather_data", {})
             recent_locations = list(weather_data.get("recent_queries", {}).keys())[-3:]  # Last 3 locations
+            location_prefs = weather_data.get("location_preferences", {})
+            user_home_zip = location_prefs.get("user_home_zip", "")
+            
+            # Note: User ZIP code should be loaded into shared_memory by the weather agent
+            # from metadata when available. If not in shared_memory, we'll use LOCATION_NEEDED
             
             location_prompt = f"""Extract the location from this weather request. Return ONLY the location in a format suitable for weather APIs.
 
 USER MESSAGE: "{user_message}"
 
 RECENT WEATHER LOCATIONS: {recent_locations if recent_locations else "None"}
+USER DEFAULT LOCATION: {user_home_zip if user_home_zip else "None"}
 
 CONVERSATION CONTEXT: {conversation_context}
 
-EXTRACTION RULES (PRIORITIZE CONVERSATION CONTEXT):
-- If explicit location mentioned: return that location
-- **CRITICAL: If no explicit location but conversation context contains research about a specific city/location, USE THAT LOCATION**
-- If recent weather locations exist: return most recent weather location  
-- For ZIP codes: return the ZIP code exactly
-- For cities: return "City, State" or "City, Country" format
-- For ambiguous locations: return most likely interpretation based on conversation context
-- **If absolutely no location clues exist: return "LOCATION_NEEDED" (user will be asked to clarify)**
+EXTRACTION RULES (PRIORITIZE IN THIS ORDER):
+1. If explicit location mentioned: return that location
+2. **CRITICAL: If no explicit location but conversation context contains research about a specific city/location, USE THAT LOCATION**
+3. If recent weather locations exist: return most recent weather location
+4. **If user has a default location (user_home_zip): use that as fallback before asking for clarification**
+5. For ZIP codes: return the ZIP code exactly
+6. For cities: return "City, State" or "City, Country" format
+7. For ambiguous locations: return most likely interpretation based on conversation context
+8. **ONLY if absolutely no location clues exist AND no default location: return "LOCATION_NEEDED"**
 
 EXAMPLES:
 "What's the weather in NYC?" → "New York, NY"
@@ -165,7 +294,7 @@ Return ONLY the location string, nothing else."""
             logger.error(f"❌ LLM location extraction failed: {e}")
             raise
     
-    async def _extract_location_fallback(self, user_message: str, shared_memory: Dict[str, Any]) -> str:
+    async def _extract_location_fallback(self, user_message: str, shared_memory: Dict[str, Any], user_id: Optional[str] = None) -> str:
         """Fallback to basic patterns if LLM fails"""
         logger.warning("🚨 Using fallback location extraction - LLM failed")
         
@@ -189,9 +318,9 @@ Return ONLY the location string, nothing else."""
                     return location
         
         # Use fallback location from preferences/config
-        return await self._get_fallback_location(shared_memory)
+        return await self._get_fallback_location(shared_memory, user_id)
     
-    async def _get_fallback_location(self, shared_memory: Dict[str, Any]) -> str:
+    async def _get_fallback_location(self, shared_memory: Dict[str, Any], user_id: Optional[str] = None) -> str:
         """Get fallback location from preferences or config"""
         # Check shared memory for user's default location
         weather_data = shared_memory.get("weather_data", {})
@@ -199,6 +328,9 @@ Return ONLY the location string, nothing else."""
         
         if "user_home_zip" in location_prefs:
             return location_prefs["user_home_zip"]
+        
+        # Note: User ZIP code should be loaded into shared_memory by the weather agent
+        # from metadata when available. If not in shared_memory, we'll use LOCATION_NEEDED
         
         # Check recent queries for location context
         recent_queries = weather_data.get("recent_queries", {})

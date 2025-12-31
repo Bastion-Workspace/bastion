@@ -30,6 +30,10 @@ class WeatherResponseFormatters:
                 return await self.format_current_conditions_response(
                     weather_data, communication_style, detail_level, shared_memory
                 )
+            elif request["request_type"] == "history":
+                return await self.format_historical_response(
+                    weather_data, communication_style, detail_level, shared_memory, request.get("date_str", "")
+                )
             else:
                 return await self.format_forecast_response(
                     weather_data, communication_style, detail_level, shared_memory, request["forecast_days"]
@@ -67,7 +71,7 @@ class WeatherResponseFormatters:
                 temp_info += f" (feels like {feels_like:.0f}{units['temperature']})"
             
             location_info = f"{location['name']}"
-            if location["country"] != "US":
+            if location.get("country") and location["country"] != "US":
                 location_info += f", {location['country']}"
             
             # Adapt response to communication style
@@ -137,7 +141,7 @@ class WeatherResponseFormatters:
             units = weather_data["units"]
             
             location_info = f"{location['name']}"
-            if location["country"] != "US":
+            if location.get("country") and location["country"] != "US":
                 location_info += f", {location['country']}"
             
             # Adapt response to communication style
@@ -228,6 +232,270 @@ class WeatherResponseFormatters:
         except Exception as e:
             logger.error(f"❌ Error formatting forecast: {e}")
             return f"I have the forecast data but encountered a formatting error: {str(e)}"
+    
+    async def format_historical_response(
+        self,
+        weather_data: Dict[str, Any],
+        style: str,
+        detail_level: str,
+        shared_memory: Dict[str, Any],
+        date_str: str
+    ) -> str:
+        """Format historical weather response"""
+        try:
+            historical = weather_data.get("historical", {})
+            location = weather_data.get("location", {})
+            period = weather_data.get("period", {})
+            units = weather_data.get("units", {})
+            
+            location_info = location.get("name", "Unknown")
+            if location.get("country") and location["country"] != "US":
+                location_info += f", {location['country']}"
+            
+            period_type = period.get("type", "daily")
+            is_monthly = period_type == "monthly_average"
+            is_yearly = period_type == "yearly_summary"
+            
+            # Adapt response to communication style
+            if style == "enthusiastic" or style == "roosevelt":
+                if is_yearly:
+                    # Yearly summary with monthly breakdown
+                    year = period.get("year", date_str)
+                    yearly_avg = historical.get("yearly_average_temperature", 0)
+                    yearly_min = historical.get("yearly_min_temperature", 0)
+                    yearly_max = historical.get("yearly_max_temperature", 0)
+                    monthly_data = historical.get("monthly_data", [])
+                    temp_unit = units.get("temperature", "°F")
+                    
+                    response = f"**BULLY!** Historical weather intelligence for {location_info} in {year}:\n\n"
+                    response += f"**Yearly Average Temperature**: {yearly_avg:.1f}{temp_unit}\n"
+                    response += f"**Yearly Temperature Range**: {yearly_min:.1f}{temp_unit} to {yearly_max:.1f}{temp_unit}\n\n"
+                    response += f"**Monthly Breakdown**:\n"
+                    
+                    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                    for month_data in monthly_data:
+                        month_num = month_data.get("month", 0)
+                        if 1 <= month_num <= 12:
+                            month_name = month_names[month_num - 1]
+                            avg_temp = month_data.get("average_temperature", 0)
+                            response += f"- **{month_name}**: {avg_temp:.1f}{temp_unit}\n"
+                    
+                    response += "\n**By George!** Complete meteorological intelligence for the entire year!"
+                elif is_monthly:
+                    avg_temp = historical.get("average_temperature", 0)
+                    min_temp = historical.get("min_temperature", 0)
+                    max_temp = historical.get("max_temperature", 0)
+                    temp_unit = units.get("temperature", "°F")
+                    month_name = datetime.strptime(date_str, "%Y-%m").strftime("%B %Y")
+                    
+                    response = f"**BULLY!** Historical weather intelligence for {location_info} in {month_name}:\n\n"
+                    response += f"**Average Temperature**: {avg_temp:.1f}{temp_unit}\n"
+                    response += f"**Temperature Range**: {min_temp:.1f}{temp_unit} to {max_temp:.1f}{temp_unit}\n"
+                    
+                    if detail_level in ["detailed", "high"]:
+                        avg_humidity = historical.get("average_humidity", 0)
+                        avg_wind = historical.get("average_wind_speed", 0)
+                        wind_unit = units.get("wind_speed", "mph")
+                        conditions = historical.get("most_common_conditions", "N/A")
+                        response += f"**Average Humidity**: {avg_humidity:.1f}%\n"
+                        response += f"**Average Wind Speed**: {avg_wind:.1f} {wind_unit}\n"
+                        response += f"**Most Common Conditions**: {conditions}\n"
+                        response += f"**Sample Days**: {historical.get('sample_days', 0)} days sampled\n"
+                    
+                    response += "\n**By George!** This meteorological intelligence is based on historical data!"
+                else:
+                    temp = historical.get("temperature", 0)
+                    feels_like = historical.get("feels_like", 0)
+                    conditions = historical.get("conditions", "")
+                    temp_unit = units.get("temperature", "°F")
+                    date_display = period.get("date", date_str)
+                    
+                    response = f"**BULLY!** Historical weather for {location_info} on {date_display}:\n\n"
+                    response += f"**Temperature**: {temp:.1f}{temp_unit}"
+                    if abs(temp - feels_like) > 3:
+                        response += f" (felt like {feels_like:.1f}{temp_unit})"
+                    response += f"\n**Conditions**: {conditions}\n"
+                    
+                    if detail_level in ["detailed", "high"]:
+                        humidity = historical.get("humidity", 0)
+                        wind = historical.get("wind_speed", 0)
+                        wind_unit = units.get("wind_speed", "mph")
+                        pressure = historical.get("pressure", 0)
+                        response += f"**Humidity**: {humidity}%\n"
+                        response += f"**Wind Speed**: {wind:.1f} {wind_unit}\n"
+                        response += f"**Pressure**: {pressure} hPa\n"
+                    
+                    response += "\n**Trust busting historical data!**"
+                    
+            elif style == "professional" or style == "formal":
+                if is_yearly:
+                    # Yearly summary with monthly breakdown
+                    year = period.get("year", date_str)
+                    yearly_avg = historical.get("yearly_average_temperature", 0)
+                    yearly_min = historical.get("yearly_min_temperature", 0)
+                    yearly_max = historical.get("yearly_max_temperature", 0)
+                    monthly_data = historical.get("monthly_data", [])
+                    temp_unit = units.get("temperature", "°F")
+                    
+                    response = f"Historical weather data for {location_info}, {year}:\n\n"
+                    response += f"Yearly Average Temperature: {yearly_avg:.1f}{temp_unit}\n"
+                    response += f"Yearly Temperature Range: {yearly_min:.1f}{temp_unit} to {yearly_max:.1f}{temp_unit}\n\n"
+                    response += f"Monthly Averages:\n"
+                    
+                    month_names = ["January", "February", "March", "April", "May", "June", 
+                                  "July", "August", "September", "October", "November", "December"]
+                    for month_data in monthly_data:
+                        month_num = month_data.get("month", 0)
+                        if 1 <= month_num <= 12:
+                            month_name = month_names[month_num - 1]
+                            avg_temp = month_data.get("average_temperature", 0)
+                            response += f"- {month_name}: {avg_temp:.1f}{temp_unit}\n"
+                elif is_monthly:
+                    avg_temp = historical.get("average_temperature", 0)
+                    min_temp = historical.get("min_temperature", 0)
+                    max_temp = historical.get("max_temperature", 0)
+                    temp_unit = units.get("temperature", "°F")
+                    month_name = datetime.strptime(date_str, "%Y-%m").strftime("%B %Y")
+                    
+                    response = f"Historical weather data for {location_info}, {month_name}:\n\n"
+                    response += f"Average Temperature: {avg_temp:.1f}{temp_unit}\n"
+                    response += f"Temperature Range: {min_temp:.1f}{temp_unit} to {max_temp:.1f}{temp_unit}\n"
+                    
+                    if detail_level in ["detailed", "high"]:
+                        avg_humidity = historical.get("average_humidity", 0)
+                        avg_wind = historical.get("average_wind_speed", 0)
+                        wind_unit = units.get("wind_speed", "mph")
+                        conditions = historical.get("most_common_conditions", "N/A")
+                        response += f"Average Humidity: {avg_humidity:.1f}%\n"
+                        response += f"Average Wind Speed: {avg_wind:.1f} {wind_unit}\n"
+                        response += f"Most Common Conditions: {conditions}\n"
+                        response += f"Data Points: {historical.get('sample_days', 0)} days sampled\n"
+                else:
+                    temp = historical.get("temperature", 0)
+                    conditions = historical.get("conditions", "")
+                    temp_unit = units.get("temperature", "°F")
+                    date_display = period.get("date", date_str)
+                    
+                    response = f"Historical weather for {location_info} on {date_display}:\n\n"
+                    response += f"Temperature: {temp:.1f}{temp_unit}\n"
+                    response += f"Conditions: {conditions}\n"
+                    
+                    if detail_level in ["detailed", "high"]:
+                        humidity = historical.get("humidity", 0)
+                        wind = historical.get("wind_speed", 0)
+                        wind_unit = units.get("wind_speed", "mph")
+                        pressure = historical.get("pressure", 0)
+                        response += f"Humidity: {humidity}%\n"
+                        response += f"Wind Speed: {wind:.1f} {wind_unit}\n"
+                        response += f"Pressure: {pressure} hPa\n"
+                        
+            elif style == "casual" or style == "friendly":
+                if is_yearly:
+                    # Yearly summary with monthly breakdown
+                    year = period.get("year", date_str)
+                    yearly_avg = historical.get("yearly_average_temperature", 0)
+                    monthly_data = historical.get("monthly_data", [])
+                    temp_unit = units.get("temperature", "°F")
+                    
+                    response = f"Here's the historical weather for {location_info} in {year}:\n\n"
+                    response += f"Yearly average: {yearly_avg:.1f}{temp_unit}\n\n"
+                    response += f"Monthly breakdown:\n"
+                    
+                    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                    for month_data in monthly_data:
+                        month_num = month_data.get("month", 0)
+                        if 1 <= month_num <= 12:
+                            month_name = month_names[month_num - 1]
+                            avg_temp = month_data.get("average_temperature", 0)
+                            response += f"- {month_name}: {avg_temp:.1f}{temp_unit}\n"
+                    
+                    response += "\nHope that helps! 😊"
+                elif is_monthly:
+                    avg_temp = historical.get("average_temperature", 0)
+                    temp_unit = units.get("temperature", "°F")
+                    month_name = datetime.strptime(date_str, "%Y-%m").strftime("%B %Y")
+                    
+                    response = f"Here's the historical weather for {location_info} in {month_name}:\n\n"
+                    response += f"Average temp: {avg_temp:.1f}{temp_unit}\n"
+                    
+                    if detail_level in ["detailed", "high"]:
+                        min_temp = historical.get("min_temperature", 0)
+                        max_temp = historical.get("max_temperature", 0)
+                        response += f"Range: {min_temp:.1f}{temp_unit} to {max_temp:.1f}{temp_unit}\n"
+                        conditions = historical.get("most_common_conditions", "N/A")
+                        response += f"Mostly: {conditions}\n"
+                else:
+                    temp = historical.get("temperature", 0)
+                    conditions = historical.get("conditions", "")
+                    temp_unit = units.get("temperature", "°F")
+                    date_display = period.get("date", date_str)
+                    
+                    response = f"Historical weather for {location_info} on {date_display}:\n\n"
+                    response += f"Temp: {temp:.1f}{temp_unit}, {conditions}\n"
+                    
+                    if detail_level in ["detailed", "high"]:
+                        humidity = historical.get("humidity", 0)
+                        wind = historical.get("wind_speed", 0)
+                        response += f"Humidity: {humidity}%, Wind: {wind:.1f} {units.get('wind_speed', 'mph')}\n"
+                    
+                    response += "\nHope that helps! 😊"
+                    
+            else:  # Default neutral style
+                if is_yearly:
+                    # Yearly summary with monthly breakdown
+                    year = period.get("year", date_str)
+                    yearly_avg = historical.get("yearly_average_temperature", 0)
+                    yearly_min = historical.get("yearly_min_temperature", 0)
+                    yearly_max = historical.get("yearly_max_temperature", 0)
+                    monthly_data = historical.get("monthly_data", [])
+                    temp_unit = units.get("temperature", "°F")
+                    
+                    response = f"Historical weather for {location_info}, {year}:\n\n"
+                    response += f"Yearly Average: {yearly_avg:.1f}{temp_unit} (Range: {yearly_min:.1f}{temp_unit} to {yearly_max:.1f}{temp_unit})\n\n"
+                    response += f"Monthly Averages:\n"
+                    
+                    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+                    for month_data in monthly_data:
+                        month_num = month_data.get("month", 0)
+                        if 1 <= month_num <= 12:
+                            month_name = month_names[month_num - 1]
+                            avg_temp = month_data.get("average_temperature", 0)
+                            response += f"- {month_name}: {avg_temp:.1f}{temp_unit}\n"
+                elif is_monthly:
+                    avg_temp = historical.get("average_temperature", 0)
+                    min_temp = historical.get("min_temperature", 0)
+                    max_temp = historical.get("max_temperature", 0)
+                    temp_unit = units.get("temperature", "°F")
+                    month_name = datetime.strptime(date_str, "%Y-%m").strftime("%B %Y")
+                    
+                    response = f"Historical weather for {location_info}, {month_name}:\n\n"
+                    response += f"Average: {avg_temp:.1f}{temp_unit} (Range: {min_temp:.1f}{temp_unit} to {max_temp:.1f}{temp_unit})\n"
+                    
+                    if detail_level in ["detailed", "high"]:
+                        avg_humidity = historical.get("average_humidity", 0)
+                        avg_wind = historical.get("average_wind_speed", 0)
+                        conditions = historical.get("most_common_conditions", "N/A")
+                        response += f"Humidity: {avg_humidity:.1f}%, Wind: {avg_wind:.1f} {units.get('wind_speed', 'mph')}\n"
+                        response += f"Conditions: {conditions}\n"
+                else:
+                    temp = historical.get("temperature", 0)
+                    conditions = historical.get("conditions", "")
+                    temp_unit = units.get("temperature", "°F")
+                    date_display = period.get("date", date_str)
+                    
+                    response = f"Historical weather for {location_info} on {date_display}:\n\n"
+                    response += f"Temperature: {temp:.1f}{temp_unit}, {conditions}\n"
+                    
+                    if detail_level in ["detailed", "high"]:
+                        humidity = historical.get("humidity", 0)
+                        wind = historical.get("wind_speed", 0)
+                        response += f"Humidity: {humidity}%, Wind: {wind:.1f} {units.get('wind_speed', 'mph')}\n"
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"❌ Error formatting historical weather: {e}")
+            return f"I have the historical weather data but encountered a formatting error: {str(e)}"
     
     def _get_historical_context(self, location: str, shared_memory: Dict[str, Any]) -> Optional[str]:
         """Get historical weather context from shared memory"""

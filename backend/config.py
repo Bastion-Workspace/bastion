@@ -98,11 +98,6 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = ""
     OPENWEATHERMAP_API_KEY: str = ""
     
-    # AWS Configuration for pricing calculator
-    AWS_ACCESS_KEY_ID: str = ""
-    AWS_SECRET_ACCESS_KEY: str = ""
-    AWS_DEFAULT_REGION: str = "us-east-1"  # Default region for pricing queries
-    
     # LLM Configuration
     DEFAULT_MODEL: str = "anthropic/claude-3.5-haiku"  # Default model for general tasks
     FAST_MODEL: str = "anthropic/claude-3.5-haiku"  # Fast model for lightweight ops (query expansion, title generation, intent classification)

@@ -37,7 +37,7 @@ async def analyze_text_metrics(
         - avg_words_per_paragraph: float (if include_advanced)
     """
     try:
-        logger.debug(f"Analyzing text metrics: {len(text)} chars, include_advanced={include_advanced}")
+        logger.info(f"📊 Analyzing text metrics: {len(text):,} chars, include_advanced={include_advanced}")
         
         # Get backend client
         client = await get_backend_tool_client()
@@ -53,7 +53,7 @@ async def analyze_text_metrics(
             logger.error(f"Text analysis failed: {metrics['error']}")
             return metrics
         
-        logger.debug(f"Text analysis complete: {metrics.get('word_count', 0)} words")
+        logger.info(f"✅ Text analysis complete: {metrics.get('word_count', 0):,} words, {metrics.get('sentence_count', 0):,} sentences, {metrics.get('paragraph_count', 0):,} paragraphs")
         return metrics
         
     except Exception as e:
@@ -175,7 +175,7 @@ async def analyze_active_editor_metrics(
                 "error": "Active editor content is empty"
             }
         
-        logger.debug(f"Analyzing active editor metrics: {len(content)} chars")
+        logger.info(f"📊 Analyzing active editor metrics: {len(content):,} chars")
         
         # Analyze content
         return await analyze_text_metrics(

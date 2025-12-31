@@ -54,16 +54,55 @@ export const ChatSidebarProvider = ({ children }) => {
   });
   const [messages, setMessages] = useState([]);
   const [query, setQuery] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+  const [replyToMessage, setReplyToMessage] = useState(null); // Message being replied to
   const [selectedModel, setSelectedModel] = useState('');
   const [backgroundJobService, setBackgroundJobService] = useState(null);
   const [sessionId] = useState(() => `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
-  const [executingPlans, setExecutingPlans] = useState(new Set());
   // LangGraph is the only system - no toggles needed
   const useLangGraphSystem = true; // Always use LangGraph
-  const [currentJobId, setCurrentJobId] = useState(null); // Track current job for cancellation
   const [activeTasks, setActiveTasks] = useState(new Map()); // Track active async tasks
   const messagesConversationIdRef = React.useRef(null); // Track which conversation the current messages belong to
+  const isLoadingFromMetadataRef = React.useRef(false); // Track when we're loading preferences from metadata to prevent save loop
+  
+  // **CONVERSATION-SCOPED ACTIVITY STATE**: Isolate loading indicators, job IDs, and executing plans per conversation
+  // Map<conversationId, { isLoading, currentJobId, executingPlans }>
+  const [conversationActivityState, setConversationActivityState] = useState(new Map());
+  
+  // Helper to get current conversation's activity state
+  const getCurrentActivityState = React.useCallback(() => {
+    if (!currentConversationId) {
+      return { isLoading: false, currentJobId: null, executingPlans: new Set() };
+    }
+    return conversationActivityState.get(currentConversationId) || {
+      isLoading: false,
+      currentJobId: null,
+      executingPlans: new Set()
+    };
+  }, [currentConversationId, conversationActivityState]);
+  
+  // Helper to update current conversation's activity state
+  const updateCurrentActivityState = React.useCallback((updates) => {
+    if (!currentConversationId) return;
+    
+    setConversationActivityState(prev => {
+      const newMap = new Map(prev);
+      const currentState = newMap.get(currentConversationId) || {
+        isLoading: false,
+        currentJobId: null,
+        executingPlans: new Set()
+      };
+      
+      // Merge updates with current state
+      newMap.set(currentConversationId, { ...currentState, ...updates });
+      
+      return newMap;
+    });
+  }, [currentConversationId]);
+  
+  // Expose as computed values for backward compatibility
+  const isLoading = getCurrentActivityState().isLoading;
+  const currentJobId = getCurrentActivityState().currentJobId;
+  const executingPlans = getCurrentActivityState().executingPlans;
   
   // **ROOSEVELT'S PREFERENCE MANAGEMENT**: Store user preferences separately from what gets sent to backend
   // User preference: what the user actually toggled (persists across navigation)
@@ -105,6 +144,47 @@ export const ChatSidebarProvider = ({ children }) => {
   }, [location.pathname, userEditorPreference, editorPreference]);
 
   const queryClient = useQueryClient();
+
+  // Preference update function for saving to conversation metadata
+  const updateConversationPreference = React.useCallback(async (key, value) => {
+    if (!currentConversationId) {
+      console.log('No conversation - only updating global preference');
+      return;
+    }
+    
+    try {
+      // Save to conversation metadata
+      await apiService.patch(`/api/conversations/${currentConversationId}/metadata`, {
+        metadata: {
+          [key]: value
+        }
+      });
+      
+      console.log(`Saved ${key} to conversation ${currentConversationId}:`, value);
+      
+      // Invalidate conversation query to refresh
+      queryClient.invalidateQueries(['conversation', currentConversationId]);
+    } catch (error) {
+      console.error(`Failed to save ${key} to conversation:`, error);
+    }
+  }, [currentConversationId, queryClient]);
+
+  // Handle editor preference change - save to both global and conversation
+  const handleEditorPreferenceChange = React.useCallback(async (newPreference) => {
+    // Update user preference (persists across navigation)
+    setUserEditorPreference(newPreference);
+    localStorage.setItem('userEditorPreference', newPreference);
+    
+    // Update active preference (context-aware)
+    if (location.pathname.startsWith('/documents')) {
+      setEditorPreference(newPreference);
+      
+      // Save to current conversation
+      if (currentConversationId) {
+        await updateConversationPreference('editor_preference', newPreference);
+      }
+    }
+  }, [currentConversationId, updateConversationPreference, location.pathname]);
 
   // Initialize background job service
   useEffect(() => {
@@ -228,12 +308,29 @@ export const ChatSidebarProvider = ({ children }) => {
     try { localStorage.setItem('userEditorPreference', userEditorPreference); } catch {}
   }, [userEditorPreference]);
 
-  // Save selected model to localStorage
+  // Save selected model to localStorage and conversation metadata
   useEffect(() => {
+    // Skip saving if we're currently loading from metadata (prevents circular updates)
+    if (isLoadingFromMetadataRef.current) {
+      return;
+    }
+    
     if (selectedModel) {
       localStorage.setItem('chatSidebarSelectedModel', selectedModel);
+      
+      // Also save to conversation metadata if we have a conversation
+      if (currentConversationId) {
+        updateConversationPreference('user_chat_model', selectedModel).catch(err => {
+          console.error('Failed to save model to conversation:', err);
+        });
+      }
+      
+      // Notify backend of model selection
+      apiService.selectModel(selectedModel).catch(err => {
+        console.error('Failed to notify backend of model selection:', err);
+      });
     }
-  }, [selectedModel]);
+  }, [selectedModel, currentConversationId, updateConversationPreference]);
 
   // ROOSEVELT: Save current conversation to localStorage for session persistence
   useEffect(() => {
@@ -251,18 +348,22 @@ export const ChatSidebarProvider = ({ children }) => {
   }, [currentConversationId]);
 
   // PRIORITY: Use unified chat service for conversation loading
-  const { data: conversationData, isLoading: conversationLoading } = useQuery(
+  const { data: conversationData, isLoading: conversationLoading, refetch: refetchConversation } = useQuery(
     ['conversation', currentConversationId],
     () => currentConversationId ? apiService.getConversation(currentConversationId) : null,
     {
       enabled: !!currentConversationId,
       refetchOnWindowFocus: false,
-      staleTime: 300000, // 5 minutes
+      refetchOnMount: true, // Always refetch when component mounts (e.g., switching conversations)
+      staleTime: 0, // Always consider data stale to get latest metadata
       onSuccess: (data) => {
         console.log('✅ ChatSidebarContext: Conversation data loaded:', {
           conversationId: currentConversationId,
           hasMessages: !!data?.messages,
-          messageCount: data?.messages?.length || 0
+          messageCount: data?.messages?.length || 0,
+          hasMetadata: !!data?.metadata_json,
+          metadataKeys: data?.metadata_json ? Object.keys(data.metadata_json) : [],
+          userChatModel: data?.metadata_json?.user_chat_model
         });
       },
       onError: (error) => {
@@ -270,6 +371,71 @@ export const ChatSidebarProvider = ({ children }) => {
       }
     }
   );
+  
+  // Refetch conversation when switching to ensure we get latest metadata
+  useEffect(() => {
+    if (currentConversationId && refetchConversation) {
+      console.log('🔄 Conversation switched, refetching to get latest metadata:', currentConversationId);
+      refetchConversation();
+    }
+  }, [currentConversationId, refetchConversation]);
+
+  // Load conversation-specific preferences from metadata
+  useEffect(() => {
+    if (!currentConversationId) {
+      // No conversation - use global preferences
+      const globalModel = localStorage.getItem('chatSidebarSelectedModel');
+      if (globalModel) setSelectedModel(globalModel);
+      return;
+    }
+    
+    // Mark that we're loading from metadata to prevent save effect from running
+    isLoadingFromMetadataRef.current = true;
+    
+    if (conversationData?.metadata_json) {
+      const metadata = conversationData.metadata_json;
+      
+      // Load model preference
+      if (metadata.user_chat_model) {
+        console.log('🔄 Loading conversation model preference:', metadata.user_chat_model, 'for conversation:', currentConversationId);
+        setSelectedModel(metadata.user_chat_model);
+      } else {
+        // Fall back to global preference
+        const globalModel = localStorage.getItem('chatSidebarSelectedModel');
+        if (globalModel) {
+          console.log('🔄 No conversation model preference, using global:', globalModel);
+          setSelectedModel(globalModel);
+        }
+      }
+      
+      // Load editor preference (only on documents page)
+      if (metadata.editor_preference && location.pathname.startsWith('/documents')) {
+        console.log('🔄 Loading conversation editor preference:', metadata.editor_preference);
+        setEditorPreference(metadata.editor_preference);
+      } else {
+        // Fall back to global user preference
+        const globalEditorPref = localStorage.getItem('userEditorPreference') || 'prefer';
+        if (location.pathname.startsWith('/documents')) {
+          setEditorPreference(globalEditorPref);
+        }
+      }
+    } else if (conversationData) {
+      // Conversation loaded but no metadata yet - use global preferences
+      console.log('🔄 Conversation loaded but no metadata, using global preferences');
+      const globalModel = localStorage.getItem('chatSidebarSelectedModel');
+      if (globalModel) setSelectedModel(globalModel);
+      
+      const globalEditorPref = localStorage.getItem('userEditorPreference') || 'prefer';
+      if (location.pathname.startsWith('/documents')) {
+        setEditorPreference(globalEditorPref);
+      }
+    }
+    
+    // Reset the flag after a short delay to allow state updates to complete
+    setTimeout(() => {
+      isLoadingFromMetadataRef.current = false;
+    }, 100);
+  }, [conversationData, currentConversationId, location.pathname]);
 
   // PRIORITY: Load messages using unified chat service
   const { data: messagesData, isLoading: messagesLoading, refetch: refetchMessages } = useQuery(
@@ -298,6 +464,8 @@ export const ChatSidebarProvider = ({ children }) => {
             sequence_number: message.sequence_number,
             citations: message.citations || [],
             metadata: message.metadata || {},
+            // ✅ CRITICAL FIX: Extract editor_operations from metadata to top level
+            editor_operations: message.metadata?.editor_operations || message.editor_operations || [],
             // Preserve any other fields
             ...message
           }));
@@ -367,6 +535,8 @@ export const ChatSidebarProvider = ({ children }) => {
         sequence_number: message.sequence_number,
         citations: message.citations || [],
         metadata: message.metadata || {},
+        // ✅ CRITICAL FIX: Extract editor_operations from metadata to top level
+        editor_operations: message.metadata?.editor_operations || message.editor_operations || [],
         // Preserve any other fields
         ...message
       }));
@@ -473,10 +643,13 @@ export const ChatSidebarProvider = ({ children }) => {
     });
     
     // Remove from executing plans
-    setExecutingPlans(prev => {
-      const newSet = new Set(prev);
-      newSet.delete(jobData.job_id);
-      return newSet;
+    updateCurrentActivityState({
+      executingPlans: (() => {
+        const currentState = getCurrentActivityState();
+        const newSet = new Set(currentState.executingPlans);
+        newSet.delete(jobData.job_id);
+        return newSet;
+      })()
     });
     
     // Invalidate conversations to refresh the list
@@ -484,7 +657,7 @@ export const ChatSidebarProvider = ({ children }) => {
     
     // Clear current job ID when job completes
     if (currentJobId === jobData.job_id) {
-      setCurrentJobId(null);
+      updateCurrentActivityState({ currentJobId: null });
     }
     
     console.log('✅ Background job completion handling completed');
@@ -533,7 +706,14 @@ export const ChatSidebarProvider = ({ children }) => {
       console.log('🚀 Executing research plan for job:', hasJobId);
       
       // Mark this plan as being executed
-      setExecutingPlans(prev => new Set([...prev, hasJobId]));
+      updateCurrentActivityState({
+        executingPlans: (() => {
+          const currentState = getCurrentActivityState();
+          const newSet = new Set(currentState.executingPlans);
+          newSet.add(hasJobId);
+          return newSet;
+        })()
+      });
       
       setMessages(prev => prev.map(msg => 
         msg.id === message.id 
@@ -605,10 +785,13 @@ export const ChatSidebarProvider = ({ children }) => {
       } else {
         console.error('❌ Plan execution failed:', response.error);
         // Remove from executing plans on failure
-        setExecutingPlans(prev => {
-          const newSet = new Set(prev);
-          newSet.delete(hasJobId);
-          return newSet;
+        updateCurrentActivityState({
+          executingPlans: (() => {
+            const currentState = getCurrentActivityState();
+            const newSet = new Set(currentState.executingPlans);
+            newSet.delete(hasJobId);
+            return newSet;
+          })()
         });
         
         // Update message to show error
@@ -623,10 +806,13 @@ export const ChatSidebarProvider = ({ children }) => {
       console.error('❌ Plan execution error:', error);
       
       // Remove from executing plans on error
-      setExecutingPlans(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(hasJobId);
-        return newSet;
+      updateCurrentActivityState({
+        executingPlans: (() => {
+          const currentState = getCurrentActivityState();
+          const newSet = new Set(currentState.executingPlans);
+          newSet.delete(hasJobId);
+          return newSet;
+        })()
       });
       
       // Update message to show error
@@ -724,9 +910,9 @@ export const ChatSidebarProvider = ({ children }) => {
     
     // Clear current state to prevent cross-conversation contamination
     setMessages([]);
-    setExecutingPlans(new Set());
     setQuery('');
-    setIsLoading(false); // ✅ Clear loading state to prevent cross-conversation thinking wheel
+    // Activity state is now automatically isolated by conversationId
+    // No need to manually clear - each conversation has its own state
     
     // Reset the messages conversation ID ref to trigger fresh load
     messagesConversationIdRef.current = null;
@@ -758,8 +944,17 @@ export const ChatSidebarProvider = ({ children }) => {
 
   const sendMessage = async (executionMode = 'auto', overrideQuery = null) => {
     // ROOSEVELT'S HITL SUPPORT: Allow override query for direct API calls without state dependency
-    const actualQuery = overrideQuery || query.trim();
-    console.log('🔄 sendMessage called with:', { query: actualQuery, overrideQuery: !!overrideQuery, backgroundJobService: !!backgroundJobService, executionMode });
+    let actualQuery = overrideQuery || query.trim();
+    
+    // Handle reply: prepend quoted message if replying
+    if (replyToMessage && !overrideQuery) {
+      const quotedContent = replyToMessage.content || '';
+      const quotedPreview = quotedContent.length > 100 ? quotedContent.substring(0, 100) + '...' : quotedContent;
+      const replyPrefix = `> ${quotedPreview}\n\n`;
+      actualQuery = replyPrefix + actualQuery;
+    }
+    
+    console.log('🔄 sendMessage called with:', { query: actualQuery, overrideQuery: !!overrideQuery, backgroundJobService: !!backgroundJobService, executionMode, hasReply: !!replyToMessage });
     
     if (!actualQuery || !backgroundJobService) {
       console.log('❌ sendMessage early return:', { hasQuery: !!actualQuery, hasService: !!backgroundJobService });
@@ -767,6 +962,11 @@ export const ChatSidebarProvider = ({ children }) => {
     }
 
     const currentQuery = actualQuery;
+    
+    // Clear reply state after using it
+    if (replyToMessage && !overrideQuery) {
+      setReplyToMessage(null);
+    }
     let conversationId = currentConversationId;
 
     // Clear input immediately for better UX (only if not using override query)
@@ -823,7 +1023,7 @@ export const ChatSidebarProvider = ({ children }) => {
 
     // Add user message to UI immediately
     setMessages(prev => [...prev, userMessage]);
-    setIsLoading(true);
+    updateCurrentActivityState({ isLoading: true });
 
     // NEWS CHAT QUICK PATH: If user asked for headlines, fetch and present as cards
     try {
@@ -874,7 +1074,7 @@ export const ChatSidebarProvider = ({ children }) => {
         }
 
         setMessages(prev => [...prev, newsMsg]);
-        setIsLoading(false);
+        updateCurrentActivityState({ isLoading: false });
         return;
       }
     } catch (e) {
@@ -905,7 +1105,7 @@ export const ChatSidebarProvider = ({ children }) => {
           isError: true,
         }]);
       } finally {
-        setIsLoading(false);
+        updateCurrentActivityState({ isLoading: false });
       }
   };
 
@@ -918,7 +1118,7 @@ export const ChatSidebarProvider = ({ children }) => {
     try {
       // ROOSEVELT'S CANCEL BUTTON FIX: Create streaming job ID for cancel functionality
       const streamingJobId = `streaming_${Date.now()}`;
-      setCurrentJobId(streamingJobId);
+      updateCurrentActivityState({ currentJobId: streamingJobId });
       
       // Add streaming message placeholder
       const streamingMessage = {
@@ -996,7 +1196,7 @@ export const ChatSidebarProvider = ({ children }) => {
         if (hasValidEditorState) {
           // All validation passed - editor is actually open and editable
           const fmType = (editorCtx.frontmatter && editorCtx.frontmatter.type || '').toLowerCase().trim();
-          const allowedTypes = ['fiction','non-fiction','nonfiction','article','rules','outline','character','style','sysml','podcast','substack','blog','electronics','project','reference'];
+          const allowedTypes = ['fiction','non-fiction','nonfiction','article','rules','outline','character','style','sysml','podcast','substack','blog','electronics','project','reference','system','systems'];
           
           if (allowedTypes.includes(fmType)) {
             const language = filenameLower.endsWith('.org') ? 'org' : (editorCtx.language || 'markdown');
@@ -1191,14 +1391,20 @@ export const ChatSidebarProvider = ({ children }) => {
                     dataType: data.type,
                     operationsCount: Array.isArray(data.operations) ? data.operations.length : 0,
                     hasManuscriptEdit: !!data.manuscript_edit,
+                    documentId: data.document_id,
+                    filename: data.filename,
                     streamingMessageId: streamingMessage.id
                   });
                   
                   const ops = Array.isArray(data.operations) ? data.operations : [];
                   const mEdit = data.manuscript_edit || null;
+                  const documentId = data.document_id || null;
+                  const filename = data.filename || null;
                   
                   console.log('📥 ChatSidebarContext: Processing editor_operations', {
                     opsLength: ops.length,
+                    documentId: documentId,
+                    filename: filename,
                     streamingMessageId: streamingMessage.id
                   });
                   
@@ -1226,35 +1432,42 @@ export const ChatSidebarProvider = ({ children }) => {
                   
                   // Emit event for live diff display in editor
                   if (ops.length > 0) {
-                    // Get document context from active editor
-                    let editorCtx = null;
-                    try {
-                      const cached = localStorage.getItem('editor_ctx_cache');
-                      if (cached) {
-                        editorCtx = JSON.parse(cached);
+                    // **CRITICAL**: Use document_id from payload (sent by backend), fall back to localStorage only if missing
+                    let finalDocumentId = documentId;
+                    let finalFilename = filename;
+                    let contentSnapshot = null;
+                    
+                    // If backend didn't send document_id, try localStorage as fallback
+                    if (!finalDocumentId) {
+                      console.warn('⚠️ No documentId in operations payload - falling back to editor_ctx_cache');
+                      try {
+                        const cached = localStorage.getItem('editor_ctx_cache');
+                        if (cached) {
+                          const editorCtx = JSON.parse(cached);
+                          finalDocumentId = editorCtx?.documentId || null;
+                          finalFilename = editorCtx?.filename || null;
+                          contentSnapshot = editorCtx?.content?.substring(0, 1000) || null;
+                        }
+                      } catch (e) {
+                        console.warn('Failed to parse editor context cache:', e);
                       }
-                    } catch (e) {
-                      console.warn('Failed to parse editor context cache:', e);
                     }
                     
-                    const documentId = editorCtx?.documentId || null;
-                    const filename = editorCtx?.filename || null;
-                    const contentSnapshot = editorCtx?.content?.substring(0, 1000) || null;
-                    
-                    //  ⚠️ CRITICAL: Warn if documentId is missing
-                    if (!documentId) {
-                      console.warn('⚠️ No documentId in editor_ctx_cache - diffs will not be displayed!', {
-                        editorCtx: editorCtx,
-                        hasCache: !!editorCtx,
-                        cacheKeys: editorCtx ? Object.keys(editorCtx) : []
+                    //  ⚠️ CRITICAL: Warn if documentId is STILL missing after fallback
+                    if (!finalDocumentId) {
+                      console.warn('⚠️ No documentId in payload OR editor_ctx_cache - diffs will not be displayed!', {
+                        payloadDocumentId: documentId,
+                        payloadFilename: filename
                       });
+                    } else {
+                      console.log('✅ Using documentId from payload:', finalDocumentId);
                     }
                     
                     console.log('🔍 ChatSidebarContext emitting editorOperationsLive:', {
                       operationsCount: ops.length,
                       messageId: streamingMessage.id,
-                      documentId: documentId,
-                      filename: filename,
+                      documentId: finalDocumentId,
+                      filename: finalFilename,
                       firstOp: ops[0],
                       allOps: ops.map(op => ({
                         start: op.start,
@@ -1265,20 +1478,63 @@ export const ChatSidebarProvider = ({ children }) => {
                       }))
                     });
                     
+                    // **CRITICAL**: Save to documentDiffStore BEFORE dispatching event
+                    // This ensures operations persist even if target document isn't currently open
+                    // When user switches to that document, plugin will load from store
+                    // IMPORTANT: Only save if operations don't already exist in store (avoid overwriting accepted/rejected ops)
+                    if (finalDocumentId) {
+                      // Use dynamic import to avoid circular dependency
+                      import('../services/documentDiffStore').then(({ documentDiffStore }) => {
+                        // Check if operations already exist for this message - don't overwrite if user is actively accepting/rejecting
+                        const existingDiffs = documentDiffStore.getDiffs(finalDocumentId);
+                        const existingMessageId = existingDiffs?.messageId;
+                        
+                        // Only save if:
+                        // 1. No existing diffs for this document, OR
+                        // 2. Existing diffs are for a DIFFERENT message (new operations arriving)
+                        // This prevents overwriting operations that user has already accepted/rejected
+                        if (!existingDiffs || existingMessageId !== streamingMessage.id) {
+                          // Generate stable operation IDs before saving (same logic as plugin)
+                          const opsWithIds = ops.map((op, idx) => ({
+                            ...op,
+                            operationId: op.operationId || `${streamingMessage.id}_${idx}`
+                          }));
+                          
+                          documentDiffStore.setDiffs(
+                            finalDocumentId, 
+                            opsWithIds, 
+                            streamingMessage.id, 
+                            contentSnapshot || ''
+                          );
+                          
+                          console.log('💾 Saved operations to documentDiffStore for later retrieval', {
+                            documentId: finalDocumentId,
+                            operationsCount: opsWithIds.length,
+                            messageId: streamingMessage.id
+                          });
+                        } else {
+                          console.log('⏭️ Skipped saving to store - operations already exist for this message (user may be accepting/rejecting)', {
+                            documentId: finalDocumentId,
+                            existingMessageId,
+                            newMessageId: streamingMessage.id
+                          });
+                        }
+                      }).catch(err => {
+                        console.error('Failed to save to documentDiffStore:', err);
+                      });
+                    }
+                    
                     const event = new CustomEvent('editorOperationsLive', {
                       detail: { 
                         operations: ops,
                         manuscriptEdit: mEdit,
                         messageId: streamingMessage.id,
-                        documentId: documentId,
-                        filename: filename,
+                        documentId: finalDocumentId,
+                        filename: finalFilename,
                         contentSnapshot: contentSnapshot
                       }
                     });
                     window.dispatchEvent(event);
-                    
-                    // ❌ REMOVED: Don't save to store here - let plugin handle it AFTER generating stable IDs!
-                    // The plugin will call documentDiffStore.setDiffs() in addOperations() after creating operationId
                     
                     console.log('✅ ChatSidebarContext: editorOperationsLive event dispatched');
                   } else {
@@ -1293,6 +1549,8 @@ export const ChatSidebarProvider = ({ children }) => {
                     window.__editor_ops_accumulator = {
                       operations: [],
                       manuscript_edit: null,
+                      document_id: data.document_id || null,  // Store document_id from first chunk
+                      filename: data.filename || null,
                       total_chunks: data.total_chunks
                     };
                   }
@@ -1307,33 +1565,85 @@ export const ChatSidebarProvider = ({ children }) => {
                       
                       const ops = window.__editor_ops_accumulator.operations;
                       const mEdit = window.__editor_ops_accumulator.manuscript_edit;
+                      const documentIdFromPayload = window.__editor_ops_accumulator.document_id;
+                      const filenameFromPayload = window.__editor_ops_accumulator.filename;
                       
                       console.log('✅ All chunks received - dispatching editorOperationsLive event with', ops.length, 'operations');
                       
-                      // Get document context from active editor
-                      let editorCtx = null;
-                      try {
-                        const cached = localStorage.getItem('editor_ctx_cache');
-                        if (cached) {
-                          editorCtx = JSON.parse(cached);
+                      // **CRITICAL**: Use document_id from payload (sent by backend), fall back to localStorage only if missing
+                      let finalDocumentId = documentIdFromPayload;
+                      let finalFilename = filenameFromPayload;
+                      let contentSnapshot = null;
+                      
+                      // If backend didn't send document_id, try localStorage as fallback
+                      if (!finalDocumentId) {
+                        console.warn('⚠️ No documentId in chunked operations payload - falling back to editor_ctx_cache');
+                        try {
+                          const cached = localStorage.getItem('editor_ctx_cache');
+                          if (cached) {
+                            const editorCtx = JSON.parse(cached);
+                            finalDocumentId = editorCtx?.documentId || null;
+                            finalFilename = editorCtx?.filename || null;
+                            contentSnapshot = editorCtx?.content?.substring(0, 1000) || null;
+                          }
+                        } catch (e) {
+                          console.warn('Failed to parse editor context cache:', e);
                         }
-                      } catch (e) {
-                        console.warn('Failed to parse editor context cache:', e);
                       }
                       
-                      const documentId = editorCtx?.documentId || null;
-                      const filename = editorCtx?.filename || null;
-                      const contentSnapshot = editorCtx?.content?.substring(0, 1000) || null;
-                      
-                      // ⚠️ CRITICAL: Warn if documentId is missing
-                      if (!documentId) {
-                        console.warn('⚠️ No documentId in editor_ctx_cache - diffs will not be displayed!', {
-                          editorCtx: editorCtx,
-                          hasCache: !!editorCtx,
-                          cacheKeys: editorCtx ? Object.keys(editorCtx) : []
+                      // ⚠️ CRITICAL: Warn if documentId is STILL missing after fallback
+                      if (!finalDocumentId) {
+                        console.warn('⚠️ No documentId in payload OR editor_ctx_cache - diffs will not be displayed!', {
+                          payloadDocumentId: documentIdFromPayload,
+                          payloadFilename: filenameFromPayload
                         });
                       } else {
-                        console.log('✅ Dispatching editorOperationsLive with documentId:', documentId);
+                        console.log('✅ Dispatching editorOperationsLive with documentId:', finalDocumentId);
+                      }
+                      
+                      // **CRITICAL**: Save to documentDiffStore BEFORE dispatching event (chunked operations)
+                      // This ensures operations persist even if target document isn't currently open
+                      // IMPORTANT: Only save if operations don't already exist in store (avoid overwriting accepted/rejected ops)
+                      if (finalDocumentId) {
+                        // Use dynamic import to avoid circular dependency
+                        import('../services/documentDiffStore').then(({ documentDiffStore }) => {
+                          // Check if operations already exist for this message - don't overwrite if user is actively accepting/rejecting
+                          const existingDiffs = documentDiffStore.getDiffs(finalDocumentId);
+                          const existingMessageId = existingDiffs?.messageId;
+                          
+                          // Only save if:
+                          // 1. No existing diffs for this document, OR
+                          // 2. Existing diffs are for a DIFFERENT message (new operations arriving)
+                          // This prevents overwriting operations that user has already accepted/rejected
+                          if (!existingDiffs || existingMessageId !== streamingMessage.id) {
+                            // Generate stable operation IDs before saving (same logic as plugin)
+                            const opsWithIds = ops.map((op, idx) => ({
+                              ...op,
+                              operationId: op.operationId || `${streamingMessage.id}_${idx}`
+                            }));
+                            
+                            documentDiffStore.setDiffs(
+                              finalDocumentId, 
+                              opsWithIds, 
+                              streamingMessage.id, 
+                              contentSnapshot || ''
+                            );
+                            
+                            console.log('💾 Saved chunked operations to documentDiffStore for later retrieval', {
+                              documentId: finalDocumentId,
+                              operationsCount: opsWithIds.length,
+                              messageId: streamingMessage.id
+                            });
+                          } else {
+                            console.log('⏭️ Skipped saving chunked operations to store - operations already exist for this message (user may be accepting/rejecting)', {
+                              documentId: finalDocumentId,
+                              existingMessageId,
+                              newMessageId: streamingMessage.id
+                            });
+                          }
+                        }).catch(err => {
+                          console.error('Failed to save chunked operations to documentDiffStore:', err);
+                        });
                       }
                       
                       // Dispatch the event
@@ -1342,15 +1652,12 @@ export const ChatSidebarProvider = ({ children }) => {
                           operations: ops,
                           manuscriptEdit: mEdit,
                           messageId: streamingMessage.id,
-                          documentId: documentId,
-                          filename: filename,
+                          documentId: finalDocumentId,
+                          filename: finalFilename,
                           contentSnapshot: contentSnapshot
                         }
                       });
                       window.dispatchEvent(event);
-                      
-                      // ❌ REMOVED: Don't save to store here - let plugin handle it AFTER generating stable IDs!
-                      // The plugin will call documentDiffStore.setDiffs() in addOperations() after creating operationId
                       
                       // Clean up accumulator
                       delete window.__editor_ops_accumulator;
@@ -1449,7 +1756,7 @@ export const ChatSidebarProvider = ({ children }) => {
                   console.log('🛡️ HITL completion - awaiting permission response');
                   
                   // Don't clear job ID yet - we're waiting for user input
-                  setIsLoading(false);
+                  updateCurrentActivityState({ isLoading: false });
                   
                   // Refresh conversations to ensure state is saved
                   queryClient.invalidateQueries(['conversations']);
@@ -1486,7 +1793,7 @@ export const ChatSidebarProvider = ({ children }) => {
                   console.log('✅ Streaming completed successfully');
                   
                   // ROOSEVELT'S CANCEL BUTTON FIX: Clear job ID when streaming completes
-                  setCurrentJobId(null);
+                  updateCurrentActivityState({ currentJobId: null });
                   
                   // Refresh conversations - title may have been updated from "New Conversation"
                   // Force a refetch to ensure we get the latest title
@@ -1533,7 +1840,7 @@ export const ChatSidebarProvider = ({ children }) => {
       console.error('❌ Streaming failed:', error);
       
       // Update message to show error
-      setCurrentJobId(null);
+      updateCurrentActivityState({ currentJobId: null });
       setMessages(prev => prev.map(msg => 
         msg.isStreaming 
           ? { 
@@ -1552,7 +1859,10 @@ export const ChatSidebarProvider = ({ children }) => {
     setMessages([]);
     messagesConversationIdRef.current = null; // Reset ref when clearing chat
     setQuery('');
-    setCurrentJobId(null); // Clear current job when clearing chat
+    // Activity state is conversation-scoped, so clearing conversation clears its state
+    if (currentConversationId) {
+      updateCurrentActivityState({ currentJobId: null, isLoading: false });
+    }
   };
 
   const cancelCurrentJob = async () => {
@@ -1569,8 +1879,7 @@ export const ChatSidebarProvider = ({ children }) => {
           : msg
       ));
       
-      setCurrentJobId(null);
-      setIsLoading(false);
+      updateCurrentActivityState({ currentJobId: null, isLoading: false });
       
       console.log('✅ Job cancelled successfully');
     } catch (error) {
@@ -1598,6 +1907,8 @@ export const ChatSidebarProvider = ({ children }) => {
     setMessages,
     query,
     setQuery,
+    replyToMessage,
+    setReplyToMessage,
     isLoading,
     selectedModel,
     setSelectedModel,
@@ -1620,6 +1931,10 @@ export const ChatSidebarProvider = ({ children }) => {
     // **ROOSEVELT**: Editor preference (active = sent to backend, user = checkbox state)
     editorPreference, // Active preference sent to backend (context-aware)
     setEditorPreference: setUserEditorPreference, // UI checkboxes modify user preference
+    handleEditorPreferenceChange, // Handler that saves to conversation metadata
+    
+    // Conversation preference management
+    updateConversationPreference, // Save preferences to conversation metadata
   };
 
   return (

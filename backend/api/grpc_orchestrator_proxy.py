@@ -215,12 +215,14 @@ async def stream_from_grpc_orchestrator(
                         editor_ops_data = json.loads(chunk.message)
                         operations = editor_ops_data.get('operations', [])
                         manuscript_edit = editor_ops_data.get('manuscript_edit')
+                        document_id = editor_ops_data.get('document_id')  # Extract document_id from payload
+                        filename = editor_ops_data.get('filename')  # Extract filename from payload
                         
                         # Store for saving to message metadata
                         editor_operations_received = operations
                         manuscript_edit_received = manuscript_edit
                         
-                        logger.info(f"📥 PROXY: Parsed {len(operations)} operation(s) from editor_operations chunk")
+                        logger.info(f"📥 PROXY: Parsed {len(operations)} operation(s) from editor_operations chunk (document_id={document_id}, filename={filename})")
                         
                         # **CRITICAL**: SSE messages have size limits (~16-64KB depending on proxy/browser)
                         # If operations are large (e.g., full chapter generation), send them one at a time
@@ -229,26 +231,96 @@ async def stream_from_grpc_orchestrator(
                         # Calculate total size
                         total_size = len(json.dumps(editor_ops_data))
                         MAX_SSE_SIZE = 50000  # 50KB safety limit
+                        MAX_TEXT_CHUNK_SIZE = 8000  # 8K chars per chunk (keeps JSON under 16KB for nginx)
                         
-                        if total_size > MAX_SSE_SIZE and len(operations) > 0:
+                        # First pass: Split any large operations into multiple smaller ones
+                        operations_to_send = []
+                        for op in operations:
+                            text_field = op.get('text', '')
+                            
+                            # Check if text field is too large and should be split
+                            if len(text_field) > MAX_TEXT_CHUNK_SIZE:
+                                logger.info(f"✂️ Splitting large operation (text_length={len(text_field)}) into multiple chunks")
+                                
+                                # Split text into chunks at paragraph boundaries
+                                text_chunks = []
+                                
+                                # Split by paragraphs (double newlines), preserving separators
+                                # Use split with keepends to preserve the \n\n separators
+                                parts = text_field.split('\n\n')
+                                
+                                current_chunk = ""
+                                for i, para in enumerate(parts):
+                                    # Determine separator: \n\n between paragraphs, none for first
+                                    separator = '\n\n' if current_chunk else ''
+                                    potential_chunk = current_chunk + separator + para
+                                    
+                                    if len(potential_chunk) > MAX_TEXT_CHUNK_SIZE:
+                                        # Current chunk is full, save it
+                                        if current_chunk:
+                                            text_chunks.append(current_chunk)
+                                        
+                                        # If single paragraph exceeds limit, split it by characters
+                                        if len(para) > MAX_TEXT_CHUNK_SIZE:
+                                            logger.warning(f"⚠️ Paragraph exceeds chunk size ({len(para)} chars), splitting by characters")
+                                            for j in range(0, len(para), MAX_TEXT_CHUNK_SIZE):
+                                                text_chunks.append(para[j:j + MAX_TEXT_CHUNK_SIZE])
+                                            current_chunk = ""
+                                        else:
+                                            # Start new chunk with this paragraph
+                                            current_chunk = para
+                                    else:
+                                        # Add paragraph to current chunk
+                                        current_chunk = potential_chunk
+                                
+                                # Add remaining chunk
+                                if current_chunk:
+                                    text_chunks.append(current_chunk)
+                                
+                                logger.info(f"✂️ Split into {len(text_chunks)} text chunks at paragraph boundaries")
+                                
+                                # Create multiple operations from the chunks
+                                # Frontend now sorts by chunk_index, so send in natural order
+                                for chunk_idx, text_chunk in enumerate(text_chunks):
+                                    op_copy = op.copy()
+                                    op_copy['text'] = text_chunk
+                                    op_copy['is_text_chunk'] = True
+                                    op_copy['chunk_index'] = chunk_idx  # Natural order: 0, 1, 2...
+                                    op_copy['total_text_chunks'] = len(text_chunks)
+                                    op_copy['original_text_length'] = len(text_field)
+                                    operations_to_send.append(op_copy)
+                            else:
+                                # Operation is fine as-is
+                                operations_to_send.append(op)
+                        
+                        logger.info(f"📦 After splitting: {len(operations)} original operations became {len(operations_to_send)} operations to send")
+                        
+                        if total_size > MAX_SSE_SIZE or len(operations_to_send) > 1:
                             # Send operations individually to avoid SSE size limits
-                            logger.info(f"📦 Editor operations are large ({total_size} bytes) - chunking into {len(operations)} separate messages")
-                            for idx, op in enumerate(operations):
+                            logger.info(f"📦 Editor operations need chunking ({total_size} bytes, {len(operations_to_send)} ops) - sending as separate messages")
+                            for idx, op in enumerate(operations_to_send):
                                 yield format_sse_message({
                                     'type': 'editor_operations_chunk',
                                     'chunk_index': idx,
-                                    'total_chunks': len(operations),
+                                    'total_chunks': len(operations_to_send),
                                     'operation': op,
-                                    'manuscript_edit': manuscript_edit if idx == len(operations) - 1 else None  # Include metadata on last chunk only
+                                    'manuscript_edit': manuscript_edit if idx == len(operations_to_send) - 1 else None,  # Include metadata on last chunk only
+                                    'document_id': document_id,  # CRITICAL: Include document_id in every chunk
+                                    'filename': filename  # Include filename in every chunk
                                 })
-                                logger.info(f"📦 Sent chunk {idx + 1}/{len(operations)} (op_type={op.get('op_type')}, text_length={len(op.get('text', ''))})")
+                                
+                                is_chunk = op.get('is_text_chunk', False)
+                                chunk_info = f" (text chunk {op.get('chunk_index', 0) + 1}/{op.get('total_text_chunks', 1)})" if is_chunk else ""
+                                logger.info(f"📦 Sent chunk {idx + 1}/{len(operations_to_send)} (op_type={op.get('op_type')}, text_length={len(op.get('text', ''))}){chunk_info}")
                         else:
                             # Small enough to send as single message
                             logger.info(f"✅ PROXY: Sending {len(operations)} editor operation(s) as single SSE message (size: {total_size} bytes)")
                             yield format_sse_message({
                                 'type': 'editor_operations',
                                 'operations': operations,
-                                'manuscript_edit': manuscript_edit
+                                'manuscript_edit': manuscript_edit,
+                                'document_id': document_id,  # CRITICAL: Include document_id
+                                'filename': filename  # Include filename
                             })
                             logger.info(f"✅ PROXY: Sent editor_operations SSE message to frontend")
                     except json.JSONDecodeError as e:

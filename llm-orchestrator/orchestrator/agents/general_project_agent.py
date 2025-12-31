@@ -43,6 +43,9 @@ from orchestrator.tools.project_structure_tools import (
 )
 from orchestrator.tools.reference_file_loader import load_referenced_files
 from orchestrator.utils.project_utils import sanitize_filename
+from orchestrator.tools.math_tools import calculate_expression_tool, list_available_formulas_tool
+from orchestrator.tools.math_formulas import evaluate_formula_tool
+from orchestrator.tools.unit_conversions import convert_units_tool
 
 # Import Pydantic models for structured outputs
 from orchestrator.models.general_project_models import (
@@ -1511,11 +1514,23 @@ Return ONLY valid JSON:
             
             context_text = "\n\n".join(context_parts) if context_parts else "No specific project context available."
             
+            # Check if query needs calculations
+            calculation_needed = self._detect_calculation_needs(query)
+            calculation_result = None
+            
+            if calculation_needed:
+                # Build context summary for calculations
+                context_summary = self._build_calculation_context(referenced_context, read_only_context, segments)
+                if context_summary:
+                    logger.info(f"Using project context for calculations ({len(context_summary)} chars of context)")
+                calculation_result = await self._perform_calculations(query, state, context_summary)
+            
             # Build user prompt
             user_prompt = f"""**USER QUERY**: {query}
 
 **PROJECT CONTEXT**:
 {context_text}
+{f'**CALCULATION RESULT**: {json.dumps(calculation_result, indent=2)}' if calculation_result else ''}
 
 **TASK**: Provide helpful, practical guidance for this general project query. Be proactive, ask clarifying questions, and suggest concrete next steps.
 
@@ -1525,7 +1540,8 @@ Return ONLY valid JSON:
 - Ask questions to clarify requirements
 - Suggest specific next steps
 - Be conversational and helpful
-- Structure your response as natural language (not JSON)"""
+- Structure your response as natural language (not JSON)
+{f'- **IMPORTANT**: Include the calculation results shown above in your response if calculations were performed.' if calculation_result else ''}"""
             
             # Build messages with conversation history using standardized helper
             state_messages = state.get("messages", [])
@@ -1544,13 +1560,19 @@ Return ONLY valid JSON:
             
             response_text = response.content if hasattr(response, 'content') else str(response)
             
+            # Include calculation results in response if available
+            response_data = {
+                "task_status": "complete",
+                "response": response_text,
+                "query_type": query_type,
+                "confidence": 0.8
+            }
+            
+            if calculation_result:
+                response_data["calculation_result"] = calculation_result
+            
             return {
-                "response": {
-                    "task_status": "complete",
-                    "response": response_text,
-                    "query_type": query_type,
-                    "confidence": 0.8
-                },
+                "response": response_data,
                 # ✅ CRITICAL: Preserve critical state keys
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
@@ -1580,6 +1602,264 @@ Return ONLY valid JSON:
                 "documents": state.get("documents", []),
                 "segments": state.get("segments", [])
             }
+    
+    def _detect_calculation_needs(self, query: str) -> bool:
+        """Detect if query needs mathematical calculations"""
+        query_lower = query.lower()
+        calculation_keywords = [
+            "calculate", "compute", "how much", "what is", "convert",
+            "heat loss", "btu", "manual j", "r-value", "u-value",
+            "square feet", "cubic feet", "area", "volume", "quantity",
+            "formula", "equation", "math", "mathematical"
+        ]
+        return any(kw in query_lower for kw in calculation_keywords)
+    
+    def _build_calculation_context(self, referenced_context: Dict[str, Any], read_only_context: Dict[str, Any], segments: List[Dict[str, Any]]) -> str:
+        """Build context summary from referenced files for use in calculations"""
+        context_parts = []
+        
+        # Include read-only referenced files
+        if read_only_context:
+            for category, files in read_only_context.items():
+                if isinstance(files, list):
+                    for ref_file in files[:3]:  # Limit to 3 files per category
+                        if isinstance(ref_file, dict):
+                            filename = ref_file.get("filename", "reference file")
+                            content = ref_file.get("content", "")
+                            # Extract key information (dimensions, specs, etc.)
+                            context_parts.append(f"**{filename}** ({category}):\n{content[:2000]}")
+        
+        # Include referenced context
+        if referenced_context:
+            for category, files in referenced_context.items():
+                if isinstance(files, list):
+                    for ref_file in files[:3]:
+                        if isinstance(ref_file, dict):
+                            filename = ref_file.get("filename", "reference file")
+                            content = ref_file.get("content", "")
+                            context_parts.append(f"**{filename}** ({category}):\n{content[:2000]}")
+        
+        # Include relevant segments
+        if segments:
+            for seg in segments[:5]:
+                filename = seg.get("filename", "document")
+                content = seg.get("content", "")
+                context_parts.append(f"**From {filename}**:\n{content[:500]}")
+        
+        return "\n\n".join(context_parts) if context_parts else ""
+    
+    async def _perform_calculations(self, query: str, state: GeneralProjectState, context_summary: str = "") -> Optional[Dict[str, Any]]:
+        """Perform calculations based on query - detects Manual J, unit conversions, or general math"""
+        try:
+            query_lower = query.lower()
+            
+            # Check for Manual J heat loss calculation
+            if any(kw in query_lower for kw in ["manual j", "heat loss", "hvac sizing", "btu calculation", "radiator sizing", "heating load"]):
+                # Extract parameters from query and context using LLM
+                fast_model = self._get_fast_model(state)
+                llm = self._get_llm(temperature=0.1, model=fast_model, state=state)
+                
+                context_section = f"""
+
+**AVAILABLE PROJECT CONTEXT** (use these values when available):
+{context_summary}
+
+**INSTRUCTIONS**: 
+- Extract building parameters from the query AND the project context above
+- If room dimensions, building specs, or construction details are mentioned in the context, use those values
+- For room-specific calculations, extract the room dimensions from context
+- Use default values only if not found in query or context
+- If the query mentions a specific room, look for that room's dimensions in the context
+""" if context_summary else ""
+                
+                prompt = f"""Extract Manual J heat loss calculation parameters from this query and available project context:
+
+**QUERY**: {query}
+{context_section}
+
+**TASK**: Extract building parameters for Manual J calculation. Return JSON with:
+- outdoor_design_temp (required - use design temp for location, typically 99% heating dry bulb)
+- indoor_design_temp (required, default 70)
+- floor_area (required - extract from room dimensions if given, or use total if not specified)
+- Optional: ceiling_height, wall_area, wall_r_value, roof_r_value, window_area, window_u_value, door_area, door_u_value, air_changes_per_hour, occupant_count, etc.
+
+**IMPORTANT**: 
+- If the query mentions a specific room (e.g., "living room", "bedroom"), extract that room's dimensions from the context
+- If context contains building age, use it to estimate construction quality (older = lower R-values, higher infiltration)
+- If context contains location/climate info, use it to estimate outdoor_design_temp
+- Calculate floor_area from room dimensions (length × width) if dimensions are provided
+
+Return ONLY valid JSON:
+{{
+  "outdoor_design_temp": 10,
+  "indoor_design_temp": 70,
+  "floor_area": 2000,
+  "wall_area": 1200,
+  "wall_r_value": 19.0,
+  ...
+}}"""
+                
+                try:
+                    schema = {
+                        "type": "object",
+                        "properties": {
+                            "outdoor_design_temp": {"type": "number"},
+                            "indoor_design_temp": {"type": "number"},
+                            "floor_area": {"type": "number"},
+                            "ceiling_height": {"type": "number"},
+                            "wall_area": {"type": "number"},
+                            "wall_r_value": {"type": "number"},
+                            "roof_r_value": {"type": "number"},
+                            "window_area": {"type": "number"},
+                            "window_u_value": {"type": "number"},
+                            "door_area": {"type": "number"},
+                            "door_u_value": {"type": "number"},
+                            "air_changes_per_hour": {"type": "number"},
+                            "occupant_count": {"type": "integer"},
+                            "appliance_heat_gain": {"type": "number"},
+                            "lighting_heat_gain": {"type": "number"}
+                        },
+                        "required": ["outdoor_design_temp", "indoor_design_temp", "floor_area"]
+                    }
+                    structured_llm = llm.with_structured_output(schema)
+                    result = await structured_llm.ainvoke([{"role": "user", "content": prompt}])
+                    inputs = result if isinstance(result, dict) else result.dict() if hasattr(result, 'dict') else result.model_dump()
+                    
+                    # Perform Manual J calculation
+                    logger.info(f"Performing Manual J calculation with inputs: {json.dumps(inputs, indent=2)}")
+                    result = await evaluate_formula_tool("manual_j_heat_loss", inputs)
+                    if result.get("success"):
+                        logger.info(f"Manual J calculation successful: {result.get('result'):.0f} BTU/hr")
+                        return {
+                            "type": "manual_j_heat_loss",
+                            "result": result,
+                            "inputs": inputs
+                        }
+                    else:
+                        logger.warning(f"Manual J calculation failed: {result.get('error')}")
+                except Exception as e:
+                    logger.warning(f"Manual J calculation extraction failed: {e}")
+            
+            # Check for unit conversion
+            if any(kw in query_lower for kw in ["convert", "conversion", "to", "from"]):
+                # Try to extract conversion parameters
+                fast_model = self._get_fast_model(state)
+                llm = self._get_llm(temperature=0.1, model=fast_model, state=state)
+                
+                prompt = f"""Extract unit conversion parameters from this query:
+
+**QUERY**: {query}
+
+**TASK**: Extract value, from_unit, to_unit, and quantity_type for unit conversion.
+
+Return ONLY valid JSON:
+{{
+  "value": 100,
+  "from_unit": "sq_ft",
+  "to_unit": "sq_m",
+  "quantity_type": "area"
+}}"""
+                
+                try:
+                    schema = {
+                        "type": "object",
+                        "properties": {
+                            "value": {"type": "number"},
+                            "from_unit": {"type": "string"},
+                            "to_unit": {"type": "string"},
+                            "quantity_type": {"type": "string"}
+                        },
+                        "required": ["value", "from_unit", "to_unit"]
+                    }
+                    structured_llm = llm.with_structured_output(schema)
+                    result = await structured_llm.ainvoke([{"role": "user", "content": prompt}])
+                    params = result if isinstance(result, dict) else result.dict() if hasattr(result, 'dict') else result.model_dump()
+                    
+                    conversion_result = await convert_units_tool(
+                        value=params.get("value"),
+                        from_unit=params.get("from_unit"),
+                        to_unit=params.get("to_unit"),
+                        quantity_type=params.get("quantity_type", "length")
+                    )
+                    if conversion_result.get("success"):
+                        return {
+                            "type": "unit_conversion",
+                            "result": conversion_result,
+                            "params": params
+                        }
+                except Exception as e:
+                    logger.warning(f"Unit conversion extraction failed: {e}")
+            
+            # Check for general math expression
+            # Try simple pattern matching first
+            import re
+            math_pattern = r'(\d+(?:\.\d+)?)\s*([+\-*/×÷])\s*(\d+(?:\.\d+)?)'
+            match = re.search(math_pattern, query)
+            if match:
+                num1, op, num2 = match.groups()
+                operator_map = {
+                    '+': '+',
+                    '-': '-',
+                    '×': '*',
+                    '÷': '/',
+                    '*': '*',
+                    '/': '/'
+                }
+                op_symbol = operator_map.get(op, op)
+                expression = f"{num1} {op_symbol} {num2}"
+                
+                calc_result = await calculate_expression_tool(expression)
+                if calc_result.get("success"):
+                    return {
+                        "type": "expression",
+                        "result": calc_result,
+                        "expression": expression
+                    }
+            
+            # Try LLM extraction for complex expressions
+            fast_model = self._get_fast_model(state)
+            llm = self._get_llm(temperature=0.1, model=fast_model, state=state)
+            
+            prompt = f"""Extract the mathematical expression from this query:
+
+**QUERY**: {query}
+
+**TASK**: Extract a mathematical expression that can be evaluated.
+
+Return ONLY valid JSON:
+{{
+  "expression": "84+92" or null
+}}"""
+            
+            try:
+                schema = {
+                    "type": "object",
+                    "properties": {
+                        "expression": {"type": ["string", "null"]}
+                    },
+                    "required": ["expression"]
+                }
+                structured_llm = llm.with_structured_output(schema)
+                result = await structured_llm.ainvoke([{"role": "user", "content": prompt}])
+                result_dict = result if isinstance(result, dict) else result.dict() if hasattr(result, 'dict') else result.model_dump()
+                expression = result_dict.get("expression")
+                
+                if expression:
+                    calc_result = await calculate_expression_tool(expression)
+                    if calc_result.get("success"):
+                        return {
+                            "type": "expression",
+                            "result": calc_result,
+                            "expression": expression
+                        }
+            except Exception as e:
+                logger.warning(f"Expression extraction failed: {e}")
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Calculation performance failed: {e}")
+            return None
     
     def _build_general_project_prompt(self) -> str:
         """Build system prompt for general project queries"""
@@ -1629,6 +1909,7 @@ When assessing a project document (e.g., from Org Agent):
 5. **Task Management**: Help organize tasks, checklists, and project milestones
 6. **Assessment**: Evaluate project documents and suggest improvements
 7. **Diagram Generation**: Generate project management diagrams to visualize workflows, timelines, and decision trees
+8. **Calculations**: Perform mathematical calculations, unit conversions, and specialized formulas (e.g., Manual J heat loss calculations for HVAC projects)
 
 **DIAGRAM GENERATION**:
 You can generate project management diagrams:
@@ -1647,7 +1928,9 @@ When a diagram would clarify project structure or flow, request diagram generati
 - Be proactive in suggesting concrete actions
 - Structure responses naturally and conversationally
 - When updating the project document, always target specific headers
-- **USE DIAGRAMS**: When explaining complex workflows, timelines, or decision processes, suggest generating a diagram"""
+- **USE DIAGRAMS**: When explaining complex workflows, timelines, or decision processes, suggest generating a diagram
+- **USE CALCULATIONS**: When queries involve mathematical calculations, unit conversions, or specialized formulas (e.g., HVAC heat loss, material quantities, area/volume calculations), perform the calculations and include results in your response. For HVAC projects, use the Manual J heat loss calculation formula when appropriate.
+- **USE REFERENCED CONTEXT FOR CALCULATIONS**: When performing calculations (especially Manual J heat loss), extract building dimensions, room specs, construction details, and other parameters from referenced files in the project context. If a query mentions a specific room, look for that room's dimensions in the referenced files. Use context values instead of asking the user for information that's already documented."""
 
     
     def _extract_json_from_response(self, content: str) -> Optional[Dict[str, Any]]:

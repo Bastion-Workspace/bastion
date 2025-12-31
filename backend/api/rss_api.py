@@ -8,12 +8,12 @@ from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import ValidationError
 
-from models.rss_models import (
+from tools_service.models.rss_models import (
     RSSFeed, RSSArticle, RSSFeedCreate, RSSArticleImport,
     RSSFeedPollResult, RSSArticleProcessResult
 )
 from models.api_models import AuthenticatedUserResponse
-from services.service_container import get_service_container
+from tools_service.services.rss_service import get_rss_service
 from services.celery_tasks.rss_tasks import poll_rss_feeds_task, process_rss_article_task, extract_full_content_task
 from utils.auth_middleware import get_current_user
 
@@ -39,11 +39,11 @@ async def create_rss_feed(
         # Set user ID for user-specific feeds
         feed_data.user_id = current_user.user_id
         
-        service_container = await get_service_container()
-        feed = await service_container.rss_service.create_feed(feed_data, update_if_exists=update_if_exists)
+        rss_service = await get_rss_service()
+        feed = await rss_service.create_feed(feed_data, update_if_exists=update_if_exists)
         
         # Check if this was an existing feed or a new one
-        existing_feed = await service_container.rss_service.get_feed_by_url(feed_data.feed_url, current_user.user_id)
+        existing_feed = await rss_service.get_feed_by_url(feed_data.feed_url, current_user.user_id)
         
         if existing_feed and existing_feed.feed_id == feed.feed_id:
             if update_if_exists:
@@ -84,8 +84,8 @@ async def create_global_rss_feed(
         # Set user_id to None for global feeds
         feed_data.user_id = None
         
-        service_container = await get_service_container()
-        feed = await service_container.rss_service.create_feed(feed_data, update_if_exists=update_if_exists)
+        rss_service = await get_rss_service()
+        feed = await rss_service.create_feed(feed_data, update_if_exists=update_if_exists)
         
         logger.info(f"✅ RSS API: Created global RSS feed {feed.feed_id}")
         return feed
@@ -110,9 +110,9 @@ async def get_rss_feeds(
     try:
         logger.info(f"📡 RSS API: Getting RSS feeds for user {current_user.user_id}")
         
-        service_container = await get_service_container()
+        rss_service = await get_rss_service()
         is_admin = current_user.role == "admin"
-        feeds = await service_container.rss_service.get_user_feeds(current_user.user_id, is_admin=is_admin)
+        feeds = await rss_service.get_user_feeds(current_user.user_id, is_admin=is_admin)
         
         logger.info(f"✅ RSS API: Retrieved {len(feeds)} RSS feeds for {'admin' if is_admin else 'user'} {current_user.user_id}")
         return feeds
@@ -134,9 +134,9 @@ async def get_categorized_rss_feeds(
     try:
         logger.info(f"📡 RSS API: Getting categorized RSS feeds for user {current_user.user_id}")
         
-        service_container = await get_service_container()
+        rss_service = await get_rss_service()
         is_admin = current_user.role == "admin"
-        feeds = await service_container.rss_service.get_user_feeds(current_user.user_id, is_admin=is_admin)
+        feeds = await rss_service.get_user_feeds(current_user.user_id, is_admin=is_admin)
         
         # Categorize feeds
         user_feeds = []
@@ -176,8 +176,8 @@ async def get_rss_feed(
     try:
         logger.info(f"📡 RSS API: Getting RSS feed {feed_id} for user {current_user.user_id}")
         
-        service_container = await get_service_container()
-        feed = await service_container.rss_service.get_feed(feed_id)
+        rss_service = await get_rss_service()
+        feed = await rss_service.get_feed(feed_id)
         
         if not feed:
             raise HTTPException(status_code=404, detail="RSS feed not found")
@@ -209,10 +209,10 @@ async def validate_feed_url(
     try:
         logger.info(f"📡 RSS API: Validating RSS feed URL: {feed_url} for user {current_user.user_id}")
         
-        service_container = await get_service_container()
+        rss_service = await get_rss_service()
         
         # Check if feed already exists for this user
-        existing_feed = await service_container.rss_service.get_feed_by_url(feed_url, current_user.user_id)
+        existing_feed = await rss_service.get_feed_by_url(feed_url, current_user.user_id)
         
         # This would validate the RSS feed URL and return feed metadata
         # For now, return a mock response for testing
@@ -258,9 +258,9 @@ async def delete_rss_feed(
     try:
         logger.info(f"📡 RSS API: Deleting RSS feed {feed_id} for user {current_user.user_id}")
         
-        service_container = await get_service_container()
+        rss_service = await get_rss_service()
         is_admin = current_user.role == "admin"
-        success = await service_container.rss_service.delete_feed(feed_id, current_user.user_id, is_admin=is_admin)
+        success = await rss_service.delete_feed(feed_id, current_user.user_id, is_admin=is_admin)
         
         if not success:
             raise HTTPException(status_code=404, detail="RSS feed not found or access denied")
@@ -292,13 +292,13 @@ async def update_rss_feed(
         # Set user ID for user-specific feeds
         feed_data.user_id = current_user.user_id
         
-        service_container = await get_service_container()
+        rss_service = await get_rss_service()
         
         # Check admin status
         is_admin = current_user.role == "admin"
         
         # First check if user has access to this feed
-        existing_feed = await service_container.rss_service.get_feed(feed_id)
+        existing_feed = await rss_service.get_feed(feed_id)
         if not existing_feed:
             raise HTTPException(status_code=404, detail="RSS feed not found")
         
@@ -307,7 +307,7 @@ async def update_rss_feed(
             raise HTTPException(status_code=403, detail="Access denied to this RSS feed")
         
         # Update the feed metadata
-        updated_feed = await service_container.rss_service.update_feed_metadata(feed_id, feed_data, current_user.user_id, is_admin=is_admin)
+        updated_feed = await rss_service.update_feed_metadata(feed_id, feed_data, current_user.user_id, is_admin=is_admin)
         
         logger.info(f"✅ RSS API: Updated RSS feed {feed_id}")
         return updated_feed
@@ -336,8 +336,8 @@ async def get_feed_articles(
     try:
         logger.info(f"📡 RSS API: Getting articles for feed {feed_id}, user {current_user.user_id}")
         
-        service_container = await get_service_container()
-        articles = await service_container.rss_service.get_feed_articles(feed_id, current_user.user_id, limit)
+        rss_service = await get_rss_service()
+        articles = await rss_service.get_feed_articles(feed_id, current_user.user_id, limit)
         
         logger.info(f"✅ RSS API: Retrieved {len(articles)} articles for feed {feed_id}")
         return articles
@@ -397,8 +397,8 @@ async def mark_article_read(
     try:
         logger.info(f"📡 RSS API: Marking article {article_id} as read for user {current_user.user_id}")
         
-        service_container = await get_service_container()
-        success = await service_container.rss_service.mark_article_read(article_id, current_user.user_id)
+        rss_service = await get_rss_service()
+        success = await rss_service.mark_article_read(article_id, current_user.user_id)
         
         if not success:
             raise HTTPException(status_code=404, detail="Article not found or access denied")
@@ -426,8 +426,8 @@ async def delete_rss_article(
     try:
         logger.info(f"📡 RSS API: Deleting article {article_id} for user {current_user.user_id}")
         
-        service_container = await get_service_container()
-        success = await service_container.rss_service.delete_article(article_id, current_user.user_id)
+        rss_service = await get_rss_service()
+        success = await rss_service.delete_article(article_id, current_user.user_id)
         
         if not success:
             raise HTTPException(status_code=404, detail="Article not found or access denied")
@@ -491,8 +491,8 @@ async def extract_full_content_for_existing_articles(
         logger.info(f"📡 RSS API: Starting full content extraction for user {current_user.user_id}")
         
         # Get articles that need full content extraction
-        service_container = await get_service_container()
-        articles_needing_content = await service_container.rss_service.get_articles_needing_full_content(limit=20)
+        rss_service = await get_rss_service()
+        articles_needing_content = await rss_service.get_articles_needing_full_content(limit=20)
         
         if not articles_needing_content:
             return {
@@ -559,8 +559,8 @@ async def get_unread_count(
     try:
         logger.info(f"📡 RSS API: Getting unread count for user {current_user.user_id}")
         
-        service_container = await get_service_container()
-        unread_counts = await service_container.rss_service.get_unread_count(current_user.user_id)
+        rss_service = await get_rss_service()
+        unread_counts = await rss_service.get_unread_count(current_user.user_id)
         
         logger.info(f"✅ RSS API: Retrieved unread counts for {len(unread_counts)} feeds")
         return unread_counts
@@ -583,8 +583,8 @@ async def subscribe_to_feed(
     try:
         logger.info(f"📡 RSS API: Subscribing user {current_user.user_id} to feed {feed_id}")
         
-        service_container = await get_service_container()
-        success = await service_container.rss_service.subscribe_to_feed(feed_id, current_user.user_id)
+        rss_service = await get_rss_service()
+        success = await rss_service.subscribe_to_feed(feed_id, current_user.user_id)
         
         if not success:
             raise HTTPException(status_code=400, detail="Failed to subscribe to feed")
@@ -612,8 +612,8 @@ async def unsubscribe_from_feed(
     try:
         logger.info(f"📡 RSS API: Unsubscribing user {current_user.user_id} from feed {feed_id}")
         
-        service_container = await get_service_container()
-        success = await service_container.rss_service.unsubscribe_from_feed(feed_id, current_user.user_id)
+        rss_service = await get_rss_service()
+        success = await rss_service.unsubscribe_from_feed(feed_id, current_user.user_id)
         
         if not success:
             raise HTTPException(status_code=404, detail="Subscription not found")

@@ -641,7 +641,10 @@ async def get_room_presence(
         if not settings.MESSAGING_ENABLED:
             raise HTTPException(status_code=503, detail="Messaging is not enabled")
         
-        presence_map = await messaging_service.get_room_participant_presence(room_id=room_id)
+        presence_map = await messaging_service.get_room_participant_presence(
+            room_id=room_id,
+            user_id=current_user.user_id
+        )
         
         return {"room_id": room_id, "presence": presence_map}
     

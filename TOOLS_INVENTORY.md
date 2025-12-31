@@ -404,6 +404,102 @@ result = await calculate_expression_tool(
 
 **Universal**: ✅ Evaluates any registered formula
 
+**Available Formulas**:
+- `manual_j_heat_loss`: ACCA Manual J heat loss calculation (see detailed documentation below)
+- `btu_hvac`: Simple BTU calculation for HVAC sizing
+- `ohms_law_voltage`, `ohms_law_current`, `ohms_law_resistance`: Electrical calculations
+- `power_dissipation`: Power calculation
+- `voltage_divider`: Resistor voltage divider
+- `capacitor_impedance`: Capacitor reactance
+- `area_rectangle`, `volume_rectangular`: Geometry calculations
+- `material_quantity`: Material estimation
+
+---
+
+#### 2a. **`manual_j_heat_loss` Formula** (via `evaluate_formula_tool`)
+**Location**: `llm-orchestrator/orchestrator/tools/math_formulas.py`
+
+**Purpose**: Calculate heat loss according to ACCA Manual J methodology for residential HVAC sizing
+
+**Required Inputs**:
+- `outdoor_design_temp`: Outdoor design temperature (°F) - typically 99% heating dry bulb for location
+- `indoor_design_temp`: Indoor design temperature (°F) - typically 70°F for heating
+- `floor_area`: Total conditioned floor area (sq ft)
+
+**Optional Inputs** (with defaults):
+- `ceiling_height`: Ceiling height in feet (default: 8.0)
+- **Wall Construction**:
+  - `wall_area`: Total wall area in sq ft (default: 0.0 - not included if 0)
+  - `wall_r_value`: Wall R-value (default: 13.0)
+- **Roof/Ceiling Construction**:
+  - `roof_area`: Roof/ceiling area in sq ft (default: uses floor_area if not specified)
+  - `roof_r_value`: Roof/ceiling R-value (default: 30.0)
+- **Floor Construction**:
+  - `floor_r_value`: Floor R-value (default: 19.0)
+  - `floor_over_unconditioned`: Boolean, true if floor over unconditioned space (default: False)
+- **Windows**:
+  - `window_area`: Total window area in sq ft (default: 0.0)
+  - `window_u_value`: Window U-value (default: 0.5 - double pane)
+- **Doors**:
+  - `door_area`: Total door area in sq ft (default: 0.0)
+  - `door_u_value`: Door U-value (default: 0.2 - insulated door)
+- **Infiltration**:
+  - `air_changes_per_hour`: ACH from air leakage (default: 0.5 - tight construction)
+- **Ventilation**:
+  - `ventilation_cfm`: Mechanical ventilation CFM (default: 0.0)
+- **Internal Heat Gains** (subtracted from losses):
+  - `occupant_count`: Number of occupants (default: 0)
+  - `appliance_heat_gain`: Heat gain from appliances in BTU/hr (default: 0.0)
+  - `lighting_heat_gain`: Heat gain from lighting in BTU/hr (default: 0.0)
+
+**Returns**: `Dict` with:
+- `result`: Net heat loss in BTU/hr
+- `unit`: "BTU/hr"
+- `formula_used`: "manual_j_heat_loss"
+- `steps`: Detailed calculation steps showing all components
+- `inputs_used`: All inputs used in calculation
+- `success`: Boolean
+
+**Calculation Components**:
+1. **Conduction Losses**: Q = U × A × ΔT through walls, roof, floor, windows, doors
+2. **Infiltration Losses**: Q = 0.018 × V × ACH × ΔT (air leakage)
+3. **Ventilation Losses**: Q = 1.08 × CFM × ΔT (mechanical ventilation)
+4. **Internal Gains**: Occupants (400 BTU/hr each), appliances, lighting
+5. **Net Heat Loss**: Total losses minus internal gains
+
+**Usage**:
+```python
+from orchestrator.tools.math_formulas import evaluate_formula_tool
+
+result = await evaluate_formula_tool(
+    formula_name="manual_j_heat_loss",
+    inputs={
+        "outdoor_design_temp": 10,  # 99% design temp for location
+        "indoor_design_temp": 70,
+        "floor_area": 2000,
+        "ceiling_height": 9.0,
+        "wall_area": 1200,
+        "wall_r_value": 19.0,  # R-19 walls
+        "roof_r_value": 38.0,  # R-38 roof
+        "window_area": 200,
+        "window_u_value": 0.35,  # Low-E windows
+        "door_area": 40,
+        "door_u_value": 0.2,
+        "air_changes_per_hour": 0.3,  # Very tight construction
+        "occupant_count": 4,
+        "appliance_heat_gain": 500
+    }
+)
+
+# Result includes detailed breakdown:
+# - Conduction losses by component
+# - Infiltration and ventilation losses
+# - Internal gains
+# - Net heat loss
+```
+
+**Universal**: ✅ Calculates heat loss for any residential building
+
 ---
 
 #### 3. **`list_available_formulas_tool`** (Backend gRPC)
@@ -458,9 +554,9 @@ result = await convert_units_tool(
 **Purpose**: Get current weather conditions for a specific location
 
 **Parameters**:
-- `location`: Location (ZIP code, city name, or 'city,country' format)
+- `location`: Location (ZIP code, city name, or 'city,country' format). If `user_id` is provided and location is vague (e.g., "user's location", "my location", empty string), the system will automatically fall back to the user's ZIP code from their profile.
 - `units`: Temperature units - `"imperial"` (Fahrenheit), `"metric"` (Celsius), or `"kelvin"` (default: `"imperial"`)
-- `user_id`: User ID for access control
+- `user_id`: User ID for access control (enables automatic location fallback to user's ZIP code)
 
 **Returns**: `Dict` with current weather conditions
 
@@ -474,9 +570,18 @@ result = await weather.get_weather_conditions(
     units="metric",
     user_id=user_id
 )
+
+# Automatic fallback to user's ZIP code
+result = await weather.get_weather_conditions(
+    location="user's location",  # Will use user's ZIP from profile
+    units="imperial",
+    user_id=user_id
+)
 ```
 
 **Universal**: ✅ Gets weather for any location
+
+**Location Fallback**: If `user_id` is provided and location is vague or missing, the system automatically retrieves the user's ZIP code from their profile settings and uses it for geocoding.
 
 ---
 
@@ -486,14 +591,105 @@ result = await weather.get_weather_conditions(
 **Purpose**: Get weather forecast for a specific location (up to 5 days)
 
 **Parameters**:
-- `location`: Location (ZIP code, city name, or 'city,country' format)
+- `location`: Location (ZIP code, city name, or 'city,country' format). If `user_id` is provided and location is vague (e.g., "user's location", "my location", empty string), the system will automatically fall back to the user's ZIP code from their profile.
 - `days`: Number of days to forecast (1-5, default: 3)
 - `units`: Temperature units (default: `"imperial"`)
-- `user_id`: User ID for access control
+- `user_id`: User ID for access control (enables automatic location fallback to user's ZIP code)
 
 **Returns**: `Dict` with forecast data
 
+**Usage**:
+```python
+from orchestrator.tools.weather_tools import WeatherTools
+
+weather = WeatherTools()
+result = await weather.get_weather_forecast(
+    location="New York, NY",
+    days=5,
+    units="imperial",
+    user_id=user_id
+)
+
+# Automatic fallback to user's ZIP code
+result = await weather.get_weather_forecast(
+    location="",  # Will use user's ZIP from profile
+    days=3,
+    user_id=user_id
+)
+```
+
 **Universal**: ✅ Forecasts weather for any location
+
+**Location Fallback**: If `user_id` is provided and location is vague or missing, the system automatically retrieves the user's ZIP code from their profile settings and uses it for geocoding.
+
+---
+
+#### 3. **`weather_history`** (Class Method)
+**Location**: `backend/services/langgraph_tools/weather_tools.py`
+
+**Purpose**: Get historical weather data for a specific location and date
+
+**Parameters**:
+- `location`: Location (ZIP code, city name, or 'city,country' format). If `user_id` is provided and location is vague (e.g., "user's location", "my location", empty string), the system will automatically fall back to the user's ZIP code from their profile.
+- `date_str`: Date string with multiple formats supported:
+  - `"YYYY-MM-DD"` - Specific day (e.g., `"2022-12-15"`)
+  - `"YYYY-MM"` - Monthly average (e.g., `"2022-12"`)
+  - `"YYYY-MM to YYYY-MM"` or `"YYYY-MM - YYYY-MM"` - Date range (e.g., `"2022-10 to 2024-02"`)
+    - Expands into monthly queries for each month in the range
+    - Returns aggregated averages across the entire range
+    - Maximum range: 24 months (2 years) to prevent excessive API calls
+- `units`: Temperature units - `"imperial"` (Fahrenheit), `"metric"` (Celsius), or `"kelvin"` (default: `"imperial"`)
+- `user_id`: User ID for access control (enables automatic location fallback to user's ZIP code)
+
+**Returns**: `Dict` with historical weather data:
+- For daily: `temperature`, `conditions`, `humidity`, `wind_speed`, `pressure`
+- For monthly: `average_temperature`, `min_temperature`, `max_temperature`, `average_humidity`, `average_wind_speed`, `most_common_conditions`, `sample_days`
+- For date ranges: Aggregated data across all months including `average_temperature`, `min_temperature`, `max_temperature`, `average_humidity`, `average_wind_speed`, `most_common_conditions`, plus `monthly_data` array with per-month averages
+
+**Usage**:
+```python
+from services.langgraph_tools.weather_tools import weather_history
+
+# Specific day
+result = await weather_history(
+    location="Los Angeles, CA",
+    date_str="2022-12-15",
+    units="imperial",
+    user_id=user_id
+)
+
+# Monthly average
+result = await weather_history(
+    location="90210",
+    date_str="2022-12",
+    units="imperial",
+    user_id=user_id
+)
+
+# Date range (expands into monthly queries)
+result = await weather_history(
+    location="14532",
+    date_str="2022-10 to 2024-02",
+    units="imperial",
+    user_id=user_id
+)
+
+# Automatic fallback to user's ZIP code
+result = await weather_history(
+    location="user's location",  # Will use user's ZIP from profile
+    date_str="2023-01",
+    units="imperial",
+    user_id=user_id
+)
+```
+
+**Universal**: ✅ Gets historical weather for any location and date
+
+**Location Fallback**: If `user_id` is provided and location is vague or missing, the system automatically retrieves the user's ZIP code from their profile settings and uses it for geocoding.
+
+**Date Range Support**: Date ranges are automatically expanded into individual monthly queries, then aggregated into summary statistics. This allows analysis of weather patterns across extended periods (e.g., comparing winter temperatures across multiple years).
+
+**Note**: Requires OpenWeatherMap One Call API 3.0 subscription for historical data access
 
 ---
 
@@ -961,6 +1157,7 @@ await save_or_update_project_content(
 - `convert_units_tool` - Unit conversions
 - `weather_conditions` - Current weather
 - `weather_forecast` - Weather forecast
+- `weather_history` - Historical weather data (YYYY-MM-DD for specific day, YYYY-MM for monthly average, YYYY-MM to YYYY-MM for date ranges)
 
 **Information Analysis**:
 - `analyze_information_needs_tool` - Analyze query information needs

@@ -13,7 +13,7 @@ import aiohttp
 import feedparser
 
 from services.langgraph_agents.base_agent import BaseAgent
-from models.rss_models import RSSFeed, RSSArticle, RSSFeedPollResult
+from tools_service.models.rss_models import RSSFeed, RSSArticle, RSSFeedPollResult
 from models.agent_response_models import RSSManagementResult
 
 logger = logging.getLogger(__name__)
@@ -49,14 +49,12 @@ This agent performs direct RSS parsing without LLM inference.
     
     async def _get_rss_service(self):
         """
-        Get RSS service with caching to avoid repeated service container lookups.
+        Get RSS service from tools-service.
         
-        **ROOSEVELT FIX**: This eliminates 10+ redundant service container calls throughout the agent.
+        RSS service has been migrated to tools-service container.
         """
-        if not self._service_container:
-            from services.service_container import get_service_container
-            self._service_container = await get_service_container()
-        return self._service_container.rss_service
+        from tools_service.services.rss_service import get_rss_service
+        return await get_rss_service()
     
     async def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """

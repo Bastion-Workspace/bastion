@@ -3,3 +3,4 @@ grpcio-tools==1.60.0
 openai==1.99.1
 python-dotenv==1.0.0
 pydantic==2.9.2
+qdrant-client==1.14.1

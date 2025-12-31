@@ -1,6 +1,6 @@
 """
 Dictionary Agent - Specialized agent for word definitions, synonyms, antonyms, and etymology
-Activated by "define:" prefix for instant routing without intent classification
+Activated by "/define" prefix for instant routing without intent classification
 """
 
 import logging
@@ -38,7 +38,7 @@ class DictionaryAgent(BaseAgent):
     """
     Dictionary Agent for word definitions, thesaurus, and etymology
     
-    Handles queries starting with "define:" for instant routing.
+    Handles queries starting with "/define" for instant routing.
     Provides comprehensive lexicographic information with conversation context.
     """
     
@@ -70,11 +70,11 @@ class DictionaryAgent(BaseAgent):
         try:
             query = state.get("query", "")
             
-            # Remove "define:" prefix if present
-            word = query.lower().replace("define:", "").strip()
+            # Remove "/define" prefix if present (already stripped by routing, but handle legacy "define:" too)
+            word = query.lower().replace("/define", "").replace("define:", "").strip()
             
             # Handle multi-word queries - take the main term
-            # Examples: "define: run fast" -> "run", "define: quantum mechanics" -> keep both
+            # Examples: "/define run fast" -> "run", "/define quantum mechanics" -> keep both
             if not word:
                 return {
                     "word": "",
@@ -253,7 +253,7 @@ Present the information in a natural, readable way. Use markdown formatting for 
 IMPORTANT: If the user is asking follow-up questions about the word (like "What's the origin?" or "Give me synonyms"), focus your response on those specific aspects while still providing the core definition."""
 
             # Build messages for LLM using standardized helper
-            user_query = state.get("query", f"define: {word}")
+            user_query = state.get("query", f"/define {word}")
             llm_messages = self._build_conversational_agent_messages(
                 system_prompt=system_prompt,
                 user_prompt=user_query,

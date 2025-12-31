@@ -5,9 +5,13 @@ gRPC Service Implementation - Vector Service (Embedding Generation Only)
 import grpc
 import logging
 import time
+import hashlib
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from concurrent import futures
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue
 
 # Import generated proto files (will be generated during Docker build)
 import sys
@@ -23,25 +27,162 @@ logger = logging.getLogger(__name__)
 
 
 class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer):
-    """Vector service gRPC implementation - Embedding generation and caching only"""
+    """
+    Vector Service gRPC Implementation - Knowledge Hub Edition!
+    
+    Now owning both embedding generation AND Qdrant vector operations
+    to ensure a centralized, elegant architecture for our agents!
+    """
     
     def __init__(self):
         self.embedding_engine = EmbeddingEngine()
         self.embedding_cache = EmbeddingCache(ttl_seconds=settings.EMBEDDING_CACHE_TTL)
+        self.qdrant_client: Optional[QdrantClient] = None
         self._initialized = False
     
     async def initialize(self):
-        """Initialize all components"""
+        """Initialize all components including Qdrant connection"""
         try:
             await self.embedding_engine.initialize()
             await self.embedding_cache.initialize()
+            
+            # Initialize Qdrant client
+            if settings.QDRANT_URL:
+                self.qdrant_client = QdrantClient(url=settings.QDRANT_URL)
+                logger.info(f"Connected to Qdrant at {settings.QDRANT_URL}")
+                # Ensure tools collection exists
+                self._ensure_collection_exists(settings.TOOL_COLLECTION_NAME)
+            else:
+                logger.warning("QDRANT_URL not set, vector store features will be unavailable")
+            
             self._initialized = True
             logger.info("Vector Service initialized successfully")
-            logger.info("Service mode: Embedding generation + caching (caller handles Qdrant)")
+            logger.info("Service mode: Knowledge Hub (Embeddings + Qdrant Ops)")
         except Exception as e:
             logger.error(f"Failed to initialize Vector Service: {e}")
             raise
-    
+
+    def _ensure_collection_exists(self, collection_name: str):
+        """Ensure a Qdrant collection exists with proper dimensions"""
+        try:
+            collections = self.qdrant_client.get_collections()
+            collection_names = [c.name for c in collections.collections]
+            
+            if collection_name not in collection_names:
+                logger.info(f"Creating collection '{collection_name}' in Qdrant")
+                # text-embedding-3-large is 3072 dimensions
+                # text-embedding-3-small is 1536 dimensions
+                # We default to large in settings
+                dimensions = 3072 if "large" in settings.OPENAI_EMBEDDING_MODEL else 1536
+                
+                self.qdrant_client.create_collection(
+                    collection_name=collection_name,
+                    vectors_config=VectorParams(
+                        size=dimensions,
+                        distance=Distance.COSINE
+                    )
+                )
+                logger.info(f"Collection '{collection_name}' created with {dimensions} dimensions")
+            else:
+                logger.debug(f"Collection '{collection_name}' already exists")
+        except Exception as e:
+            logger.error(f"Failed to ensure collection '{collection_name}' exists: {e}")
+            # Don't raise here, allow other features to work if possible
+
+    async def UpsertTools(self, request, context):
+        """Vectorize and store tools in Qdrant (Knowledge Hub Maneuver!)"""
+        try:
+            if not self._initialized or not self.qdrant_client:
+                return vector_service_pb2.UpsertToolsResponse(
+                    success=False, 
+                    error="Service or Qdrant not initialized"
+                )
+
+            success_count = 0
+            for tool in request.tools:
+                # Create semantic text for embedding (name + description + keywords)
+                semantic_text = f"{tool.name} {tool.description} {' '.join(tool.keywords)}"
+                
+                # Generate embedding
+                embedding = await self.embedding_engine.generate_embedding(semantic_text)
+                
+                # Create point with stable ID from name
+                tool_id = int(hashlib.md5(tool.name.encode()).hexdigest(), 16) % (2**63)
+                
+                point = PointStruct(
+                    id=tool_id,
+                    vector=embedding,
+                    payload={
+                        "name": tool.name,
+                        "description": tool.description,
+                        "pack": tool.pack,
+                        "keywords": list(tool.keywords)
+                    }
+                )
+                
+                # Upsert to Qdrant
+                self.qdrant_client.upsert(
+                    collection_name=settings.TOOL_COLLECTION_NAME,
+                    points=[point]
+                )
+                success_count += 1
+                
+            logger.info(f"Successfully vectorized and stored {success_count} tools")
+            return vector_service_pb2.UpsertToolsResponse(success=True, count=success_count)
+            
+        except Exception as e:
+            logger.error(f"UpsertTools failed: {e}")
+            return vector_service_pb2.UpsertToolsResponse(success=False, error=str(e))
+
+    async def SearchTools(self, request, context):
+        """Search for tools by semantic similarity (Librarian nodes at work!)"""
+        try:
+            if not self._initialized or not self.qdrant_client:
+                return vector_service_pb2.SearchToolsResponse(
+                    error="Service or Qdrant not initialized"
+                )
+
+            # Generate query embedding
+            query_embedding = await self.embedding_engine.generate_embedding(request.query)
+            
+            # Build filter if pack specified
+            query_filter = None
+            if request.pack_filter:
+                query_filter = Filter(
+                    must=[
+                        FieldCondition(
+                            key="pack",
+                            match=MatchValue(value=request.pack_filter)
+                        )
+                    ]
+                )
+            
+            # Search Qdrant
+            search_results = self.qdrant_client.search(
+                collection_name=settings.TOOL_COLLECTION_NAME,
+                query_vector=query_embedding,
+                limit=request.limit or 5,
+                query_filter=query_filter,
+                score_threshold=request.min_score or 0.5
+            )
+            
+            # Format results
+            matches = []
+            for result in search_results:
+                matches.append(vector_service_pb2.ToolMatch(
+                    name=result.payload.get("name"),
+                    description=result.payload.get("description"),
+                    pack=result.payload.get("pack"),
+                    score=result.score
+                ))
+                
+            logger.info(f"Found {len(matches)} tool matches for query: {request.query[:50]}...")
+            return vector_service_pb2.SearchToolsResponse(matches=matches)
+            
+        except Exception as e:
+            logger.error(f"SearchTools failed: {e}")
+            return vector_service_pb2.SearchToolsResponse(error=str(e))
+
     async def GenerateEmbedding(self, request, context):
         """Generate single embedding with cache lookup"""
         try:

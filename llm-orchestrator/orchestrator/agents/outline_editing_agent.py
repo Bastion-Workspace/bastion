@@ -138,6 +138,19 @@ def find_chapter_ranges(text: str) -> List[ChapterRange]:
     return ranges
 
 
+def count_beats_in_chapter(chapter_text: str) -> int:
+    """Count the number of beats (lines starting with '- ') in a chapter."""
+    if not chapter_text:
+        return 0
+    lines = chapter_text.split('\n')
+    beat_count = 0
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith('- '):
+            beat_count += 1
+    return beat_count
+
+
 def find_last_line_of_last_chapter(outline: str) -> Optional[str]:
     """Find the last non-empty line of the last chapter in the outline.
     
@@ -329,6 +342,7 @@ class OutlineEditingAgent(BaseAgent):
         # Add nodes - simplified workflow
         workflow.add_node("prepare_context", self._prepare_context_node)
         workflow.add_node("load_references", self._load_references_node)
+        workflow.add_node("detect_request_type", self._detect_request_type_node)
         workflow.add_node("generate_edit_plan", self._generate_edit_plan_node)
         workflow.add_node("resolve_operations", self._resolve_operations_node)
         workflow.add_node("format_response", self._format_response_node)
@@ -336,9 +350,10 @@ class OutlineEditingAgent(BaseAgent):
         # Entry point
         workflow.set_entry_point("prepare_context")
         
-        # Simplified flow: prepare_context -> load_references -> generate_edit_plan -> resolve_operations -> format_response
+        # Flow: prepare_context -> load_references -> detect_request_type -> generate_edit_plan -> resolve_operations -> format_response
         workflow.add_edge("prepare_context", "load_references")
-        workflow.add_edge("load_references", "generate_edit_plan")
+        workflow.add_edge("load_references", "detect_request_type")
+        workflow.add_edge("detect_request_type", "generate_edit_plan")
         workflow.add_edge("generate_edit_plan", "resolve_operations")
         workflow.add_edge("resolve_operations", "format_response")
         workflow.add_edge("format_response", END)
@@ -379,10 +394,12 @@ class OutlineEditingAgent(BaseAgent):
             "- If the user is asking a question that can be answered WITHOUT making edits to the outline\n"
             "- Examples: \"What unresolved plot points do we have?\", \"Give me a list of...\", \"Show me...\", \"Analyze...\", \"What chapters...\"\n"
             "- OR if the user explicitly says \"don't edit\", \"no edits\", \"just answer\", \"only analyze\", or similar phrases\n"
-            "- THEN return a ManuscriptEdit with an EMPTY operations array ([]) and put your complete answer in the summary field\n"
+            "- THEN return a ManuscriptEdit with:\n"
+            "  * Use standard scope value (\"paragraph\" is fine for questions)\n"
+            "  * EMPTY operations array ([])\n"
+            "  * Your complete answer in the summary field\n"
             "- The summary should contain the full answer to the user's question (e.g., bullet points, analysis, recommendations, lists)\n"
-            "- This allows you to provide information, analysis, or recommendations without making any edits to the outline\n"
-            "- **Be flexible**: If a question can be answered without edits, use 0 operations and put the answer in summary\n\n"
+            "- This allows you to provide information, analysis, or recommendations without making any edits to the outline\n\n"
             "OUTLINE STRUCTURE:\n"
             "# Overall Synopsis (high-level story summary - major elements only)\n"
             "# Notes (rules, themes, worldbuilding)\n"
@@ -391,6 +408,13 @@ class OutlineEditingAgent(BaseAgent):
             "  The outline should only have brief character references (name + role), not full profiles.\n"
             "  Do NOT copy character descriptions, backstories, or traits into the outline.\n"
             "## Chapter N (with summary paragraph + bullet point beats)\n\n"
+            "**CRITICAL - CHAPTER HEADING FORMAT**:\n"
+            "- Chapter headings MUST be EXACTLY \"## Chapter N\" where N is the chapter number\n"
+            "- **NEVER add titles, names, or descriptions to chapter headings**\n"
+            "- **CORRECT**: \"## Chapter 1\", \"## Chapter 5\", \"## Chapter 12\"\n"
+            "- **WRONG**: \"## Chapter 1: The Beginning\", \"## Chapter 5 - The Confrontation\", \"## Chapter 12: Final Battle\"\n"
+            "- If you want chapter titles, you can add them yourself or ask the user - the outline agent will NEVER add them automatically\n"
+            "- Chapter headings are ONLY for numbering - no additional text after the number\n\n"
             "CHAPTER SUMMARY REQUIREMENTS (CRITICAL):\n"
             "- Each chapter MUST have a BRIEF, HIGH-LEVEL summary paragraph (3-5 sentences MAXIMUM)\n"
             "- The summary should be a QUICK OVERVIEW of the chapter's main events, NOT a detailed synopsis\n"
@@ -398,12 +422,27 @@ class OutlineEditingAgent(BaseAgent):
             "- DO NOT write lengthy, detailed chapter-by-chapter synopses - keep summaries concise and focused\n"
             "- The summary should capture the ESSENCE of the chapter, not every plot detail (details go in beats)\n"
             "- If your summary exceeds 5 sentences, it's too detailed - trim it down to the core story elements\n\n"
-            "BEAT FORMATTING:\n"
+            "BEAT FORMATTING AND LIMITS:\n"
             "- Every beat MUST start with '- ' (dash space)\n"
             "- Beats are specific plot events/actions (THIS is where details belong)\n"
-            "- Use as many beats as needed to cover the chapter's plot points\n"
-            "- Each chapter needs: (1) BRIEF 3-5 sentence summary paragraph AND (2) detailed beats\n"
+            "- **CRITICAL - 50 BEAT LIMIT**: Each chapter MUST have a MAXIMUM of 50 beats\n"
+            "- When adding new beats to a chapter that already has beats:\n"
+            "  * Count the existing beats first\n"
+            "  * If adding new beats would exceed 50, you MUST prune less important beats to make room\n"
+            "  * Prioritize plot-critical beats over minor details\n"
+            "  * Remove redundant or less essential beats to stay within the 50-beat limit\n"
+            "  * Example: If chapter has 48 beats and user wants to add 5 new beats, remove 3 least important existing beats\n"
+            "- Each chapter needs: (1) BRIEF 3-5 sentence summary paragraph AND (2) detailed beats (max 50)\n"
             "- **CRITICAL**: The summary is BRIEF and HIGH-LEVEL; the beats are DETAILED\n\n"
+            "**ABSOLUTE PROHIBITION ON DIALOGUE**:\n"
+            "- **NEVER include actual dialogue** (quoted speech) in outline beats\n"
+            "- Dialogue belongs in the fiction manuscript, NOT in the outline\n"
+            "- You CAN mention talking/conversation as an event: \"- Character discusses plan with ally\"\n"
+            "- You CAN describe what is discussed: \"- Character reveals secret to ally during conversation\"\n"
+            "- You CANNOT include: \"- Character says 'I have a secret'\" or any quoted dialogue\n"
+            "- Think of beats as plot events, not prose - describe what happens, not how characters speak\n"
+            "- Example CORRECT: \"- Character confronts antagonist about betrayal\"\n"
+            "- Example WRONG: \"- Character says 'You betrayed me!' to antagonist\"\n\n"
             "OPERATIONS:\n\n"
             "**1. replace_range - CHANGING EXISTING TEXT**:\n"
             "- Use this when modifying, rewriting, or continuing text that ALREADY EXISTS in the outline\n"
@@ -429,6 +468,13 @@ class OutlineEditingAgent(BaseAgent):
             "  * Find the actual last line of text in Chapter 6 (could be a beat, summary sentence, etc.)\n"
             "  * Example: If Chapter 6 ends with \"- Fleet coordinates the rescue operation\", use that EXACT line as anchor_text\n"
             "  * This ensures Chapter 7 is inserted AFTER all of Chapter 6's content, not in the middle of it\n"
+            "  * **CRITICAL - AVOID REPETITION**: When creating a NEW chapter, DO NOT repeat beats from the end of the previous chapter!\n"
+            "    - The previous chapter's final beats are COMPLETE - they represent where that chapter ENDS\n"
+            "    - Your new chapter should START fresh with NEW events that logically follow from where the previous chapter ended\n"
+            "    - Example: If Chapter 6 ends with \"- Character arrives at the city\", Chapter 7 should NOT start with \"- Character arrives at the city\"\n"
+            "    - Instead, Chapter 7 should start with NEW events that happen AFTER arrival (e.g., \"- Character explores the city streets\")\n"
+            "    - Think of chapter transitions: each chapter should pick up the narrative thread naturally, not repeat the previous chapter's conclusion\n"
+            "    - The new chapter's first beats should represent NEW plot developments, not a rehash of the previous chapter's ending\n"
             "- For adding beats to existing chapter: anchor_text = LAST existing beat of that chapter\n"
             "- For truly new beats (no overlap): anchor_text = last existing beat or chapter heading\n"
             "- **ONLY use this if your generated content is 100% new** (no existing beats included)\n"
@@ -685,7 +731,8 @@ class OutlineEditingAgent(BaseAgent):
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
                 "messages": state.get("messages", []),
-                "query": state.get("query", "")
+                "query": state.get("query", ""),
+                "frontmatter": state.get("frontmatter", {})  # CRITICAL: Preserve frontmatter for temperature access
             }
             
         except Exception as e:
@@ -704,7 +751,8 @@ class OutlineEditingAgent(BaseAgent):
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
                 "messages": state.get("messages", []),
-                "query": state.get("query", "")
+                "query": state.get("query", ""),
+                "frontmatter": state.get("frontmatter", {})  # CRITICAL: Preserve frontmatter for temperature access
             }
     
     async def _analyze_mode_node(self, state: OutlineEditingState) -> Dict[str, Any]:
@@ -783,7 +831,8 @@ class OutlineEditingAgent(BaseAgent):
                 "generation_mode": generation_mode,
                 "available_references": available_references,
                 "reference_summary": reference_summary,
-                "mode_guidance": mode_guidance
+                "mode_guidance": mode_guidance,
+                "frontmatter": state.get("frontmatter", {})  # CRITICAL: Preserve frontmatter for temperature access
             }
             
         except Exception as e:
@@ -794,7 +843,8 @@ class OutlineEditingAgent(BaseAgent):
                 "generation_mode": "freehand",
                 "available_references": {},
                 "reference_summary": "Error analyzing references - defaulting to freehand",
-                "mode_guidance": "Freehand mode - proceed with creative freedom."
+                "mode_guidance": "Freehand mode - proceed with creative freedom.",
+                "frontmatter": state.get("frontmatter", {})  # CRITICAL: Preserve frontmatter for temperature access
             }
     
     async def _analyze_outline_structure_node(self, state: OutlineEditingState) -> Dict[str, Any]:
@@ -985,11 +1035,12 @@ Chapter count: {chapter_count}
     * If you see "## Chapter 2" at the end, that's the last chapter - use its last line as anchor
     * **DO NOT** use a line from an earlier chapter (e.g., Chapter 2) when Chapter 3 exists - always use the LAST chapter
   - Set anchor_text to that LAST LINE (could be a bullet point, summary sentence, or chapter heading)
-  - Include the new chapter heading "## Chapter N" in the content itself
+  - Include the new chapter heading "## Chapter N" in the content itself (EXACTLY \"## Chapter N\" with no title or additional text)
   - Example: If creating Chapter 4 and the outline has Chapters 1, 2, 3:
     * Find the LAST line of Chapter 3 (the last chapter that exists)
     * If last line is "- Character reaches the destination", then anchor_text: "- Character reaches the destination"
     * content: "## Chapter 4\n\n[summary paragraph]\n\n- Beat 1\n- Beat 2\n..."
+    * **CRITICAL**: The heading must be EXACTLY \"## Chapter 4\" - no titles, no colons, no dashes, no additional text
   - **DO NOT** set anchor_text to the new chapter heading (it doesn't exist yet!)
   - **DO NOT** use anchor_text from Chapter 2 if Chapter 3 exists - always use the LAST chapter's last line
 
@@ -999,7 +1050,12 @@ Chapter count: {chapter_count}
   - Examples: "Chapter 3 also needs a confrontation" → operation_type: "insert_after_heading", anchor_text: "## Chapter 3"
   - Examples: "Continue Chapter 2 with these beats: ..." → operation_type: "insert_after_heading", anchor_text: "## Chapter 2"
   - Examples: "Here are more beats for Chapter 1: ..." → operation_type: "insert_after_heading", anchor_text: "## Chapter 1"
-  - **PRESERVE ALL EXISTING CONTENT** - only add new bullet points, don't regenerate the chapter
+  - **CRITICAL - 50-BEAT LIMIT**: Each chapter has a MAXIMUM of 50 beats
+    - Before routing, check the current beat count in the target chapter
+    - If adding beats would exceed 50, note in reasoning that beats must be pruned
+    - The content generator will handle pruning less important beats to stay within limit
+    - Route the addition, but flag in reasoning if beat limit enforcement is needed
+  - **PRESERVE ALL EXISTING CONTENT** - only add new bullet points, don't regenerate the chapter (unless pruning for beat limit)
   - **CRITICAL FOR "continue" or providing new beats**: When user says "continue chapter", "continue with", or provides a list of new beats for an existing chapter, they want to ADD beats, not replace the chapter
     - Find the LAST bullet point in the existing chapter
     - Insert new beats AFTER that last bullet point
@@ -1103,6 +1159,10 @@ Chapter count: {chapter_count}
 4. Detect structural changes (character role changes, scope changes)
 5. Flag conflicts with existing content
 6. Generate content for each piece (markdown formatted)
+   - **CRITICAL - NO DIALOGUE**: Never include quoted dialogue in outline content
+   - You can mention talking as an event, but never include actual dialogue quotes
+   - Example CORRECT: "Character discusses plan with ally"
+   - Example WRONG: "Character says 'Let's make a plan' to ally"
 7. **For granular corrections**: 
    - Read the CURRENT OUTLINE CONTENT above to find the exact text containing the word/phrase
    - Set original_text to the full bullet point or sentence (not just the word)
@@ -1114,9 +1174,11 @@ Chapter count: {chapter_count}
    - Check CURRENT OUTLINE CONTENT to verify the chapter heading doesn't exist
    - Find the LAST LINE of the LAST existing chapter in CURRENT OUTLINE CONTENT
    - Set anchor_text to that LAST LINE (the actual last line of text - could be a bullet point, summary sentence, etc.)
-   - Include the new chapter heading "## Chapter N" in the content itself
+   - Include the new chapter heading "## Chapter N" in the content itself (EXACTLY \"## Chapter N\" with no title or additional text)
    - Example: If last line of Chapter 5 is "- Character reaches the destination", then anchor_text: "- Character reaches the destination", content: "## Chapter 6\n\n[summary]\n\n- Beat 1..."
+   - **CRITICAL**: Chapter headings must be EXACTLY \"## Chapter N\" - never add titles, colons, dashes, or any text after the number
    - **The LLM can figure out the exact insertion point from the context - use the actual last line, not a heading**
+   - **CRITICAL - AVOID REPETITION IN CONTENT GENERATION**: When routing a new chapter creation, note in reasoning that the new chapter should NOT repeat beats from the previous chapter's ending. The content generator will handle this, but flag it in your routing reasoning for awareness.
 9. **For chapter additions** (chapter exists): Set anchor_text to the chapter heading (e.g., "## Chapter 2") and note that content should be inserted after the last existing bullet point
 10. Verify completeness - ensure ALL parts of the request are covered
 
@@ -1211,27 +1273,102 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     request_type = "edit_request"
                 
                 return {
-                    "request_type": request_type
+                    "request_type": request_type,
+                    # ✅ CRITICAL 5: Always preserve
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    # ✅ Domain-specific: Preserve outline context
+                    "outline": state.get("outline", ""),
+                    "filename": state.get("filename", ""),
+                    "frontmatter": state.get("frontmatter", {}),
+                    "body_only": state.get("body_only", ""),
+                    "cursor_offset": state.get("cursor_offset", -1),
+                    "selection_start": state.get("selection_start", -1),
+                    "selection_end": state.get("selection_end", -1),
+                    "active_editor": state.get("active_editor", {}),
+                    "current_request": state.get("current_request", ""),
+                    # ✅ Reference context
+                    "rules_body": state.get("rules_body"),
+                    "style_body": state.get("style_body"),
+                    "characters_bodies": state.get("characters_bodies", []),
+                    # ✅ Analysis results from previous nodes
+                    "generation_mode": state.get("generation_mode", ""),
+                    "available_references": state.get("available_references", {}),
+                    "reference_summary": state.get("reference_summary", ""),
+                    "mode_guidance": state.get("mode_guidance", ""),
+                    "outline_completeness": state.get("outline_completeness", 0.0),
+                    "chapter_count": state.get("chapter_count", 0),
+                    "structure_guidance": state.get("structure_guidance", ""),
                 }
                 
             except Exception as parse_error:
                 logger.error(f"Failed to parse request type detection: {parse_error}")
                 logger.warning("Defaulting to edit_request due to parse error")
-                return {"request_type": "edit_request"}
+                return {
+                    "request_type": "edit_request",
+                    # ✅ CRITICAL: Preserve even on error!
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "outline": state.get("outline", ""),
+                    "filename": state.get("filename", ""),
+                    "frontmatter": state.get("frontmatter", {}),
+                    "body_only": state.get("body_only", ""),
+                    "cursor_offset": state.get("cursor_offset", -1),
+                    "selection_start": state.get("selection_start", -1),
+                    "selection_end": state.get("selection_end", -1),
+                    "active_editor": state.get("active_editor", {}),
+                    "current_request": state.get("current_request", ""),
+                    "rules_body": state.get("rules_body"),
+                    "style_body": state.get("style_body"),
+                    "characters_bodies": state.get("characters_bodies", []),
+                    "generation_mode": state.get("generation_mode", ""),
+                    "available_references": state.get("available_references", {}),
+                    "reference_summary": state.get("reference_summary", ""),
+                    "mode_guidance": state.get("mode_guidance", ""),
+                    "outline_completeness": state.get("outline_completeness", 0.0),
+                    "chapter_count": state.get("chapter_count", 0),
+                    "structure_guidance": state.get("structure_guidance", ""),
+                }
             
         except Exception as e:
             logger.error(f"Failed to detect request type: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             # Default to edit_request on error
-            return {"request_type": "edit_request"}
-    
-    def _route_from_request_type(self, state: OutlineEditingState) -> str:
-        """Route based on detected request type"""
-        request_type = state.get("request_type", "edit_request")
-        # ALL questions route to edit path (can analyze and optionally edit)
-        # Both question and edit_request route to the same path (analyze_and_route_request)
-        return "edit_request"  # Both question and edit_request go to edit path
+            return {
+                "request_type": "edit_request",
+                # ✅ CRITICAL: Preserve even on error!
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "outline": state.get("outline", ""),
+                "filename": state.get("filename", ""),
+                "frontmatter": state.get("frontmatter", {}),
+                "body_only": state.get("body_only", ""),
+                "cursor_offset": state.get("cursor_offset", -1),
+                "selection_start": state.get("selection_start", -1),
+                "selection_end": state.get("selection_end", -1),
+                "active_editor": state.get("active_editor", {}),
+                "current_request": state.get("current_request", ""),
+                "rules_body": state.get("rules_body"),
+                "style_body": state.get("style_body"),
+                "characters_bodies": state.get("characters_bodies", []),
+                "generation_mode": state.get("generation_mode", ""),
+                "available_references": state.get("available_references", {}),
+                "reference_summary": state.get("reference_summary", ""),
+                "mode_guidance": state.get("mode_guidance", ""),
+                "outline_completeness": state.get("outline_completeness", 0.0),
+                "chapter_count": state.get("chapter_count", 0),
+                "structure_guidance": state.get("structure_guidance", ""),
+            }
     
     async def _generate_question_answer(self, state: OutlineEditingState) -> Optional[str]:
         """Generate a conversational answer to a user's question about the outline"""
@@ -1538,7 +1675,8 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     logger.info(f"  Piece {i+1}: {piece_type} → {target_section} (structural_change: {is_structural})")
             
             return {
-                "routing_plan": routing_plan
+                "routing_plan": routing_plan,
+                "frontmatter": state.get("frontmatter", {})  # CRITICAL: Preserve frontmatter for temperature access
             }
             
         except Exception as e:
@@ -1550,7 +1688,8 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     "content_pieces": [],
                     "completeness_check": f"Error during routing analysis: {str(e)}"
                 },
-                "error": str(e)
+                "error": str(e),
+                "frontmatter": state.get("frontmatter", {})  # CRITICAL: Preserve frontmatter for temperature access
             }
     
     async def _generate_edit_plan_node(self, state: OutlineEditingState) -> Dict[str, Any]:
@@ -1587,14 +1726,99 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             if not current_request:
                 logger.error("current_request is empty - user's request will not be sent to LLM")
             
-            # Current outline
+            # Current outline - detect chapter context from cursor position
             is_empty_file = not body_only.strip()
             context_parts.append("=== CURRENT OUTLINE ===\n")
             context_parts.append(f"File: {filename}\n")
             if is_empty_file:
                 context_parts.append("\n⚠️ EMPTY FILE DETECTED: This file contains only frontmatter (no content yet)\n\n")
             else:
-                context_parts.append("\n" + body_only + "\n\n")
+                # Detect which chapter the cursor is in (if cursor is valid)
+                cursor_offset = state.get("cursor_offset", -1)
+                outline = state.get("outline", "")
+                current_chapter_text = None
+                current_chapter_number = None
+                prev_chapter_text = None
+                prev_chapter_number = None
+                
+                # Find all chapter ranges (we'll use this for both cursor detection and display)
+                chapter_ranges = find_chapter_ranges(body_only)
+                
+                if cursor_offset >= 0 and body_only and outline and chapter_ranges:
+                    # Adjust cursor offset for frontmatter (cursor is relative to full outline)
+                    fm_end_idx = _frontmatter_end_index(outline)
+                    cursor_in_body = cursor_offset - fm_end_idx
+                    
+                    # Only proceed if cursor is actually in the body (not in frontmatter)
+                    if cursor_in_body >= 0:
+                        # Find which chapter contains the cursor
+                        for i, chapter_range in enumerate(chapter_ranges):
+                            if chapter_range.start <= cursor_in_body < chapter_range.end:
+                                # Cursor is in this chapter
+                                current_chapter_text = body_only[chapter_range.start:chapter_range.end].strip()
+                                current_chapter_number = chapter_range.chapter_number
+                                
+                                # Get previous chapter if it exists
+                                if i > 0:
+                                    prev_range = chapter_ranges[i - 1]
+                                    prev_chapter_text = body_only[prev_range.start:prev_range.end].strip()
+                                    prev_chapter_number = prev_range.chapter_number
+                                break
+                
+                # Show ALL chapters with clear delineation
+                if chapter_ranges:
+                    if current_chapter_text and current_chapter_number is not None:
+                        context_parts.append(f"\n**YOU ARE WORKING IN CHAPTER {current_chapter_number}**\n")
+                        context_parts.append("(Cursor position detected - showing all chapters with clear progression)\n\n")
+                    else:
+                        context_parts.append("\n**ALL CHAPTERS IN OUTLINE** (showing complete story progression):\n\n")
+                    
+                    # Show ALL chapters with clear section markers
+                    for i, chapter_range in enumerate(chapter_ranges):
+                        chapter_text = body_only[chapter_range.start:chapter_range.end].strip()
+                        chapter_num = chapter_range.chapter_number
+                        
+                        # Count beats in this chapter
+                        beat_count = count_beats_in_chapter(chapter_text)
+                        
+                        # Determine section label based on position relative to current chapter
+                        if current_chapter_number is not None:
+                            if chapter_num == current_chapter_number:
+                                section_label = f"=== CHAPTER {chapter_num} (CURRENT - WHERE YOU ARE WORKING) ==="
+                            elif chapter_num and chapter_num < current_chapter_number:
+                                section_label = f"=== CHAPTER {chapter_num} (PREVIOUS - ALREADY COMPLETED) ==="
+                            elif chapter_num and chapter_num > current_chapter_number:
+                                section_label = f"=== CHAPTER {chapter_num} (FUTURE - NOT YET WRITTEN) ==="
+                            else:
+                                section_label = f"=== CHAPTER {chapter_num} ==="
+                        else:
+                            # No cursor detected, just show chapter number
+                            section_label = f"=== CHAPTER {chapter_num} ==="
+                        
+                        context_parts.append(f"{section_label}\n")
+                        context_parts.append(f"**Beat count: {beat_count}/50**\n")
+                        if beat_count >= 50:
+                            context_parts.append(f"⚠️ **WARNING**: Chapter {chapter_num} is at the 50-beat limit! Any new beats require removing existing ones.\n")
+                        elif beat_count >= 45:
+                            context_parts.append(f"⚠️ **NOTE**: Chapter {chapter_num} is approaching the 50-beat limit ({beat_count} beats). Consider pruning less important beats if adding more.\n")
+                        context_parts.append(f"{chapter_text}\n\n")
+                        
+                        # Add transition guidance after each chapter (except the last)
+                        if i < len(chapter_ranges) - 1:
+                            next_chapter_num = chapter_ranges[i + 1].chapter_number
+                            if next_chapter_num:
+                                context_parts.append(f"--- END OF CHAPTER {chapter_num} → BEGINNING OF CHAPTER {next_chapter_num} ---\n\n")
+                    
+                    # Add critical transition reminder
+                    if prev_chapter_text and prev_chapter_number is not None:
+                        context_parts.append(f"\n**CRITICAL TRANSITION REMINDER**:\n")
+                        context_parts.append(f"- Chapter {prev_chapter_number} ENDED with the beats shown above.\n")
+                        context_parts.append(f"- Chapter {current_chapter_number} (where you are working) should start with NEW events that happen AFTER Chapter {prev_chapter_number}'s conclusion.\n")
+                        context_parts.append(f"- Do NOT repeat the ending beats from Chapter {prev_chapter_number} in Chapter {current_chapter_number}!\n")
+                        context_parts.append(f"- Each chapter should advance the plot forward, not rehash previous chapter endings.\n\n")
+                else:
+                    # No chapters found, show full outline
+                    context_parts.append("\n" + body_only + "\n\n")
             
             # References (if present)
             if rules_body:
@@ -1623,7 +1847,7 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 "1. **QUESTIONS THAT DON'T REQUIRE EDITS**:\n"
                 "   - If the user is asking for information, analysis, lists, or recommendations\n"
                 "   - AND you can answer without modifying the outline\n"
-                "   - THEN return 0 operations with your complete answer in the summary field\n"
+                "   - THEN return scope=\"paragraph\" with 0 operations and your complete answer in the summary field\n"
                 "   - Examples: \"What unresolved plot points?\", \"Give me a list of...\", \"Analyze the structure\"\n"
                 "2. **EDIT REQUESTS**:\n"
                 "   - If the user wants to add, change, or modify content\n"
@@ -1701,7 +1925,95 @@ Be flexible - if you can answer the question without edits, use 0 operations and
 Generate ManuscriptEdit JSON with operations to fulfill the user's request.
 Use replace_range for changing existing content, insert_after_heading for adding new content, delete_range for removing content.
 
+**CRITICAL RULES FOR BEAT GENERATION**:
+1. **CHAPTER HEADING FORMAT (ABSOLUTE REQUIREMENT)**:
+   - Chapter headings MUST be EXACTLY \"## Chapter N\" where N is the number
+   - **NEVER add titles, names, descriptions, colons, or dashes to chapter headings**
+   - **CORRECT**: \"## Chapter 1\", \"## Chapter 5\", \"## Chapter 12\"
+   - **WRONG**: \"## Chapter 1: The Beginning\", \"## Chapter 5 - Confrontation\", \"## Chapter 12: Final Battle\"
+   - If chapter titles are desired, the user will add them - you should NEVER add them automatically
+
+2. **50-BEAT LIMIT**: Each chapter MUST have a MAXIMUM of 50 beats
+   - Before adding beats, count existing beats in the target chapter
+   - If adding beats would exceed 50, you MUST remove less important beats first
+   - Prioritize plot-critical beats over minor details
+   - Example: If chapter has 48 beats and user wants 5 new beats, remove 3 least important existing beats
+
+3. **NO DIALOGUE IN OUTLINES**: 
+   - NEVER include quoted dialogue (e.g., "Character says 'Hello'")
+   - Dialogue belongs in fiction manuscripts, NOT outlines
+   - You CAN mention talking as an event: "- Character discusses plan with ally"
+   - You CAN describe what is discussed: "- Character reveals secret during conversation"
+   - Think of beats as plot events, not prose - describe what happens, not how characters speak
+
 **NOTE**: If this request is actually a question that can be answered without edits, return 0 operations and put your answer in the summary field."""
+                    
+                    # Detect if creating a new chapter and add specific transition guidance
+                    new_chapter_patterns = [
+                        r'create\s+chapter\s+(\d+)',
+                        r'add\s+chapter\s+(\d+)',
+                        r'new\s+chapter\s+(\d+)',
+                        r'outline\s+for\s+chapter\s+(\d+)',
+                        r'chapter\s+(\d+)\s+(?:outline|beats|content)',
+                    ]
+                    is_new_chapter_request = False
+                    new_chapter_num = None
+                    for pattern in new_chapter_patterns:
+                        match = re.search(pattern, current_request, re.IGNORECASE)
+                        if match:
+                            is_new_chapter_request = True
+                            new_chapter_num = int(match.group(1))
+                            break
+                    
+                    # Also check if routing plan indicates new chapter creation
+                    routing_plan = state.get("routing_plan", {})
+                    if routing_plan and not is_new_chapter_request:
+                        for piece in routing_plan.get("content_pieces", []):
+                            target_section = piece.get("target_section", "")
+                            if target_section.startswith("## Chapter"):
+                                chapter_match = re.match(r'^##\s+Chapter\s+(\d+)', target_section)
+                                if chapter_match:
+                                    # Check if this chapter exists in the outline
+                                    chapter_num = int(chapter_match.group(1))
+                                    if body_only:
+                                        chapter_ranges = find_chapter_ranges(body_only)
+                                        existing_chapter_numbers = {ch.chapter_number for ch in chapter_ranges if ch.chapter_number is not None}
+                                        if chapter_num not in existing_chapter_numbers:
+                                            is_new_chapter_request = True
+                                            new_chapter_num = chapter_num
+                                            break
+                    
+                    if is_new_chapter_request and new_chapter_num and not is_empty_file:
+                        request_with_instructions += f"""
+
+⚠️ **CRITICAL: CREATING NEW CHAPTER {new_chapter_num} - AVOID REPETITION**
+
+You are creating a NEW chapter that does not yet exist in the outline. Follow these rules:
+
+**CHAPTER TRANSITION RULES:**
+1. **DO NOT REPEAT PREVIOUS CHAPTER'S ENDING BEATS**
+   - The previous chapter's final beats represent where that chapter COMPLETELY ENDS
+   - Your new Chapter {new_chapter_num} should START with NEW events that happen AFTER the previous chapter concluded
+   - Example: If Chapter {new_chapter_num - 1} ends with "- Character arrives at the city", Chapter {new_chapter_num} should NOT start with "- Character arrives at the city"
+   - Instead, Chapter {new_chapter_num} should start with NEW events like "- Character explores the city streets" or "- Character meets with contact"
+
+2. **SMOOTH NARRATIVE TRANSITION**
+   - Each chapter should pick up the narrative thread naturally from where the previous chapter ended
+   - Think of it as a story continuation: the previous chapter's ending is the setup, your new chapter is the payoff
+   - The new chapter should feel like a natural progression, not a repetition
+
+3. **FRESH START WITH NEW BEATS**
+   - Your new chapter's first beats should represent NEW plot developments
+   - These should be events that logically follow from the previous chapter's conclusion
+   - Avoid rehashing or repeating the previous chapter's ending beats
+
+4. **QUALITY CHECK BEFORE GENERATING**
+   - Review the last 2-3 beats of the previous chapter (Chapter {new_chapter_num - 1})
+   - Ensure your new Chapter {new_chapter_num} beats are DISTINCT and ADVANCE the plot
+   - If your first beat is too similar to the previous chapter's last beat, revise it to be more distinct
+
+**Remember**: A good chapter transition moves the story forward, not backward or in place!"""
+                    
                 if is_empty_file:
                     request_with_instructions += """
 
@@ -1710,6 +2022,9 @@ Since this file is empty (only frontmatter), follow these rules:
 1. **DO NOT use anchor_text** - The file has no content to anchor to
 2. **Use insert_after_heading WITHOUT anchor_text** - The system will automatically insert after frontmatter
 3. **Include section headings in your text** - For example, if creating the first chapter, include '## Chapter 1' in the text
+   - **CRITICAL**: Chapter headings must be EXACTLY \"## Chapter N\" with no titles or additional text
+   - **CORRECT**: \"## Chapter 1\", \"## Chapter 5\"
+   - **WRONG**: \"## Chapter 1: Title\", \"## Chapter 5 - Name\"
 4. **Example operation for empty file**:
    {"op_type": "insert_after_heading", "text": "## Chapter 1\\n\\n[your content]"}
    (Note: NO anchor_text field needed - omit it entirely)
@@ -1726,8 +2041,14 @@ Since this file is empty (only frontmatter), follow these rules:
                 look_back_limit=6
             )
             
+            # Check frontmatter for temperature override (default: 0.3 for outline generation)
+            frontmatter = state.get("frontmatter", {})
+            temperature = frontmatter.get("temperature", 0.3)
+            if temperature != 0.3:
+                logger.info(f"🌡️ Using frontmatter temperature: {temperature} (default: 0.3)")
+            
             # Call LLM - pass state to access user's model selection from metadata
-            llm = self._get_llm(temperature=0.3, state=state)
+            llm = self._get_llm(temperature=temperature, state=state)
             start_time = datetime.now()
             try:
                 response = await self._safe_llm_invoke(llm, messages, error_context="Generate edit plan")
@@ -2323,38 +2644,51 @@ Since this file is empty (only frontmatter), follow these rules:
             task_status = state.get("task_status", "complete")
             request_type = state.get("request_type", "edit_request")
             
-            # Handle question requests - if no operations and summary looks like an answer, use it
-            if not editor_operations and structured_edit:
-                is_question_answer = structured_edit.get("is_question_answer", False)
-                summary = structured_edit.get("summary", "")
-                current_request = state.get("current_request", "").lower()
-                
-                # Check if this is a "don't edit" request or question
-                is_dont_edit_request = any(phrase in current_request for phrase in [
-                    "don't edit", "dont edit", "no edit", "no edits", "just answer", "only analyze",
-                    "don't change", "dont change", "no changes", "just tell me", "just show me"
-                ])
-                
-                # Check if summary is a real answer (not just a generic summary)
-                # Also check if it's a "don't edit" request - summary should be used as the answer
-                if is_question_answer or is_dont_edit_request or (summary and len(summary) > 50 and not summary.startswith("Assessment of")):
-                    logger.info("Returning question/analysis response (no operations needed)")
-                    return {
-                        "response": {
-                            "response": summary if summary else "Analysis complete (no operations generated).",
+            # Handle questions (with or without operations)
+            if request_type == "question":
+                if structured_edit and structured_edit.get("summary"):
+                    summary = structured_edit.get("summary")
+                    if len(editor_operations) == 0:
+                        # Pure question with no operations - return summary as response
+                        logger.info("Question request with no operations - using summary as response")
+                        return {
+                            "response": {
+                                "response": summary,
+                                "task_status": "complete",
+                                "agent_type": "outline_editing_agent",
+                                "timestamp": datetime.now().isoformat()
+                            },
                             "task_status": "complete",
-                            "agent_type": "outline_editing_agent",
-                            "timestamp": datetime.now().isoformat()
-                        },
-                        "task_status": "complete",
-                        "editor_operations": [],  # No operations for pure questions/analysis
-                        # ✅ CRITICAL: Preserve state (final node, but good practice)
-                        "metadata": state.get("metadata", {}),
-                        "user_id": state.get("user_id", "system"),
-                        "shared_memory": state.get("shared_memory", {}),
-                        "messages": state.get("messages", []),
-                        "query": state.get("query", "")
-                    }
+                            "editor_operations": [],
+                            # ✅ CRITICAL: Preserve state
+                            "metadata": state.get("metadata", {}),
+                            "user_id": state.get("user_id", "system"),
+                            "shared_memory": state.get("shared_memory", {}),
+                            "messages": state.get("messages", []),
+                            "query": state.get("query", "")
+                        }
+                    else:
+                        # Question with operations - use summary as conversational response
+                        logger.info(f"Question request with {len(editor_operations)} operations - using summary as conversational response")
+                        response_text = summary
+                else:
+                    # Question but no summary - fallback
+                    logger.warning("Question request but no summary - using fallback")
+                    if editor_operations:
+                        response_text = f"Analysis complete. Generated {len(editor_operations)} edit(s) based on your question."
+                    else:
+                        response_text = "Analysis complete."
+            # Build response text for edit requests - use summary, not full text
+            else:
+                # Edit request: use summary from structured_edit, not full text
+                if structured_edit and structured_edit.get("summary"):
+                    response_text = structured_edit.get("summary")
+                elif editor_operations:
+                    # Fallback: brief description of operations
+                    op_count = len(editor_operations)
+                    response_text = f"Made {op_count} edit(s) to the outline."
+                else:
+                    response_text = "Edit plan ready."
             
             # If we have a clarification request, it was already formatted in generate_edit_plan
             if clarification_request:
@@ -2387,45 +2721,47 @@ Since this file is empty (only frontmatter), follow these rules:
                     "query": state.get("query", "")
                 }
             
-            # Build response text with summary and preview
-            summary = structured_edit.get("summary", "").strip()
-            generated_preview = "\n\n".join([
-                op.get("text", "").strip()
-                for op in editor_operations
-                if op.get("text", "").strip()
-            ]).strip()
-            
-            # Add failed operations if present
-            failed_operations = state.get("failed_operations", [])
-            failed_content = ""
-            if failed_operations:
-                failed_content = "\n\n**⚠️ UNRESOLVED EDITS (Manual Action Required)**\n"
-                failed_content += "The following generated content could not be automatically placed in the outline. You can copy and paste these sections manually:\n\n"
+            # Build response text with summary and preview (for edit requests)
+            # Note: response_text is already set for questions above
+            if request_type != "question":
+                summary = structured_edit.get("summary", "").strip() if structured_edit else ""
+                generated_preview = "\n\n".join([
+                    op.get("text", "").strip()
+                    for op in editor_operations
+                    if op.get("text", "").strip()
+                ]).strip()
                 
-                for i, op in enumerate(failed_operations, 1):
-                    op_type = op.get("op_type", "edit")
-                    error = op.get("error", "Anchor text not found")
-                    text = op.get("text", "")
-                    anchor = op.get("anchor_text") or op.get("original_text")
+                # Add failed operations if present
+                failed_operations = state.get("failed_operations", [])
+                failed_content = ""
+                if failed_operations:
+                    failed_content = "\n\n**⚠️ UNRESOLVED EDITS (Manual Action Required)**\n"
+                    failed_content += "The following generated content could not be automatically placed in the outline. You can copy and paste these sections manually:\n\n"
                     
-                    failed_content += f"#### Unresolved Edit {i} ({op_type})\n"
-                    failed_content += f"- **Reason**: {error}\n"
-                    if anchor:
-                        failed_content += f"- **Intended near**:\n> {anchor[:200]}...\n"
-                    
-                    failed_content += "\n**Generated Content** (Scroll-safe):\n"
-                    failed_content += f"{text}\n\n"
-                    failed_content += "---\n"
-            
-            # Always include summary if available; optionally add preview
-            if summary and generated_preview:
-                response_text = f"{summary}\n\n---\n\n{generated_preview}{failed_content}"
-            elif summary:
-                response_text = f"{summary}{failed_content}"
-            elif generated_preview:
-                response_text = f"{generated_preview}{failed_content}"
-            else:
-                response_text = "Edit plan ready." + failed_content
+                    for i, op in enumerate(failed_operations, 1):
+                        op_type = op.get("op_type", "edit")
+                        error = op.get("error", "Anchor text not found")
+                        text = op.get("text", "")
+                        anchor = op.get("anchor_text") or op.get("original_text")
+                        
+                        failed_content += f"#### Unresolved Edit {i} ({op_type})\n"
+                        failed_content += f"- **Reason**: {error}\n"
+                        if anchor:
+                            failed_content += f"- **Intended near**:\n> {anchor[:200]}...\n"
+                        
+                        failed_content += "\n**Generated Content** (Scroll-safe):\n"
+                        failed_content += f"{text}\n\n"
+                        failed_content += "---\n"
+                
+                # Build response text for edit requests: include summary and preview
+                if summary and generated_preview:
+                    response_text = f"{summary}\n\n---\n\n{generated_preview}{failed_content}"
+                elif summary:
+                    response_text = f"{summary}{failed_content}"
+                elif generated_preview:
+                    response_text = f"{generated_preview}{failed_content}"
+                else:
+                    response_text = "Edit plan ready." + failed_content
             
             # Build response with editor operations
             response = {

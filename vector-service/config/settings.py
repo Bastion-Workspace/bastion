@@ -15,9 +15,14 @@ class Settings:
     
     # OpenAI Configuration (for embeddings)
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    OPENAI_EMBEDDING_MODEL: str = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+    OPENAI_EMBEDDING_MODEL: str = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large")
     OPENAI_MAX_RETRIES: int = int(os.getenv("OPENAI_MAX_RETRIES", "3"))
     OPENAI_TIMEOUT: int = int(os.getenv("OPENAI_TIMEOUT", "30"))
+    
+    # Qdrant Configuration (Knowledge Hub Extension!)
+    QDRANT_URL: str = os.getenv("QDRANT_URL", "http://qdrant:6333")
+    QDRANT_API_KEY: Optional[str] = os.getenv("QDRANT_API_KEY")
+    TOOL_COLLECTION_NAME: str = os.getenv("TOOL_COLLECTION_NAME", "tools")
     
     # Performance Tuning
     PARALLEL_WORKERS: int = int(os.getenv("PARALLEL_WORKERS", "4"))

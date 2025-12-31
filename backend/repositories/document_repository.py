@@ -1431,7 +1431,23 @@ class DocumentRepository:
                             updated_at = EXCLUDED.updated_at,
                             created_by = COALESCE(document_folders.created_by, EXCLUDED.created_by),
                             exempt_from_vectorization = CASE 
-                                WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
+                                WHEN document_folders.exempt_from_vectorization IS NULL AND (
+                                    EXCLUDED.exempt_from_vectorization IS TRUE OR
+                                    EXISTS (
+                                        WITH RECURSIVE folder_path AS (
+                                            SELECT folder_id, parent_folder_id, exempt_from_vectorization, 0 as depth
+                                            FROM document_folders WHERE folder_id = EXCLUDED.parent_folder_id
+                                            UNION ALL
+                                            SELECT f.folder_id, f.parent_folder_id, f.exempt_from_vectorization, fp.depth + 1
+                                            FROM document_folders f
+                                            INNER JOIN folder_path fp ON f.folder_id = fp.parent_folder_id
+                                        )
+                                        SELECT exempt_from_vectorization
+                                        FROM folder_path
+                                        WHERE exempt_from_vectorization IS TRUE
+                                        LIMIT 1
+                                    )
+                                )
                                 THEN TRUE 
                                 ELSE document_folders.exempt_from_vectorization 
                             END
@@ -1461,7 +1477,23 @@ class DocumentRepository:
                             updated_at = EXCLUDED.updated_at,
                             created_by = COALESCE(document_folders.created_by, EXCLUDED.created_by),
                             exempt_from_vectorization = CASE 
-                                WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
+                                WHEN document_folders.exempt_from_vectorization IS NULL AND (
+                                    EXCLUDED.exempt_from_vectorization IS TRUE OR
+                                    EXISTS (
+                                        WITH RECURSIVE folder_path AS (
+                                            SELECT folder_id, parent_folder_id, exempt_from_vectorization, 0 as depth
+                                            FROM document_folders WHERE folder_id = EXCLUDED.parent_folder_id
+                                            UNION ALL
+                                            SELECT f.folder_id, f.parent_folder_id, f.exempt_from_vectorization, fp.depth + 1
+                                            FROM document_folders f
+                                            INNER JOIN folder_path fp ON f.folder_id = fp.parent_folder_id
+                                        )
+                                        SELECT exempt_from_vectorization
+                                        FROM folder_path
+                                        WHERE exempt_from_vectorization IS TRUE
+                                        LIMIT 1
+                                    )
+                                )
                                 THEN TRUE 
                                 ELSE document_folders.exempt_from_vectorization 
                             END
@@ -1491,7 +1523,23 @@ class DocumentRepository:
                             updated_at = EXCLUDED.updated_at,
                             created_by = COALESCE(document_folders.created_by, EXCLUDED.created_by),
                             exempt_from_vectorization = CASE 
-                                WHEN document_folders.exempt_from_vectorization IS NULL AND EXCLUDED.exempt_from_vectorization IS TRUE 
+                                WHEN document_folders.exempt_from_vectorization IS NULL AND (
+                                    EXCLUDED.exempt_from_vectorization IS TRUE OR
+                                    EXISTS (
+                                        WITH RECURSIVE folder_path AS (
+                                            SELECT folder_id, parent_folder_id, exempt_from_vectorization, 0 as depth
+                                            FROM document_folders WHERE folder_id = EXCLUDED.parent_folder_id
+                                            UNION ALL
+                                            SELECT f.folder_id, f.parent_folder_id, f.exempt_from_vectorization, fp.depth + 1
+                                            FROM document_folders f
+                                            INNER JOIN folder_path fp ON f.folder_id = fp.parent_folder_id
+                                        )
+                                        SELECT exempt_from_vectorization
+                                        FROM folder_path
+                                        WHERE exempt_from_vectorization IS TRUE
+                                        LIMIT 1
+                                    )
+                                )
                                 THEN TRUE 
                                 ELSE document_folders.exempt_from_vectorization 
                             END

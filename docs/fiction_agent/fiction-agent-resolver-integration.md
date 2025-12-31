@@ -4,7 +4,7 @@
 
 ## Executive Summary
 
-The Fiction Editing Agent now uses the same **Progressive Search Resolver** (`backend/utils/editor_operations_resolver.py`) that the Outline, Rules, and Character Development agents use. This provides:
+The Fiction Editing Agent (in `llm-orchestrator/orchestrator/agents/fiction_editing_agent.py`) now uses the same **Progressive Search Resolver** (`backend/utils/editor_operations_resolver.py`) that the Outline, Rules, and Character Development agents use. This provides:
 
 1. **Surgical precision for revisions** - exact text targeting with confidence scoring
 2. **Smart positioning for generation** - automatic insertion after last chapter

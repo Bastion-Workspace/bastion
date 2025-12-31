@@ -2,12 +2,15 @@ syntax = "proto3";
 
 package vector_service;
 
-// Vector Service - Embedding generation and caching ONLY
-// (Qdrant operations handled by caller)
+// Vector Service - Embedding generation and Knowledge Hub operations
 service VectorService {
   // Embedding Generation
   rpc GenerateEmbedding(EmbeddingRequest) returns (EmbeddingResponse);
   rpc GenerateBatchEmbeddings(BatchEmbeddingRequest) returns (BatchEmbeddingResponse);
+  
+  // Tool Vector Operations (Roosevelt's Knowledge Hub Expansion!)
+  rpc UpsertTools(UpsertToolsRequest) returns (UpsertToolsResponse);
+  rpc SearchTools(SearchToolsRequest) returns (SearchToolsResponse);
   
   // Cache Management
   rpc ClearEmbeddingCache(ClearCacheRequest) returns (ClearCacheResponse);
@@ -15,6 +18,46 @@ service VectorService {
   
   // Health Check
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// ============================================================================
+// Tool Vector Operations Messages
+// ============================================================================
+
+message ToolDefinition {
+  string name = 1;
+  string description = 2;
+  string pack = 3;
+  repeated string keywords = 4;
+}
+
+message UpsertToolsRequest {
+  repeated ToolDefinition tools = 1;
+}
+
+message UpsertToolsResponse {
+  bool success = 1;
+  int32 count = 2;
+  string error = 3;
+}
+
+message SearchToolsRequest {
+  string query = 1;
+  int32 limit = 2;
+  float min_score = 3;
+  string pack_filter = 4;
+}
+
+message ToolMatch {
+  string name = 1;
+  string description = 2;
+  string pack = 3;
+  float score = 4;
+}
+
+message SearchToolsResponse {
+  repeated ToolMatch matches = 1;
+  string error = 2;
 }
 
 // ============================================================================

@@ -9,8 +9,8 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Set PYTHONPATH to /app so that top-level modules like 'utils' can be imported correctly
-ENV PYTHONPATH=/app
+# Set PYTHONPATH to include tools_service for imports
+ENV PYTHONPATH=/app:/app/tools_service
 
 # Copy shared proto files first
 COPY protos /app/protos
@@ -24,6 +24,10 @@ RUN pip install --no-cache-dir -r requirements-celery-worker.txt
 
 # Copy application code
 COPY backend /app
+
+# Copy tools-service code (needed for imports like tools_service.models.rss_models)
+# NOTE: Directory is tools-service but we copy as tools_service so Python can import it
+COPY tools-service /app/tools_service
 
 # Generate gRPC code from shared proto files (needed for orchestrator calls)
 RUN python -m grpc_tools.protoc \

@@ -192,6 +192,18 @@ AGENT_CAPABILITIES = {
         ],
         'context_boost': 10,  # Moderate boost when org-related keywords present
         'requires_editor': False
+    },
+    'technical_hyperspace_agent': {
+        'domains': ['systems', 'engineering', 'technical', 'topology', 'failure'],
+        'actions': ['observation', 'generation', 'modification', 'analysis', 'query'],
+        'editor_types': ['system', 'systems'],  # Accept both singular and plural
+        'keywords': [
+            'system', 'systems', 'topology', 'failure mode', 'component', 'failure analysis',
+            'system design', 'system modeling', 'technical hyperspace', 'hyperspace',
+            'system architecture', 'system components', 'failure simulation'
+        ],
+        'context_boost': 20,  # Strong preference when systems editor is active
+        'requires_editor': False  # Can work without editor, but prefers systems editor
     }
 }
 
@@ -230,7 +242,9 @@ def detect_domain(
                 'substack': 'content',
                 'blog': 'content',
                 'project': 'general',
-                'reference': 'general'
+                'reference': 'general',
+                'system': 'systems',
+                'systems': 'systems'
             }
             domain = editor_domain_map.get(editor_type)
             if domain:
@@ -616,9 +630,15 @@ def find_best_agent_match(
                     logger.info(f"🎯 EDITOR TYPE MATCH: editor_type='{editor_type}' matches {len(matching_agents)} agents, using capability scoring")
                     # Continue to capability scoring below, but these agents will get context_boost
     
+    # Extract last_agent and primary_agent_selected for continuity
     last_agent = None
+    primary_agent_selected = None
     if conversation_history:
-        last_agent = conversation_history.get('last_agent') or conversation_history.get('primary_agent_selected')
+        last_agent = conversation_history.get('last_agent')
+        primary_agent_selected = conversation_history.get('primary_agent_selected')
+    
+    # Use primary_agent_selected if last_agent is not set (for continuity in ongoing conversations)
+    continuity_agent = last_agent or primary_agent_selected
     
     scores = {}
     for agent in AGENT_CAPABILITIES.keys():
@@ -635,7 +655,7 @@ def find_best_agent_match(
             action_intent=action_intent,
             query=query,
             editor_context=editor_context,
-            last_agent=last_agent,
+            last_agent=continuity_agent,  # Use continuity_agent (last_agent or primary_agent_selected)
             editor_preference=editor_preference
         )
         scores[agent] = score
@@ -657,28 +677,35 @@ def find_best_agent_match(
     # INTELLIGENT AGENT SWITCHING: Only switch if new agent scores significantly higher
     # This prevents unnecessary switches for marginal cases while allowing clear topic changes
     # Higher threshold when switching FROM chat_agent (since it handles general conversation)
+    # CRITICAL: Use continuity_agent (last_agent or primary_agent_selected) for continuity checks
     MIN_SCORE_DIFFERENCE_FOR_SWITCH = 3.0  # Default minimum score difference
     MIN_SCORE_DIFFERENCE_FROM_CHAT = 8.0  # Higher threshold when switching from chat_agent
+    MIN_SCORE_DIFFERENCE_FROM_HYPERSPACE = 10.0  # Very high threshold when switching from technical_hyperspace_agent (maintain continuity)
     
-    if last_agent and last_agent != best_agent:
-        last_agent_score = scores.get(last_agent, 0.0)
-        score_difference = best_score - last_agent_score
+    if continuity_agent and continuity_agent != best_agent:
+        continuity_agent_score = scores.get(continuity_agent, 0.0)
+        score_difference = best_score - continuity_agent_score
         
-        # Use higher threshold when switching from chat_agent (handles general conversation)
-        threshold = MIN_SCORE_DIFFERENCE_FROM_CHAT if last_agent == 'chat_agent' else MIN_SCORE_DIFFERENCE_FOR_SWITCH
+        # Use higher threshold when switching from chat_agent or technical_hyperspace_agent
+        if continuity_agent == 'chat_agent':
+            threshold = MIN_SCORE_DIFFERENCE_FROM_CHAT
+        elif continuity_agent == 'technical_hyperspace_agent':
+            threshold = MIN_SCORE_DIFFERENCE_FROM_HYPERSPACE
+        else:
+            threshold = MIN_SCORE_DIFFERENCE_FOR_SWITCH
         
         if score_difference < threshold:
             # Score difference is too small - maintain continuity
-            logger.info(f"🔄 CONTINUITY: Keeping {last_agent} (score difference {score_difference:.1f} < {threshold} threshold)")
-            logger.info(f"   → {last_agent}: {last_agent_score:.1f} vs {best_agent}: {best_score:.1f}")
-            best_agent = last_agent
-            best_score = last_agent_score
+            logger.info(f"🔄 CONTINUITY: Keeping {continuity_agent} (score difference {score_difference:.1f} < {threshold} threshold)")
+            logger.info(f"   → {continuity_agent}: {continuity_agent_score:.1f} vs {best_agent}: {best_score:.1f}")
+            best_agent = continuity_agent
+            best_score = continuity_agent_score
         else:
             # Score difference is significant - switch agents
             logger.info(f"🔄 TOPIC CHANGE: Switching to {best_agent} (score difference {score_difference:.1f} >= {threshold} threshold)")
-            logger.info(f"   → {last_agent}: {last_agent_score:.1f} vs {best_agent}: {best_score:.1f}")
-    elif last_agent and last_agent == best_agent:
-        logger.info(f"✅ CONTINUITY: Routed to {best_agent} (matches primary_agent, conversation continuity maintained)")
+            logger.info(f"   → {continuity_agent}: {continuity_agent_score:.1f} vs {best_agent}: {best_score:.1f}")
+    elif continuity_agent and continuity_agent == best_agent:
+        logger.info(f"✅ CONTINUITY: Routed to {best_agent} (matches continuity_agent, conversation continuity maintained)")
     
     # Normalize score to 0-1 confidence
     max_possible_score = 50.0  # Approximate max

@@ -26,10 +26,18 @@ class GeneralProjectSaveNodes:
         target_file: str,
         active_editor: Dict[str, Any],
         referenced_context: Dict[str, Any],
-        user_id: str
+        user_id: str,
+        target_document_id: Optional[str] = None
     ) -> Optional[str]:
         """
         Resolve document_id from target_file name.
+        
+        Args:
+            target_file: Name of the file to resolve
+            active_editor: Active editor context
+            referenced_context: Referenced files context
+            user_id: User ID
+            target_document_id: Locked document ID from request start (prevents race conditions)
         
         Returns:
             document_id if found, None otherwise
@@ -45,8 +53,9 @@ class GeneralProjectSaveNodes:
         )
         
         if is_project_plan:
-            doc_id = active_editor.get("document_id")
-            logger.info(f"Resolving project_plan: active_editor.document_id={doc_id}, canonical_path={active_editor.get('canonical_path')}")
+            # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+            doc_id = target_document_id or active_editor.get("document_id")
+            logger.info(f"Resolving project_plan: target_document_id={target_document_id}, active_editor.document_id={active_editor.get('document_id')}, canonical_path={active_editor.get('canonical_path')}")
             
             if not doc_id and active_editor.get("canonical_path"):
                 logger.info(f"Attempting canonical_path lookup for: {active_editor.get('canonical_path')}")
@@ -68,7 +77,8 @@ class GeneralProjectSaveNodes:
             if not doc_id:
                 editor_filename = active_editor.get("filename", "")
                 if editor_filename == "project_plan.md" or editor_filename.endswith("/project_plan.md"):
-                    doc_id = active_editor.get("document_id")
+                    # 🔒 Use locked target_document_id first, fallback to active_editor
+                    doc_id = target_document_id or active_editor.get("document_id")
                     if doc_id:
                         logger.info(f"✅ Found project_plan document_id from filename match: {doc_id}")
             
@@ -265,9 +275,10 @@ summary: {file_summary}
                 if not target_file:
                     continue
                 
-                # Resolve document_id
+                # Resolve document_id (pass locked target_document_id to prevent race conditions)
                 doc_id = await self._resolve_document_id(
-                    target_file, active_editor, referenced_context, user_id
+                    target_file, active_editor, referenced_context, user_id,
+                    target_document_id=project_plan_doc_id
                 )
                 
                 if not doc_id:
@@ -373,7 +384,18 @@ summary: {file_summary}
             elif plan_edits:
                 # No active editor or file not open: apply plan edits directly
                 logger.info(f"📝 Applying {len(plan_edits)} plan edits directly (file not open)")
-                project_plan_doc_id = active_editor.get("document_id") if active_editor else None
+                # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+                project_plan_doc_id = (
+                    metadata.get("target_document_id") or 
+                    (active_editor.get("document_id") if active_editor else None)
+                )
+                
+                # Defensive logging: warn if document_id differs from active_editor
+                if active_editor:
+                    active_editor_doc_id = active_editor.get("document_id")
+                    if project_plan_doc_id and active_editor_doc_id and project_plan_doc_id != active_editor_doc_id:
+                        logger.warning(f"⚠️ RACE CONDITION DETECTED (general_project_save): target={project_plan_doc_id}, active_editor={active_editor_doc_id}")
+                
                 if project_plan_doc_id:
                     from orchestrator.utils.document_batch_editor import DocumentEditBatch
                     plan_batch = DocumentEditBatch(project_plan_doc_id, user_id, "general_project_agent")

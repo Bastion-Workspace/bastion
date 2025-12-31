@@ -252,6 +252,16 @@ class MessageResponse(BaseModel):
     message: ConversationMessage
 
 
+class ReactionRequest(BaseModel):
+    emoji: str = Field(..., description="Emoji reaction (👍, 👎, 😂, ❤️, 😢)")
+
+
+class ReactionResponse(BaseModel):
+    success: bool
+    message_id: str
+    reactions: Dict[str, List[str]] = Field(default_factory=dict, description="Map of emoji to list of user_ids who reacted")
+
+
 class FolderListResponse(BaseModel):
     folders: List[ConversationFolder]
 

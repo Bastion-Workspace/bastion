@@ -76,6 +76,7 @@ def infer_action_from_agent(agent_name: str) -> Optional[str]:
         "research_agent": "query",
         "chat_agent": "observation",
         "electronics_agent": "generation",
+        "technical_hyperspace_agent": "analysis",
         "outline_editing_agent": "generation",
         "rules_editing_agent": "generation",
         "character_development_agent": "generation",
@@ -1420,7 +1421,7 @@ ROUTING HINTS FOR PROJECT CAPTURE:
 **STRICT OUTPUT FORMAT - JSON ONLY (NO MARKDOWN, NO EXPLANATION):**
 You MUST respond with a single JSON object matching this schema:
 {{
-  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|style_editing_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_agent|website_crawler_agent|podcast_script_agent|article_writing_agent|entertainment_agent|weather_agent|electronics_agent",
+  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|style_editing_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_agent|website_crawler_agent|podcast_script_agent|article_writing_agent|entertainment_agent|weather_agent|electronics_agent|technical_hyperspace_agent",
   "action_intent": "observation|generation|modification|analysis|query|management",
   "permission_required": false,
   "confidence": 0.0,

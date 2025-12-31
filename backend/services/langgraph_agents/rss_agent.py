@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 from services.langgraph_agents.base_agent import BaseAgent
 from models.agent_response_models import RSSManagementResult, RSSMetadataRequest
-from models.rss_models import RSSFeedCreate
+from tools_service.models.rss_models import RSSFeedCreate
 import uuid
 
 logger = logging.getLogger(__name__)
@@ -393,9 +393,9 @@ When metadata is missing, use this structured format:
         try:
             from services.service_container import get_service_container
             from services.auth_service import get_auth_service
+            from tools_service.services.rss_service import get_rss_service
             
-            service_container = await get_service_container()
-            rss_service = service_container.rss_service
+            rss_service = await get_rss_service()
             auth_service = await get_auth_service()
             
             # Check permissions for global feeds
@@ -440,9 +440,8 @@ When metadata is missing, use this structured format:
     async def _list_rss_feeds(self, operation: Dict[str, Any], user_id: str) -> Dict[str, Any]:
         """List RSS feeds"""
         try:
-            from services.service_container import get_service_container
-            service_container = await get_service_container()
-            rss_service = service_container.rss_service
+            from tools_service.services.rss_service import get_rss_service
+            rss_service = await get_rss_service()
             
             # Get feeds based on scope
             if operation["scope"] == "global":
@@ -481,9 +480,9 @@ When metadata is missing, use this structured format:
         try:
             from services.service_container import get_service_container
             from services.celery_tasks.rss_tasks import poll_rss_feeds_task
+            from tools_service.services.rss_service import get_rss_service
             
-            service_container = await get_service_container()
-            rss_service = service_container.rss_service
+            rss_service = await get_rss_service()
             
             # Find the feed by name
             feeds = await rss_service.get_user_feeds(user_id, is_admin=True)
