@@ -30,8 +30,8 @@ from orchestrator.agents import (
     get_story_analysis_agent,
     get_site_crawl_agent,
     get_rules_editing_agent,
+    get_series_editing_agent,
     get_style_editing_agent,
-    get_proofreading_agent,
     get_general_project_agent,
     get_reference_agent,
     get_knowledge_builder_agent,
@@ -79,7 +79,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         self.site_crawl_agent = None
         self.rules_editing_agent = None
         self.style_editing_agent = None
-        self.proofreading_agent = None
+        self.series_editing_agent = None
         self.general_project_agent = None
         self.reference_agent = None
         self.knowledge_builder_agent = None
@@ -89,7 +89,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
     def _ensure_agents_loaded(self):
         """Lazy load agents"""
         agents_loaded = 0
-        total_agents = 26  # Total number of agents to load
+        total_agents = 27  # Total number of agents to load
         
         if self.research_agent is None:
             self.research_agent = get_full_research_agent()
@@ -170,13 +170,14 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             self.rules_editing_agent = get_rules_editing_agent()
             agents_loaded += 1
         
+        if self.series_editing_agent is None:
+            self.series_editing_agent = get_series_editing_agent()
+            agents_loaded += 1
+        
         if self.style_editing_agent is None:
             self.style_editing_agent = get_style_editing_agent()
             agents_loaded += 1
         
-        if self.proofreading_agent is None:
-            self.proofreading_agent = get_proofreading_agent()
-            agents_loaded += 1
         
         if self.general_project_agent is None:
             self.general_project_agent = get_general_project_agent()
@@ -2412,117 +2413,6 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                         agent_name="system"
                     )
 
-            elif agent_type == "proofreading":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Proofreading agent analyzing manuscript...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="proofreading_agent"
-                )
-                
-                # Build metadata with user_id and shared_memory
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                proofreading_metadata = {
-                    "user_id": request.user_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
-                }
-                
-                result = await self.proofreading_agent.process(
-                    query=request.query,
-                    metadata=proofreading_metadata,
-                    messages=messages
-                )
-                
-                # Extract response from result
-                if isinstance(result, dict):
-                    agent_messages = result.get("messages", [])
-                    if agent_messages:
-                        for msg in agent_messages:
-                            if hasattr(msg, 'content'):
-                                yield orchestrator_pb2.ChatChunk(
-                                    type="content",
-                                    message=msg.content,
-                                    timestamp=datetime.now().isoformat(),
-                                    agent_name="proofreading_agent"
-                                )
-                    else:
-                        response_data = result.get("response", "Proofreading complete")
-                        # Handle both string and dict responses
-                        if isinstance(response_data, str):
-                            response_text = response_data
-                        elif isinstance(response_data, dict):
-                            response_text = response_data.get("response", "Proofreading complete")
-                        else:
-                            response_text = "Proofreading complete"
-                        yield orchestrator_pb2.ChatChunk(
-                            type="content",
-                            message=response_text,
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="proofreading_agent"
-                        )
-                    
-                    # Include editor operations in metadata if available
-                    agent_results = result.get("agent_results", {})
-                    editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
-                    manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
-                    
-                    if editor_operations:
-                        # Send editor operations as separate chunk
-                        import json
-                        # 🔒 Use locked target_document_id to prevent race conditions during tab switches
-                        document_id = (
-                            proofreading_metadata.get("target_document_id") or 
-                            shared_memory.get("active_editor", {}).get("document_id")
-                        )
-                        filename = shared_memory.get("active_editor", {}).get("filename")
-                        
-                        # Defensive logging: warn if document_id differs from active_editor
-                        active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
-                        if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
-                            logger.warning(f"⚠️ RACE CONDITION DETECTED (proofreading): target={document_id}, active_editor={active_editor_doc_id}")
-                        
-                        editor_ops_data = {
-                            "operations": editor_operations,
-                            "manuscript_edit": manuscript_edit,
-                            "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
-                            "filename": filename
-                        }
-                        logger.info(f"✅ PROOFREADING AGENT: Sending {len(editor_operations)} editor operations with document_id={document_id}, filename={filename}")
-                        yield orchestrator_pb2.ChatChunk(
-                            type="editor_operations",
-                            message=json.dumps(editor_ops_data),
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="proofreading_agent"
-                        )
-                        yield orchestrator_pb2.ChatChunk(
-                            type="complete",
-                            message="Proofreading corrections ready",
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system"
-                        )
-                    else:
-                        yield orchestrator_pb2.ChatChunk(
-                            type="complete",
-                            message="Proofreading complete",
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system"
-                        )
-                else:
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=str(result),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="proofreading_agent"
-                    )
-                    yield orchestrator_pb2.ChatChunk(
-                        type="complete",
-                        message="Proofreading complete",
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="system"
-                    )
-
             elif agent_type == "story_analysis":
                 yield orchestrator_pb2.ChatChunk(
                     type="status",
@@ -3117,3 +3007,78 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             }
         )
 
+    async def StartTask(
+        self,
+        request: orchestrator_pb2.TaskRequest,
+        context: grpc.aio.ServicerContext
+    ) -> orchestrator_pb2.TaskResponse:
+        """
+        Start async task processing
+        
+        Phase 1: Stub implementation
+        """
+        logger.info(f"StartTask request from user {request.user_id}")
+        
+        return orchestrator_pb2.TaskResponse(
+            task_id=f"task_{datetime.now().timestamp()}",
+            status="queued",
+            message="Phase 1: Task queued (full implementation in Phase 2)"
+        )
+    
+    async def GetTaskStatus(
+        self,
+        request: orchestrator_pb2.TaskStatusRequest,
+        context: grpc.aio.ServicerContext
+    ) -> orchestrator_pb2.TaskStatusResponse:
+        """Get status of async task"""
+        logger.info(f"GetTaskStatus request for task {request.task_id}")
+        
+        return orchestrator_pb2.TaskStatusResponse(
+            task_id=request.task_id,
+            status="completed",
+            result="Phase 1: Stub response",
+            error_message=""
+        )
+    
+    async def ApprovePermission(
+        self,
+        request: orchestrator_pb2.PermissionApproval,
+        context: grpc.aio.ServicerContext
+    ) -> orchestrator_pb2.ApprovalResponse:
+        """Handle permission approval (HITL)"""
+        logger.info(f"ApprovePermission from user {request.user_id}: {request.approval_decision}")
+        
+        return orchestrator_pb2.ApprovalResponse(
+            success=True,
+            message="Phase 1: Permission recorded",
+            next_action="continue"
+        )
+    
+    async def GetPendingPermissions(
+        self,
+        request: orchestrator_pb2.PermissionRequest,
+        context: grpc.aio.ServicerContext
+    ) -> orchestrator_pb2.PermissionList:
+        """Get list of pending permissions"""
+        logger.info(f"GetPendingPermissions for user {request.user_id}")
+        
+        return orchestrator_pb2.PermissionList(
+            permissions=[]  # Phase 1: No pending permissions
+        )
+    
+    async def HealthCheck(
+        self,
+        request: orchestrator_pb2.HealthCheckRequest,
+        context: grpc.aio.ServicerContext
+    ) -> orchestrator_pb2.HealthCheckResponse:
+        """Health check endpoint"""
+        return orchestrator_pb2.HealthCheckResponse(
+            status="healthy",
+            details={
+                "phase": "6",
+                "service": "llm-orchestrator",
+                "status": "multi_agent_active",
+                "agents": "research,chat,help,weather,image_generation,rss,org,substack,podcast_script",
+                "features": "multi_round_research,query_expansion,gap_analysis,web_search,caching,conversation,formatting,weather_forecasts,image_generation,rss_management,org_management,article_generation,podcast_script_generation,org_project_capture,cross_document_synthesis"
+            }
+        )

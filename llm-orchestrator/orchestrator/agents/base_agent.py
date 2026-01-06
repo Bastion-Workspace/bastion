@@ -252,11 +252,29 @@ class BaseAgent:
         logger.info(f"🎯 SELECTED MODEL: {final_model} (explicit={model}, user={user_model}, default={settings.DEFAULT_MODEL})")
         logger.info(f"🌡️ SELECTED TEMPERATURE: {temperature}")
         
+        # Add reasoning support via extra_body
+        # Note: LangChain ChatOpenAI passes model_kwargs to the underlying OpenAI client
+        # extra_body is a top-level parameter in OpenAI SDK, so we include it in model_kwargs
+        from orchestrator.utils.llm_reasoning_utils import add_reasoning_to_extra_body
+        reasoning_extra_body = add_reasoning_to_extra_body(extra_body=None, model=final_model, use_enabled_flag=True)
+        
+        # Build model_kwargs with reasoning config
+        # extra_body gets passed through to the underlying OpenAI client
+        model_kwargs = {}
+        if reasoning_extra_body:
+            # reasoning_extra_body is already in format: {"reasoning": {"enabled": true}}
+            # We need to pass it as extra_body to the OpenAI client
+            model_kwargs["extra_body"] = reasoning_extra_body
+            logger.info(f"🧠 Reasoning enabled for model {final_model}: {reasoning_extra_body}")
+        else:
+            logger.debug(f"🧠 Reasoning disabled or not available for model {final_model}")
+        
         return ChatOpenAI(
             model=final_model,
             openai_api_key=settings.OPENROUTER_API_KEY,
             openai_api_base=settings.OPENROUTER_BASE_URL,
-            temperature=temperature
+            temperature=temperature,
+            model_kwargs=model_kwargs if model_kwargs else None
         )
     
     def _get_fast_model(self, state: Optional[Dict[str, Any]] = None) -> str:

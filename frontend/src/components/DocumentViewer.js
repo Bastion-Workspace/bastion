@@ -46,10 +46,106 @@ import OrgTagDialog from './OrgTagDialog';
 import PDFDocumentViewer from './PDFDocumentViewer';
 import AudioPlayer from './AudioPlayer';
 import DocxViewer from './DocxViewer';
+import EMLViewer from './EMLViewer';
 import { useEditor } from '../contexts/EditorContext';
 import { parseFrontmatter } from '../utils/frontmatterUtils';
 import { useTheme } from '../contexts/ThemeContext';
 import { documentDiffStore } from '../services/documentDiffStore';
+
+// Image viewer component with authentication
+const ImageViewer = ({ documentId, filename, title, onDownload }) => {
+  const [imageData, setImageData] = React.useState(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState(null);
+
+  // Fetch image with authentication
+  React.useEffect(() => {
+    const fetchImageWithAuth = async () => {
+      try {
+        const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
+        if (!token) {
+          setError('Authentication token not found');
+          setLoading(false);
+          return;
+        }
+
+        const imageUrl = `/api/images/${encodeURIComponent(filename)}`;
+        const response = await fetch(imageUrl, {
+          headers: {
+            'Authorization': `Bearer ${token}`
+          }
+        });
+
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        setImageData(url);
+        setLoading(false);
+      } catch (err) {
+        console.error('Failed to fetch image with auth:', err);
+        setError('Failed to load image. Authentication may have failed.');
+        setLoading(false);
+      }
+    };
+
+    fetchImageWithAuth();
+  }, [filename]);
+
+  // Cleanup: revoke the blob URL when component unmounts or imageData changes
+  React.useEffect(() => {
+    return () => {
+      if (imageData) {
+        URL.revokeObjectURL(imageData);
+      }
+    };
+  }, [imageData]);
+
+  return (
+    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <Box>
+          <Typography variant="h6">{filename || title || 'Image File'}</Typography>
+          {title && title !== filename && (
+            <Typography variant="body2" color="text.secondary">{title}</Typography>
+          )}
+        </Box>
+        <Box>
+          <Tooltip title="Download">
+            <IconButton size="small" onClick={onDownload}>
+              <Download fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Box>
+      </Box>
+      <Box sx={{ flex: 1, p: 3, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto', bgcolor: 'background.default' }}>
+        {loading && (
+          <CircularProgress />
+        )}
+        {error && (
+          <Alert severity="error">{error}</Alert>
+        )}
+        {imageData && !loading && !error && (
+          <Box 
+            component="img"
+            src={imageData}
+            alt={filename}
+            sx={{ 
+              maxWidth: '100%', 
+              maxHeight: '100%', 
+              objectFit: 'contain',
+              boxShadow: 3,
+              borderRadius: 1,
+              bgcolor: 'white' // Better contrast for transparent SVGs
+            }}
+          />
+        )}
+      </Box>
+    </Box>
+  );
+};
 
 const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHeading = null, initialScrollPosition = 0, onScrollChange }) => {
   const [document, setDocument] = useState(null);
@@ -864,14 +960,13 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   useEffect(() => {
     const fname = (document?.filename || '').toLowerCase();
     if (isEditing && (fname.endsWith('.md') || fname.endsWith('.org'))) {
-      // **BULLY!** Parse frontmatter for proper editor context (org files may have frontmatter too)
+      // Parse frontmatter for proper editor context (org files may have frontmatter too)
       const parsed = parseFrontmatter(editContent || '');
       
-      // **ROOSEVELT'S FRONTMATTER MERGE**: Merge data and lists so array fields (files, components, etc.) are included!
+      // Merge data and lists so array fields (files, components, etc.) are included!
       const mergedFrontmatter = { ...(parsed.data || {}), ...(parsed.lists || {}) };
       
-      setEditorState((prev) => ({
-        ...prev,
+      const editorStatePayload = {
         isEditable: true,
         filename: document?.filename || null,
         language: fname.endsWith('.org') ? 'org' : 'markdown',
@@ -880,8 +975,29 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
         frontmatter: mergedFrontmatter,
         canonicalPath: document?.canonical_path || null,
         documentId: document?.document_id || null,
-        folderId: document?.folder_id || null
+        folderId: document?.folder_id || null,
+        cursorOffset: -1,
+        selectionStart: -1,
+        selectionEnd: -1,
+      };
+      
+      setEditorState((prev) => ({
+        ...prev,
+        ...editorStatePayload
       }));
+      
+      // Also write to localStorage for ChatSidebar to read (backup to MarkdownCMEditor)
+      // This ensures frontmatter is correct even if MarkdownCMEditor hasn't mounted yet
+      try {
+        localStorage.setItem('editor_ctx_cache', JSON.stringify(editorStatePayload));
+        console.log('📝 DocumentViewer: Updated editor_ctx_cache:', {
+          filename: editorStatePayload.filename,
+          frontmatterType: mergedFrontmatter?.type,
+          documentId: editorStatePayload.documentId
+        });
+      } catch (e) {
+        console.error('Failed to update editor_ctx_cache from DocumentViewer:', e);
+      }
     } else {
       setEditorState({
         isEditable: false,
@@ -889,11 +1005,17 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
         language: null,
         content: null,
         contentLength: 0,
-        frontmatter: null
+        frontmatter: null,
+        cursorOffset: -1,
+        selectionStart: -1,
+        selectionEnd: -1,
+        canonicalPath: null,
+        documentId: null,
+        folderId: null
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isEditing, editContent, document?.filename]);
+  }, [isEditing, editContent, document?.filename, document?.document_id]);
 
   // **ROOSEVELT'S CLEANUP**: Clear editor state when component unmounts (tab closes)
   // Note: Diffs are intentionally NOT cleared here - they persist in documentDiffStore
@@ -1273,6 +1395,16 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
     );
   }
 
+  // EML email files get specialized viewer with headers and body
+  if (fnameLower.endsWith('.eml')) {
+    return (
+      <EMLViewer 
+        documentId={documentId}
+        filename={document.filename}
+      />
+    );
+  }
+
   // **BULLY!** PDF files get special full-screen viewer treatment!
   if (fnameLower.endsWith('.pdf')) {
     return (
@@ -1288,43 +1420,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   const isImageFile = imageExtensions.some(ext => fnameLower.endsWith(ext));
   
   if (isImageFile && document) {
-    // SECURITY: Use the authenticated /api/images endpoint
-    const imageUrl = `/api/images/${encodeURIComponent(document.filename)}`;
-    
-    return (
-      <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-        <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <Box>
-            <Typography variant="h6">{document.filename || document.title || 'Image File'}</Typography>
-            {document.title && document.title !== document.filename && (
-              <Typography variant="body2" color="text.secondary">{document.title}</Typography>
-            )}
-          </Box>
-          <Box>
-            <Tooltip title="Download">
-              <IconButton size="small" onClick={handleDownload}>
-                <Download fontSize="small" />
-              </IconButton>
-            </Tooltip>
-          </Box>
-        </Box>
-        <Box sx={{ flex: 1, p: 3, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto', bgcolor: 'background.default' }}>
-          <Box 
-            component="img"
-            src={imageUrl}
-            alt={document.filename}
-            sx={{ 
-              maxWidth: '100%', 
-              maxHeight: '100%', 
-              objectFit: 'contain',
-              boxShadow: 3,
-              borderRadius: 1,
-              bgcolor: 'white' // Better contrast for transparent SVGs
-            }}
-          />
-        </Box>
-      </Box>
-    );
+    return <ImageViewer documentId={documentId} filename={document.filename} title={document.title} onDownload={handleDownload} />;
   }
 
   // Audio files get audio player treatment

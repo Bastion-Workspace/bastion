@@ -79,9 +79,9 @@ def infer_action_from_agent(agent_name: str) -> Optional[str]:
         "technical_hyperspace_agent": "analysis",
         "outline_editing_agent": "generation",
         "rules_editing_agent": "generation",
+        "series_editing_agent": "generation",
         "character_development_agent": "generation",
         "style_editing_agent": "generation",
-        "proofreading_agent": "modification",
         "org_agent": "management",
         "website_crawler_agent": "management",
         "article_writing_agent": "generation",
@@ -705,12 +705,31 @@ class IntentClassifier:
 			)
 			
 			# Apply explicit continuity override for strong follow-up signals
+			# BUT: Don't override if action intent has changed in a way that requires a different agent
+			# Example: analysis → modification (story_analysis_agent → fiction_editing_agent)
+			previous_action = infer_action_from_agent(primary_agent) if primary_agent else None
+			action_intent_changed = (
+				previous_action and 
+				previous_action != action_intent and
+				# Critical transitions that should NOT be overridden:
+				# analysis → modification (user wants to edit after analysis)
+				# modification → analysis (user wants to analyze after editing)
+				((previous_action == "analysis" and action_intent == "modification") or
+				 (previous_action == "modification" and action_intent == "analysis") or
+				 (previous_action == "analysis" and action_intent == "generation") or
+				 (previous_action == "generation" and action_intent == "analysis"))
+			)
+			
 			if should_boost and primary_agent and target_agent != primary_agent:
-				# Strong follow-up detected - override routing to maintain continuity
-				logger.info(f"🔄 CONTINUITY OVERRIDE: Query is clear follow-up ('{user_message[:50]}...'), routing to {primary_agent} instead of {target_agent}")
-				target_agent = primary_agent
-				# Adjust confidence slightly lower since we're overriding
-				confidence = min(confidence + 0.1, 0.95)
+				if action_intent_changed:
+					# Action intent changed - respect the new intent, don't override
+					logger.info(f"🔄 ACTION INTENT CHANGE: Previous agent '{primary_agent}' ({previous_action}) → Current intent '{action_intent}' → Routing to {target_agent} (NOT overriding to {primary_agent})")
+				else:
+					# Strong follow-up detected - override routing to maintain continuity
+					logger.info(f"🔄 CONTINUITY OVERRIDE: Query is clear follow-up ('{user_message[:50]}...'), routing to {primary_agent} instead of {target_agent}")
+					target_agent = primary_agent
+					# Adjust confidence slightly lower since we're overriding
+					confidence = min(confidence + 0.1, 0.95)
 			elif should_boost and primary_agent and target_agent == primary_agent:
 				logger.info(f"✅ CONTINUITY: Follow-up query correctly routed to {primary_agent}")
 			elif should_boost and not primary_agent:
@@ -1237,7 +1256,6 @@ Every query has a PRIMARY action intent that determines routing behavior:
     * "our file called...", "document named...", "the document...", "file X..."
   - AVOID: generation requests, observation queries, general information queries (use research_agent)
 
-- **proofreading_agent**
   - ACTION INTENTS: modification (minimal corrections only)
   - USE FOR: Grammar/spelling/style corrections aligned to style guide
   - TRIGGERS: "proofread", "check grammar", "fix typos", "style corrections"
@@ -1247,6 +1265,9 @@ Every query has a PRIMARY action intent that determines routing behavior:
 - **outline_editing_agent**
   - ACTION INTENTS: observation, generation, modification
   - USE FOR: Create/refine story outlines, view outline content
+- **series_editing_agent**
+  - ACTION INTENTS: observation, generation, modification
+  - USE FOR: Generate book synopses, track book status, maintain series continuity
   - TRIGGERS: "create outline", "expand outline", "do you see", "show me outline", "refine structure"
   - AVOID: analysis requests (use content_analysis_agent)
 
@@ -1421,7 +1442,7 @@ ROUTING HINTS FOR PROJECT CAPTURE:
 **STRICT OUTPUT FORMAT - JSON ONLY (NO MARKDOWN, NO EXPLANATION):**
 You MUST respond with a single JSON object matching this schema:
 {{
-  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|style_editing_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|proofreading_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_agent|website_crawler_agent|podcast_script_agent|article_writing_agent|entertainment_agent|weather_agent|electronics_agent|technical_hyperspace_agent",
+  "target_agent": "research_agent|chat_agent|help_agent|fiction_editing_agent|rules_editing_agent|outline_editing_agent|character_development_agent|series_editing_agent|style_editing_agent|{pipeline_agent_enum}rss_agent|image_generation_agent|content_analysis_agent|story_analysis_agent|combined_proofread_and_analyze|org_agent|website_crawler_agent|podcast_script_agent|article_writing_agent|entertainment_agent|weather_agent|electronics_agent|technical_hyperspace_agent",
   "action_intent": "observation|generation|modification|analysis|query|management",
   "permission_required": false,
   "confidence": 0.0,
@@ -1562,17 +1583,18 @@ You MUST respond with a single JSON object matching this schema:
 								data['reasoning'] = f"Editor context (fiction) + analysis intent → story_analysis_agent"
 						else:
 							# Non-analysis fiction queries → fiction_editing_agent
-							if current_agent not in ['fiction_editing_agent', 'outline_editing_agent', 'character_development_agent', 'rules_editing_agent', 'style_editing_agent']:
+							if current_agent not in ['fiction_editing_agent', 'outline_editing_agent', 'character_development_agent', 'rules_editing_agent', 'series_editing_agent', 'style_editing_agent']:
 								logger.info(f"🔄 EDITOR OVERRIDE: {current_agent} → fiction_editing_agent (editor type: fiction, action: {action_intent})")
 								data['target_agent'] = 'fiction_editing_agent'
 								data['reasoning'] = f"Editor context (fiction) + {action_intent} intent → fiction_editing_agent"
 					
-					elif doc_type in ['outline', 'character', 'rules', 'style']:
+					elif doc_type in ['outline', 'character', 'rules', 'series', 'style']:
 						# Specialized fiction editors → their specific agents
 						editor_agent_map = {
 							'outline': 'outline_editing_agent',
 							'character': 'character_development_agent',
 							'rules': 'rules_editing_agent',
+							'series': 'series_editing_agent',
 							'style': 'style_editing_agent'
 						}
 						target_agent = editor_agent_map.get(doc_type)
@@ -1631,7 +1653,6 @@ You MUST respond with a single JSON object matching this schema:
 							# FactCheckingAgent removed - not actively used
 							'org_agent',
 							'fiction_editing_agent', 'story_analysis_agent',
-							'content_analysis_agent', 'proofreading_agent'
 						]
 						
 						# Only prefer pipeline agent if not clearly something else

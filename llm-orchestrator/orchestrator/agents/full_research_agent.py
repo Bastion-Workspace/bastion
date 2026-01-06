@@ -816,7 +816,7 @@ Your decision:"""
                         max_results=limit,
                         small_doc_threshold=5000
                     ),
-                    timeout=2.0
+                    timeout=5.0
                 )
                 
                 # Extract documents from subgraph result
@@ -838,7 +838,7 @@ Your decision:"""
                 return formatted_results
                 
             except asyncio.TimeoutError:
-                logger.warning("Quick vector search timed out after 2 seconds - falling back to basic search")
+                logger.warning("Quick vector search timed out after 5 seconds - falling back to basic search")
                 # Fallback to basic search
                 from orchestrator.tools import search_documents_structured
                 search_result = await search_documents_structured(query=query, limit=limit, user_id=user_id)

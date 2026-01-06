@@ -175,7 +175,9 @@ DECISION FRAMEWORK:
 - Would structured format SIGNIFICANTLY improve comprehension?
 - Is this genuinely comparative/statistical data with multiple dimensions?
 - Does tabular format provide clear advantage over prose?
-- Are there trends/patterns that would benefit from visualization?
+- **For charts**: Are there trends/patterns with sufficient data points (minimum 3-5) that would benefit from visualization?
+- **For charts**: Is there meaningful variation in the data (not all same values)?
+- **For charts**: Would visualization provide value beyond what text can convey?
 - Is there sufficient structured data to warrant formatting/visualization?
 
 3. APPROPRIATENESS ANALYSIS:
@@ -186,25 +188,32 @@ DECISION FRAMEWORK:
 - **Text**: Simple answers, conversational responses, narratives
 
 DECISION RULES:
-- **EXPLICIT VISUALIZATION REQUESTS ALWAYS WIN**: If user says "graph", "chart", "plot", etc., recommend chart_recommended=true
+- **EXPLICIT VISUALIZATION REQUESTS ALWAYS WIN**: If user says "graph", "chart", "plot", etc., recommend chart_recommended=true (but still validate data quality in visualization subgraph)
+- **CHART VALUE REQUIREMENTS**: Only recommend charts if:
+  - User explicitly requested visualization, OR
+  - Data has sufficient points (minimum 3-5 depending on chart type)
+  - Data shows meaningful variation or patterns
+  - Visualization would provide SIGNIFICANT value beyond text
 - EXPLICIT USER PREFERENCE OVERRIDES data characteristics
 - Only recommend when it provides SIGNIFICANT value (unless explicitly requested)
 - Respect conversational context and user intent
 - Prioritize user experience over data perfectionism
 - **CONTENT ANALYSIS QUERIES**: Queries asking "what does X say" or "key insights from Y" prefer narrative analysis
-- **COMPARATIVE QUERIES**: Queries asking "compare A vs B" or "which has more X" benefit from tables
-- **TREND QUERIES**: Queries asking "how has X changed" or "show trends" benefit from charts
+- **COMPARATIVE QUERIES**: Queries asking "compare A vs B" or "which has more X" benefit from tables (not charts unless explicitly requested)
+- **TREND QUERIES**: Queries asking "how has X changed" or "show trends" with sufficient data points benefit from charts
 - **BOTH**: Data with both comparisons AND trends can benefit from both table and chart
 
 EXAMPLES:
-- "Compare debt by country" + comparative data → TABLE only
-- "Show GDP growth over time" + time series data → CHART only
-- "Can you graph those stats?" + any data → CHART (explicit request!)
-- "Graph the national debt data" + any data → CHART (explicit request!)
-- "Compare sales by region and show growth trends" + both → TABLE + CHART
+- "Compare debt by country" + comparative data → TABLE only (no chart unless explicitly requested)
+- "Show GDP growth over time" + time series data with 5+ data points → CHART only
+- "Show GDP growth over time" + only 2 data points → NONE (insufficient data for meaningful chart)
+- "Can you graph those stats?" + any data → CHART (explicit request - will validate data quality in subgraph)
+- "Graph the national debt data" + any data → CHART (explicit request - will validate data quality in subgraph)
+- "Compare sales by region and show growth trends" + both with sufficient data → TABLE + CHART
 - "Create a timeline for the history" + historical data → TIMELINE
 - "Tell me about debt, no tables please" + any data → NONE
 - "Who has the most debt?" + simple data → NONE (overkill, unless user explicitly requests chart)
+- "What's the GDP of France?" + single value → NONE (single data point, no chart needed)
 - "Explain the situation" + any data → NONE (narrative preferred)
 
 RESPOND WITH ONLY valid JSON matching this schema:

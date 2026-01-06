@@ -64,6 +64,8 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         current_chapter_number = state.get("current_chapter_number")
         prev_chapter_text = state.get("prev_chapter_text")
         next_chapter_text = state.get("next_chapter_text")
+        reference_chapter_numbers = state.get("reference_chapter_numbers", [])
+        reference_chapter_texts = state.get("reference_chapter_texts", {})
         
         outline_body = state.get("outline_body")
         rules_body = state.get("rules_body")
@@ -77,25 +79,37 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         requested_chapter_number = state.get("requested_chapter_number")
         explicit_primary_chapter = state.get("explicit_primary_chapter")
         
-        # CRITICAL: Only use requested_chapter_number if it's "fresh" (explicitly set in current query)
-        # This prevents stale requested_chapter_number from persisted state from overriding cursor-based detection
-        is_fresh_request = (
-            explicit_primary_chapter is not None and 
-            requested_chapter_number is not None and 
-            requested_chapter_number == explicit_primary_chapter
-        )
+        # DIAGNOSTIC: Log what we received
+        logger.info(f"📖 [CONTEXT] explicit_primary_chapter={explicit_primary_chapter}, requested_chapter_number={requested_chapter_number}, current_chapter_number={current_chapter_number}")
         
-        if is_fresh_request:
-            # User explicitly requested this chapter in the current query - use it
-            target_chapter_number = requested_chapter_number
-            logger.info(f"📖 Using FRESH requested chapter {requested_chapter_number} (explicitly mentioned in current query)")
+        # Initialize is_fresh_request to avoid UnboundLocalError
+        is_fresh_request = False
+        
+        # CRITICAL: When user explicitly mentions a chapter, prioritize it over cursor position
+        # This ensures "In Chapter 2..." edits Chapter 2, not the chapter where cursor is
+        if explicit_primary_chapter is not None:
+            # User explicitly mentioned a chapter - use it regardless of cursor position
+            target_chapter_number = explicit_primary_chapter
+            is_fresh_request = True  # Explicit chapter mention is always fresh
+            logger.info(f"📖 Using EXPLICIT chapter {explicit_primary_chapter} (user mentioned it in query, overriding cursor-based detection)")
+        elif requested_chapter_number is not None:
+            # Check if requested_chapter_number is "fresh" (matches explicit mention)
+            is_fresh_request = (
+                explicit_primary_chapter is not None and 
+                requested_chapter_number == explicit_primary_chapter
+            )
+            if is_fresh_request:
+                # User explicitly requested this chapter in the current query - use it
+                target_chapter_number = requested_chapter_number
+                logger.info(f"📖 Using FRESH requested chapter {requested_chapter_number} (explicitly mentioned in current query)")
+            else:
+                # Stale requested_chapter_number - ignore it, use cursor-based detection
+                target_chapter_number = current_chapter_number
+                logger.info(f"📖 Ignoring STALE requested_chapter_number={requested_chapter_number} (not in current query), using cursor-based current_chapter_number={current_chapter_number}")
         else:
             # Use cursor-based detection (current_chapter_number from cursor position)
             target_chapter_number = current_chapter_number
-            if requested_chapter_number is not None:
-                logger.info(f"📖 Ignoring STALE requested_chapter_number={requested_chapter_number} (not in current query), using cursor-based current_chapter_number={current_chapter_number}")
-            else:
-                logger.info(f"📖 Using cursor-based current_chapter_number={current_chapter_number}")
+            logger.info(f"📖 Using cursor-based current_chapter_number={current_chapter_number}")
         
         # Determine chapter labels with actual chapter numbers
         prev_chapter_number = state.get("prev_chapter_number")
@@ -164,8 +178,16 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                     break
         
         if prev_chapter_text:
-            section_header = f"=== MANUSCRIPT TEXT: {prev_chapter_label.upper()} (PREVIOUS - FOR CONTINUITY AND ANCHORS) ===\n"
+            section_header = f"=== MANUSCRIPT TEXT: {prev_chapter_label.upper()} (PREVIOUS - READ ONLY, FOR CONTINUITY AND ANCHORS) ===\n"
             context_parts.append(section_header)
+            context_parts.append("⚠️ READ ONLY - DO NOT EDIT THIS CHAPTER ⚠️\n")
+            context_parts.append("This chapter is provided for context and continuity reference ONLY.\n")
+            context_parts.append("**EDITING RESTRICTIONS:**\n")
+            context_parts.append("- **YOU MUST NOT EDIT, MODIFY, OR CHANGE ANY TEXT IN THIS CHAPTER.**\n")
+            context_parts.append("- You may use text from this chapter as 'anchor_text' for operations in other chapters.\n")
+            context_parts.append("- **ANALYSIS ALLOWED**: You CAN and SHOULD analyze this chapter and report any issues you find to the user.\n")
+            context_parts.append("- If you spot inconsistencies, errors, or problems in this READ ONLY chapter, mention them in your 'summary' field.\n")
+            context_parts.append("- **DO NOT create operations to fix issues in this chapter** - only report them to the user.\n\n")
             
             # For new chapter generation, emphasize continuity assessment
             if is_fresh_request:
@@ -205,8 +227,16 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         })
         
         if next_chapter_text:
-            section_header = f"=== MANUSCRIPT TEXT: {next_chapter_label.upper()} (NEXT - FOR CONTEXT ONLY, USE FOR ANCHORS IF NEEDED) ===\n"
+            section_header = f"=== MANUSCRIPT TEXT: {next_chapter_label.upper()} (NEXT - READ ONLY, FOR CONTEXT ONLY, USE FOR ANCHORS IF NEEDED) ===\n"
             context_parts.append(section_header)
+            context_parts.append("⚠️ READ ONLY - DO NOT EDIT THIS CHAPTER ⚠️\n")
+            context_parts.append("This chapter is provided for context and transition awareness ONLY.\n")
+            context_parts.append("**EDITING RESTRICTIONS:**\n")
+            context_parts.append("- **YOU MUST NOT EDIT, MODIFY, OR CHANGE ANY TEXT IN THIS CHAPTER.**\n")
+            context_parts.append("- You may use text from this chapter as 'anchor_text' for operations in other chapters.\n")
+            context_parts.append("- **ANALYSIS ALLOWED**: You CAN and SHOULD analyze this chapter and report any issues you find to the user.\n")
+            context_parts.append("- If you spot inconsistencies, errors, or problems in this READ ONLY chapter, mention them in your 'summary' field.\n")
+            context_parts.append("- **DO NOT create operations to fix issues in this chapter** - only report them to the user.\n\n")
             context_parts.append(f"{next_chapter_text}\n\n")
             context_structure["sections"].append({
                 "type": "manuscript_next_chapter",
@@ -215,6 +245,35 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                 "chapter_number": next_chapter_number
             })
         
+        # 🎯 NEW: Include reference chapters (mentioned but not current/adjacent) as READ-ONLY
+        reference_chapter_numbers = state.get("reference_chapter_numbers", [])
+        reference_chapter_texts = state.get("reference_chapter_texts", {})
+        
+        if reference_chapter_numbers:
+            for ref_ch_num in sorted(reference_chapter_numbers):
+                ref_text = reference_chapter_texts.get(ref_ch_num)
+                if ref_text:
+                    ref_label = f"Chapter {ref_ch_num}"
+                    section_header = f"=== MANUSCRIPT TEXT: {ref_label.upper()} (REFERENCE - READ ONLY, MENTIONED IN QUERY) ===\n"
+                    context_parts.append(section_header)
+                    context_parts.append("⚠️ READ ONLY - DO NOT EDIT THIS CHAPTER ⚠️\n")
+                    context_parts.append(f"This chapter was mentioned in your query but is not the current editable chapter.\n")
+                    context_parts.append("It is provided for reference and context ONLY.\n")
+                    context_parts.append("**EDITING RESTRICTIONS:**\n")
+                    context_parts.append("- **YOU MUST NOT EDIT, MODIFY, OR CHANGE ANY TEXT IN THIS CHAPTER.**\n")
+                    context_parts.append("- You may use text from this chapter as 'anchor_text' for operations in other chapters.\n")
+                    context_parts.append("- **ANALYSIS ALLOWED**: You CAN and SHOULD analyze this chapter and report any issues you find to the user.\n")
+                    context_parts.append("- If you spot inconsistencies, errors, or problems in this READ ONLY chapter, mention them in your 'summary' field.\n")
+                    context_parts.append("- **DO NOT create operations to fix issues in this chapter** - only report them to the user.\n\n")
+                    context_parts.append(f"{ref_text}\n\n")
+                    context_structure["sections"].append({
+                        "type": "manuscript_reference_chapter",
+                        "heading": section_header.strip(),
+                        "content_length": len(ref_text),
+                        "chapter_number": ref_ch_num
+                    })
+                    logger.info(f"📖 Added reference Chapter {ref_ch_num} as READ-ONLY ({len(ref_text)} chars)")
+        
         # Close manuscript section explicitly
         context_parts.append("=== END OF MANUSCRIPT CONTEXT ===\n")
         context_parts.append("="*80 + "\n")
@@ -222,8 +281,16 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         context_parts.append("="*80 + "\n")
         context_parts.append("All text ABOVE this line is MANUSCRIPT TEXT (use for anchors and text matching)\n")
         context_parts.append("All text BELOW this line is REFERENCE DOCUMENTS (use for story context, NOT for text matching)\n\n")
+        context_parts.append("**CHAPTER EDITING RESTRICTIONS:**\n")
+        context_parts.append(f"✅ **ONLY EDIT**: Chapter {target_chapter_number if target_chapter_number else 'CURRENT'} (marked as 'CURRENT - EDITABLE')\n")
+        context_parts.append("❌ **READ ONLY**: PREVIOUS, NEXT, and REFERENCE chapters (marked as 'READ ONLY') - DO NOT EDIT THESE!\n")
+        context_parts.append("⚠️ **CRITICAL**: If PREVIOUS, NEXT, or REFERENCE chapters are shown above, they are for context reference ONLY.\n")
+        context_parts.append("   - You may use their text as 'anchor_text' for operations in the current chapter.\n")
+        context_parts.append("   - You MUST NOT create operations that modify READ ONLY chapters.\n")
+        context_parts.append("   - **BUT**: You CAN and SHOULD analyze READ ONLY chapters and report issues to the user in your 'summary'.\n\n")
         context_parts.append("**REMINDER**: If you need to use 'original_text' or 'anchor_text' in your operations:\n")
         context_parts.append("✅ Copy from MANUSCRIPT TEXT sections above (marked with chapter numbers)\n")
+        context_parts.append("✅ **ONLY use text from the CURRENT/EDITABLE chapter** for 'original_text' in your operations\n")
         context_parts.append("❌ DO NOT copy from OUTLINE, STORY OVERVIEW, or CHARACTER PROFILES below\n")
         context_parts.append("❌ Reference documents below do NOT exist in the manuscript file!\n\n")
         
@@ -585,6 +652,9 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
             "cursor_offset": state.get("cursor_offset", -1),
             "requested_chapter_number": state.get("requested_chapter_number"),
             "explicit_primary_chapter": state.get("explicit_primary_chapter"),  # CRITICAL: For validating requested_chapter_number freshness
+            # PRESERVE reference chapters
+            "reference_chapter_numbers": state.get("reference_chapter_numbers", []),
+            "reference_chapter_texts": state.get("reference_chapter_texts", {}),
             # PRESERVE outline context
             "outline_body": state.get("outline_body"),
             "story_overview": story_overview if 'story_overview' in locals() else state.get("story_overview"),
@@ -621,6 +691,8 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
             "cursor_offset": state.get("cursor_offset", -1),
             "requested_chapter_number": state.get("requested_chapter_number"),
             "explicit_primary_chapter": state.get("explicit_primary_chapter"),
+            "reference_chapter_numbers": state.get("reference_chapter_numbers", []),
+            "reference_chapter_texts": state.get("reference_chapter_texts", {}),
         }
 
 
@@ -665,16 +737,27 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
         explicit_primary_chapter = state.get("explicit_primary_chapter")
         current_chapter_number = state.get("current_chapter_number")
         target_chapter_number = state.get("target_chapter_number")
+        
+        # DIAGNOSTIC: Log what we received
+        logger.info(f"📖 [PROMPT] explicit_primary_chapter={explicit_primary_chapter}, requested_chapter_number={requested_chapter_number}, current_chapter_number={current_chapter_number}, target_chapter_number={target_chapter_number}")
+        
         if target_chapter_number is None:
-            # CRITICAL: Only use requested_chapter_number if it's "fresh" (explicitly set in current query)
-            # This prevents stale requested_chapter_number from persisted state from overriding cursor-based detection
-            is_fresh_request = (
-                explicit_primary_chapter is not None and 
-                requested_chapter_number is not None and 
-                requested_chapter_number == explicit_primary_chapter
-            )
-            if is_fresh_request:
-                target_chapter_number = requested_chapter_number
+            # CRITICAL: When user explicitly mentions a chapter, prioritize it over cursor position
+            # This ensures "In Chapter 2..." edits Chapter 2, not the chapter where cursor is
+            if explicit_primary_chapter is not None:
+                # User explicitly mentioned a chapter - use it regardless of cursor position
+                target_chapter_number = explicit_primary_chapter
+                logger.info(f"📖 [PROMPT] Using EXPLICIT chapter {explicit_primary_chapter} (user mentioned it in query)")
+            elif requested_chapter_number is not None:
+                # Check if requested_chapter_number is "fresh" (matches explicit mention)
+                is_fresh_request = (
+                    explicit_primary_chapter is not None and 
+                    requested_chapter_number == explicit_primary_chapter
+                )
+                if is_fresh_request:
+                    target_chapter_number = requested_chapter_number
+                else:
+                    target_chapter_number = current_chapter_number
             else:
                 target_chapter_number = current_chapter_number
         chapter_ranges = state.get("chapter_ranges", [])
@@ -682,13 +765,45 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # datetime_context should be provided by main agent via state
         datetime_context = state.get("datetime_context", "")
         
+        # CRITICAL: Include conversation history for context
+        # Extract previous user queries and assistant responses (not the references/context)
+        from langchain_core.messages import AIMessage
+        
+        conversation_messages = state.get("messages", [])
+        conversation_history = []
+        
+        if conversation_messages:
+            # Keep only lightweight conversational turns (user queries + assistant summaries)
+            # Skip the massive reference dumps that were in previous turns
+            for msg in conversation_messages[:-1]:  # Exclude current turn (it's being built now)
+                if isinstance(msg, HumanMessage):
+                    # Extract just the user's query (not the full context)
+                    # User queries are typically short
+                    user_query = msg.content
+                    if len(user_query) < 500:  # User queries are short
+                        conversation_history.append(HumanMessage(content=user_query))
+                elif isinstance(msg, AIMessage):
+                    # Include the assistant's text response (the summary, not the operations)
+                    # This is the conversational response the LLM provided
+                    assistant_response = msg.content
+                    if assistant_response and len(assistant_response) < 5000:  # Summaries are concise
+                        conversation_history.append(AIMessage(content=assistant_response))
+        
+        # Build messages: system prompt first, then conversation history, then current turn
         messages = [
             SystemMessage(content=system_prompt),
             SystemMessage(content=datetime_context) if datetime_context else None,
-            HumanMessage(content="".join(generation_context_parts))
         ]
+        # Add conversation history after system prompts
+        messages.extend(conversation_history)
+        # Add current turn context
+        messages.append(HumanMessage(content="".join(generation_context_parts)))
+        
         # Remove None entries
         messages = [m for m in messages if m is not None]
+        
+        if conversation_history:
+            logger.info(f"📜 Included {len(conversation_history)} previous conversational messages for context")
         
         # Add selection/cursor context
         selection_context = ""
@@ -829,17 +944,46 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # Build chapter clarification if there's a discrepancy
             chapter_clarification = ""
             # Only show clarification if target_chapter_number was explicitly requested (fresh)
+            logger.info(f"📖 [CLARIFICATION CHECK] explicit_primary_chapter={explicit_primary_chapter}, target_chapter_number={target_chapter_number}, will_show_clarification={(explicit_primary_chapter is not None and target_chapter_number == explicit_primary_chapter)}")
             if explicit_primary_chapter is not None and target_chapter_number == explicit_primary_chapter:
-                # Clear generation instruction matching detected chapter
-                chapter_clarification = (
-                    f"\n{'='*80}\n"
-                    f"CHAPTER GENERATION TARGET: CHAPTER {target_chapter_number}\n"
-                    f"{'='*80}\n"
-                    f"**YOU ARE GENERATING CHAPTER {target_chapter_number}**\n"
-                    f"**MANDATORY**: Your chapter header MUST be '## Chapter {target_chapter_number}' (NOT any other number!)\n"
-                    f"**CRITICAL**: Use the outline for Chapter {target_chapter_number} (marked as CURRENT above) as your guide\n"
-                    f"{'='*80}\n\n"
-                )
+                # Check if this is a new chapter generation or editing an existing chapter
+                current_chapter_text = state.get("current_chapter_text", "")
+                is_existing_chapter = current_chapter_text.strip() != ""
+                
+                if is_existing_chapter:
+                    # User explicitly mentioned an existing chapter - CRITICAL: ONLY edit that chapter!
+                    chapter_clarification = (
+                        f"\n{'='*80}\n"
+                        f"⚠️ CRITICAL: USER EXPLICITLY MENTIONED CHAPTER {target_chapter_number} ⚠️\n"
+                        f"{'='*80}\n"
+                        f"**YOU MUST ONLY EDIT CHAPTER {target_chapter_number}**\n\n"
+                        f"**MANDATORY RESTRICTIONS:**\n"
+                        f"1. **ONLY search for text in the 'MANUSCRIPT TEXT: CHAPTER {target_chapter_number} (CURRENT - EDITABLE)' section above**\n"
+                        f"2. **PREVIOUS and NEXT chapters are MARKED AS READ ONLY** - they are for context reference ONLY!\n"
+                        f"3. **DO NOT edit Chapter {target_chapter_number - 1 if target_chapter_number > 1 else 'previous'} or Chapter {target_chapter_number + 1}** - they are READ ONLY!\n"
+                        f"4. **If you find similar text in PREVIOUS or NEXT chapters, IGNORE IT for editing** - only edit Chapter {target_chapter_number}!\n"
+                        f"5. **Your 'original_text' MUST come from Chapter {target_chapter_number} ONLY**\n"
+                        f"6. **Any operations you create MUST target Chapter {target_chapter_number} text only**\n"
+                        f"7. **ANALYSIS ALLOWED**: You CAN analyze READ ONLY chapters and report issues in your 'summary' field\n"
+                        f"8. **DO NOT create operations for READ ONLY chapters** - only report issues, don't fix them\n\n"
+                        f"**WHY THIS MATTERS:**\n"
+                        f"The user specifically said 'In Chapter {target_chapter_number}...' - they want changes in THAT chapter, not others.\n"
+                        f"PREVIOUS and NEXT chapters are provided for continuity context but are READ ONLY - do not modify them.\n"
+                        f"However, if you spot problems in READ ONLY chapters, you SHOULD mention them to the user in your summary.\n"
+                        f"Even if similar text exists in other chapters, you must ONLY edit Chapter {target_chapter_number}.\n"
+                        f"{'='*80}\n\n"
+                    )
+                else:
+                    # Clear generation instruction matching detected chapter
+                    chapter_clarification = (
+                        f"\n{'='*80}\n"
+                        f"CHAPTER GENERATION TARGET: CHAPTER {target_chapter_number}\n"
+                        f"{'='*80}\n"
+                        f"**YOU ARE GENERATING CHAPTER {target_chapter_number}**\n"
+                        f"**MANDATORY**: Your chapter header MUST be '## Chapter {target_chapter_number}' (NOT any other number!)\n"
+                        f"**CRITICAL**: Use the outline for Chapter {target_chapter_number} (marked as CURRENT above) as your guide\n"
+                        f"{'='*80}\n\n"
+                    )
             
             # 🎯 ROOSEVELT DEBUG: Log component sizes BEFORE concatenation
             logger.info(f"📊 PRE-CONCAT DEBUG:")
@@ -1304,7 +1448,15 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
             # Ensure required fields have defaults
             if isinstance(raw, dict):
                 raw.setdefault("target_filename", filename)
-                raw.setdefault("scope", "paragraph")
+                # DEFENSIVE: Force scope to valid value if missing or invalid
+                raw_scope = raw.get("scope", "paragraph")
+                valid_scopes = ["paragraph", "chapter", "multi_chapter"]
+                if raw_scope not in valid_scopes:
+                    logger.warning(f"⚠️ Invalid scope value: {raw_scope} - defaulting to 'paragraph'")
+                    raw["scope"] = "paragraph"
+                else:
+                    raw.setdefault("scope", "paragraph")
+                
                 raw.setdefault("summary", "Planned edit generated from context.")
                 raw.setdefault("safety", "medium")
                 raw.setdefault("operations", [])
@@ -1360,6 +1512,46 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                 
                 error_msg = f"ManuscriptEdit validation failed:\n" + "\n".join(error_details)
                 logger.error(f"{error_msg}")
+                
+                # SALVAGE OPERATION: For question requests, try to extract summary even if validation fails
+                request_type = state.get("request_type", "")
+                if request_type == "question" and isinstance(raw, dict):
+                    summary = raw.get("summary", "")
+                    if summary and len(summary) > 20:  # Meaningful summary exists
+                        logger.warning(f"⚠️ Validation failed but this is a question request - salvaging summary ({len(summary)} chars)")
+                        # Create minimal valid ManuscriptEdit with just the summary
+                        salvaged_edit = {
+                            "target_filename": raw.get("target_filename", filename),
+                            "scope": "paragraph",  # Safe default
+                            "summary": summary,
+                            "safety": raw.get("safety", "medium"),
+                            "operations": [],  # No operations needed for questions
+                        }
+                        logger.info(f"✅ Salvaged summary: {summary[:200]}...")
+                        return {
+                            "llm_response": content,
+                            "structured_edit": salvaged_edit,
+                            "system_prompt": state.get("system_prompt", ""),
+                            "datetime_context": state.get("datetime_context", ""),
+                            "generation_context_parts": state.get("generation_context_parts", []),
+                            "metadata": state.get("metadata", {}),
+                            "user_id": state.get("user_id", "system"),
+                            "shared_memory": state.get("shared_memory", {}),
+                            "messages": state.get("messages", []),
+                            "query": state.get("query", ""),
+                            "manuscript": state.get("manuscript", ""),
+                            "filename": state.get("filename", ""),
+                            "current_chapter_text": state.get("current_chapter_text", ""),
+                            "current_chapter_number": state.get("current_chapter_number"),
+                            "chapter_ranges": state.get("chapter_ranges", []),
+                            "current_request": state.get("current_request", ""),
+                            "selection_start": state.get("selection_start", -1),
+                            "selection_end": state.get("selection_end", -1),
+                            "cursor_offset": state.get("cursor_offset", -1),
+                            "requested_chapter_number": state.get("requested_chapter_number"),
+                        }
+                
+                # Not salvageable - return error
                 return {
                     "llm_response": content,
                     "structured_edit": None,

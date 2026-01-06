@@ -125,6 +125,7 @@ async def detect_chapter_mentions_node(state: Dict[str, Any]) -> Dict[str, Any]:
             logger.info("No current request - skipping chapter detection")
             return {
                 "explicit_primary_chapter": None,
+                "mentioned_chapters": [],  # No chapters mentioned
                 # ✅ CRITICAL: Preserve all critical state keys
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
@@ -172,15 +173,18 @@ async def detect_chapter_mentions_node(state: Dict[str, Any]) -> Dict[str, Any]:
         unique_mentions.sort(key=lambda x: x["position"])
         
         primary_chapter = None
+        all_mentioned_chapters = []
         
         if unique_mentions:
             primary_chapter = unique_mentions[0]["chapter"]
-            logger.info(f"📖 DETECTED CHAPTER MENTION: primary={primary_chapter}, from '{current_request}'")
+            all_mentioned_chapters = [m["chapter"] for m in unique_mentions]
+            logger.info(f"📖 DETECTED CHAPTER MENTION: primary={primary_chapter}, all_mentioned={all_mentioned_chapters}, from '{current_request}'")
         else:
             logger.info(f"📖 NO CHAPTER MENTIONS DETECTED in '{current_request}'")
         
         return {
             "explicit_primary_chapter": primary_chapter,
+            "mentioned_chapters": all_mentioned_chapters,  # All chapters mentioned in query
             "current_request": state.get("current_request", ""),  # Preserve from prepare_context
             "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
             "selection_start": state.get("selection_start", -1),
@@ -201,6 +205,7 @@ async def detect_chapter_mentions_node(state: Dict[str, Any]) -> Dict[str, Any]:
         logger.error(f"Failed to detect chapter mentions: {e}")
         return {
             "explicit_primary_chapter": None,
+            "mentioned_chapters": [],  # No chapters mentioned on error
             "current_request": state.get("current_request", ""),  # Preserve even on error
             "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
             "selection_start": state.get("selection_start", -1),
@@ -233,6 +238,7 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Get explicit chapter mentions from query
         explicit_primary_chapter = state.get("explicit_primary_chapter")
+        mentioned_chapters = state.get("mentioned_chapters", [])  # All chapters mentioned in query
         
         # Find chapter ranges
         chapter_ranges = find_chapter_ranges(manuscript)
@@ -241,44 +247,45 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if len(chapter_ranges) == 0 and len(manuscript) > 0:
             logger.warning(f"CHAPTER DETECTION FAILED - Manuscript preview (first 500 chars): {repr(manuscript[:500])}")
         
-        # Priority system: explicit chapter > cursor position > smart default
+        # 🎯 NEW PRIORITY SYSTEM: Cursor position ALWAYS determines editable chapter
+        # Mentioned chapters become READ-ONLY reference chapters
         active_idx = -1
         current_chapter_number: Optional[int] = None
         detection_method = "unknown"
         requested_chapter_number: Optional[int] = None  # For new chapter generation
         
-        # 1. Explicit chapter from query (highest priority - works even on empty files)
-        if explicit_primary_chapter is not None:
-            # User explicitly requested a specific chapter
-            for i, ch_range in enumerate(chapter_ranges):
-                if ch_range.chapter_number == explicit_primary_chapter:
-                    active_idx = i
-                    current_chapter_number = explicit_primary_chapter
-                    detection_method = "explicit_query"
-                    break
-            
-            if active_idx == -1:
-                # Explicit chapter doesn't exist yet - this is a generation request
-                logger.info(f"Explicit chapter {explicit_primary_chapter} not found in manuscript - treating as new chapter generation request")
-                current_chapter_number = explicit_primary_chapter
-                requested_chapter_number = explicit_primary_chapter
-                detection_method = "explicit_new_chapter"
-        
-        # 2. Cursor position (if no explicit chapter and cursor is valid)
-        if active_idx == -1 and current_chapter_number is None and cursor_offset >= 0:
+        # 1. Cursor position (ALWAYS highest priority for editable chapter)
+        if cursor_offset >= 0:
             active_idx = locate_chapter_index(chapter_ranges, cursor_offset)
             if active_idx != -1:
                 # Cursor is WITHIN a chapter
                 current_chapter_number = chapter_ranges[active_idx].chapter_number
                 detection_method = "cursor_position"
+                logger.info(f"📖 Using cursor position: Chapter {current_chapter_number} (cursor at offset {cursor_offset})")
             elif len(chapter_ranges) > 0 and cursor_offset >= chapter_ranges[-1].end:
                 # Cursor is AFTER all chapters - set to last existing chapter
-                # Let the LLM assess the request to determine if user wants next chapter or to work on last chapter
                 last_chapter = chapter_ranges[-1]
                 current_chapter_number = last_chapter.chapter_number
                 logger.info(f"Cursor at end of file (offset {cursor_offset} after last chapter ending at {last_chapter.end}) - setting to last existing Chapter {current_chapter_number}")
-                logger.info(f"   LLM will assess request to determine if user wants next chapter or to work on Chapter {current_chapter_number}")
                 detection_method = "cursor_after_all_chapters"
+        
+        # 2. If no cursor-based chapter found, check explicit chapter (for new chapter generation)
+        if active_idx == -1 and current_chapter_number is None:
+            if explicit_primary_chapter is not None:
+                # Check if explicit chapter exists
+                for i, ch_range in enumerate(chapter_ranges):
+                    if ch_range.chapter_number == explicit_primary_chapter:
+                        active_idx = i
+                        current_chapter_number = explicit_primary_chapter
+                        detection_method = "explicit_query_fallback"
+                        break
+                
+                if active_idx == -1:
+                    # Explicit chapter doesn't exist yet - this is a generation request
+                    logger.info(f"Explicit chapter {explicit_primary_chapter} not found in manuscript - treating as new chapter generation request")
+                    current_chapter_number = explicit_primary_chapter
+                    requested_chapter_number = explicit_primary_chapter
+                    detection_method = "explicit_new_chapter"
         
         # 3. Smart default for empty or ambiguous files
         if active_idx == -1 and current_chapter_number is None:
@@ -291,6 +298,38 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 # Fallback to entire manuscript
                 detection_method = "default_entire_manuscript"
+        
+        # 🎯 NEW: Identify reference chapters (mentioned but not current/adjacent)
+        reference_chapter_numbers = []
+        reference_chapter_texts = {}  # Map chapter_number -> text
+        
+        if mentioned_chapters and current_chapter_number is not None:
+            # Get adjacent chapter numbers
+            prev_chapter_num = None
+            next_chapter_num = None
+            if active_idx != -1:
+                prev_c, next_c = get_adjacent_chapters(chapter_ranges, active_idx)
+                if prev_c:
+                    prev_chapter_num = prev_c.chapter_number
+                if next_c:
+                    next_chapter_num = next_c.chapter_number
+            
+            # Filter mentioned chapters: include only if NOT current or adjacent
+            for mentioned_ch in mentioned_chapters:
+                if (mentioned_ch != current_chapter_number and 
+                    mentioned_ch != prev_chapter_num and 
+                    mentioned_ch != next_chapter_num):
+                    reference_chapter_numbers.append(mentioned_ch)
+                    logger.info(f"📖 Adding Chapter {mentioned_ch} as READ-ONLY reference (mentioned but not current/adjacent)")
+            
+            # Extract text for reference chapters
+            for ref_ch_num in reference_chapter_numbers:
+                for ch_range in chapter_ranges:
+                    if ch_range.chapter_number == ref_ch_num:
+                        ref_text = strip_frontmatter_block(manuscript[ch_range.start:ch_range.end])
+                        reference_chapter_texts[ref_ch_num] = ref_text
+                        logger.info(f"📖 Extracted {len(ref_text)} chars for reference Chapter {ref_ch_num}")
+                        break
         
         prev_c, next_c = (None, None)
         # 🎯 ROOSEVELT FIX: Default to empty string for current chapter text if not found
@@ -365,6 +404,8 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "prev_chapter_number": prev_chapter_number,
             "next_chapter_text": next_chapter_text,
             "next_chapter_number": next_chapter_number,
+            "reference_chapter_numbers": reference_chapter_numbers,  # Chapters mentioned but not current/adjacent
+            "reference_chapter_texts": reference_chapter_texts,  # Text for reference chapters (READ-ONLY)
             "current_request": state.get("current_request", ""),  # Preserve from earlier nodes
             "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
             "selection_start": state.get("selection_start", -1),
@@ -394,6 +435,8 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "manuscript": state.get("manuscript", ""),
             "filename": state.get("filename", ""),
             "frontmatter": state.get("frontmatter", {}),
+            "reference_chapter_numbers": [],  # No reference chapters on error
+            "reference_chapter_texts": {},  # No reference chapters on error
             "user_id": state.get("user_id", "system"),  # CRITICAL: Preserve user_id for DB queries
             # ✅ CRITICAL: Preserve all critical state keys even on error
             "metadata": state.get("metadata", {}),

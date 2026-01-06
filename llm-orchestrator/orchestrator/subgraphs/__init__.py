@@ -28,6 +28,7 @@ from .entity_relationship_subgraph import build_entity_relationship_subgraph
 from .data_formatting_subgraph import build_data_formatting_subgraph
 from .visualization_subgraph import build_visualization_subgraph
 from .diagramming_subgraph import build_diagramming_subgraph
+from .proofreading_subgraph import build_proofreading_subgraph
 
 __all__ = [
     "build_context_preparation_subgraph",
@@ -47,6 +48,7 @@ __all__ = [
     "build_entity_relationship_subgraph",
     "build_data_formatting_subgraph",
     "build_visualization_subgraph",
-    "build_diagramming_subgraph"
+    "build_diagramming_subgraph",
+    "build_proofreading_subgraph"
 ]
 

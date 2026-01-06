@@ -1095,15 +1095,8 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             # Check if this is a historical request
             if request.HasField("date_str") and request.date_str:
                 # Historical weather request
-                # Import from tools-service (running in tools-service container)
-                # Use explicit import to avoid conflicts with backend paths
-                import sys
-                import importlib.util
-                tools_service_weather_path = '/app/tools_service/services/weather_tools.py'
-                spec = importlib.util.spec_from_file_location("tools_service_weather_tools", tools_service_weather_path)
-                tools_service_weather = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(tools_service_weather)
-                weather_history = tools_service_weather.weather_history
+                # Import from tools-service (same pattern as RSS service)
+                from tools_service.services.weather_tools import weather_history
                 
                 weather_result = await weather_history(
                     location=location,
@@ -1181,18 +1174,11 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             data_types = list(request.data_types) if request.data_types else ["current"]
             is_forecast_request = "forecast" in data_types
             
-            # Import from tools-service (running in tools-service container)
-            # Use explicit import to avoid conflicts with backend paths
-            import sys
-            import importlib.util
-            tools_service_weather_path = '/app/tools_service/services/weather_tools.py'
-            spec = importlib.util.spec_from_file_location("tools_service_weather_tools", tools_service_weather_path)
-            tools_service_weather = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(tools_service_weather)
+            # Import from tools-service (same pattern as RSS service)
+            from tools_service.services.weather_tools import weather_forecast, weather_conditions
             
             if is_forecast_request:
                 # Forecast request
-                weather_forecast = tools_service_weather.weather_forecast
                 
                 # Default to 3 days if not specified
                 days = 3
@@ -1250,8 +1236,6 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 return response
             else:
                 # Default to current conditions
-                weather_conditions = tools_service_weather.weather_conditions
-                
                 weather_result = await weather_conditions(
                     location=location,
                     units=units,

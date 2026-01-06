@@ -170,9 +170,9 @@ status: draft
   - Sets narrative voice, POV (point of view), tense, pacing, dialogue style, sensory detail level
   - Defines writing techniques, sentence structure patterns, and descriptive style
   - Used by **Fiction Editing Agent** to match narrative voice when writing prose
-  - Also referenced by **Proofreading Agent** for style-consistent corrections
+  - Also referenced by writing agents' proofreading capabilities for style-consistent corrections
   - Example: "Add POV guidelines", "Define narrative voice", "Set pacing style"
-  - Note: This is for SETTING narrative style, NOT for proofreading. Proofreading is done by the Proofreading Agent.
+  - Note: This is for SETTING narrative style, NOT for proofreading. Proofreading is handled by the writing agents (Fiction Editing Agent, Article Writing Agent, Podcast Script Agent) as an internal capability.
 
 **Content Creation Types:**
 - `type: substack` or `type: blog` - Enables **Substack Agent** for article/tweet generation
@@ -363,8 +363,10 @@ What it does:
 - Writes chapters, scenes, dialogue
 - Develops characters and plots
 - Works with active fiction editor
-When to use: "Write chapter 3", "Edit this scene to add tension", "Draft an opening paragraph"
+- **Includes proofreading capability** - Automatically handles proofreading requests using internal proofreading subgraph
+When to use: "Write chapter 3", "Edit this scene to add tension", "Draft an opening paragraph", "Proofread this chapter", "Check grammar", "Fix typos"
 Example: "Write the opening scene for my story" → Generates creative fiction prose
+Example: "Proofread Chapter 1" → Automatically routes to internal proofreading subgraph for grammar and style corrections
 
 **DATA FORMATTING AGENT**
 What it does:
@@ -408,13 +410,16 @@ What it does:
 When to use: "Analyze my plot", "Critique this chapter", "Review the character development"
 Example: "Analyze the pacing of my story" → Detailed story critique
 
-**PROOFREADING AGENT**
+**PROOFREADING CAPABILITY (Built into Writing Agents)**
 What it does:
 - Checks grammar, spelling, and style
-- Aligns corrections to style guide
+- Aligns corrections to style guide when available
 - Makes minimal, targeted corrections
-When to use: "Proofread this", "Check grammar", "Fix typos"
-Example: "Proofread my article" → Grammar and style corrections
+- Available as an internal subgraph within writing agents
+When to use: "Proofread this", "Check grammar", "Fix typos", "Check for filter words"
+Example: "Proofread Chapter 1" (on fiction document) → Fiction Editing Agent handles proofreading internally
+Example: "Proofread my article" (on substack/blog document) → Article Writing Agent handles proofreading internally
+Note: Proofreading is not a standalone agent. It's a capability built into Fiction Editing Agent, Article Writing Agent, and Podcast Script Agent. When you request proofreading on a document, the appropriate writing agent automatically handles it using its internal proofreading subgraph.
 
 **OUTLINE EDITING AGENT**
 What it does:
@@ -524,16 +529,16 @@ EDITOR-BASED AGENTS SUMMARY
 **Editor-based agents** are specialized agents that activate when you have a document open with a matching `type` in the frontmatter. They use your document as project context and can read referenced files.
 
 **Creative Writing Editor Agents:**
-- **Fiction Editing Agent** (`type: fiction`) - Prose creation/editing, chapters, scenes, dialogue
+- **Fiction Editing Agent** (`type: fiction`) - Prose creation/editing, chapters, scenes, dialogue, **includes proofreading capability**
 - **Outline Editing Agent** (`type: outline`) - Story structure, plot organization, narrative flow
 - **Character Development Agent** (`type: character`) - Character profiles, backstory, motivations, arcs
 - **Rules Editing Agent** (`type: rules`) - World-building rules, magic systems, canon consistency
 - **Style Editing Agent** (`type: style`) - Narrative style guides (voice, POV, tense, pacing, dialogue style)
-- **Proofreading Agent** - Grammar, spelling, style corrections (references style guide when available)
+- **Proofreading** - Grammar, spelling, style corrections (available as internal capability within Fiction Editing Agent, Article Writing Agent, and Podcast Script Agent)
 
 **Content Creation Editor Agents:**
-- **Substack Agent** (`type: substack` or `type: blog`) - Article/tweet generation with built-in research
-- **Podcast Script Agent** (`type: podcast`) - TTS-ready podcast scripts with audio cues
+- **Article Writing Agent** (`type: substack` or `type: blog`) - Article/tweet generation with built-in research and proofreading capability
+- **Podcast Script Agent** (`type: podcast`) - TTS-ready podcast scripts with audio cues and proofreading capability
 
 **Technical Editor Agents:**
 - **Electronics Agent** (`type: electronics`) - Circuit design, embedded programming, project management
@@ -695,7 +700,7 @@ For "How does the research agent work?":
 
 For "What can this application do?":
 {{
-    "message": "**Application Capabilities Overview**\\n\\nThis is a comprehensive AI-powered knowledge and creativity platform with:\\n\\n**Core Features:**\\n- **Research & Knowledge**: Search documents, web, and build knowledge graphs\\n- **Creative Writing**: Fiction editing, character development, outlining\\n- **Task Management**: Org-mode TODO tracking and project management\\n- **Content Creation**: Articles, podcasts, images, data visualization\\n- **Document Management**: Upload, search, and organize files\\n\\n**Available Agents:**\\n- Research, Chat, Fiction Editing, Data Formatting, Content Analysis\\n- Story Analysis, Proofreading, Character Development, Rules Editing\\n- RSS Management, Org Inbox, Image Generation, Entertainment\\n\\nAsk about any specific feature to learn more!",
+    "message": "**Application Capabilities Overview**\\n\\nThis is a comprehensive AI-powered knowledge and creativity platform with:\\n\\n**Core Features:**\\n- **Research & Knowledge**: Search documents, web, and build knowledge graphs\\n- **Creative Writing**: Fiction editing, character development, outlining (includes proofreading)\\n- **Task Management**: Org-mode TODO tracking and project management\\n- **Content Creation**: Articles, podcasts, images, data visualization (articles and podcasts include proofreading)\\n- **Document Management**: Upload, search, and organize files\\n\\n**Available Agents:**\\n- Research, Chat, Fiction Editing, Data Formatting, Content Analysis\\n- Story Analysis, Character Development, Rules Editing\\n- RSS Management, Org Inbox, Image Generation, Entertainment\\n- Article Writing, Podcast Script (both include proofreading capability)\\n\\nAsk about any specific feature to learn more!",
     "task_status": "complete",
     "help_category": "feature_discovery",
     "related_topics": ["Getting started guide", "Agent capabilities", "Workflow tutorials"]

@@ -440,27 +440,48 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     }, { decorations: v => v.decorations });
   }, []);
 
-  // Set editor state ONCE on mount to tell ChatSidebar that editor is open
-  // ChatSidebar only checks isEditable flag, doesn't need content updates during typing
+  // Track last documentId to detect document switches
+  const lastDocumentIdRef = React.useRef(null);
+  
+  // Set editor state when document changes or content loads
+  // This ensures frontmatter is correct when switching tabs
   useEffect(() => {
     const fullText = (value || '').replace(/\r\n/g, '\n');
     const { data, lists } = parseFrontmatter(fullText);
     const mergedFrontmatter = { ...data, ...lists };
     
-    console.log('📝 MarkdownCMEditor MOUNT: Parsed frontmatter:', {
+    // Only update if documentId changed OR if we have content and documentId matches
+    // This prevents stale frontmatter when switching tabs
+    const documentChanged = lastDocumentIdRef.current !== documentId;
+    const hasContent = fullText.trim().length > 0;
+    
+    // Skip if document hasn't changed and we don't have content yet (waiting for content to load)
+    if (!documentChanged && !hasContent) {
+      return;
+    }
+    
+    // Update ref to track current document
+    if (documentChanged) {
+      lastDocumentIdRef.current = documentId;
+    }
+    
+    console.log('📝 MarkdownCMEditor UPDATE: Parsed frontmatter:', {
+      documentChanged,
+      hasContent,
+      documentId,
       dataKeys: Object.keys(data),
       listsKeys: Object.keys(lists),
       dataType: data.type,
       mergedType: mergedFrontmatter.type,
       mergedKeys: Object.keys(mergedFrontmatter),
-      fullData: data,
-      fullMerged: mergedFrontmatter
+      contentLength: fullText.length
     });
     
     // CRITICAL FIX: Initialize window cache for typing handler to reuse
     window.__last_editor_frontmatter = mergedFrontmatter;
+    window.__last_editor_content = fullText;
     
-    // Set context state ONCE to indicate editor is open
+    // Set context state to indicate editor is open
     const payload = {
       isEditable: true,
       filename: filename || 'untitled.md',
@@ -477,37 +498,41 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     
     setEditorState(payload);
     
-    // Also write to localStorage for chat to read on mount
+    // Also write to localStorage for chat to read immediately
     try {
-      console.log('📝 MarkdownCMEditor MOUNT: Writing editor_ctx_cache:', {
+      console.log('📝 MarkdownCMEditor UPDATE: Writing editor_ctx_cache:', {
         filename: payload.filename,
         frontmatterKeys: Object.keys(payload.frontmatter || {}),
         frontmatterType: payload.frontmatter?.type,
         fullFrontmatter: payload.frontmatter,
-        contentLength: payload.contentLength
+        contentLength: payload.contentLength,
+        documentId: payload.documentId
       });
       localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
     } catch {}
     
     // Cleanup on unmount - clear editor state
     return () => {
-      setEditorState({
-        isEditable: false,
-        filename: null,
-        language: null,
-        content: null,
-        contentLength: 0,
-        frontmatter: null,
-        cursorOffset: -1,
-        selectionStart: -1,
-        selectionEnd: -1,
-        canonicalPath: null,
-        documentId: null, // ✅ Clear documentId on unmount
-      });
+      if (documentId !== lastDocumentIdRef.current) {
+        // Only clear if we're actually unmounting (document changed)
+        setEditorState({
+          isEditable: false,
+          filename: null,
+          language: null,
+          content: null,
+          contentLength: 0,
+          frontmatter: null,
+          cursorOffset: -1,
+          selectionStart: -1,
+          selectionEnd: -1,
+          canonicalPath: null,
+          documentId: null, // ✅ Clear documentId on unmount
+        });
+      }
     };
-    // Only run on mount/unmount and when file changes, NOT on every keystroke
+    // Run when document changes OR when content loads for the current document
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filename, canonicalPath, documentId]);
+  }, [filename, canonicalPath, documentId, value]);
 
   // Watch for content changes and update cache (CRITICAL for fresh content after edits)
   // Debounced to avoid excessive updates during typing

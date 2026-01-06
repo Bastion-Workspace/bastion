@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, END
 from orchestrator.agents.base_agent import BaseAgent
 from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
+from orchestrator.subgraphs import build_proofreading_subgraph
 
 logger = logging.getLogger(__name__)
 
@@ -61,23 +62,42 @@ class ArticleWritingAgent(BaseAgent):
         """Build LangGraph workflow for article writing agent"""
         workflow = StateGraph(ArticleWritingState)
         
+        # Build proofreading subgraph (optional quality step)
+        proofreading_subgraph = build_proofreading_subgraph(
+            checkpointer,
+            llm_factory=self._get_llm,
+            get_datetime_context=self._get_datetime_context
+        )
+        
         # Add nodes
         workflow.add_node("prepare_context", self._prepare_context_node)
         workflow.add_node("extract_content", self._extract_content_node)
         workflow.add_node("generate_article", self._generate_article_node)
+        workflow.add_node("proofreading", proofreading_subgraph)
         workflow.add_node("resolve_operations", self._resolve_operations_node)
         workflow.add_node("format_response", self._format_response_node)
         
         # Entry point
         workflow.set_entry_point("prepare_context")
         
-        # Conditional routing based on editing mode
+        # Conditional routing based on editing mode and proofreading intent
         workflow.add_edge("prepare_context", "extract_content")
         workflow.add_edge("extract_content", "generate_article")
         
-        # Route based on editing mode
+        # Route after generation: check for proofreading or go to resolution/format
         workflow.add_conditional_edges(
             "generate_article",
+            self._route_after_generation,
+            {
+                "proofreading": "proofreading",
+                "resolve_operations": "resolve_operations",
+                "format_response": "format_response"
+            }
+        )
+        
+        # Proofreading flows to resolution if editing mode, otherwise to format
+        workflow.add_conditional_edges(
+            "proofreading",
             lambda state: "resolve_operations" if state.get("editing_mode") else "format_response",
             {
                 "resolve_operations": "resolve_operations",
@@ -89,6 +109,26 @@ class ArticleWritingAgent(BaseAgent):
         workflow.add_edge("format_response", END)
         
         return workflow.compile(checkpointer=checkpointer)
+    
+    def _route_after_generation(self, state: ArticleWritingState) -> str:
+        """Route after article generation: check for proofreading intent or editing mode"""
+        # Check for proofreading intent
+        query = state.get("query", "").lower()
+        user_message = state.get("user_message", "").lower()
+        proofreading_keywords = [
+            "proofread", "check grammar", "fix typos", "style corrections",
+            "grammar check", "spell check", "proofreading", "grammar", "typos"
+        ]
+        is_proofreading = any(kw in query or kw in user_message for kw in proofreading_keywords)
+        
+        if is_proofreading:
+            logger.info("Detected proofreading intent - routing to proofreading subgraph")
+            return "proofreading"
+        
+        # Not proofreading - continue with normal flow
+        if state.get("editing_mode"):
+            return "resolve_operations"
+        return "format_response"
     
     
     def _build_system_prompt(self, persona: Optional[Dict[str, Any]] = None, editing_mode: bool = False) -> str:

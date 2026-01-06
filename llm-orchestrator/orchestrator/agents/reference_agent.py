@@ -191,8 +191,15 @@ class ReferenceAgent(BaseAgent):
             }
         )
         
-        # Research subgraph routes to synthesis
-        workflow.add_edge("call_research_subgraph", "synthesize_response")
+        # After research, check if calculations are still needed (may have been missed or enabled by research)
+        workflow.add_conditional_edges(
+            "call_research_subgraph",
+            self._route_after_research,
+            {
+                "calculations": "perform_calculations",
+                "synthesize": "synthesize_response"
+            }
+        )
         
         # Synthesis routes to formatting
         workflow.add_edge("synthesize_response", "format_response")
@@ -245,6 +252,18 @@ class ReferenceAgent(BaseAgent):
         """Route after weather - check if research is still needed"""
         if state.get("needs_external_info", False):
             return "research"
+        return "synthesize"
+    
+    def _route_after_research(self, state: ReferenceAgentState) -> str:
+        """Route after research - check if calculations are still needed"""
+        # Check if calculations were needed but not yet performed
+        # This handles cases where:
+        # 1. Complexity analysis missed calculation detection
+        # 2. Research provided data that enables calculations
+        # 3. Query requires calculations that should happen after research
+        if state.get("needs_calculations", False):
+            logger.info("📊 Calculations still needed after research - routing to calculations")
+            return "calculations"
         return "synthesize"
     
     async def _load_reference_context_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
@@ -386,18 +405,37 @@ class ReferenceAgent(BaseAgent):
    - 0.0-0.49: Low relevance (query appears unrelated to document content)
 2. **is_unrelated**: true if query_relevance < 0.3 (query is clearly unrelated to document)
 3. **complexity_level**: "simple_qa" (factual questions like "What did I write on X date?"), "pattern_analysis" (trends/frequencies like "Show me days I ate pizza"), or "insights" (deep analysis like "What patterns do you notice?")
-4. **needs_calculations**: Does this query require mathematical calculations (e.g., "calculate BTU", "how much", "total", "compute")?
-5. **calculation_type**: If calculations needed, what type? "formula" (BTU, electrical formulas), "expression" (simple math), or "conversion" (unit conversion)
+4. **needs_calculations**: Does this query require mathematical calculations? **ALWAYS set to true if query contains:**
+   - "calculate", "compute", "figure out", "determine" + any technical term (BTU, heat loss, voltage, etc.)
+   - "heat loss", "actual heat losses", "Manual J", "BTU requirements", "HVAC sizing"
+   - "how much", "what is the", "total" + technical calculations
+   - Any formula-related terms (BTU, electrical, conversion, etc.)
+   - Examples: "calculate actual heat losses", "what BTU do I need", "compute the heat loss", "figure out the BTU requirements"
+5. **calculation_type**: If calculations needed, what type? "formula" (BTU, heat loss, electrical formulas), "expression" (simple math), or "conversion" (unit conversion)
 6. **needs_external_info**: Does this query require external information (e.g., nutritional data, definitions, research)?
 7. **research_query**: If external info is needed, what should be researched? (e.g., "nutritional content of pizza")
 8. **needs_weather**: Does this query ask about weather conditions (current, forecast, or historical)? Examples: "What's the weather?", "Weather forecast", "What was the weather on [date]?"
 9. **weather_request**: If weather is needed, structure as: {{"location": "city name or location", "request_type": "current|forecast|history", "date_str": "YYYY-MM-DD or YYYY-MM" (for history)}}
-10. **needs_visualization**: Would this query benefit from a chart or graph? Consider:
-   - Queries asking to "show", "graph", "chart", "plot", or "visualize" data
-   - Queries about trends over time (weight, mood, food intake)
-   - Queries comparing values across categories or time periods
-   - Queries about distributions or frequency patterns
-9. **visualization_type**: If visualization needed, what type? "bar" (comparisons), "line" (trends over time), "pie" (proportions), "scatter" (correlations), "area" (cumulative trends), "heatmap" (2D patterns), "box_plot" (distributions), "histogram" (frequency distributions)
+10. **needs_visualization**: Would this query benefit from a chart or graph? **CRITICAL**: Only recommend visualization if:
+   - The user EXPLICITLY requests a chart/graph/plot/visualization, OR
+   - There is SUBSTANTIAL structured data (multiple data points, clear patterns, meaningful comparisons)
+   - The visualization would provide SIGNIFICANT value beyond what text can convey
+   - There are at least 3-5 distinct data points to visualize (not just 1-2 values)
+   - The data has clear patterns, trends, or relationships worth visualizing
+   
+   **DO NOT recommend visualization for:**
+   - Simple single-value questions ("What's my weight today?")
+   - Questions with insufficient data points (< 3 data points)
+   - Questions where text would be clearer than a chart
+   - Exploratory queries without clear visualization intent
+   
+   Consider:
+   - Queries explicitly asking to "show", "graph", "chart", "plot", or "visualize" data → needs_visualization=true
+   - Queries about trends over time with multiple data points (weight, mood, food intake over weeks/months) → needs_visualization=true
+   - Queries comparing values across categories or time periods with sufficient data → needs_visualization=true
+   - Queries about distributions or frequency patterns with multiple categories → needs_visualization=true
+   - Simple factual questions or single data point queries → needs_visualization=false
+11. **visualization_type**: If visualization needed, what type? "bar" (comparisons), "line" (trends over time), "pie" (proportions), "scatter" (correlations), "area" (cumulative trends), "heatmap" (2D patterns), "box_plot" (distributions), "histogram" (frequency distributions)
 
 **RELEVANCE EXAMPLES**:
 - "What did I write in my journal on December 5th?" → relevance: 0.95 (directly about document)
@@ -407,10 +445,15 @@ class ReferenceAgent(BaseAgent):
 
 **COMPLEXITY EXAMPLES**:
 - "What did I write in my journal on December 5th?" → simple_qa, no calculations, no external info, no weather, no visualization
-- "Show me all days I mentioned feeling anxious" → pattern_analysis, no calculations, no external info, no weather, no visualization
-- "Graph my weight over time" → pattern_analysis, no calculations, no external info, no weather, needs visualization (line chart)
-- "Chart the frequency of different foods I ate" → pattern_analysis, no calculations, no external info, no weather, needs visualization (bar or pie chart)
+- "Show me all days I mentioned feeling anxious" → pattern_analysis, no calculations, no external info, no weather, no visualization (text list is sufficient)
+- "Graph my weight over time" → pattern_analysis, no calculations, no external info, no weather, needs visualization (line chart - explicit request)
+- "Chart the frequency of different foods I ate" → pattern_analysis, no calculations, no external info, no weather, needs visualization (bar or pie chart - explicit request)
+- "What's my weight today?" → simple_qa, no calculations, no external info, no weather, no visualization (single value, no chart needed)
+- "Show me my weight trends over the last 6 months" → pattern_analysis, no calculations, no external info, no weather, needs visualization (line chart - multiple data points, clear trend)
+- "How many times did I eat pizza?" → simple_qa, no calculations, no external info, no weather, no visualization (single count, text is sufficient)
 - "What BTU requirements do I need for these rooms?" → simple_qa, needs calculations (formula: btu_hvac), no external info, no weather, no visualization
+- "Calculate actual heat losses" → simple_qa, needs calculations (formula: manual_j_heat_loss), no external info, no weather, no visualization
+- "What's the heat loss for this building?" → simple_qa, needs calculations (formula: manual_j_heat_loss), no external info, no weather, no visualization
 - "What's the calorie count of the foods I logged yesterday?" → simple_qa, no calculations, needs external info (nutritional data), no weather, no visualization
 - "What patterns do you notice in my logs?" → insights, no calculations, no external info, no weather, no visualization
 - "What's the weather today?" → simple_qa, no calculations, no external info, needs weather (current), no visualization
@@ -484,6 +527,15 @@ Return ONLY valid JSON:
             weather_request = result_dict.get("weather_request")
             needs_visualization = result_dict.get("needs_visualization", False)
             visualization_type = result_dict.get("visualization_type")
+            
+            # Log calculation detection with emphasis
+            if needs_calculations:
+                logger.info(f"🔢 CALCULATION DETECTED: needs_calculations=True, type={calculation_type}, query='{query[:100]}'")
+            else:
+                # Check if query contains calculation keywords but wasn't detected
+                calc_keywords = ["calculate", "compute", "heat loss", "btu", "manual j", "figure out", "determine"]
+                if any(kw in query.lower() for kw in calc_keywords):
+                    logger.warning(f"⚠️ CALCULATION KEYWORDS FOUND but needs_calculations=False: query='{query[:100]}'")
             
             logger.info(f"📚 Query relevance: {query_relevance:.2f}, is_unrelated: {is_unrelated}, complexity: {complexity}, needs calculations: {needs_calculations}, needs external info: {needs_external}, needs weather: {needs_weather}, needs visualization: {needs_visualization}")
             
@@ -921,11 +973,16 @@ Return ONLY the JSON object, no markdown, no code blocks."""
 1. Extract all numerical values from the document (measurements, dimensions, etc.)
 2. Use conversation history to understand follow-up questions and previous calculations
 3. Identify the calculation type:
-   - If BTU/HVAC related: use formula "btu_hvac"
+   - If heat loss calculation (Manual J, actual heat losses, building heat loss): use formula "manual_j_heat_loss"
+   - If BTU/HVAC sizing (room sizing, HVAC requirements): use formula "btu_hvac"
    - If electrical (voltage, current, resistance): use appropriate "ohms_law_*" formula
    - If simple math: use "expression" type
    - If unit conversion: use "conversion" type
 4. Structure the calculation request as JSON
+
+**IMPORTANT - Heat Loss vs BTU Sizing**:
+- "heat loss", "actual heat losses", "calculate heat loss", "Manual J" → use "manual_j_heat_loss" formula
+- "BTU requirements", "HVAC sizing", "room sizing" → use "btu_hvac" formula
 
 **OUTPUT FORMAT**: Return ONLY valid JSON:
 {{
@@ -1055,6 +1112,114 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                 "query": state.get("query", "")
             }
     
+    def _validate_chart_data_quality(self, chart_type: str, chart_data: Dict[str, Any], query: str) -> bool:
+        """
+        Validate that chart data has sufficient value for visualization.
+        
+        Returns True only if:
+        - Data has sufficient data points (minimum 3-5 depending on chart type)
+        - Data shows meaningful variation or patterns
+        - Chart would provide value beyond what text can convey
+        - User explicitly requested visualization (overrides strict checks)
+        """
+        if not chart_data:
+            return False
+        
+        # Check for explicit visualization request in query (overrides strict validation)
+        query_lower = query.lower()
+        explicit_viz_keywords = ["graph", "chart", "plot", "visualize", "visualization", "show me a", "create a chart", "make a graph"]
+        is_explicit_request = any(keyword in query_lower for keyword in explicit_viz_keywords)
+        
+        # For explicit requests, be more lenient but still check for minimum data
+        min_data_points = 2 if is_explicit_request else 3
+        
+        # Validate based on chart type
+        if chart_type in ["bar", "pie"]:
+            labels = chart_data.get("labels", [])
+            values = chart_data.get("values", [])
+            
+            if not labels or not values:
+                return False
+            
+            if len(labels) < min_data_points or len(values) < min_data_points:
+                logger.debug(f"Bar/pie chart: insufficient data points ({len(labels)} labels, {len(values)} values)")
+                return False
+            
+            # Check for meaningful variation (not all same values)
+            if len(set(values)) == 1 and not is_explicit_request:
+                logger.debug(f"Bar/pie chart: all values are the same ({values[0]}) - no visualization value")
+                return False
+            
+            return True
+        
+        elif chart_type in ["line", "scatter", "area"]:
+            x = chart_data.get("x", [])
+            y = chart_data.get("y", [])
+            series = chart_data.get("series", [])
+            
+            # Check single series format
+            if x and y:
+                if len(x) < min_data_points or len(y) < min_data_points:
+                    logger.debug(f"Line/scatter/area chart: insufficient data points ({len(x)} x, {len(y)} y)")
+                    return False
+                
+                if len(x) != len(y):
+                    logger.debug(f"Line/scatter/area chart: mismatched array lengths")
+                    return False
+                
+                # Check for meaningful variation
+                if len(set(y)) == 1 and not is_explicit_request:
+                    logger.debug(f"Line/scatter/area chart: all y values are the same - no visualization value")
+                    return False
+                
+                return True
+            
+            # Check multi-series format
+            if series and isinstance(series, list):
+                if len(series) == 0:
+                    return False
+                
+                # Check if any series has sufficient data
+                has_valid_series = False
+                for s in series:
+                    if isinstance(s, dict):
+                        s_x = s.get("x", [])
+                        s_y = s.get("y", [])
+                        if len(s_x) >= min_data_points and len(s_y) >= min_data_points and len(s_x) == len(s_y):
+                            has_valid_series = True
+                            break
+                
+                return has_valid_series
+            
+            return False
+        
+        elif chart_type == "heatmap":
+            z = chart_data.get("z", [])
+            if not z or not isinstance(z, list):
+                return False
+            
+            # Heatmap needs at least 2x2 grid
+            if len(z) < 2:
+                return False
+            
+            row_lengths = [len(row) for row in z if isinstance(row, list)]
+            if not row_lengths or min(row_lengths) < 2:
+                return False
+            
+            return True
+        
+        elif chart_type in ["histogram", "box_plot"]:
+            values = chart_data.get("values", [])
+            if not values or len(values) < min_data_points:
+                logger.debug(f"Histogram/box_plot: insufficient data points ({len(values) if values else 0})")
+                return False
+            
+            return True
+        
+        # Unknown chart type - be conservative
+        logger.warning(f"Unknown chart type for validation: {chart_type}")
+        return False
+    
     async def _perform_visualization_node(self, state: ReferenceAgentState) -> Dict[str, Any]:
         """Perform visualization using chart generation tool"""
         try:
@@ -1156,11 +1321,33 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     "query": state.get("query", "")
                 }
             
+            # Validate data quality before creating chart
+            chart_type = viz_request.get("chart_type")
+            chart_data = viz_request.get("data", {})
+            
+            # Check if data has sufficient value for visualization
+            data_is_meaningful = self._validate_chart_data_quality(chart_type, chart_data, query)
+            
+            if not data_is_meaningful:
+                logger.info(f"⚠️ Skipping chart creation: insufficient or low-value data for {chart_type} chart")
+                return {
+                    "visualization_results": {
+                        "success": False,
+                        "error": "Insufficient data points or low visualization value. Chart would not provide meaningful insight."
+                    },
+                    "needs_visualization": False,
+                    "error": "Data quality validation failed - chart would not provide meaningful value",
+                    # ✅ CRITICAL: Preserve state even on validation failure
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", "")
+                }
+            
             # Call visualization tool
             from orchestrator.tools.visualization_tools import create_chart_tool
             
-            chart_type = viz_request.get("chart_type")
-            chart_data = viz_request.get("data", {})
             chart_title = viz_request.get("title", "")
             x_label = viz_request.get("x_label", "")
             y_label = viz_request.get("y_label", "")
@@ -1390,6 +1577,10 @@ Return ONLY the JSON object, no markdown, no code blocks."""
             return {
                 "research_results": research_result,
                 "needs_external_info": False,  # Research completed
+                # ✅ CRITICAL: Preserve calculation needs - calculations may still be needed after research
+                "needs_calculations": state.get("needs_calculations", False),
+                "calculation_type": state.get("calculation_type"),
+                "calculation_request": state.get("calculation_request"),
                 # ✅ CRITICAL: Preserve state for subsequent nodes
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),

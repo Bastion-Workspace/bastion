@@ -22,6 +22,7 @@ from orchestrator.subgraphs import (
     build_validation_subgraph,
     build_generation_subgraph,
     build_resolution_subgraph,
+    build_proofreading_subgraph
 )
 from orchestrator.utils.fiction_utilities import (
     ChapterRange,
@@ -203,6 +204,11 @@ class FictionEditingAgent(BaseAgent):
             get_datetime_context=self._get_datetime_context
         )
         resolution_subgraph = build_resolution_subgraph(checkpointer)
+        proofreading_subgraph = build_proofreading_subgraph(
+            checkpointer,
+            llm_factory=self._get_llm,
+            get_datetime_context=self._get_datetime_context
+        )
         
         # Phase 1: Context preparation (now a subgraph)
         workflow.add_node("context_preparation", context_subgraph)
@@ -218,6 +224,9 @@ class FictionEditingAgent(BaseAgent):
         # Phase 4: Generation (now a subgraph)
         workflow.add_node("generate_edit_plan", generation_subgraph)
         workflow.add_node("generate_simple_edit", self._generate_simple_edit_node)
+        
+        # Phase 4.5: Proofreading (reusable subgraph)
+        workflow.add_node("proofreading", proofreading_subgraph)
         
         # Phase 5: Post-generation validation (now a subgraph)
         workflow.add_node("validation", validation_subgraph)
@@ -240,15 +249,19 @@ class FictionEditingAgent(BaseAgent):
             }
         )
         
-        # Short-circuit: if no references, use fast path directly
+        # Route after detect_mode: check for proofreading intent or continue to generation
         workflow.add_conditional_edges(
             "detect_mode",
             self._route_after_context,
             {
+                "proofreading": "proofreading",  # Proofreading intent -> proofreading subgraph
                 "simple_path": "generate_simple_edit",  # No references -> fast path
                 "full_path": "detect_request_type"       # Has references -> full path
             }
         )
+        
+        # Proofreading subgraph flows to resolution (skip generation/validation)
+        workflow.add_edge("proofreading", "resolve_operations")
         
         # Route to generation preparation (always single chapter)
         workflow.add_edge("detect_request_type", "prepare_generation")
@@ -363,6 +376,11 @@ class FictionEditingAgent(BaseAgent):
             "    }\n"
             "  ]\n"
             "}\n\n"
+            "**CRITICAL FIELD REQUIREMENTS:**\n"
+            '- "scope" MUST be EXACTLY one of: "paragraph", "chapter", or "multi_chapter" (no other values allowed!)\n'
+            '- "safety" MUST be EXACTLY one of: "low", "medium", or "high" (no other values allowed!)\n'
+            '- "operations" is an array of operation objects (can be empty [] for question-only requests)\n'
+            '- "summary" is a string describing what was done or answering the question\n\n'
             "FIELD DEFINITIONS:\n"
             "- target_filename: Name of manuscript file (string, REQUIRED)\n"
             "- scope: Edit scope - \"paragraph\", \"chapter\", or \"multi_chapter\" (REQUIRED)\n"
@@ -736,11 +754,25 @@ class FictionEditingAgent(BaseAgent):
         return "continue"
     
     def _route_after_context(self, state: FictionEditingState) -> str:
-        """Route after context preparation: check if references exist"""
+        """Route after context preparation: check for proofreading intent or if references exist"""
         # Check for errors first
         if state.get("task_status") == "error":
             return "format_response"  # Skip to format to return error
         
+        # Check for proofreading intent
+        current_request = state.get("current_request", "").lower()
+        proofreading_keywords = [
+            "proofread", "check grammar", "fix typos", "style corrections",
+            "grammar check", "spell check", "proofreading", "grammar", "typos",
+            "check for filter words", "filter words"
+        ]
+        is_proofreading = any(kw in current_request for kw in proofreading_keywords)
+        
+        if is_proofreading:
+            logger.info("Detected proofreading intent - routing to proofreading subgraph")
+            return "proofreading"
+        
+        # Not proofreading - continue with normal routing
         has_references = state.get("has_references", False)
         
         # If no references, use simple fast path
@@ -959,6 +991,9 @@ class FictionEditingAgent(BaseAgent):
     }}
   ]
 }}
+
+**CRITICAL**: "scope" MUST be EXACTLY one of these three strings: "paragraph", "chapter", or "multi_chapter" (no other values allowed!)
+
 
 **CRITICAL scope VALUES** (use EXACTLY one of these):
 - "paragraph" - edits within a single paragraph (most common for simple requests)
@@ -1675,15 +1710,29 @@ class FictionEditingAgent(BaseAgent):
                         response_text = "Analysis complete."
             # Build response text for edit requests - use summary, not full text
             else:
-                # Single chapter: use summary from structured_edit, not full text
-                if structured_edit and structured_edit.summary:
-                    response_text = structured_edit.summary
-                elif editor_operations:
-                    # Fallback: brief description of operations
-                    op_count = len(editor_operations)
-                    response_text = f"Made {op_count} edit(s) to align with style guide and improve narrative flow."
+                # Check if this was a proofreading request (has mode in state)
+                mode = state.get("mode", "")
+                is_proofreading = mode in ["clarity", "compliance", "accuracy"]
+                
+                if is_proofreading:
+                    # Proofreading-specific response formatting
+                    if structured_edit and structured_edit.summary:
+                        response_text = f"## Proofreading ({mode})\n\n{structured_edit.summary}\n\n"
+                    elif editor_operations:
+                        op_count = len(editor_operations)
+                        response_text = f"## Proofreading ({mode})\n\n**{op_count} correction(s)** ready to apply.\n"
+                    else:
+                        response_text = f"## Proofreading ({mode})\n\nProofreading complete. No issues found.\n"
                 else:
-                    response_text = "Edit plan ready."
+                    # Regular editing response
+                    if structured_edit and structured_edit.summary:
+                        response_text = structured_edit.summary
+                    elif editor_operations:
+                        # Fallback: brief description of operations
+                        op_count = len(editor_operations)
+                        response_text = f"Made {op_count} edit(s) to align with style guide and improve narrative flow."
+                    else:
+                        response_text = "Edit plan ready."
             
             # Add clarifying questions if present
             clarifying_questions = structured_edit.clarifying_questions if structured_edit else []

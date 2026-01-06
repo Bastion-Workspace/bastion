@@ -215,29 +215,38 @@ def _generate_manual_j_steps(inputs: Dict[str, Any], result: float) -> List[str]
 FORMULA_LIBRARY: Dict[str, Dict[str, Any]] = {
     # HVAC/BTU Calculations
     "btu_hvac": {
-        "description": "Calculate BTU requirements for HVAC room sizing",
+        "description": "Calculate BTU requirements for HVAC room sizing. Can handle 'square_feet' for a single area or a 'rooms' list for multiple rooms.",
         "formula": lambda inputs: (
-            inputs["square_feet"] * 
+            (inputs.get("square_feet") if inputs.get("square_feet") else sum(room.get("square_feet", 0) for room in inputs.get("rooms", []))) * 
             inputs.get("btu_per_sqft", 25) * 
             inputs.get("climate_factor", 1.0) *
             inputs.get("ceiling_height_factor", 1.0) *
             inputs.get("insulation_factor", 1.0)
         ),
-        "required_inputs": ["square_feet"],
+        "required_inputs": [], # We'll validate in the validation function
         "optional_inputs": {
+            "square_feet": None,
+            "rooms": [],
             "btu_per_sqft": 25,  # Default for moderate climate
             "climate_factor": 1.0,  # 1.0 = moderate, 1.2-1.5 = hot, 0.8-0.9 = cold
             "ceiling_height_factor": 1.0,  # 1.0 = 8ft, adjust for taller ceilings
             "insulation_factor": 1.0  # 1.0 = standard, <1.0 = well insulated, >1.0 = poor insulation
         },
         "output_unit": "BTU/hr",
-        "validation": lambda inputs: inputs["square_feet"] > 0,
-        "step_generator": lambda inputs, result: [
-            f"Base calculation: {inputs['square_feet']} sq ft × {inputs.get('btu_per_sqft', 25)} BTU/sq ft = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25)} BTU/hr",
-            f"Apply climate factor: × {inputs.get('climate_factor', 1.0)} = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25) * inputs.get('climate_factor', 1.0)} BTU/hr",
-            f"Apply ceiling height factor: × {inputs.get('ceiling_height_factor', 1.0)} = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25) * inputs.get('climate_factor', 1.0) * inputs.get('ceiling_height_factor', 1.0)} BTU/hr",
-            f"Apply insulation factor: × {inputs.get('insulation_factor', 1.0)} = {result} BTU/hr"
-        ]
+        "validation": lambda inputs: (inputs.get("square_feet") is not None and inputs["square_feet"] > 0) or (isinstance(inputs.get("rooms"), list) and len(inputs["rooms"]) > 0),
+        "step_generator": lambda inputs, result: (
+            [
+                f"Base calculation (rooms): Sum of room areas = {sum(room.get('square_feet', 0) for room in inputs.get('rooms', []))} sq ft",
+                f"Total area × {inputs.get('btu_per_sqft', 25)} BTU/sq ft = {sum(room.get('square_feet', 0) for room in inputs.get('rooms', [])) * inputs.get('btu_per_sqft', 25)} BTU/hr",
+                f"Apply climate factor: × {inputs.get('climate_factor', 1.0)} = {sum(room.get('square_feet', 0) for room in inputs.get('rooms', [])) * inputs.get('btu_per_sqft', 25) * inputs.get('climate_factor', 1.0)} BTU/hr",
+                f"Apply insulation factor: × {inputs.get('insulation_factor', 1.0)} = {result} BTU/hr"
+            ] if not inputs.get("square_feet") else [
+                f"Base calculation: {inputs['square_feet']} sq ft × {inputs.get('btu_per_sqft', 25)} BTU/sq ft = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25)} BTU/hr",
+                f"Apply climate factor: × {inputs.get('climate_factor', 1.0)} = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25) * inputs.get('climate_factor', 1.0)} BTU/hr",
+                f"Apply ceiling height factor: × {inputs.get('ceiling_height_factor', 1.0)} = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25) * inputs.get('climate_factor', 1.0) * inputs.get('ceiling_height_factor', 1.0)} BTU/hr",
+                f"Apply insulation factor: × {inputs.get('insulation_factor', 1.0)} = {result} BTU/hr"
+            ]
+        )
     },
     "manual_j_heat_loss": {
         "description": "Calculate heat loss according to ACCA Manual J methodology. Includes conduction losses through building envelope, infiltration losses, ventilation losses, and subtracts internal heat gains.",

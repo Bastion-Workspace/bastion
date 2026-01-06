@@ -11,6 +11,14 @@ from datetime import datetime, timedelta
 import json
 import math
 
+# Import weather models using explicit tools_service path
+# This avoids conflicts with backend's 'from models.xxx' imports
+from tools_service.models.weather_models import (
+    WeatherConditionsRequest,
+    WeatherForecastRequest,
+    WeatherHistoryRequest
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -1165,8 +1173,6 @@ async def weather_conditions(location: Optional[str] = None, units: str = "imper
     Returns:
         Dict with weather data or error message
     """
-    from models.weather_models import WeatherConditionsRequest
-    
     # Resolve location using Pydantic model
     request = WeatherConditionsRequest(location=location, user_id=user_id, units=units)
     resolved_location, error = await request.resolve_location()
@@ -1196,8 +1202,6 @@ async def weather_forecast(location: Optional[str] = None, days: int = 3, units:
     Returns:
         Dict with forecast data or error message
     """
-    from models.weather_models import WeatherForecastRequest
-    
     # Resolve location using Pydantic model
     request = WeatherForecastRequest(location=location, user_id=user_id, days=days, units=units)
     resolved_location, error = await request.resolve_location()
@@ -1229,8 +1233,6 @@ async def weather_history(location: Optional[str] = None, date_str: str = "", un
     Returns:
         Dict with historical weather data or error message
     """
-    from models.weather_models import WeatherHistoryRequest
-    
     # Resolve location using Pydantic model
     request = WeatherHistoryRequest(location=location, user_id=user_id, date_str=date_str, units=units)
     resolved_location, error = await request.resolve_location()

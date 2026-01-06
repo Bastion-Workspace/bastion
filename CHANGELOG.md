@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Feature: 'Cover' frontmatter type support in Fiction documents
 
 ## [Unreleased]
+- Fix: Intent classifier now respects action intent changes (analysis → modification) to prevent routing revisions back to story_analysis_agent
+- Fix: Updated btu_hvac formula to handle rooms list and calculate total BTU for multi-room reference documents
+- Fix: Updated llm-orchestrator Dockerfile to generate all required gRPC protos including vector_service
+- Fix: Installed Chromium and dependencies in tools-service Dockerfile to enable static chart generation via Kaleido
+- Update: Increased research agent quick vector search timeout to 5 seconds to accommodate network latency
 - Fix: Resolved fiction generation subgraph state preservation bug where generation_context_parts was dropped across nodes
 - Fix: Added failed_operations conversion in fiction generation to display unplaceable content in chat sidebar
 - Feature: Added context-aware fuzzy matching with auto-correction for fiction agent anchor texts to prevent LLM hallucination errors
@@ -21,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix: Added chunk_index sorting to frontend operation application to ensure text chunks are applied in correct sequence
 - Fix: Removed obsolete chunk reversal logic in backend that was causing text chunks to be sent in reverse order
 - Fix: Added explicit instructions for fiction agent to use insert_after (not insert_after_heading) when continuing existing chapters to prevent duplication
+- Fix: Modified editor operation resolver to prefer matches near cursor position (±10K chars) to ensure edits target the correct chapter when cursor is positioned
 - Fix: Resolved DOCX file reading errors in gRPC GetDocumentContent by using DocumentProcessor for binary formats
 - Feature: Added automatic location fallback to user ZIP code for weather tools
 - Feature: Added date range support for historical weather queries (e.g., "2022-10 to 2024-02")

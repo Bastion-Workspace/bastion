@@ -62,6 +62,14 @@ AGENT_CAPABILITIES = {
         'context_boost': 20,
         'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
     },
+    'series_editing_agent': {
+        'domains': ['fiction', 'writing', 'series'],
+        'actions': ['observation', 'generation', 'modification'],
+        'editor_types': ['series'],
+        'keywords': ['series', 'synopsis', 'book status', 'series continuity', 'future books'],
+        'context_boost': 20,
+        'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
+    },
     'style_editing_agent': {
         'domains': ['fiction', 'writing', 'style'],
         'actions': ['observation', 'generation', 'modification'],
@@ -131,14 +139,6 @@ AGENT_CAPABILITIES = {
         'keywords': ['crawl site', 'crawl website', 'site crawl', 'domain crawl', 'crawl domain'],
         'context_boost': 0
     },
-    'proofreading_agent': {
-        'domains': ['fiction', 'writing'],
-        'actions': ['modification'],
-        'editor_types': ['fiction'],
-        'keywords': ['proofread', 'check grammar', 'fix typos', 'style corrections', 'grammar check', 'spell check'],
-        'context_boost': 20,
-        'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
-    },
     'general_project_agent': {
         'domains': ['general', 'management'],
         'actions': ['observation', 'generation', 'modification', 'analysis', 'management'],
@@ -163,7 +163,13 @@ AGENT_CAPABILITIES = {
         'domains': ['general', 'reference', 'journal', 'log'],
         'actions': ['query', 'analysis', 'observation', 'generation'],  # generation for visualization requests
         'editor_types': ['reference'],
-        'keywords': ['journal', 'log', 'record', 'tracking', 'diary', 'food log', 'weight log', 'mood log', 'graph', 'chart', 'visualize'],
+        'keywords': [
+            'journal', 'log', 'record', 'tracking', 'diary', 'food log', 'weight log', 'mood log', 
+            'graph', 'chart', 'visualize',
+            # Calculation keywords
+            'calculate', 'calculation', 'compute', 'math', 'formula', 'btu', 'heat loss', 'heat losses', 
+            'manual j', 'hvac', 'electrical', 'ohms law', 'convert units', 'unit conversion'
+        ],
         'context_boost': 20  # Strong preference when editor type matches
     },
     'knowledge_builder_agent': {
@@ -276,8 +282,8 @@ def detect_domain(
                 'outline_editing_agent': 'fiction',
                 'character_development_agent': 'fiction',
                 'rules_editing_agent': 'fiction',
+                'series_editing_agent': 'fiction',
                 'style_editing_agent': 'fiction',
-                'proofreading_agent': 'fiction',
                 'weather_agent': 'weather',
                 'research_agent': 'general',
                 'site_crawl_agent': 'general',
@@ -372,6 +378,8 @@ def route_within_domain(
             return 'character_development_agent'
         elif editor_type == 'rules':
             return 'rules_editing_agent'
+        elif editor_type == 'series':
+            return 'series_editing_agent'
         elif editor_type == 'style':
             return 'style_editing_agent'
         elif editor_type == 'fiction':

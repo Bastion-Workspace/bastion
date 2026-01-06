@@ -31,6 +31,7 @@ import PresenceIndicator from './PresenceIndicator';
 import messagingService from '../../services/messagingService';
 import AudioPlayer from '../AudioPlayer';
 import TeamInvitationMessage from './TeamInvitationMessage';
+import { formatTimestamp } from '../../utils/chatUtils';
 
 const RoomChat = () => {
   const {
@@ -265,16 +266,6 @@ const RoomChat = () => {
     }
   };
 
-  const formatMessageTime = (timestamp) => {
-    if (!timestamp) return '';
-    
-    try {
-      const date = new Date(timestamp);
-      return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    } catch {
-      return '';
-    }
-  };
 
   if (!currentRoom) return null;
 
@@ -447,7 +438,7 @@ const RoomChat = () => {
                       color: 'inherit',
                     }}
                   >
-                    {formatMessageTime(message.created_at)}
+                    {formatTimestamp(message.created_at)}
                   </Typography>
                 </Paper>
               </Box>

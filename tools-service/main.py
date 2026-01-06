@@ -10,7 +10,7 @@ import sys
 
 # CRITICAL: Set up Python path BEFORE any other imports
 # Python adds the script's directory (/app/tools-service) to sys.path automatically
-# We need to ensure /app/backend is FIRST so 'from models.xxx' imports work
+# We need to ensure /app/backend is FIRST so 'from models.xxx' imports work for backend code
 # Backend code uses relative imports like 'from models.api_models'
 
 # Ensure /app/backend is FIRST in sys.path (most important for 'from models.xxx')
@@ -22,7 +22,7 @@ sys.path.insert(0, '/app/backend')
 if '/app' not in sys.path:
     sys.path.insert(0, '/app')
 
-# Keep /app/tools_service in path (for tools_service local imports)
+# Keep /app/tools_service in path (for tools_service imports)
 # It's already there from Python's automatic addition, but ensure it's after /app/backend
 if '/app/tools_service' in sys.path and sys.path.index('/app/tools_service') < sys.path.index('/app/backend'):
     sys.path.remove('/app/tools_service')

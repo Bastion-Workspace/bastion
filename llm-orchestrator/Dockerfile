@@ -30,7 +30,10 @@ RUN python -m grpc_tools.protoc \
     --python_out=/app \
     --grpc_python_out=/app \
     /app/protos/orchestrator.proto \
-    /app/protos/tool_service.proto
+    /app/protos/tool_service.proto \
+    /app/protos/vector_service.proto \
+    /app/protos/data_service.proto \
+    /app/protos/crawl_service.proto
 
 # Expose gRPC port
 EXPOSE 50051

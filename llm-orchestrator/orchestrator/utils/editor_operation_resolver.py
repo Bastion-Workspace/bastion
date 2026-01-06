@@ -149,21 +149,55 @@ def resolve_editor_operation(
     
     # Strategy 2: Exact match with original_text (for replace_range/delete_range)
     if original_text and op_type in ("replace_range", "delete_range"):
-        # First try exact match
+        # CRITICAL: If cursor_offset is provided, prefer matches near cursor (within ±10K chars)
+        # This ensures edits target the chapter where the user's cursor is located
+        cursor_search_window = 10000  # ±10K characters around cursor
+        cursor_matches = []
+        all_matches = []
+        
+        # First, try searching near cursor if available
+        if cursor_offset is not None and cursor_offset >= 0:
+            search_start = max(frontmatter_end, cursor_offset - cursor_search_window)
+            search_end = min(len(content), cursor_offset + cursor_search_window)
+            cursor_window = content[search_start:search_end]
+            
+            # Search in cursor window
+            search_from = 0
+            while True:
+                pos_in_window = cursor_window.find(original_text, search_from)
+                if pos_in_window == -1:
+                    break
+                # Convert window-relative position to document-relative position
+                pos = search_start + pos_in_window
+                cursor_matches.append(pos)
+                search_from = pos_in_window + 1
+            
+            # If we found matches near cursor, prefer those
+            if cursor_matches:
+                # Use occurrence_index to select which match (default to first)
+                match_idx = min(occurrence_index, len(cursor_matches) - 1)
+                pos = cursor_matches[match_idx]
+                end_pos = pos + len(original_text)
+                # Guard frontmatter: ensure operations never occur before frontmatter end
+                pos = max(pos, frontmatter_end)
+                end_pos = max(end_pos, pos)
+                logger.debug(f"✅ Found original_text near cursor at position {pos} (match {match_idx+1}/{len(cursor_matches)}, cursor_offset={cursor_offset})")
+                return pos, end_pos, text, 1.0
+        
+        # If no match near cursor (or no cursor), search entire document
         count = 0
         search_from = 0
-        found_positions = []
         while True:
             pos = content.find(original_text, search_from)
             if pos == -1:
                 break
-            found_positions.append(pos)
+            all_matches.append(pos)
             if count == occurrence_index:
                 end_pos = pos + len(original_text)
                 # Guard frontmatter: ensure operations never occur before frontmatter end
                 pos = max(pos, frontmatter_end)
                 end_pos = max(end_pos, pos)
-                logger.debug(f"✅ Found original_text at position {pos} (occurrence {count})")
+                logger.debug(f"✅ Found original_text at position {pos} (occurrence {count}, total_matches={len(all_matches)})")
                 return pos, end_pos, text, 1.0
             count += 1
             search_from = pos + 1
@@ -323,12 +357,42 @@ def resolve_editor_operation(
                     # No clear paragraph boundary - use end of document
                     end_pos = len(content)
             else:
-                # For insert_after_heading (non-chapter headings), find end of line/paragraph
-                end_pos = content.find("\n", pos)
-                if end_pos == -1:
-                    end_pos = len(content)
+                # For insert_after_heading (non-chapter headings), find end of section
+                # Similar to chapters: find where this section ends (next heading at same or higher level)
+                anchor_start = pos
+                anchor_end = pos + len(anchor_text)
+                
+                # Check if anchor_text is a markdown heading (starts with #)
+                heading_match = re.match(r'^(#{1,6})\s+', anchor_text.strip())
+                if heading_match:
+                    # It's a markdown heading - find the end of this section
+                    heading_level = len(heading_match.group(1))
+                    
+                    # Find next heading at same or higher level (marks end of this section)
+                    # Pattern: \n followed by 1 to heading_level #, then space and text
+                    # We want headings at level <= heading_level (same or higher level = section boundary)
+                    # Example: For level 2 (##), match \n## or \n# (but not \n###)
+                    # Build pattern string: {1,heading_level} means 1 to heading_level hashes
+                    hash_range = '{1,' + str(heading_level) + '}'
+                    pattern_str = r'\n(#' + hash_range + r')\s+'
+                    next_heading_pattern = re.compile(pattern_str, re.MULTILINE)
+                    match = next_heading_pattern.search(content, anchor_end)
+                    
+                    if match:
+                        # Found next section - insert before it (at end of current section)
+                        end_pos = match.start()
+                    else:
+                        # This is the last section, insert at end of document
+                        end_pos = len(content)
+                    
+                    logger.info(f"Section heading detected (level {heading_level}) - inserting at section end: position {end_pos}")
                 else:
-                    end_pos += 1
+                    # Not a markdown heading - fall back to end of line
+                    end_pos = content.find("\n", pos)
+                    if end_pos == -1:
+                        end_pos = len(content)
+                    else:
+                        end_pos += 1
             # Guard frontmatter: ensure insertions never occur before frontmatter end
             end_pos = max(end_pos, frontmatter_end)
             return end_pos, end_pos, text, 0.9

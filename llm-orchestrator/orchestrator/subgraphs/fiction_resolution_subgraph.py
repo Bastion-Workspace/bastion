@@ -101,6 +101,7 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
                     "active_editor": state.get("active_editor", {}),
                     "frontmatter": state.get("frontmatter", {}),
                     "structured_edit": state.get("structured_edit"),
+                    "mode": state.get("mode", ""),
                 }
             return {
                 "editor_operations": [],
@@ -122,6 +123,7 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
                 "active_editor": state.get("active_editor", {}),
                 "frontmatter": state.get("frontmatter", {}),
                 "structured_edit": state.get("structured_edit"),
+                "mode": state.get("mode", ""),
             }
         
         operations = structured_edit.operations
@@ -146,6 +148,7 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
                 "active_editor": state.get("active_editor", {}),
                 "frontmatter": state.get("frontmatter", {}),
                 "structured_edit": state.get("structured_edit"),
+                "mode": state.get("mode", ""),
             }
         
         # Check if this is a question with no edits needed (empty operations array)
@@ -171,6 +174,7 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
                 "active_editor": state.get("active_editor", {}),
                 "frontmatter": state.get("frontmatter", {}),
                 "structured_edit": state.get("structured_edit"),
+                "mode": state.get("mode", ""),
             }
         
         fm_end_idx = _frontmatter_end_index(manuscript)
@@ -222,6 +226,7 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
             "active_editor": state.get("active_editor", {}),
             "frontmatter": state.get("frontmatter", {}),
             "structured_edit": state.get("structured_edit"),
+            "mode": state.get("mode", ""),
         }
         
     except Exception as e:
@@ -248,6 +253,7 @@ async def prepare_resolution_context_node(state: Dict[str, Any]) -> Dict[str, An
             "active_editor": state.get("active_editor", {}),
             "frontmatter": state.get("frontmatter", {}),
             "structured_edit": state.get("structured_edit"),
+            "mode": state.get("mode", ""),
         }
 
 
@@ -290,6 +296,7 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
                 "resolution_manuscript": state.get("resolution_manuscript", ""),
                 "resolution_structured_edit": state.get("resolution_structured_edit"),
                 "resolution_operations": state.get("resolution_operations", []),
+                "mode": state.get("mode", ""),
             }
         
         editor_operations = []
@@ -544,6 +551,7 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
             "resolution_manuscript": state.get("resolution_manuscript", ""),
             "resolution_structured_edit": state.get("resolution_structured_edit"),
             "resolution_operations": state.get("resolution_operations", []),
+            "mode": state.get("mode", ""),
         }
         
     except Exception as e:
@@ -573,6 +581,7 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
             "resolution_manuscript": state.get("resolution_manuscript", ""),
             "resolution_structured_edit": state.get("resolution_structured_edit"),
             "resolution_operations": state.get("resolution_operations", []),
+            "mode": state.get("mode", ""),
         }
 
 
@@ -620,6 +629,7 @@ async def validate_resolved_operations_node(state: Dict[str, Any]) -> Dict[str, 
             "resolution_manuscript": state.get("resolution_manuscript", ""),
             "resolution_structured_edit": state.get("resolution_structured_edit"),
             "resolution_operations": state.get("resolution_operations", []),
+            "mode": state.get("mode", ""),
         }
         
     except Exception as e:
@@ -649,6 +659,7 @@ async def validate_resolved_operations_node(state: Dict[str, Any]) -> Dict[str, 
             "resolution_manuscript": state.get("resolution_manuscript", ""),
             "resolution_structured_edit": state.get("resolution_structured_edit"),
             "resolution_operations": state.get("resolution_operations", []),
+            "mode": state.get("mode", ""),
         }
 
 
@@ -681,6 +692,7 @@ async def finalize_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "resolution_manuscript": state.get("resolution_manuscript", ""),
             "resolution_structured_edit": state.get("resolution_structured_edit"),
             "resolution_operations": state.get("resolution_operations", []),
+            "mode": state.get("mode", ""),
         }
         
     except Exception as e:
@@ -710,6 +722,7 @@ async def finalize_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "resolution_manuscript": state.get("resolution_manuscript", ""),
             "resolution_structured_edit": state.get("resolution_structured_edit"),
             "resolution_operations": state.get("resolution_operations", []),
+            "mode": state.get("mode", ""),
         }
 
 

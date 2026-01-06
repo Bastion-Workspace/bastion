@@ -41,6 +41,7 @@ class AgentType(str, Enum):
     OUTLINE_EDITING_AGENT = "outline_editing_agent"
     # CHARACTER_DEVELOPMENT_AGENT removed - migrated to llm-orchestrator gRPC service
     # RULES_EDITING_AGENT removed - migrated to llm-orchestrator gRPC service
+    SERIES_EDITING_AGENT = "series_editing_agent"
     STYLE_EDITING_AGENT = "style_editing_agent"
     # SYSML_AGENT removed - not fully fleshed out
     # STORY_ANALYSIS_AGENT removed - migrated to llm-orchestrator gRPC service

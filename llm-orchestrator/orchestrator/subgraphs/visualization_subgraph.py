@@ -39,12 +39,133 @@ logger = logging.getLogger(__name__)
 VisualizationSubgraphState = Dict[str, Any]
 
 
+def _validate_chart_data_quality(chart_type: str, chart_data: Dict[str, Any], query: str) -> bool:
+    """
+    Validate that chart data has sufficient value for visualization.
+    
+    Returns True only if:
+    - Data has sufficient data points (minimum 3-5 depending on chart type)
+    - Data shows meaningful variation or patterns
+    - Chart would provide value beyond what text can convey
+    - User explicitly requested visualization (overrides strict checks)
+    """
+    if not chart_data:
+        return False
+    
+    # Check for explicit visualization request in query (overrides strict validation)
+    query_lower = query.lower()
+    explicit_viz_keywords = ["graph", "chart", "plot", "visualize", "visualization", "show me a", "create a chart", "make a graph"]
+    is_explicit_request = any(keyword in query_lower for keyword in explicit_viz_keywords)
+    
+    # For explicit requests, be more lenient but still check for minimum data
+    min_data_points = 2 if is_explicit_request else 3
+    
+    # Validate based on chart type
+    if chart_type in ["bar", "pie"]:
+        labels = chart_data.get("labels", [])
+        values = chart_data.get("values", [])
+        
+        if not labels or not values:
+            return False
+        
+        if len(labels) < min_data_points or len(values) < min_data_points:
+            logger.debug(f"Bar/pie chart: insufficient data points ({len(labels)} labels, {len(values)} values)")
+            return False
+        
+        # Check for meaningful variation (not all same values)
+        if len(set(values)) == 1 and not is_explicit_request:
+            logger.debug(f"Bar/pie chart: all values are the same ({values[0]}) - no visualization value")
+            return False
+        
+        return True
+    
+    elif chart_type in ["line", "scatter", "area"]:
+        x = chart_data.get("x", [])
+        y = chart_data.get("y", [])
+        series = chart_data.get("series", [])
+        
+        # Check single series format
+        if x and y:
+            if len(x) < min_data_points or len(y) < min_data_points:
+                logger.debug(f"Line/scatter/area chart: insufficient data points ({len(x)} x, {len(y)} y)")
+                return False
+            
+            if len(x) != len(y):
+                logger.debug(f"Line/scatter/area chart: mismatched array lengths")
+                return False
+            
+            # Check for meaningful variation
+            if len(set(y)) == 1 and not is_explicit_request:
+                logger.debug(f"Line/scatter/area chart: all y values are the same - no visualization value")
+                return False
+            
+            return True
+        
+        # Check multi-series format
+        if series and isinstance(series, list):
+            if len(series) == 0:
+                return False
+            
+            # Check if any series has sufficient data
+            has_valid_series = False
+            for s in series:
+                if isinstance(s, dict):
+                    s_x = s.get("x", [])
+                    s_y = s.get("y", [])
+                    if len(s_x) >= min_data_points and len(s_y) >= min_data_points and len(s_x) == len(s_y):
+                        has_valid_series = True
+                        break
+            
+            return has_valid_series
+        
+        return False
+    
+    elif chart_type == "heatmap":
+        z = chart_data.get("z", [])
+        if not z or not isinstance(z, list):
+            return False
+        
+        # Heatmap needs at least 2x2 grid
+        if len(z) < 2:
+            return False
+        
+        row_lengths = [len(row) for row in z if isinstance(row, list)]
+        if not row_lengths or min(row_lengths) < 2:
+            return False
+        
+        return True
+    
+    elif chart_type in ["histogram", "box_plot"]:
+        values = chart_data.get("values", [])
+        if not values or len(values) < min_data_points:
+            logger.debug(f"Histogram/box_plot: insufficient data points ({len(values) if values else 0})")
+            return False
+        
+        return True
+    
+    # Unknown chart type - be conservative
+    logger.warning(f"Unknown chart type for validation: {chart_type}")
+    return False
+
+
 def _build_visualization_analysis_prompt(user_request: str, research_data: str, conversation_context: str) -> str:
     """Build prompt for LLM to analyze visualization needs and extract data"""
     
     return f"""You are a Data Visualization Specialist - an expert at identifying when data would benefit from charts and extracting the right data points.
 
 **MISSION**: Analyze research data and determine the best chart type, then extract structured data points for visualization.
+
+**CRITICAL VALUE ASSESSMENT**: Only create charts if:
+1. The data has sufficient data points (minimum 3-5 depending on chart type)
+2. The data shows meaningful variation, patterns, or relationships
+3. The visualization would provide SIGNIFICANT value beyond what text can convey
+4. The user explicitly requested a chart/graph/visualization (overrides strict checks but still needs minimum data)
+
+**DO NOT create charts for:**
+- Single data points or very few values (< 3 data points)
+- Data where all values are the same (no variation)
+- Data where text would be clearer than a chart
+- Exploratory queries without clear visualization intent
 
 **USER REQUEST**: {user_request}
 
@@ -74,6 +195,13 @@ You MUST respond with valid JSON matching this schema:
     "reasoning": "Explanation of why this chart type and data structure were chosen"
 }}
 
+**CONFIDENCE SCORING**:
+- confidence >= 0.8: High confidence - sufficient data, clear patterns, meaningful value
+- confidence 0.5-0.79: Medium confidence - some data but may be borderline
+- confidence < 0.5: Low confidence - insufficient data or low visualization value (DO NOT create chart)
+
+If data is insufficient or would not provide meaningful value, set confidence < 0.5 and return empty/null data.
+
 **CHART TYPE SELECTION GUIDE**:
 - **bar**: Comparisons between categories (e.g., "Compare sales by region")
 - **line**: Trends over time (e.g., "Show population growth over years")
@@ -90,12 +218,21 @@ You MUST respond with valid JSON matching this schema:
 3. Ensure data arrays have matching lengths
 4. For time series, extract dates/values chronologically
 5. For comparisons, extract categories and their values
+6. **CRITICAL**: Only extract data if there are sufficient data points (minimum 3-5 depending on chart type)
+7. **CRITICAL**: Only extract data if visualization would provide meaningful value (patterns, trends, comparisons)
+8. **CRITICAL**: If data is insufficient or would not provide value, return null/empty data and set confidence < 0.5
 
 **CRITICAL**:
 1. **STRUCTURED JSON ONLY** - No plain text responses!
 2. **Use actual data** - Only data provided in research_data
 3. **Valid chart type** - Must match one of the supported types
 4. **Valid data structure** - Data format must match chart_type requirements
+5. **Data quality validation** - Only create charts if:
+   - There are sufficient data points (minimum 3-5 depending on chart type)
+   - Data shows meaningful variation or patterns
+   - Visualization would provide value beyond text
+   - If data is insufficient, set confidence < 0.5 and return empty/null data
+6. **Value assessment** - Ask: "Would this chart provide meaningful insight?" If no, don't create it.
 
 **JSON RESPONSE EXAMPLE**:
 ```json
@@ -311,6 +448,45 @@ async def generate_chart_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "visualization_result": {
                     "success": False,
                     "error": "Missing chart_type or data in visualization analysis"
+                },
+                "chart_type": None,
+                "chart_data": None,
+                # Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
+        
+        # Check confidence - if low, data may not be meaningful
+        confidence = visualization_analysis.get("confidence", 1.0)
+        if confidence < 0.5:
+            logger.info(f"Low confidence ({confidence}) in visualization analysis - skipping chart creation")
+            return {
+                "visualization_result": {
+                    "success": False,
+                    "error": "Insufficient data quality for meaningful visualization"
+                },
+                "chart_type": None,
+                "chart_data": None,
+                # Preserve critical state keys
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", "")
+            }
+        
+        # Validate data quality before creating chart
+        data_is_meaningful = _validate_chart_data_quality(chart_type, data, state.get("query", ""))
+        
+        if not data_is_meaningful:
+            logger.info(f"Data quality validation failed for {chart_type} chart - skipping creation")
+            return {
+                "visualization_result": {
+                    "success": False,
+                    "error": "Insufficient data points or low visualization value. Chart would not provide meaningful insight."
                 },
                 "chart_type": None,
                 "chart_data": None,
