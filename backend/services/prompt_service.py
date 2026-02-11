@@ -86,7 +86,7 @@ class PromptService:
     def __init__(self):
         self.components: Dict[str, PromptComponent] = {}
         self._initialize_default_components()
-        logger.info("🎯 Prompt Service initialized with modular components")
+        logger.debug("🎯 Prompt Service initialized with modular components")
     
     def _initialize_default_components(self):
         """Initialize default prompt components"""

@@ -32,6 +32,11 @@ const ChatHeader = ({
   onClearChat,
   onOpenSettings,
 }) => {
+  // Chat dropdown excludes image generation model (used only for image creation)
+  const chatModels = (enabledModels?.enabled_models || []).filter(
+    (m) => m !== (enabledModels?.image_generation_model || '')
+  );
+
   // Format cost for display (per 1M tokens by default)
   const formatCost = (cost) => {
     if (!cost) return 'Free';
@@ -90,7 +95,7 @@ const ChatHeader = ({
         {/* Model Selection and Actions */}
         <Box display="flex" alignItems="center" gap={1.5}>
           {/* Current Model Display & Dropdown */}
-          {enabledModels?.enabled_models?.length > 0 && (
+          {chatModels.length > 0 && (
             <FormControl size="small" sx={{ minWidth: 180 }}>
               <InputLabel>AI Model</InputLabel>
               <Select
@@ -99,7 +104,7 @@ const ChatHeader = ({
                 label="AI Model"
                 disabled={isSelectingModel}
               >
-                {enabledModels.enabled_models.map((modelId) => {
+                {chatModels.map((modelId) => {
                   const modelInfo = availableModels?.models?.find(m => m.id === modelId);
                   const isSelected = currentModel?.current_model === modelId;
                   const pricingInfo = formatPricing(modelInfo);
@@ -149,7 +154,7 @@ const ChatHeader = ({
           )}
 
           {/* No models enabled warning */}
-          {enabledModels?.enabled_models?.length === 0 && (
+          {chatModels.length === 0 && (
             <Tooltip title="No models enabled. Go to Settings to enable models.">
               <Chip 
                 label="No Models" 

@@ -21,7 +21,10 @@ FEATURE_KEYS = [
     "feature.news.view",
     "feature.news.agent",
     "feature.news.notifications",
-    # Extend with more features as needed
+    # Maps
+    "feature.maps.view",
+    # Image analysis
+    "feature.image.llm_description",
 ]
 
 
@@ -63,6 +66,39 @@ class CapabilitiesService:
             return await set_user_setting(user_id, "capabilities", value, data_type="json")
         except Exception as e:
             logger.error(f"❌ Failed to set capabilities for {user_id}: {e}")
+            return False
+    
+    async def is_vision_service_available(self) -> bool:
+        """Check if image vision service is running"""
+        try:
+            from clients.image_vision_client import get_image_vision_client
+            client = await get_image_vision_client()
+            
+            # Try to initialize if not already initialized
+            if not client._initialized:
+                logger.debug("Vision client not initialized, attempting connection...")
+                await client.initialize(required=False)
+            
+            # If still not initialized, service is unavailable
+            if not client._initialized:
+                logger.debug("Vision client initialization failed - service unavailable")
+                return False
+            
+            # Try a health check to verify it's actually working
+            try:
+                from protos import image_vision_pb2
+                health_request = image_vision_pb2.HealthCheckRequest()
+                response = await client.stub.HealthCheck(health_request, timeout=5.0)
+                is_healthy = response.status == "healthy"
+                logger.debug(f"Vision service health check: {response.status} (healthy={is_healthy})")
+                return is_healthy
+            except Exception as e:
+                logger.warning(f"Vision service health check failed: {e}")
+                # If health check fails, mark as uninitialized for retry
+                client._initialized = False
+                return False
+        except Exception as e:
+            logger.warning(f"Vision service availability check failed: {e}")
             return False
 
 

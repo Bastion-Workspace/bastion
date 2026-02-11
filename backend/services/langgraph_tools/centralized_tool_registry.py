@@ -38,11 +38,11 @@ class AgentType(str, Enum):
     # WEBSITE_CRAWLER_AGENT removed - migrated to llm-orchestrator gRPC service
     # Content and Writing Agents
     FICTION_EDITING_AGENT = "fiction_editing_agent"
-    OUTLINE_EDITING_AGENT = "outline_editing_agent"
+    # OUTLINE_EDITING_AGENT removed - outline handled by Writing Assistant → outline_editing_subgraph
     # CHARACTER_DEVELOPMENT_AGENT removed - migrated to llm-orchestrator gRPC service
     # RULES_EDITING_AGENT removed - migrated to llm-orchestrator gRPC service
     SERIES_EDITING_AGENT = "series_editing_agent"
-    STYLE_EDITING_AGENT = "style_editing_agent"
+    # STYLE_EDITING_AGENT removed - style handled by Writing Assistant → style_editing_subgraph
     # SYSML_AGENT removed - not fully fleshed out
     # STORY_ANALYSIS_AGENT removed - migrated to llm-orchestrator gRPC service
     # CONTENT_ANALYSIS_AGENT removed - migrated to llm-orchestrator gRPC service
@@ -56,10 +56,10 @@ class AgentType(str, Enum):
     PIPELINE_AGENT = "pipeline_agent"
     # Template Agent
     TEMPLATE_AGENT = "template_agent"
-    # EMAIL_AGENT removed - not used, functionality not migrated
+    EMAIL_AGENT = "email_agent"
     # PODCAST_SCRIPT_AGENT removed - migrated to llm-orchestrator gRPC service
     # SUBSTACK_AGENT removed - migrated to llm-orchestrator gRPC service
-    MESSAGING_AGENT = "messaging_agent"  # ROOSEVELT'S MESSAGING CAVALRY!
+    # MESSAGING_AGENT removed - not used, no agent implementation
     # ENTERTAINMENT_AGENT removed - migrated to llm-orchestrator gRPC service
 
 
@@ -122,10 +122,13 @@ class CentralizedToolRegistry:
             await self._register_org_inbox_tools()
             await self._register_org_search_tools()  # **BULLY!** Org file search across all .org files!
             await self._register_image_tools()
-            await self._register_messaging_tools()  # **BULLY!** Messaging cavalry tools!
             await self._register_file_creation_tools()  # **BULLY!** File and folder creation for agents!
             await self._register_document_editing_tools()  # **BULLY!** Document editing tools for agents!
-            
+            await self._register_image_search_tools()  # Image search with metadata sidecars
+            await self._register_face_analysis_tools()  # Face detection and identification
+            await self._register_object_detection_tools()  # Object detection and user annotations
+            await self._register_email_tools()  # Email via connections-service (O365, etc.)
+
             # Set up agent permissions
             self._configure_agent_permissions()
             
@@ -569,44 +572,6 @@ class CentralizedToolRegistry:
         except Exception as e:
             logger.error(f"❌ Failed to register image tools: {e}")
     
-    async def _register_messaging_tools(self):
-        """Register messaging tools for sending messages to rooms"""
-        try:
-            from services.langgraph_tools.messaging_tools import (
-                get_user_rooms_tool,
-                send_room_message_tool
-            )
-            
-            self._tools["get_user_rooms"] = ToolDefinition(
-                name="get_user_rooms",
-                function=get_user_rooms_tool,
-                description="Get list of user's chat rooms with participants and unread counts. Use this to find the correct room to send a message to.",
-                access_level=ToolAccessLevel.READ_ONLY,
-                parameters={
-                    "user_id": {"type": "string", "required": True, "description": "User ID"},
-                    "limit": {"type": "integer", "default": 20, "description": "Maximum rooms to return"}
-                },
-                timeout_seconds=10
-            )
-            
-            self._tools["send_room_message"] = ToolDefinition(
-                name="send_room_message",
-                function=send_room_message_tool,
-                description="Send a message to a specific chat room. Room ID should be obtained from get_user_rooms first.",
-                access_level=ToolAccessLevel.READ_WRITE,
-                parameters={
-                    "user_id": {"type": "string", "required": True, "description": "User ID sending the message"},
-                    "room_id": {"type": "string", "required": True, "description": "Room UUID to send message to"},
-                    "message_content": {"type": "string", "required": True, "description": "The message text to send"},
-                    "message_type": {"type": "string", "default": "text", "enum": ["text", "ai_share", "system"]}
-                },
-                timeout_seconds=10
-            )
-            
-            logger.info("✅ BULLY! Registered messaging cavalry tools")
-        except Exception as e:
-            logger.error(f"❌ Failed to register messaging tools: {e}")
-    
     async def _register_file_creation_tools(self):
         """Register file and folder creation tools for agents"""
         try:
@@ -678,6 +643,240 @@ class CentralizedToolRegistry:
         except Exception as e:
             logger.error(f"❌ Failed to register document editing tools: {e}")
     
+    async def _register_image_search_tools(self):
+        """Register image search tools for images with metadata sidecars"""
+        try:
+            from services.langgraph_tools.image_search_tools import search_images
+            
+            self._tools["search_images"] = ToolDefinition(
+                name="search_images",
+                function=search_images,
+                description="Search for images, comics, artwork, memes, screenshots, and other visual content with metadata. Use this when users ask to 'show', 'display', 'find', or 'see' images, comics, pictures, or visual content. Supports searching by content description, type (comic/artwork/meme/screenshot), date, author, or series. Returns markdown-formatted results with image URLs that can be displayed in chat. Essential for queries like 'show me Dilbert comics', 'find images from 1989', 'display artwork by artist name'. Note: Comic names like 'Dilbert' are series, not authors - use the series parameter for comic names.",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={
+                    "query": {"type": "string", "required": True, "description": "Search query describing the image content (e.g., 'Dilbert from 1989', 'office politics comic', 'medical diagnosis diagram')"},
+                    "image_type": {"type": "string", "required": False, "description": "OPTIONAL: Filter by image type (comic, artwork, meme, screenshot, medical, documentation, maps, photo, other)"},
+                    "date": {"type": "string", "required": False, "description": "OPTIONAL: Filter by specific date (YYYY-MM-DD format, e.g., '1989-04-16')"},
+                    "author": {"type": "string", "required": False, "description": "OPTIONAL: Filter by author/creator name (e.g., 'Scott Adams')"},
+                    "series": {"type": "string", "required": False, "description": "OPTIONAL: Filter by series/comic name (e.g., 'Dilbert', 'Garfield')"},
+                    "limit": {"type": "integer", "default": 10, "description": "Maximum number of results to return"}
+                },
+                timeout_seconds=30,
+                categories=["search_local", "visual_content"]  # Add categories for keyword detection
+            )
+            
+            logger.info("✅ Registered image search tools")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to register image search tools: {e}")
+    
+    async def _register_face_analysis_tools(self):
+        """Register face detection and identification tools"""
+        try:
+            # Import from orchestrator tools (these are LangGraph-compatible)
+            import sys
+            import os
+            orchestrator_path = os.path.join(os.path.dirname(__file__), '..', '..', '..', 'llm-orchestrator')
+            if orchestrator_path not in sys.path:
+                sys.path.insert(0, orchestrator_path)
+            
+            from orchestrator.tools.face_analysis_tools import (
+                detect_faces_in_image,
+                identify_faces_in_image
+            )
+            
+            self._tools["detect_faces_in_image"] = ToolDefinition(
+                name="detect_faces_in_image",
+                function=detect_faces_in_image,
+                description="Detect faces in an attached image file. Returns face encodings and bounding boxes for all detected faces. Use this when you need to detect faces but don't need to identify who they are.",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={
+                    "attachment_path": {"type": "string", "required": True, "description": "Full path to the image file"},
+                    "user_id": {"type": "string", "required": False, "default": "system", "description": "User ID for access control"}
+                },
+                timeout_seconds=30,
+                categories=["face_analysis", "image_processing"]
+            )
+            
+            self._tools["identify_faces_in_image"] = ToolDefinition(
+                name="identify_faces_in_image",
+                function=identify_faces_in_image,
+                description="Identify people in an attached image by matching faces against known identities. This tool detects faces in the image and matches them against the known_identities database to identify who the people are. Use this when users ask 'who is this?' or want to identify people in photos.",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={
+                    "attachment_path": {"type": "string", "required": True, "description": "Full path to the image file"},
+                    "user_id": {"type": "string", "required": False, "default": "system", "description": "User ID for access control"},
+                    "confidence_threshold": {"type": "float", "required": False, "default": 0.82, "description": "Minimum confidence for identity matches (0.0-1.0). 0.82 aligns with L2 < 0.6 same-person rule."}
+                },
+                timeout_seconds=30,
+                categories=["face_analysis", "image_processing"]
+            )
+            
+            logger.info("✅ Registered face analysis tools")
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to register face analysis tools: {e}")
+            # Don't fail initialization if face analysis tools aren't available
+    
+    async def _register_object_detection_tools(self):
+        """Register object detection and user-defined annotation tools"""
+        try:
+            from services.langgraph_tools.object_detection_tools import (
+                detect_objects_in_image,
+                search_images_by_object,
+                annotate_custom_object,
+            )
+            self._tools["detect_objects_in_image"] = ToolDefinition(
+                name="detect_objects_in_image",
+                function=detect_objects_in_image,
+                description="Run object detection (YOLO + optional CLIP + user-defined matching) on an image document. Returns detected objects with bounding boxes and class names. Use when the user asks to find specific objects (e.g. person, car, logo) in an image.",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={
+                    "document_id": {"type": "string", "required": True, "description": "Document ID of the image"},
+                    "user_id": {"type": "string", "required": True, "description": "User ID (must match document owner)"},
+                    "class_filter": {"type": "array", "items": {"type": "string"}, "required": False, "description": "Optional YOLO class names to include (e.g. person, car)"},
+                    "confidence_threshold": {"type": "number", "required": False, "default": 0.5, "description": "Minimum confidence (0.0-1.0)"},
+                    "semantic_descriptions": {"type": "array", "items": {"type": "string"}, "required": False, "description": "Optional text descriptions for CLIP matching"},
+                },
+                timeout_seconds=60,
+                categories=["object_detection", "image_processing"],
+            )
+            self._tools["search_images_by_object"] = ToolDefinition(
+                name="search_images_by_object",
+                function=search_images_by_object,
+                description="Find document IDs of images that contain the given object (YOLO class or user-defined annotation name). Use when the user asks 'which images have X?' or 'find images containing Y'.",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={
+                    "object_name": {"type": "string", "required": True, "description": "Object class or user-defined annotation name"},
+                    "user_id": {"type": "string", "required": True, "description": "User ID for user-defined annotations"},
+                    "limit": {"type": "integer", "required": False, "default": 20, "description": "Maximum number of document IDs to return"},
+                },
+                timeout_seconds=15,
+                categories=["object_detection", "search_local"],
+            )
+            self._tools["annotate_custom_object"] = ToolDefinition(
+                name="annotate_custom_object",
+                function=annotate_custom_object,
+                description="Create a user-defined object annotation on an image (one bounding box + name/description). Use when the user wants to teach the system a custom object (e.g. a logo, a product) by specifying a box and name.",
+                access_level=ToolAccessLevel.READ_WRITE,
+                parameters={
+                    "document_id": {"type": "string", "required": True, "description": "Document ID of the image"},
+                    "user_id": {"type": "string", "required": True, "description": "User ID (must match document owner)"},
+                    "object_name": {"type": "string", "required": True, "description": "Name for the object (e.g. My coffee mug)"},
+                    "bbox_x": {"type": "integer", "required": True, "description": "Bounding box left (pixels)"},
+                    "bbox_y": {"type": "integer", "required": True, "description": "Bounding box top (pixels)"},
+                    "bbox_width": {"type": "integer", "required": True, "description": "Bounding box width (pixels)"},
+                    "bbox_height": {"type": "integer", "required": True, "description": "Bounding box height (pixels)"},
+                    "description": {"type": "string", "required": False, "description": "Optional description for the object"},
+                },
+                timeout_seconds=30,
+                categories=["object_detection", "image_processing"],
+            )
+            logger.info("✅ Registered object detection tools")
+        except Exception as e:
+            logger.warning("⚠️ Failed to register object detection tools: %s", e)
+
+    async def _register_email_tools(self):
+        """Register email tools (read, search, send, reply) via connections-service."""
+        try:
+            from services.langgraph_tools.email_tools import (
+                read_recent_emails,
+                search_emails,
+                get_email_thread,
+                send_email,
+                reply_to_email,
+                mark_email_as_read,
+                get_email_statistics,
+                summarize_unread_emails,
+            )
+            self._tools["read_recent_emails"] = ToolDefinition(
+                name="read_recent_emails",
+                function=read_recent_emails,
+                description="Read recent emails from the user's connected account (inbox or folder).",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={
+                    "user_id": {"type": "string", "required": True},
+                    "folder": {"type": "string", "default": "inbox"},
+                    "count": {"type": "integer", "default": 10},
+                    "unread_only": {"type": "boolean", "default": False},
+                },
+            )
+            self._tools["search_emails"] = ToolDefinition(
+                name="search_emails",
+                function=search_emails,
+                description="Search emails with optional filters (from, date range).",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={
+                    "user_id": {"type": "string", "required": True},
+                    "query": {"type": "string", "required": True},
+                    "from_address": {"type": "string", "required": False},
+                    "date_range": {"type": "object", "required": False},
+                    "top": {"type": "integer", "default": 20},
+                },
+            )
+            self._tools["get_email_thread"] = ToolDefinition(
+                name="get_email_thread",
+                function=get_email_thread,
+                description="Get all messages in an email conversation thread.",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={
+                    "user_id": {"type": "string", "required": True},
+                    "conversation_id": {"type": "string", "required": True},
+                },
+            )
+            self._tools["send_email"] = ToolDefinition(
+                name="send_email",
+                function=send_email,
+                description="Send an email. Requires user approval (HITL) before sending.",
+                access_level=ToolAccessLevel.READ_WRITE,
+                parameters={
+                    "user_id": {"type": "string", "required": True},
+                    "to": {"type": "array", "items": {"type": "string"}, "required": True},
+                    "subject": {"type": "string", "required": True},
+                    "body": {"type": "string", "required": True},
+                    "cc": {"type": "array", "items": {"type": "string"}, "required": False},
+                },
+            )
+            self._tools["reply_to_email"] = ToolDefinition(
+                name="reply_to_email",
+                function=reply_to_email,
+                description="Reply to an email. Requires user approval (HITL) before sending.",
+                access_level=ToolAccessLevel.READ_WRITE,
+                parameters={
+                    "user_id": {"type": "string", "required": True},
+                    "message_id": {"type": "string", "required": True},
+                    "body": {"type": "string", "required": True},
+                    "reply_all": {"type": "boolean", "default": False},
+                },
+            )
+            self._tools["mark_email_as_read"] = ToolDefinition(
+                name="mark_email_as_read",
+                function=mark_email_as_read,
+                description="Mark an email as read.",
+                access_level=ToolAccessLevel.READ_WRITE,
+                parameters={
+                    "user_id": {"type": "string", "required": True},
+                    "message_id": {"type": "string", "required": True},
+                },
+            )
+            self._tools["get_email_statistics"] = ToolDefinition(
+                name="get_email_statistics",
+                function=get_email_statistics,
+                description="Get email counts (total, unread) for the user's inbox.",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={"user_id": {"type": "string", "required": True}},
+            )
+            self._tools["summarize_unread_emails"] = ToolDefinition(
+                name="summarize_unread_emails",
+                function=summarize_unread_emails,
+                description="Fetch unread emails and return a short summary.",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={"user_id": {"type": "string", "required": True}},
+            )
+            logger.info("Registered email tools")
+        except Exception as e:
+            logger.warning("Failed to register email tools: %s", e)
+
     def _configure_agent_permissions(self):
         """Configure which tools each agent type can access"""
         
@@ -689,6 +888,12 @@ class CentralizedToolRegistry:
             "search_local": ToolAccessLevel.READ_ONLY,
             "get_document": ToolAccessLevel.READ_ONLY,
             "search_web": ToolAccessLevel.WEB_ACCESS,  # RESTORED: Needed for fact-checking agent
+            "search_images": ToolAccessLevel.READ_ONLY,  # Universal image search with metadata sidecars
+            "detect_faces_in_image": ToolAccessLevel.READ_ONLY,  # Face detection in attached images
+            "identify_faces_in_image": ToolAccessLevel.READ_ONLY,  # Face identification against known identities
+            "detect_objects_in_image": ToolAccessLevel.READ_ONLY,  # Object detection (YOLO + CLIP)
+            "search_images_by_object": ToolAccessLevel.READ_ONLY,  # Find images containing an object
+            "annotate_custom_object": ToolAccessLevel.READ_WRITE,  # Create user-defined object annotation
             "crawl_web_content": ToolAccessLevel.WEB_ACCESS,
             "summarize_content": ToolAccessLevel.READ_ONLY,
             "analyze_documents": ToolAccessLevel.READ_ONLY,
@@ -696,7 +901,13 @@ class CentralizedToolRegistry:
             # **BULLY!** ORG-MODE SEARCH TOOLS - Search user's reference org files!
             "search_org_files": ToolAccessLevel.READ_ONLY,  # Search across all .org files
             "list_org_todos": ToolAccessLevel.READ_ONLY,  # List TODO items
-            "search_org_by_tag": ToolAccessLevel.READ_ONLY  # Search by org tags
+            "search_org_by_tag": ToolAccessLevel.READ_ONLY,  # Search by org tags
+            # Email (read-only)
+            "read_recent_emails": ToolAccessLevel.READ_ONLY,
+            "search_emails": ToolAccessLevel.READ_ONLY,
+            "get_email_thread": ToolAccessLevel.READ_ONLY,
+            "get_email_statistics": ToolAccessLevel.READ_ONLY,
+            "summarize_unread_emails": ToolAccessLevel.READ_ONLY,
             # CALCULATION TOOLS REMOVED: Use collaboration with Calculate Agent instead!
             # WEATHER TOOLS REMOVED: Use collaboration with Weather Agent instead!
         }
@@ -705,13 +916,22 @@ class CentralizedToolRegistry:
         
         # Chat Agent: Pure conversational intelligence + conversation cache access
         self._agent_permissions[AgentType.CHAT_AGENT] = {
+            "search_images": ToolAccessLevel.READ_ONLY,  # Image search with metadata
+            "search_images_by_object": ToolAccessLevel.READ_ONLY,  # Find images containing an object
+            "detect_objects_in_image": ToolAccessLevel.READ_ONLY,  # Object detection in image
             "search_conversation_cache": ToolAccessLevel.READ_ONLY,  # ROOSEVELT'S UNIVERSAL CACHE
             "calculate": ToolAccessLevel.READ_ONLY,
             "convert_units": ToolAccessLevel.READ_ONLY,
             # format_data removed - DataFormattingAgent migrated to llm-orchestrator gRPC service
             # **BULLY!** Quick org-mode TODO queries for casual questions
             "list_org_todos": ToolAccessLevel.READ_ONLY,  # "What's on my TODO list?"
-            "search_org_by_tag": ToolAccessLevel.READ_ONLY  # "What's tagged @work?"
+            "search_org_by_tag": ToolAccessLevel.READ_ONLY,  # "What's tagged @work?"
+            # Email (read-only): inbox summary, search, stats
+            "read_recent_emails": ToolAccessLevel.READ_ONLY,
+            "search_emails": ToolAccessLevel.READ_ONLY,
+            "get_email_thread": ToolAccessLevel.READ_ONLY,
+            "get_email_statistics": ToolAccessLevel.READ_ONLY,
+            "summarize_unread_emails": ToolAccessLevel.READ_ONLY,
             # REMOVED: search_local, get_document - Chat Agent uses cache first, Research Agent handles external searches
         }
         
@@ -754,6 +974,18 @@ class CentralizedToolRegistry:
 
         # ORG_PROJECT_AGENT removed - migrated to llm-orchestrator gRPC service
 
+        # Email Agent: Full email operations (read, search, send, reply) via connections-service
+        self._agent_permissions[AgentType.EMAIL_AGENT] = {
+            "read_recent_emails": ToolAccessLevel.READ_ONLY,
+            "search_emails": ToolAccessLevel.READ_ONLY,
+            "get_email_thread": ToolAccessLevel.READ_ONLY,
+            "send_email": ToolAccessLevel.READ_WRITE,
+            "reply_to_email": ToolAccessLevel.READ_WRITE,
+            "mark_email_as_read": ToolAccessLevel.READ_WRITE,
+            "get_email_statistics": ToolAccessLevel.READ_ONLY,
+            "summarize_unread_emails": ToolAccessLevel.READ_ONLY,
+        }
+
         # IMAGE_GENERATION_AGENT removed - migrated to llm-orchestrator gRPC service
 
         # WargamingAgent removed - not fully fleshed out
@@ -768,17 +1000,10 @@ class CentralizedToolRegistry:
             # Editor-interactive: Works with active editor content, no external tools
         }
         
-        self._agent_permissions[AgentType.OUTLINE_EDITING_AGENT] = {
-            # Editor-interactive: Works with active editor content, no external tools
-        }
+        # OUTLINE_EDITING_AGENT removed - outline handled by Writing Assistant → outline_editing_subgraph
         
         # CHARACTER_DEVELOPMENT_AGENT removed - migrated to llm-orchestrator gRPC service
-        
-        self._agent_permissions[AgentType.STYLE_EDITING_AGENT] = {
-            "can_use_document_tools": True,
-            "can_use_reference_tools": True,
-            "can_use_web_tools": False,
-        }
+        # STYLE_EDITING_AGENT removed - style handled by Writing Assistant → style_editing_subgraph
         
         # RULES_EDITING_AGENT removed - migrated to llm-orchestrator gRPC service
         
@@ -809,12 +1034,6 @@ class CentralizedToolRegistry:
         # Template Agent - Template for new agents (no tools)
         self._agent_permissions[AgentType.TEMPLATE_AGENT] = {
             # Template agent, configure tools as needed
-        }
-        
-        # **BULLY!** MESSAGING AGENT: Send messages to chat rooms via natural language
-        self._agent_permissions[AgentType.MESSAGING_AGENT] = {
-            "get_user_rooms": ToolAccessLevel.READ_ONLY,
-            "send_room_message": ToolAccessLevel.READ_WRITE
         }
     
     def get_tools_for_agent(self, agent_type: AgentType) -> List[str]:

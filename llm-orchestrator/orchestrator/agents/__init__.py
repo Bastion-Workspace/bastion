@@ -2,87 +2,19 @@
 Orchestrator Agents - LangGraph agents using gRPC backend tools
 """
 
-from orchestrator.agents.full_research_agent import FullResearchAgent, get_full_research_agent
+from orchestrator.agents.base_agent import BaseAgent
 from orchestrator.agents.chat_agent import ChatAgent
-from orchestrator.agents.dictionary_agent import DictionaryAgent
-from orchestrator.agents.help_agent import HelpAgent
-from orchestrator.agents.weather_agent import WeatherAgent, get_weather_agent
-from orchestrator.agents.image_generation_agent import ImageGenerationAgent, get_image_generation_agent
-# FactCheckingAgent removed - not actively used
-from orchestrator.agents.rss_agent import RSSAgent, get_rss_agent
-from orchestrator.agents.org_agent import OrgAgent, get_org_agent
-from orchestrator.agents.article_writing_agent import ArticleWritingAgent, get_article_writing_agent
-from orchestrator.agents.podcast_script_agent import PodcastScriptAgent, get_podcast_script_agent
-from orchestrator.agents.entertainment_agent import EntertainmentAgent, get_entertainment_agent
-from orchestrator.agents.website_crawler_agent import WebsiteCrawlerAgent, get_website_crawler_agent
-from orchestrator.agents.electronics_agent import ElectronicsAgent, get_electronics_agent
-from orchestrator.agents.technical_hyperspace_agent import TechnicalHyperspaceAgent, get_technical_hyperspace_agent
-from orchestrator.agents.character_development_agent import CharacterDevelopmentAgent, get_character_development_agent
-from orchestrator.agents.content_analysis_agent import ContentAnalysisAgent, get_content_analysis_agent
-from orchestrator.agents.fiction_editing_agent import FictionEditingAgent, get_fiction_editing_agent
-from orchestrator.agents.outline_editing_agent import OutlineEditingAgent, get_outline_editing_agent
-from orchestrator.agents.story_analysis_agent import StoryAnalysisAgent, get_story_analysis_agent
-from orchestrator.agents.site_crawl_agent import SiteCrawlAgent, get_site_crawl_agent
-from orchestrator.agents.rules_editing_agent import RulesEditingAgent, get_rules_editing_agent
-from orchestrator.agents.series_editing_agent import SeriesEditingAgent, get_series_editing_agent
-from orchestrator.agents.style_editing_agent import StyleEditingAgent, get_style_editing_agent
-from orchestrator.agents.proofreading_agent import ProofreadingAgent, get_proofreading_agent
-from orchestrator.agents.general_project_agent import GeneralProjectAgent, get_general_project_agent
-from orchestrator.agents.reference_agent import ReferenceAgent, get_reference_agent
-from orchestrator.agents.knowledge_builder_agent import KnowledgeBuilderAgent, get_knowledge_builder_agent
+from orchestrator.agents.full_research_agent import FullResearchAgent, get_full_research_agent
+from orchestrator.agents.writing_assistant_agent import WritingAssistantAgent, get_writing_assistant_agent
+from orchestrator.agents.proposal_generation_agent import ProposalGenerationAgent, get_proposal_generation_agent
 
 __all__ = [
+    'BaseAgent',
+    'ChatAgent',
     'FullResearchAgent',
     'get_full_research_agent',
-    'ChatAgent',
-    'DictionaryAgent',
-    'HelpAgent',
-    'WeatherAgent',
-    'get_weather_agent',
-    'ImageGenerationAgent',
-    'get_image_generation_agent',
-    # FactCheckingAgent removed - not actively used
-    'RSSAgent',
-    'get_rss_agent',
-    'OrgAgent',
-    'get_org_agent',
-    'ArticleWritingAgent',
-    'get_article_writing_agent',
-    'PodcastScriptAgent',
-    'get_podcast_script_agent',
-    'EntertainmentAgent',
-    'get_entertainment_agent',
-    'WebsiteCrawlerAgent',
-    'get_website_crawler_agent',
-    'ElectronicsAgent',
-    'get_electronics_agent',
-    'CharacterDevelopmentAgent',
-    'get_character_development_agent',
-    'ContentAnalysisAgent',
-    'get_content_analysis_agent',
-    'FictionEditingAgent',
-    'get_fiction_editing_agent',
-    'OutlineEditingAgent',
-    'get_outline_editing_agent',
-    'StoryAnalysisAgent',
-    'get_story_analysis_agent',
-    'SiteCrawlAgent',
-    'get_site_crawl_agent',
-    'RulesEditingAgent',
-    'get_rules_editing_agent',
-    'SeriesEditingAgent',
-    'get_series_editing_agent',
-    'StyleEditingAgent',
-    'get_style_editing_agent',
-    'ProofreadingAgent',
-    'get_proofreading_agent',
-    'GeneralProjectAgent',
-    'get_general_project_agent',
-    'ReferenceAgent',
-    'get_reference_agent',
-    'KnowledgeBuilderAgent',
-    'get_knowledge_builder_agent',
-    'TechnicalHyperspaceAgent',
-    'get_technical_hyperspace_agent'
+    'WritingAssistantAgent',
+    'get_writing_assistant_agent',
+    'ProposalGenerationAgent',
+    'get_proposal_generation_agent',
 ]
-

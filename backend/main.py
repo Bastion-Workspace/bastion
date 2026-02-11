@@ -88,6 +88,7 @@ folder_service = None
 
 # Import API routers
 from api.settings_api import router as settings_router
+from api.learning_api import router as learning_router
 
 # Import FileManager service
 from services.file_manager import get_file_manager
@@ -207,21 +208,6 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ Settings Service initialization failed: {e}")
             # Don't raise here as the app can still function with limited settings
 
-        # Initialize template service
-        try:
-            from services.template_service import template_service
-            await template_service.initialize()
-            logger.info("📋 Template Service initialized")
-        except Exception as e:
-            logger.error(f"❌ Template Service initialization failed: {e}")
-            # Don't raise here as the app can still function without templates
-        
-
-        
-
-        
-
-        
         # Initialize folder service
         try:
             from services.folder_service import FolderService
@@ -276,7 +262,6 @@ async def lifespan(app: FastAPI):
         # Initialize available models from OpenRouter on startup
         logger.info("🔍 Fetching available models from OpenRouter on startup...")
         try:
-            from services.settings_service import settings_service
             available_models = await chat_service.get_available_models()
             logger.info(f"✅ Fetched {len(available_models)} models from OpenRouter")
             
@@ -312,12 +297,48 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.error(f"❌ Failed to start File System Watcher: {e}")
             file_watcher = None
-        
+
+        # Sync active chat_bot connections to connections-service (Telegram/Discord)
+        try:
+            from services.database_manager.database_helpers import fetch_all
+            from services.external_connections_service import external_connections_service
+            from clients.connections_service_client import get_connections_service_client
+            rows = await fetch_all("SELECT user_id FROM users")
+            user_ids = [r["user_id"] for r in rows] if rows else []
+            client = await get_connections_service_client()
+            synced = 0
+            for uid in user_ids:
+                conns = await external_connections_service.get_user_connections(
+                    uid, connection_type="chat_bot", active_only=True,
+                    rls_context={"user_id": uid},
+                )
+                for conn in conns:
+                    token = await external_connections_service.get_valid_access_token(
+                        conn["id"], rls_context={"user_id": uid}
+                    )
+                    if token:
+                        result = await client.register_bot(
+                            connection_id=conn["id"],
+                            user_id=uid,
+                            provider=conn.get("provider", ""),
+                            bot_token=token,
+                            display_name=conn.get("display_name") or conn.get("account_identifier") or "",
+                        )
+                        if result.get("success"):
+                            synced += 1
+            if synced:
+                logger.info("Synced %s chat bot connection(s) to connections-service", synced)
+        except Exception as e:
+            logger.warning("Chat bot sync on startup failed (connections-service may be unavailable): %s", e)
+
         # gRPC Tool Service moved to dedicated tools-service container
         
     except Exception as e:
         logger.error(f"❌ Failed to initialize services: {e}")
         raise
+    
+    # Service is ready to accept requests
+    logger.info("✅ Tools-Service Up - FastAPI application ready to serve requests")
     
     yield
     
@@ -427,6 +448,11 @@ images_path = Path(f"{settings.UPLOAD_DIR}/web_sources/images")
 images_path.mkdir(parents=True, exist_ok=True)
 app.mount("/static/images", StaticFiles(directory=str(images_path)), name="images")
 
+# Mount static files for serving Global Comics
+comics_path = Path(f"{settings.UPLOAD_DIR}/Global/Comics")
+comics_path.mkdir(parents=True, exist_ok=True)
+app.mount("/api/comics", StaticFiles(directory=str(comics_path)), name="comics")
+
 
 @app.get("/api/images/{filename:path}")
 async def serve_image(
@@ -457,19 +483,25 @@ async def serve_image(
         logger.info(f"🖼️ Serving image: {safe_filename} for user: {current_user.username}")
         
         # SECURITY: Check if this image is associated with a document
-        # If so, verify the user has access to that document
+        # If so, verify the user has access to that document and resolve file path
         from services.database_manager.database_helpers import fetch_all
+        from services.service_container import get_service_container
+        from api.document_api import check_document_access
         
-        # Search for documents with this filename
+        has_access = False
+        image_file_path = None
+        doc_info = None
+        
+        # Search for documents with this filename using RLS context
+        # Use user context so RLS allows access to global documents
+        rls_context = {'user_id': current_user.user_id, 'user_role': 'user'}
         doc_query = """
             SELECT document_id, user_id, collection_type, folder_id
             FROM document_metadata
             WHERE filename = $1
             LIMIT 10
         """
-        doc_rows = await fetch_all(doc_query, safe_filename)
-        
-        has_access = False
+        doc_rows = await fetch_all(doc_query, safe_filename, rls_context=rls_context)
         
         if doc_rows:
             # Image is associated with one or more documents - check access
@@ -482,25 +514,50 @@ async def serve_image(
                         if doc_info:
                             has_access = True
                             logger.info(f"✅ User {current_user.username} has access via document {doc_id}")
-                            break
+                            
+                            # Resolve file path using folder service
+                            container = await get_service_container()
+                            folder_service = container.folder_service
+                            
+                            folder_id = getattr(doc_info, 'folder_id', None)
+                            user_id = getattr(doc_info, 'user_id', None)
+                            collection_type = getattr(doc_info, 'collection_type', 'user')
+                            
+                            file_path = await folder_service.get_document_file_path(
+                                filename=safe_filename,
+                                folder_id=folder_id,
+                                user_id=user_id,
+                                collection_type=collection_type
+                            )
+                            
+                            if file_path and file_path.exists():
+                                image_file_path = file_path
+                                logger.info(f"✅ Resolved file path: {image_file_path}")
+                                break
+                            else:
+                                logger.warning(f"⚠️ File path resolved but doesn't exist: {file_path}")
+                                # Continue checking other documents
                     except HTTPException:
                         # User doesn't have access to this document, continue checking others
                         continue
+                    except Exception as e:
+                        logger.error(f"❌ Error resolving file path for document {doc_id}: {e}")
+                        continue
         
         # If not found in documents, check if image is in a document_id subdirectory
-        # and verify access to that document
-        if not has_access:
+        # and verify access to that document (fallback for old-style images)
+        if not has_access or not image_file_path:
             # Construct file path
-            image_file_path = images_path / safe_filename
+            fallback_path = images_path / safe_filename
             
             # Check subdirectories (some images may be in document_id subdirectories)
-            if not image_file_path.exists():
+            if not fallback_path.exists():
                 found_path = False
                 for subdir in images_path.iterdir():
                     if subdir.is_dir():
                         potential_path = subdir / safe_filename
                         if potential_path.exists():
-                            image_file_path = potential_path
+                            fallback_path = potential_path
                             found_path = True
                             # Check if subdirectory name is a document_id
                             potential_doc_id = subdir.name
@@ -508,41 +565,32 @@ async def serve_image(
                                 doc_info = await check_document_access(potential_doc_id, current_user, "read")
                                 if doc_info:
                                     has_access = True
+                                    image_file_path = fallback_path
                                     logger.info(f"✅ User {current_user.username} has access via document_id subdirectory {potential_doc_id}")
                                     break
                             except HTTPException:
                                 # Not a valid document_id or no access, continue
                                 continue
                 
-                if not found_path:
+                if not found_path and not image_file_path:
                     logger.warning(f"❌ Image not found: {safe_filename}")
                     raise HTTPException(status_code=404, detail="Image not found")
             else:
                 # Image is in root directory - for standalone generated images,
                 # we allow access if user is authenticated (generated images are
                 # typically shown in user's own conversations)
-                has_access = True
-                logger.info(f"✅ Allowing access to standalone generated image: {safe_filename}")
+                if not has_access:
+                    has_access = True
+                    image_file_path = fallback_path
+                    logger.info(f"✅ Allowing access to standalone generated image: {safe_filename}")
         
         if not has_access:
             logger.warning(f"❌ Access denied: User {current_user.username} does not have access to image {safe_filename}")
             raise HTTPException(status_code=403, detail="Access denied")
         
-        # Construct file path if not already set
-        if 'image_file_path' not in locals():
-            image_file_path = images_path / safe_filename
-            if not image_file_path.exists():
-                # Check subdirectories
-                found = False
-                for subdir in images_path.iterdir():
-                    if subdir.is_dir():
-                        potential_path = subdir / safe_filename
-                        if potential_path.exists():
-                            image_file_path = potential_path
-                            found = True
-                            break
-                if not found:
-                    raise HTTPException(status_code=404, detail="Image not found")
+        if not image_file_path:
+            logger.error(f"❌ File path not resolved for image: {safe_filename}")
+            raise HTTPException(status_code=404, detail="Image not found")
         
         # SECURITY: Verify resolved path is within uploads directory
         try:
@@ -593,76 +641,80 @@ async def serve_image(
 # Include unified chat API routes
 from api.unified_chat_api import router as unified_chat_router
 app.include_router(unified_chat_router)
-logger.info("✅ Unified chat API routes registered")
+logger.debug("✅ Unified chat API routes registered")
 
 
 
 # Include classification model API routes
 from api.classification_model_api import router as classification_model_router
 app.include_router(classification_model_router)
-logger.info("✅ Classification model API routes registered")
+logger.debug("✅ Classification model API routes registered")
 
 # Include text completion model API routes
 from api.text_completion_model_api import router as text_completion_model_router
 app.include_router(text_completion_model_router)
-logger.info("✅ Text completion model API routes registered")
+logger.debug("✅ Text completion model API routes registered")
+
+# Learning API routes
+app.include_router(learning_router)
+logger.debug("✅ Learning API routes registered")
 
 # Include admin API routes
 from api.admin_api import router as admin_router
 app.include_router(admin_router)
-logger.info("✅ Admin API routes registered")
+logger.debug("✅ Admin API routes registered")
 
 # Include resilient embedding API routes
 from api.resilient_embedding_api import router as resilient_embedding_router
 app.include_router(resilient_embedding_router)
-logger.info("✅ Resilient embedding API routes registered")
+logger.debug("✅ Resilient embedding API routes registered")
 
 # Include settings API routes
 app.include_router(settings_router)
 
 # Template management removed - functionality not in use
-logger.info("✅ Settings API routes registered")
+logger.debug("✅ Settings API routes registered")
 
 # Services API removed - Twitter integration removed
-logger.info("✅ Services API routes registered")
-logger.info("✅ Template management API routes registered")
-logger.info("✅ Template execution API routes registered")
+logger.debug("✅ Services API routes registered")
+logger.debug("✅ Template management API routes registered")
+logger.debug("✅ Template execution API routes registered")
 
 # Include Export API routes
 from api.export_api import router as export_router
 app.include_router(export_router)
-logger.info("✅ Export API routes registered")
+logger.debug("✅ Export API routes registered")
 
 # ROOSEVELT'S ORG SEARCH API
 from api.org_search_api import router as org_search_router
 app.include_router(org_search_router)
-logger.info("✅ Org Search API routes registered")
+logger.debug("✅ Org Search API routes registered")
 
 # Org Quick Capture API
 from api.org_capture_api import router as org_capture_router
 app.include_router(org_capture_router)
-logger.info("✅ Org Capture API routes registered")
+logger.debug("✅ Org Capture API routes registered")
 
 # Include org settings API
 from api.org_settings_api import router as org_settings_router
 app.include_router(org_settings_router)
-logger.info("✅ Org Settings API routes registered")
+logger.debug("✅ Org Settings API routes registered")
 
 # Include org tag API
 from api.org_tag_api import router as org_tag_router
 app.include_router(org_tag_router)
-logger.info("✅ Org Tag API routes registered")
+logger.debug("✅ Org Tag API routes registered")
 
 # Include editor API
 from api.editor_api import router as editor_router
 app.include_router(editor_router)
-logger.info("✅ Editor API routes registered")
+logger.debug("✅ Editor API routes registered")
 
 # Research plan API routes removed - migrated to LangGraph subgraph workflows
 
 # Include agent API routes
 
-logger.info("✅ Agent API routes registered")
+logger.debug("✅ Agent API routes registered")
 
 # Context-aware research API routes removed - migrated to LangGraph subgraph workflows
 
@@ -672,38 +724,77 @@ logger.info("✅ Agent API routes registered")
 # Include Async Orchestrator API routes
 from api.async_orchestrator_api import router as async_orchestrator_router
 app.include_router(async_orchestrator_router)
-logger.info("✅ Async Orchestrator API routes registered")
+logger.debug("✅ Async Orchestrator API routes registered")
 
 # gRPC Orchestrator Proxy (Phase 5 - Microservices)
 from api.grpc_orchestrator_proxy import router as grpc_orchestrator_proxy_router
 app.include_router(grpc_orchestrator_proxy_router)
-logger.info("✅ gRPC Orchestrator Proxy routes registered (Phase 5)")
+logger.debug("✅ gRPC Orchestrator Proxy routes registered (Phase 5)")
 
 # Include Conversation API routes (moved from main)
 from api.conversation_api import router as conversation_router
 app.include_router(conversation_router)
-logger.info("✅ Conversation API routes registered")
+logger.debug("✅ Conversation API routes registered")
 
 # Include Conversation Sharing API routes
 from api.conversation_sharing_api import router as conversation_sharing_router
 app.include_router(conversation_sharing_router)
 
 # Include Document API routes
-from api.document_api import router as document_router
+from api.document_api import router as document_router, check_document_access
 app.include_router(document_router)
-logger.info("✅ Document API routes registered")
+logger.debug("✅ Document API routes registered")
+
+# Include Graph API routes (link-graph for file relation cloud)
+from api.graph_api import router as graph_router
+app.include_router(graph_router)
+logger.debug("✅ Graph API routes registered")
+
+# Include Image Metadata API routes
+try:
+    from api.image_metadata_api import router as image_metadata_router
+    app.include_router(image_metadata_router)
+    logger.info("✅ Image Metadata API routes registered")
+    # Log registered routes for debugging
+    for route in image_metadata_router.routes:
+        if hasattr(route, 'path') and hasattr(route, 'methods'):
+            logger.info(f"  📍 Route: {list(route.methods)} {route.path}")
+except Exception as e:
+    logger.error(f"❌ Failed to register Image Metadata API routes: {e}")
+    import traceback
+    traceback.print_exc()
+
+# Include Document Metadata API routes (doc-metadata sidecars, generate-summary)
+try:
+    from api.document_metadata_api import router as document_metadata_router
+    app.include_router(document_metadata_router)
+    logger.info("✅ Document Metadata API routes registered")
+except Exception as e:
+    logger.error(f"❌ Failed to register Document Metadata API routes: {e}")
+    import traceback
+    traceback.print_exc()
 
 # Include Folder API routes
 from api.folder_api import router as folder_router
 app.include_router(folder_router)
-logger.info("✅ Folder API routes registered")
+logger.debug("✅ Folder API routes registered")
+
+# Include Location API routes
+from api.location_api import router as location_router
+app.include_router(location_router)
+logger.debug("✅ Location API routes registered")
+
+# Include Routes API (OSRM routing and saved routes)
+from api.routes_api import router as routes_router
+app.include_router(routes_router)
+logger.debug("✅ Routes API routes registered")
 
 # Include OCR API routes
 
 # Include Search API routes
 from api.search_api import router as search_router
 app.include_router(search_router)
-logger.info("✅ Search API routes registered")
+logger.debug("✅ Search API routes registered")
 
 # Include Segmentation API routes
 
@@ -712,7 +803,7 @@ logger.info("✅ Search API routes registered")
 # Include Category API routes
 from api.category_api import router as category_router
 app.include_router(category_router)
-logger.info("✅ Category API routes registered")
+logger.debug("✅ Category API routes registered")
 
 
 # Conversation create endpoint moved to api/conversation_api.py
@@ -724,68 +815,82 @@ app.include_router(rss_router)
 
 from api.entertainment_sync_api import router as entertainment_sync_router
 app.include_router(entertainment_sync_router)
-logger.info("✅ RSS API routes registered")
+logger.debug("✅ RSS API routes registered")
 
 
 # Include News API routes
 try:
     from api.news_api import router as news_router
     app.include_router(news_router)
-    logger.info("✅ News API routes registered")
+    logger.debug("✅ News API routes registered")
 except Exception as e:
     logger.warning(f"⚠️ Failed to register News API routes: {e}")
 
 # Include FileManager API routes
 from api.file_manager_api import router as file_manager_router
 app.include_router(file_manager_router)
-logger.info("✅ FileManager API routes registered")
+logger.debug("✅ FileManager API routes registered")
 
 # Include Authentication API routes
 from api.auth_api import router as auth_router
 app.include_router(auth_router)
-logger.info("✅ Authentication API routes registered")
+logger.debug("✅ Authentication API routes registered")
 
 # ROOSEVELT'S MESSAGING CAVALRY API
 from api.messaging_api import router as messaging_router
 app.include_router(messaging_router)
-logger.info("✅ BULLY! Messaging API routes registered")
+logger.debug("✅ BULLY! Messaging API routes registered")
 
 # Teams API
 from api.teams_api import router as teams_router
 app.include_router(teams_router)
-logger.info("✅ Teams API routes registered")
+logger.debug("✅ Teams API routes registered")
 
 # Include Data Workspace API routes
 from api.data_workspace_api import router as data_workspace_router
 app.include_router(data_workspace_router)
-logger.info("✅ Data Workspace API routes registered")
+logger.debug("✅ Data Workspace API routes registered")
 
 # Include Audio Transcription API routes
 try:
     from api.audio_api import router as audio_router
     app.include_router(audio_router)
-    logger.info("✅ Audio API routes registered")
+    logger.debug("✅ Audio API routes registered")
 except Exception as e:
     logger.warning(f"⚠️ Failed to register Audio API routes: {e}")
 
 # Include Projects API routes
 from api.projects_api import router as projects_router
 app.include_router(projects_router)
-logger.info("✅ Projects API routes registered")
+logger.debug("✅ Projects API routes registered")
 
 # Include Status Bar API routes
 from api.status_bar_api import router as status_bar_router
 app.include_router(status_bar_router)
-logger.info("✅ Status Bar API routes registered")
+logger.debug("✅ Status Bar API routes registered")
 
 # Include Music API routes
 from api.music_api import router as music_router
 app.include_router(music_router)
-logger.info("✅ Music API routes registered")
+logger.debug("✅ Music API routes registered")
+
+# External connections (OAuth / email)
+from api.external_connections_api import router as external_connections_router
+from api.internal_chat_api import router as internal_chat_router
+app.include_router(external_connections_router, prefix="/api")
+app.include_router(internal_chat_router)
+logger.debug("✅ External connections API routes registered")
+
+try:
+    from api.email_api import router as email_router
+    app.include_router(email_router)
+    logger.debug("✅ Email API routes registered")
+except Exception as e:
+    logger.warning("⚠️ Failed to register Email API routes: %s", e)
 
 # Include HITL Orchestrator API routes
 # HITL orchestrator API removed - using official orchestrator
-logger.info("✅ Legacy HITL Orchestrator API removed")
+logger.debug("✅ Legacy HITL Orchestrator API removed")
 
 # Health check endpoint
 @app.get("/health")
@@ -937,19 +1042,15 @@ async def get_available_models():
 
 @app.get("/api/models/enabled")
 async def get_enabled_models():
-    """Get list of enabled model IDs (excluding image generation model)"""
+    """Get full list of enabled model IDs. Also returns image_generation_model so
+    the frontend can exclude it from the chat dropdown while showing it as enabled in Settings."""
     try:
         enabled_models = await settings_service.get_enabled_models()
-        
-        # Filter out the image generation model if it's set
-        # This prevents it from appearing in the chat model dropdown
         image_generation_model = await settings_service.get_image_generation_model()
-        if image_generation_model and image_generation_model in enabled_models:
-            enabled_models = [m for m in enabled_models if m != image_generation_model]
-            logger.debug(f"🔍 Filtered out image generation model '{image_generation_model}' from enabled models list")
-        
-        return {"enabled_models": enabled_models}
-
+        return {
+            "enabled_models": enabled_models,
+            "image_generation_model": image_generation_model or "",
+        }
     except Exception as e:
         logger.error(f"❌ Failed to get enabled models: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))

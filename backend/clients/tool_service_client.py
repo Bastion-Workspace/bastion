@@ -123,6 +123,152 @@ class ToolServiceClient:
         except Exception as e:
             logger.error(f"Unexpected error getting weather data: {e}")
             return None
+    
+    async def detect_faces(
+        self,
+        attachment_path: str,
+        user_id: str = "system"
+    ) -> Dict[str, Any]:
+        """
+        Detect faces in an image using Tools Service
+        
+        Args:
+            attachment_path: Full path to image file
+            user_id: User ID for access control
+            
+        Returns:
+            Dict with success, faces (list of face detections), face_count, image_width, image_height, error
+        """
+        try:
+            await self.initialize()
+            
+            request = tool_service_pb2.DetectFacesRequest(
+                attachment_path=attachment_path,
+                user_id=user_id
+            )
+            
+            response = await self.stub.DetectFaces(request)
+            
+            if response.success:
+                faces_list = []
+                for pb_face in response.faces:
+                    faces_list.append({
+                        "face_encoding": list(pb_face.face_encoding),
+                        "bbox_x": pb_face.bbox_x,
+                        "bbox_y": pb_face.bbox_y,
+                        "bbox_width": pb_face.bbox_width,
+                        "bbox_height": pb_face.bbox_height
+                    })
+                
+                return {
+                    "success": True,
+                    "faces": faces_list,
+                    "face_count": response.face_count,
+                    "image_width": response.image_width if response.HasField("image_width") else None,
+                    "image_height": response.image_height if response.HasField("image_height") else None
+                }
+            else:
+                error_msg = response.error if response.HasField("error") else "Unknown error"
+                logger.error(f"Face detection failed: {error_msg}")
+                return {
+                    "success": False,
+                    "faces": [],
+                    "face_count": 0,
+                    "error": error_msg
+                }
+            
+        except grpc.RpcError as e:
+            logger.error(f"Face detection failed: {e.code()} - {e.details()}")
+            return {
+                "success": False,
+                "faces": [],
+                "face_count": 0,
+                "error": str(e)
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error in face detection: {e}")
+            return {
+                "success": False,
+                "faces": [],
+                "face_count": 0,
+                "error": str(e)
+            }
+    
+    async def identify_faces(
+        self,
+        attachment_path: str,
+        user_id: str = "system",
+        confidence_threshold: float = 0.82
+    ) -> Dict[str, Any]:
+        """
+        Identify people in an image by matching against known identities using Tools Service
+        
+        Args:
+            attachment_path: Full path to image file
+            user_id: User ID for access control
+            confidence_threshold: Minimum confidence for identity matches (default: 0.82, aligns with L2 < 0.6)
+            
+        Returns:
+            Dict with success, identified_faces (list of identified faces), face_count, identified_count, error
+        """
+        try:
+            await self.initialize()
+            
+            request = tool_service_pb2.IdentifyFacesRequest(
+                attachment_path=attachment_path,
+                user_id=user_id,
+                confidence_threshold=confidence_threshold
+            )
+            
+            response = await self.stub.IdentifyFaces(request)
+            
+            if response.success:
+                identified_faces_list = []
+                for pb_face in response.identified_faces:
+                    identified_faces_list.append({
+                        "identity_name": pb_face.identity_name,
+                        "confidence": pb_face.confidence,
+                        "bbox_x": pb_face.bbox_x,
+                        "bbox_y": pb_face.bbox_y,
+                        "bbox_width": pb_face.bbox_width,
+                        "bbox_height": pb_face.bbox_height
+                    })
+                
+                return {
+                    "success": True,
+                    "identified_faces": identified_faces_list,
+                    "face_count": response.face_count,
+                    "identified_count": response.identified_count
+                }
+            else:
+                error_msg = response.error if response.HasField("error") else "Unknown error"
+                logger.error(f"Face identification failed: {error_msg}")
+                return {
+                    "success": False,
+                    "identified_faces": [],
+                    "face_count": 0,
+                    "identified_count": 0,
+                    "error": error_msg
+                }
+            
+        except grpc.RpcError as e:
+            logger.error(f"Face identification failed: {e.code()} - {e.details()}")
+            return {
+                "success": False,
+                "identified_faces": [],
+                "face_count": 0,
+                "identified_count": 0,
+                "error": str(e)
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error in face identification: {e}")
+            return {
+                "success": False,
+                "identified_faces": [],
+                "face_count": 0,
+                "identified_count": 0,
+                "error": str(e)
+            }
 
 
 # Global client instance

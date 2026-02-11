@@ -445,6 +445,15 @@ body {
   color: #64b5f6;
 }
 
+/* File Relation Graph - MiniMap dark mode */
+.dark-mode .react-flow__minimap {
+  background-color: var(--bg-primary) !important;
+}
+
+.dark-mode .react-flow__minimap svg {
+  background-color: var(--bg-primary);
+}
+
 /* Print styles */
 @media print {
   * {

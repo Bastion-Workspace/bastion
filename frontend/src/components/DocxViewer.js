@@ -29,6 +29,7 @@ import {
 import mammoth from 'mammoth';
 import DOMPurify from 'dompurify';
 import { useTheme } from '../contexts/ThemeContext';
+import { useImageLightbox } from './common/ImageLightbox';
 
 const DocxViewer = ({ documentId, filename }) => {
   const [htmlContent, setHtmlContent] = useState(null);
@@ -36,6 +37,7 @@ const DocxViewer = ({ documentId, filename }) => {
   const [error, setError] = useState(null);
   const { darkMode } = useTheme();
   const contentRef = useRef(null);
+  const { openLightbox } = useImageLightbox();
 
   // Fetch and convert DocX file
   useEffect(() => {
@@ -109,6 +111,25 @@ const DocxViewer = ({ documentId, filename }) => {
       fetchAndConvertDocx();
     }
   }, [documentId]);
+
+  // Add click handlers to embedded images
+  useEffect(() => {
+    if (htmlContent && contentRef.current) {
+      const handleImageClick = (e) => {
+        if (e.target.tagName === 'IMG') {
+          e.preventDefault();
+          openLightbox(e.target.src, { alt: e.target.alt || 'Document image' });
+        }
+      };
+      
+      const container = contentRef.current;
+      container.addEventListener('click', handleImageClick);
+      
+      return () => {
+        container.removeEventListener('click', handleImageClick);
+      };
+    }
+  }, [htmlContent, openLightbox]);
 
   // Download handler
   const handleDownload = useCallback(() => {
@@ -305,7 +326,8 @@ const DocxViewer = ({ documentId, filename }) => {
                 maxWidth: '100%',
                 height: 'auto',
                 marginTop: '0.5em',
-                marginBottom: '0.5em'
+                marginBottom: '0.5em',
+                cursor: 'pointer'
               }
             }}
           >

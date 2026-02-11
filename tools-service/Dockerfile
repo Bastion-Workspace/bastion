@@ -48,7 +48,8 @@ RUN python -m grpc_tools.protoc \
     /app/protos/orchestrator.proto \
     /app/protos/vector_service.proto \
     /app/protos/data_service.proto \
-    /app/protos/crawl_service.proto
+    /app/protos/crawl_service.proto \
+    /app/protos/image_vision.proto
 
 # Create necessary directories
 RUN mkdir -p /app/uploads /app/logs

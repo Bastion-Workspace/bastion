@@ -14,7 +14,8 @@ from models.org_settings_models import (
     OrgModeSettingsUpdate,
     TodoStateSequence,
     AgendaPreferences,
-    DisplayPreferences
+    DisplayPreferences,
+    JournalPreferences
 )
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ class OrgSettingsService:
             tags=[],
             agenda_preferences=AgendaPreferences(),
             display_preferences=DisplayPreferences(),
+            journal_preferences=None,  # Will use default from model
             created_at=datetime.now(),
             updated_at=datetime.now()
         )
@@ -137,6 +139,28 @@ class OrgSettingsService:
             
             if settings_update.display_preferences is not None:
                 current_settings.display_preferences = settings_update.display_preferences
+            
+            if settings_update.journal_preferences is not None:
+                journal_prefs = settings_update.journal_preferences
+                
+                # If journal is being enabled, validate location
+                if journal_prefs.enabled and journal_prefs.journal_location:
+                    # Get username for path resolution
+                    from services.database_manager.database_helpers import fetch_one
+                    row = await fetch_one("SELECT username FROM users WHERE user_id = $1", user_id)
+                    username = row['username'] if row else user_id
+                    
+                    # Validate folder exists
+                    from services.org_journal_service import get_org_journal_service
+                    journal_service = await get_org_journal_service()
+                    valid, error_msg = await journal_service._validate_journal_location(
+                        user_id, username, journal_prefs.journal_location
+                    )
+                    
+                    if not valid:
+                        raise ValueError(f"Journal location validation failed: {error_msg}")
+                
+                current_settings.journal_preferences = journal_prefs
 
             # Update timestamp
             current_settings.updated_at = datetime.now()

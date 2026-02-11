@@ -26,7 +26,7 @@ class SettingsService:
     async def initialize(self):
         """Initialize the settings service"""
         try:
-            logger.info("🔧 Initializing Settings Service...")
+            logger.debug("🔧 Initializing Settings Service...")
             
             # Test connection
             await self._test_connection()
@@ -35,7 +35,7 @@ class SettingsService:
             await self._load_settings_cache()
             
             self._initialized = True
-            logger.info("✅ Settings Service initialized")
+            logger.debug("✅ Settings Service initialized")
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize Settings Service: {e}")
@@ -45,7 +45,7 @@ class SettingsService:
         """Test database connection"""
         try:
             _ = await fetch_one("SELECT 1")
-            logger.info("✅ Database connection successful")
+            logger.debug("✅ Database connection successful")
         except Exception as e:
             logger.error(f"❌ Database connection failed: {e}")
             raise
@@ -57,7 +57,7 @@ class SettingsService:
             for row in rows:
                 key, value, value_type = row["key"], row["value"], row["data_type"]
                 self._settings_cache[key] = self._convert_value(value, value_type)
-            logger.info(f"📚 Loaded {len(self._settings_cache)} settings into cache")
+            logger.debug(f"📚 Loaded {len(self._settings_cache)} settings into cache")
         except Exception as e:
             logger.error(f"❌ Failed to load settings cache: {e}")
             # Continue with empty cache if database is not ready
@@ -344,7 +344,35 @@ class SettingsService:
             "OpenRouter model used for image generation",
             "llm"
         )
-    
+
+    DEFAULT_IMAGE_ANALYSIS_MODEL = "google/gemini-2.0-flash-thinking-exp"
+
+    async def get_image_analysis_model(self) -> str:
+        """Get global default image analysis (vision) model."""
+        return await self.get_setting(
+            "image_analysis_model",
+            self.DEFAULT_IMAGE_ANALYSIS_MODEL
+        )
+
+    async def set_image_analysis_model(self, model: str) -> bool:
+        """Set global default image analysis model (vision-capable)."""
+        return await self.set_setting(
+            "image_analysis_model",
+            model,
+            "string",
+            "Vision model for image description and analysis",
+            "llm"
+        )
+
+    async def get_effective_image_analysis_model(self, user_id: Optional[str]) -> str:
+        """Get image analysis model for user: user override first, then global default."""
+        if user_id:
+            from services.user_settings_kv_service import get_user_setting
+            user_model = await get_user_setting(user_id, "image_analysis_model")
+            if user_model:
+                return user_model
+        return await self.get_image_analysis_model()
+
     async def get_user_timezone(self, user_id: str) -> str:
         """Get user's timezone preference"""
         try:
@@ -556,6 +584,33 @@ class SettingsService:
             return success
         except Exception as e:
             logger.error(f"❌ Failed to set preferred name for user {user_id}: {e}")
+            return False
+    
+    async def get_vision_features_enabled(self, user_id: str) -> bool:
+        """Check if user has opted into vision features"""
+        try:
+            from services.user_settings_kv_service import get_user_setting
+            value = await get_user_setting(user_id, "enable_vision_features")
+            return value == "true"
+        except Exception as e:
+            logger.warning(f"Failed to get vision features setting for user {user_id}: {e}")
+            return False  # Default disabled
+    
+    async def set_vision_features_enabled(self, user_id: str, enabled: bool) -> bool:
+        """Set user's vision features opt-in"""
+        try:
+            from services.user_settings_kv_service import set_user_setting
+            success = await set_user_setting(
+                user_id,
+                "enable_vision_features",
+                "true" if enabled else "false",
+                "boolean"
+            )
+            if success:
+                logger.info(f"✅ Updated vision features setting for user {user_id}: {enabled}")
+            return success
+        except Exception as e:
+            logger.error(f"❌ Failed to set vision features for user {user_id}: {e}")
             return False
     
     async def get_user_ai_context(self, user_id: str) -> Optional[str]:

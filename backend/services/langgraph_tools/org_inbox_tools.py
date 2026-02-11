@@ -1,11 +1,9 @@
 """
-Org Inbox Tools - Roosevelt's "Inbox Commander"
-Utilities to locate, create, and modify the user's org-mode inbox file.
+Org Inbox Tools - Utilities to locate, create, and modify the user's org-mode inbox file.
+Inbox path is resolved via org-mode settings only; no filesystem globbing.
 """
 
-import asyncio
 import glob
-import os
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -18,11 +16,12 @@ logger = logging.getLogger(__name__)
 
 class OrgInboxTools:
     """
-    File utilities to work with a single `inbox.org` anywhere under uploads or web_sources.
+    File utilities to work with the user's org-mode inbox file.
     Strategy:
-    - Search for existing inbox.org under uploads root
-    - If not found and create_if_missing, create `/app/uploads/inbox.org`
-    - Provide append, list, toggle-done, and update-line operations
+    - Resolve inbox path from org_settings_service (inbox_file setting)
+    - If not configured, use ensure_user_org_files default (Users/{username}/Org/inbox.org)
+    - Save resolved path to settings for future lookups
+    - No glob fallback
     """
 
     def __init__(self, user_id: Optional[str] = None):
@@ -31,60 +30,53 @@ class OrgInboxTools:
 
     async def _base_dir(self) -> Path:
         if self._user_id:
-            # Per-user Org base
             info = await ensure_user_org_files(self._user_id)
             return Path(info["org_base_dir"])  # type: ignore[arg-type]
         return self._global_upload_dir
 
     async def _find_inbox_path(self) -> Optional[Path]:
-        try:
-            base = await self._base_dir()
-            if not base.exists():
-                return None
-            # Collect candidates
-            exact_candidates: List[Path] = []
-            suffix_candidates: List[Path] = []
-            for m in glob.glob(str(base / "**" / "*"), recursive=True):
-                p = Path(m)
-                if not p.is_file():
-                    continue
-                name = p.name
-                lname = name.lower()
-                if lname == "inbox.org" or lname == "inbox" or lname == "inbox.org.txt":
-                    exact_candidates.append(p)
-                if lname.endswith("_inbox.org"):
-                    suffix_candidates.append(p)
-                elif lname.endswith("inbox.org"):
-                    # generic endswith (covers both exact and nested)
-                    exact_candidates.append(p)
-            # Prefer known document-backed naming '*_inbox.org' with most recent mtime
-            if suffix_candidates:
-                suffix_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                return suffix_candidates[0]
-            # Otherwise fall back to exact/endswith matches
-            if exact_candidates:
-                exact_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                return exact_candidates[0]
+        if not self._user_id:
             return None
+        try:
+            from services.org_settings_service import get_org_settings_service
+            from models.org_settings_models import OrgModeSettingsUpdate
+
+            org_settings_service = await get_org_settings_service()
+            settings_obj = await org_settings_service.get_settings(self._user_id)
+            base = await self._base_dir()
+            user_base_dir = base.parent
+
+            if settings_obj.inbox_file:
+                inbox_path = user_base_dir / settings_obj.inbox_file
+                if inbox_path.exists():
+                    return inbox_path
+                logger.warning("Configured inbox not found: %s", inbox_path)
+
+            info = await ensure_user_org_files(self._user_id)
+            inbox_path = Path(info["inbox_path"])
+            relative_path = inbox_path.relative_to(user_base_dir)
+            await org_settings_service.create_or_update_settings(
+                self._user_id,
+                OrgModeSettingsUpdate(inbox_file=str(relative_path)),
+            )
+            return inbox_path
         except Exception as e:
-            logger.error(f"❌ Failed to search for inbox.org: {e}")
+            logger.error("Failed to resolve inbox path: %s", e)
             return None
 
     async def ensure_inbox(self) -> Path:
         path = await self._find_inbox_path()
         if path:
             return path
-        # Create at uploads root if not exists
-        try:
-            base = self._base_dir()
-            base.mkdir(parents=True, exist_ok=True)
-            path = base / "inbox.org"
-            if not path.exists():
-                path.write_text("* Inbox\n", encoding="utf-8")
-            return path
-        except Exception as e:
-            logger.error(f"❌ Failed to create inbox.org: {e}")
-            raise
+        if self._user_id:
+            info = await ensure_user_org_files(self._user_id)
+            return Path(info["inbox_path"])
+        base = await self._base_dir()
+        base.mkdir(parents=True, exist_ok=True)
+        path = base / "inbox.org"
+        if not path.exists():
+            path.write_text("* Inbox\n", encoding="utf-8")
+        return path
 
     async def get_inbox_path(self) -> Optional[str]:
         path = await self._find_inbox_path()
@@ -111,6 +103,23 @@ class OrgInboxTools:
             logger.error(f"❌ Failed to list items: {e}")
             return {"path": str(path), "items": [], "error": str(e)}
 
+    async def _created_timestamp_line(self) -> str:
+        """Format CREATED timestamp in user's timezone (org-mode style). Returns empty string if no user_id or on error."""
+        if not self._user_id:
+            return ""
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            from services.settings_service import settings_service
+            user_timezone = await settings_service.get_user_timezone(self._user_id)
+            tz = ZoneInfo(user_timezone)
+            now = datetime.now(tz)
+            ts = now.strftime("%Y-%m-%d %a %H:%M")
+            return f"CREATED: [{ts}]\n"
+        except Exception as e:
+            logger.debug("Could not add CREATED timestamp: %s", e)
+            return ""
+
     async def add_item(self, text: str, kind: str = "checkbox") -> Dict[str, Any]:
         path = await self.ensure_inbox()
         line = ""
@@ -118,15 +127,19 @@ class OrgInboxTools:
             line = f"* TODO {text}\n"
         else:
             line = f"- [ ] {text}\n"
+        created_line = await self._created_timestamp_line()
         try:
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)
-            # Return the index of the newly added line
+                if created_line:
+                    f.write(created_line)
             lines = path.read_text(encoding="utf-8").splitlines()
             added_index = len(lines) - 1
+            if created_line:
+                added_index = len(lines) - 2
             return {"path": str(path), "added": line.strip(), "line_index": added_index}
         except Exception as e:
-            logger.error(f"❌ Failed to add item: {e}")
+            logger.error("Failed to add item: %s", e)
             return {"path": str(path), "error": str(e)}
 
     async def append_text(self, content: str) -> Dict[str, Any]:
@@ -248,7 +261,7 @@ class OrgInboxTools:
 
     async def index_tags(self) -> Dict[str, int]:
         """Scan .org files under uploads to build a tag frequency index."""
-        base = self._base_dir()
+        base = await self._base_dir()
         counts: Dict[str, int] = {}
         try:
             if not base.exists():

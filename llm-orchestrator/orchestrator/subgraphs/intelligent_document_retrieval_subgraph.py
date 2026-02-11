@@ -14,7 +14,7 @@ import re
 from typing import Dict, Any, List, TypedDict, Literal, Optional
 from langgraph.graph import StateGraph, END
 
-from orchestrator.tools import search_documents_structured, get_document_content_tool
+from orchestrator.tools import search_documents_structured, get_document_content_tool, search_images_tool
 from orchestrator.backend_tool_client import get_backend_tool_client
 from orchestrator.agents.base_agent import BaseAgent
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -30,11 +30,17 @@ class DocumentRetrievalState(TypedDict):
     retrieval_mode: Literal["fast", "comprehensive", "targeted"]
     max_results: int  # How many documents to retrieve
     small_doc_threshold: int  # Size threshold for full vs chunk retrieval
+    metadata: Optional[Dict[str, Any]]  # Metadata for model selection and other context
+    messages: Optional[List[Any]]  # Conversation messages for context-aware detection
+    shared_memory: Optional[Dict[str, Any]]  # Shared memory for conversation context
     
     # Output results
     retrieved_documents: List[Dict[str, Any]]
     formatted_context: str
     retrieval_metadata: Dict[str, Any]
+    image_search_results: Optional[str]  # Image search results in markdown format
+    structured_images: Optional[List[Dict[str, Any]]]  # Structured image data for AgentResponse contract
+    skip_sufficiency_check: Optional[bool]  # Skip LLM sufficiency check (fast path)
     error: str
 
 
@@ -46,6 +52,124 @@ async def _vector_search_node(state: DocumentRetrievalState) -> Dict[str, Any]:
         max_results = state.get("max_results", 5)
         retrieval_mode = state.get("retrieval_mode", "fast")
         
+        # Use image search subgraph for intelligent image search
+        image_search_results = None
+        try:
+            from orchestrator.subgraphs.image_search_subgraph import search_images_intelligently
+            
+            # Get metadata for model selection (from state if available)
+            metadata = state.get("metadata", {})
+            messages = state.get("messages", [])
+            shared_memory = state.get("shared_memory", {})
+            
+            image_search_result = await search_images_intelligently(
+                query=query,
+                user_id=user_id,
+                metadata=metadata,
+                limit=max_results,
+                messages=messages,
+                shared_memory=shared_memory
+            )
+            
+            image_search_results = image_search_result.get("image_search_results")
+            
+            if image_search_results:
+                logger.info(f"✅ Image search found results")
+                logger.info(f"⚡ SKIPPING document search - image search is authoritative for image queries")
+                
+                # Extract metadata from image search results for LLM context
+                # Check if structured response (new format) or legacy markdown (old format)
+                images_markdown = None
+                metadata_list = []
+                message = None
+                
+                if isinstance(image_search_results, dict):
+                    images_markdown = image_search_results.get("images_markdown", "")
+                    metadata_list = image_search_results.get("metadata", [])
+                    message = image_search_results.get("message")  # Informational message from search
+                    logger.info(f"📊 Structured response: {len(images_markdown)} chars, {len(metadata_list)} metadata entries")
+                else:
+                    # Legacy string format (backward compatibility during transition)
+                    images_markdown = image_search_results
+                    image_count = images_markdown.count("![") if images_markdown else 0
+                    logger.info(f"📊 Legacy format: {len(images_markdown)} characters, {image_count} images")
+                
+                # If there's a message from the search tool (e.g., no semantic matches found), use it
+                if message:
+                    logger.info(f"📝 Search tool message: {message}")
+                    formatted_context = message
+                    return {
+                        "formatted_context": formatted_context,
+                        "retrieved_documents": [],
+                        "image_search_results": None,  # No images to display
+                        "metadata": state.get("metadata", {}),
+                        "success": True,
+                        "error": ""
+                    }
+                
+                # Format metadata for LLM - provide FULL information
+                if metadata_list:
+                    formatted_context = "Found these comics from your collection:\n\n"
+                    for idx, meta in enumerate(metadata_list, 1):
+                        formatted_context += f"{idx}. {meta.get('title', 'Untitled')}"
+                        if meta.get('date'):
+                            formatted_context += f" ({meta['date']})"
+                        formatted_context += "\n"
+                        
+                        if meta.get('content'):
+                            # Include full content description
+                            formatted_context += f"   Description: {meta['content']}\n"
+                        
+                        if meta.get('tags'):
+                            tags = meta['tags']
+                            if isinstance(tags, list):
+                                formatted_context += f"   Tags: {', '.join(tags)}\n"
+                            elif isinstance(tags, str):
+                                formatted_context += f"   Tags: {tags}\n"
+                        
+                        formatted_context += "\n"
+                    
+                    logger.info(f"📝 Providing FULL metadata context to LLM: {len(metadata_list)} comics with titles, dates, descriptions, tags")
+                    logger.info(f"📝 Formatted context preview (first 500 chars): {formatted_context[:500]}")
+                else:
+                    # Fallback for legacy format
+                    image_count = images_markdown.count("![") if images_markdown else 0
+                    formatted_context = f"Found {image_count} relevant image(s) from local collection."
+                    logger.info(f"📝 Providing basic context to LLM: {image_count} images found (no metadata available)")
+                
+                # Store base64 images separately for appending after LLM response
+                # The document retrieval subgraph should pass through the images_markdown
+                image_search_results = images_markdown if images_markdown else image_search_results
+                
+                # Extract structured images if available (for AgentResponse contract)
+                structured_images = None
+                if isinstance(image_search_result, dict) and image_search_result.get("images"):
+                    structured_images = image_search_result.get("images")
+                    logger.info(f"📸 Extracted {len(structured_images)} structured image(s) from search results")
+                
+                # Return early with image search results as the single source of truth
+                # No need to run redundant document search that might return different results
+                return {
+                    "success": True,  # ✅ CRITICAL: Chat agent checks for this!
+                    "retrieved_documents": [],  # No text documents needed
+                    "formatted_context": formatted_context,  # ✅ Tell LLM what was found (with full metadata)
+                    "retrieval_metadata": {
+                        "total_results": len(metadata_list) if metadata_list else (images_markdown.count("![") if images_markdown else 0),
+                        "search_type": "image_only",
+                        "message": "Image search completed - document search skipped to avoid inconsistencies"
+                    },
+                    "image_search_results": image_search_results,
+                    "structured_images": structured_images,  # Pass through structured image data
+                    "error": ""
+                }
+            elif image_search_result.get("search_performed"):
+                logger.info("Image search performed but no results found, proceeding with document search")
+        except Exception as e:
+            logger.warning(f"Image search failed, falling back to document search: {e}")
+            import traceback
+            logger.error(f"Image search error traceback: {traceback.format_exc()}")
+        
+        # Only run document search if image search didn't find anything
         # Request more candidates to ensure we don't miss relevant documents
         # Use 2-3x the requested results to get a broader pool for ranking
         candidate_multiplier = {
@@ -172,14 +296,18 @@ async def _vector_search_node(state: DocumentRetrievalState) -> Dict[str, Any]:
                 "total_candidates": len(results),
                 "thresholded_candidates": len(thresholded_results),
                 "recency_boosted": sum(1 for r in final_results if r.get('recency_boost', 0) > 0)
-            }
+            },
+            "image_search_results": image_search_results,  # Store image results for formatting
+            "metadata": state.get("metadata", {})  # Preserve metadata
         }
         
     except Exception as e:
         logger.error(f"Vector search failed: {e}")
         return {
             "error": str(e),
-            "retrieved_documents": []
+            "retrieved_documents": [],
+            "image_search_results": None,
+            "metadata": state.get("metadata", {})  # Preserve metadata even on error
         }
 
 
@@ -273,21 +401,47 @@ async def _intelligent_content_retrieval_node(state: DocumentRetrievalState) -> 
                 **state.get("retrieval_metadata", {}),
                 "content_retrieval_complete": True,
                 "documents_processed": len(enriched_documents)
-            }
+            },
+            "image_search_results": state.get("image_search_results"),  # Preserve image results
+            "metadata": state.get("metadata", {})  # Preserve metadata
         }
         
     except Exception as e:
         logger.error(f"Content retrieval failed: {e}")
-        return {"error": str(e)}
+        return {
+            "error": str(e),
+            "metadata": state.get("metadata", {})  # Preserve metadata even on error
+        }
 
 
 async def _check_sufficiency_and_retrieve_full_node(state: DocumentRetrievalState) -> Dict[str, Any]:
     """Check if chunked documents need full retrieval based on query analysis"""
     try:
+        skip_check = state.get("skip_sufficiency_check", False)
+
+        if skip_check:
+            logger.info("Skipping sufficiency check (fast mode)")
+            return {
+                "retrieved_documents": state.get("retrieved_documents", []),
+                "retrieval_metadata": {
+                    **state.get("retrieval_metadata", {}),
+                    "sufficiency_check_skipped": True,
+                },
+                "formatted_context": state.get("formatted_context", ""),
+                "image_search_results": state.get("image_search_results"),
+                "structured_images": state.get("structured_images"),
+                "query": state.get("query", ""),
+                "user_id": state.get("user_id", "system"),
+                "metadata": state.get("metadata", {}),
+                "messages": state.get("messages", []),
+                "shared_memory": state.get("shared_memory", {}),
+                "error": "",
+            }
+
         query = state.get("query", "")
         retrieved_documents = state.get("retrieved_documents", [])
         user_id = state.get("user_id", "system")
-        
+
         # Find documents that were chunked (not full document)
         chunked_documents = []
         for doc in retrieved_documents:
@@ -322,7 +476,10 @@ async def _check_sufficiency_and_retrieve_full_node(state: DocumentRetrievalStat
                     **state.get("retrieval_metadata", {}),
                     "sufficiency_check_complete": True,
                     "full_retrievals_requested": 0
-                }
+                },
+                "image_search_results": state.get("image_search_results"),  # Preserve image results
+                "structured_images": state.get("structured_images"),  # Preserve structured images
+                "metadata": state.get("metadata", {})  # Preserve metadata
             }
         
         # Use LLM to determine if full document retrieval is needed
@@ -375,7 +532,9 @@ Return an entry for each document. Set needs_full=true if the full document shou
         # Use BaseAgent for LLM access
         base_agent = BaseAgent("sufficiency_checker")
         # Create a minimal state dict for LLM access
-        minimal_state = {"metadata": {}, "user_id": user_id}
+        # Preserve metadata from state for model selection
+        metadata = state.get("metadata", {})
+        minimal_state = {"metadata": metadata, "user_id": user_id}
         llm = base_agent._get_llm(temperature=0.3, state=minimal_state)
         
         messages = [
@@ -436,7 +595,10 @@ Return an entry for each document. Set needs_full=true if the full document shou
                     **state.get("retrieval_metadata", {}),
                     "sufficiency_check_complete": True,
                     "full_retrievals_requested": full_retrievals
-                }
+                },
+                "image_search_results": state.get("image_search_results"),  # Preserve image results
+                "structured_images": state.get("structured_images"),  # Preserve structured images
+                "metadata": state.get("metadata", {})  # Preserve metadata
             }
             
         except Exception as e:
@@ -449,7 +611,10 @@ Return an entry for each document. Set needs_full=true if the full document shou
                     "sufficiency_check_complete": True,
                     "full_retrievals_requested": 0,
                     "sufficiency_check_error": str(e)
-                }
+                },
+                "image_search_results": state.get("image_search_results"),  # Preserve image results
+                "structured_images": state.get("structured_images"),  # Preserve structured images
+                "metadata": state.get("metadata", {})  # Preserve metadata
             }
         
     except Exception as e:
@@ -462,7 +627,9 @@ Return an entry for each document. Set needs_full=true if the full document shou
                 "sufficiency_check_complete": True,
                 "full_retrievals_requested": 0,
                 "error": str(e)
-            }
+            },
+            "image_search_results": state.get("image_search_results"),  # Preserve image results
+            "metadata": state.get("metadata", {})  # Preserve metadata
         }
 
 
@@ -472,17 +639,38 @@ async def _format_context_node(state: DocumentRetrievalState) -> Dict[str, Any]:
         retrieved_documents = state.get("retrieved_documents", [])
         
         if not retrieved_documents:
+            # Preserve existing formatted_context (e.g., from image search)
+            existing_formatted_context = state.get("formatted_context", "")
             return {
-                "formatted_context": "",
+                "formatted_context": existing_formatted_context,
                 "retrieval_metadata": {
                     **state.get("retrieval_metadata", {}),
                     "context_formatted": True,
-                    "has_content": False
-                }
+                    "has_content": bool(existing_formatted_context)
+                },
+                "image_search_results": state.get("image_search_results"),
+                "structured_images": state.get("structured_images"),
+                "metadata": state.get("metadata", {})
             }
         
         context_parts = []
+        image_parts = []  # Collect base64 images separately
+        
+        # Add image search results to context only when we do NOT have structured_images.
+        # When structured_images exist, images are sent separately (Telegram/UI use metadata);
+        # putting markdown in context would cause the synthesis LLM to echo it and duplicate images.
+        image_results = state.get("image_search_results")
+        has_structured = bool(state.get("structured_images"))
+        if image_results and "No images found" not in image_results and "Error" not in image_results and not has_structured:
+            context_parts.append(image_results)
+            context_parts.append("\n")
+            logger.info("Added image search results to context (no structured images)")
+        
         context_parts.append("=== RELEVANT LOCAL INFORMATION ===\n")
+        
+        # Build structured_images from image docs (for full research path / synthesis)
+        structured_images_list: List[Dict[str, Any]] = list(state.get("structured_images") or [])
+        image_extensions = ("webp", "png", "jpg", "jpeg", "gif", "bmp", "svg", "heic")
         
         for i, doc in enumerate(retrieved_documents, 1):
             # Handle both flat structure and nested document structure
@@ -495,6 +683,85 @@ async def _format_context_node(state: DocumentRetrievalState) -> Dict[str, Any]:
 
             score = doc.get('similarity_score', doc.get('relevance_score', 0.0))
             strategy = doc.get('retrieval_strategy', 'unknown')
+            
+            doc_id = doc.get('document_id') or (doc.get('document') or {}).get('document_id')
+            filename = doc.get('filename') or (doc.get('document') or {}).get('filename') or (doc.get('metadata') or {}).get('image_filename') or ""
+            doc_metadata = doc.get('metadata', {})
+            image_filename = doc_metadata.get('image_filename') or filename
+            image_url = doc_metadata.get('image_url')
+            image_type = doc_metadata.get('image_type')
+            
+            # Image doc from document search (flat: document_id + filename, no image_url): add markdown and structured_images
+            if doc_id and filename:
+                ext = filename.lower().split(".")[-1] if "." in filename else ""
+                if ext in image_extensions and not any(s.get("metadata", {}).get("document_id") == doc_id for s in structured_images_list):
+                    doc_image_url = f"/api/documents/{doc_id}/file"
+                    image_parts.append(f"![]({doc_image_url})\n")
+                    structured_images_list.append({
+                        "url": doc_image_url,
+                        "alt_text": title or filename or "Image",
+                        "type": "search_result",
+                        "metadata": {"document_id": doc_id, "filename": filename, "title": title},
+                    })
+                    logger.info(f"Added document image to context: {filename} ({doc_id[:8]}...)")
+            
+            # If this is an image metadata document (with image_url), embed the actual image as base64
+            if image_filename and image_url:
+                logger.info(f"🖼️ Found image metadata document: {title} (file: {image_filename}, type: {image_type})")
+                
+                try:
+                    # Resolve image file path from URL
+                    from pathlib import Path
+                    from config import settings
+                    import mimetypes
+                    import base64
+                    
+                    image_file_path = None
+                    
+                    # Handle /api/comics/ URLs
+                    if image_url.startswith('/api/comics/'):
+                        relative_path = image_url.replace('/api/comics/', '')
+                        # Handle duplicate "Comics" in path if it exists
+                        if relative_path.startswith('Comics/'):
+                            relative_path = relative_path.replace('Comics/', '', 1)
+                        image_file_path = Path(settings.UPLOAD_DIR) / 'Global' / 'Comics' / relative_path
+                    elif image_url.startswith('/api/images/'):
+                        # Generic /api/images/ path handling
+                        relative_path = image_url.replace('/api/images/', '')
+                        image_file_path = Path(settings.UPLOAD_DIR) / relative_path
+                    else:
+                        # Generic /api/ path handling
+                        relative_path = image_url.replace('/api/', '')
+                        image_file_path = Path(settings.UPLOAD_DIR) / relative_path
+                    
+                    if image_file_path and image_file_path.exists():
+                        mime_type, _ = mimetypes.guess_type(str(image_file_path))
+                        if not mime_type or not mime_type.startswith('image/'):
+                            # Fallback for common comic types
+                            ext = image_file_path.suffix.lower()
+                            mime_map = {
+                                '.gif': 'image/gif',
+                                '.png': 'image/png',
+                                '.jpg': 'image/jpeg',
+                                '.jpeg': 'image/jpeg',
+                                '.webp': 'image/webp'
+                            }
+                            mime_type = mime_map.get(ext, 'image/png')
+                        
+                        # Read image data and encode to base64
+                        with open(image_file_path, 'rb') as f:
+                            image_data_raw = f.read()
+                        image_data = base64.b64encode(image_data_raw).decode('utf-8')
+                        
+                        # Embed as data URI with empty alt text
+                        data_uri = f"data:{mime_type};base64,{image_data}"
+                        image_markdown = f"![]({data_uri})\n"
+                        image_parts.append(image_markdown)
+                        logger.info(f"✅ Embedded image as base64: {image_file_path.name} ({mime_type})")
+                    else:
+                        logger.warning(f"⚠️ Image file not found: {image_file_path}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to embed image {image_filename}: {e}")
             
             context_parts.append(f"\n{i}. {title} (relevance: {score:.2f})")
             
@@ -521,19 +788,34 @@ async def _format_context_node(state: DocumentRetrievalState) -> Dict[str, Any]:
         
         formatted_context = "\n".join(context_parts)
         
+        # Combine image search results with discovered images
+        all_images = state.get("image_search_results", "") or ""
+        if image_parts:
+            all_images += "".join(image_parts)
+            logger.info(f"✅ Automatically embedded {len(image_parts)} image(s) from metadata documents")
+        
         return {
             "formatted_context": formatted_context,
             "retrieval_metadata": {
                 **state.get("retrieval_metadata", {}),
                 "context_formatted": True,
                 "has_content": True,
-                "total_context_size": len(formatted_context)
-            }
+                "total_context_size": len(formatted_context),
+                "embedded_images": len(image_parts)
+            },
+            "image_search_results": all_images if all_images else None,
+            "structured_images": structured_images_list if structured_images_list else state.get("structured_images"),
+            "metadata": state.get("metadata", {})
         }
         
     except Exception as e:
         logger.error(f"Context formatting failed: {e}")
-        return {"error": str(e), "formatted_context": ""}
+        return {
+            "error": str(e),
+            "formatted_context": "",
+            "structured_images": state.get("structured_images"),
+            "metadata": state.get("metadata", {})
+        }
 
 
 def build_intelligent_document_retrieval_subgraph() -> StateGraph:
@@ -563,7 +845,11 @@ async def retrieve_documents_intelligently(
     user_id: str = "system",
     mode: Literal["fast", "comprehensive", "targeted"] = "fast",
     max_results: int = 5,
-    small_doc_threshold: int = 5000
+    small_doc_threshold: int = 5000,
+    metadata: Optional[Dict[str, Any]] = None,
+    messages: Optional[List[Any]] = None,
+    shared_memory: Optional[Dict[str, Any]] = None,
+    skip_sufficiency_check: bool = False,
 ) -> Dict[str, Any]:
     """
     Convenience function to retrieve documents with intelligent strategy
@@ -574,6 +860,9 @@ async def retrieve_documents_intelligently(
         mode: Retrieval mode (fast/comprehensive/targeted)
         max_results: Maximum documents to retrieve
         small_doc_threshold: Size threshold for full vs chunk retrieval
+        metadata: Optional metadata for model selection
+        messages: Conversation messages for context-aware detection
+        shared_memory: Shared memory for conversation context
         
     Returns:
         Dict with formatted_context, retrieved_documents, and metadata
@@ -586,19 +875,26 @@ async def retrieve_documents_intelligently(
         "retrieval_mode": mode,
         "max_results": max_results,
         "small_doc_threshold": small_doc_threshold,
+        "metadata": metadata or {},
+        "messages": messages or [],
+        "shared_memory": shared_memory or {},
         "retrieved_documents": [],
         "formatted_context": "",
         "retrieval_metadata": {},
-        "error": ""
+        "image_search_results": None,  # Initialize image_search_results
+        "skip_sufficiency_check": skip_sufficiency_check,
+        "error": "",
     }
-    
+
     result = await subgraph.ainvoke(initial_state)
-    
+
     return {
         "formatted_context": result.get("formatted_context", ""),
         "retrieved_documents": result.get("retrieved_documents", []),
         "metadata": result.get("retrieval_metadata", {}),
+        "image_search_results": result.get("image_search_results"),  # Base64 images markdown
+        "structured_images": result.get("structured_images"),
         "success": not bool(result.get("error")),
-        "error": result.get("error", "")
+        "error": result.get("error", ""),
     }
 

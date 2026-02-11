@@ -8,6 +8,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import Response
 
 from models.api_models import (
     FolderTreeResponse, FolderContentsResponse, DocumentFolder,
@@ -33,6 +34,26 @@ async def _get_folder_service():
 
 
 # ===== FOLDER MANAGEMENT ENDPOINTS =====
+
+@router.get("/api/folders/library/download")
+async def download_library_zip(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Download the current user's library (My Documents) as a zip file."""
+    folder_service = await _get_folder_service()
+    try:
+        zip_bytes = await folder_service.build_library_zip(current_user.user_id)
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": 'attachment; filename="my-library.zip"',
+            },
+        )
+    except Exception as e:
+        logger.error(f"Failed to build library zip: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/api/folders/tree", response_model=FolderTreeResponse)
 async def get_folder_tree(
@@ -64,13 +85,13 @@ async def get_folder_contents(
     """Get contents of a specific folder"""
     folder_service = await _get_folder_service()
     try:
-        logger.info(f"🔍 API: Getting folder contents for {folder_id} (user: {current_user.user_id})")
+        logger.debug(f"🔍 API: Getting folder contents for {folder_id} (user: {current_user.user_id})")
         contents = await folder_service.get_folder_contents(folder_id, current_user.user_id)
         if not contents:
             logger.warning(f"⚠️ API: Folder {folder_id} not found or access denied for user {current_user.user_id}")
             raise HTTPException(status_code=404, detail="Folder not found or access denied")
         
-        logger.info(f"✅ API: Returning folder contents for {folder_id}: {contents.total_documents} docs, {contents.total_subfolders} subfolders")
+        logger.debug(f"✅ API: Returning folder contents for {folder_id}: {contents.total_documents} docs, {contents.total_subfolders} subfolders")
         return contents
     except HTTPException:
         raise

@@ -90,6 +90,101 @@ def _fuzzy_match_in_window(
     return None
 
 
+def _find_anchor_text_fuzzy(
+    content: str,
+    anchor_text: str,
+    search_start: int = 0
+) -> Optional[Tuple[int, float]]:
+    """
+    Progressive fuzzy search for anchor text in document.
+    
+    Tries multiple strategies in order:
+    1. Exact match (case-sensitive, exact whitespace)
+    2. Case-insensitive match (for headings)
+    3. Normalized whitespace match (collapses whitespace)
+    4. Regex pattern match (for markdown headings with flexible spacing)
+    
+    Args:
+        content: Full document content
+        anchor_text: Anchor text to search for
+        search_start: Position to start searching from
+    
+    Returns:
+        Tuple of (position, confidence) or None if no match found
+        Confidence: 1.0 for exact, 0.9 for case-insensitive, 0.85 for normalized, 0.8 for regex
+    """
+    if not anchor_text:
+        return None
+    
+    search_content = content[search_start:]
+    
+    # Strategy 1: Exact match (highest confidence)
+    pos = search_content.rfind(anchor_text)
+    if pos != -1:
+        actual_pos = search_start + pos
+        logger.debug(f"✅ Anchor text exact match at position {actual_pos}")
+        return (actual_pos, 1.0)
+    
+    # Strategy 2: Case-insensitive match (useful for headings)
+    anchor_lower = anchor_text.lower()
+    pos_lower = search_content.lower().rfind(anchor_lower)
+    if pos_lower != -1:
+        # Verify it's actually at a reasonable position (start of line or after newline)
+        actual_pos = search_start + pos_lower
+        if actual_pos == 0 or content[actual_pos - 1] == '\n':
+            logger.info(f"💡 Anchor text case-insensitive match at position {actual_pos}")
+            return (actual_pos, 0.9)
+    
+    # Strategy 3: Normalized whitespace (collapse multiple spaces/newlines to single space)
+    # Search line by line for better position accuracy
+    normalized_anchor = ' '.join(anchor_text.split())
+    if normalized_anchor != anchor_text:  # Only if normalization changed something
+        lines = search_content.split('\n')
+        # Search from end (last occurrence) to match rfind behavior
+        for i in range(len(lines) - 1, -1, -1):
+            line = lines[i]
+            normalized_line = ' '.join(line.split())
+            if normalized_anchor in normalized_line:
+                # Found in this line - calculate line start position
+                line_start = search_start + sum(len(l) + 1 for l in lines[:i])  # +1 for newline
+                # Try to find the anchor in the original line using a simple approach
+                # Look for the first word of the anchor
+                anchor_words = normalized_anchor.split()
+                if anchor_words:
+                    first_word = anchor_words[0]
+                    # Find first word in original line (case-insensitive for robustness)
+                    word_pos = line.lower().find(first_word.lower())
+                    if word_pos >= 0:
+                        actual_pos = line_start + word_pos
+                        logger.info(f"💡 Anchor text normalized whitespace match at position {actual_pos}")
+                        return (actual_pos, 0.85)
+                    else:
+                        # Fallback: use line start
+                        logger.info(f"💡 Anchor text normalized whitespace match (line start) at position {line_start}")
+                        return (line_start, 0.85)
+    
+    # Strategy 4: Regex pattern match for markdown headings (flexible spacing)
+    # This handles cases like "## Chapter 1" vs "##Chapter 1" or "##  Chapter 1"
+    heading_match = re.match(r'^(#{1,6})\s*(.+)$', anchor_text.strip())
+    if heading_match:
+        hash_count = len(heading_match.group(1))
+        heading_text = heading_match.group(2).strip()
+        
+        # Build flexible regex pattern: allows variable spacing after hashes
+        # Match: ##\s+Chapter\s+1 (allows multiple spaces)
+        pattern = rf'^{"#" * hash_count}\s+{re.escape(heading_text)}'
+        regex_matches = list(re.finditer(pattern, search_content, re.MULTILINE | re.IGNORECASE))
+        if regex_matches:
+            # Use last match (rfind behavior)
+            last_match = regex_matches[-1]
+            actual_pos = search_start + last_match.start()
+            logger.info(f"💡 Anchor text regex pattern match at position {actual_pos}")
+            return (actual_pos, 0.8)
+    
+    # No match found
+    return None
+
+
 # Import frontmatter utilities from shared module
 from orchestrator.utils.frontmatter_utils import strip_frontmatter_block, frontmatter_end_index
 
@@ -178,6 +273,13 @@ def resolve_editor_operation(
                 match_idx = min(occurrence_index, len(cursor_matches) - 1)
                 pos = cursor_matches[match_idx]
                 end_pos = pos + len(original_text)
+                
+                # DEBUG: Check what text is actually at this position
+                actual_text_at_pos = content[pos:end_pos]
+                logger.debug(f"🔍 RESOLVER DEBUG: original_text={repr(original_text[:50])}...")
+                logger.debug(f"🔍 RESOLVER DEBUG: actual text at [{pos}:{end_pos}]={repr(actual_text_at_pos[:50])}...")
+                logger.debug(f"🔍 RESOLVER DEBUG: 10 chars BEFORE pos={repr(content[max(0, pos-10):pos])}")
+                
                 # Guard frontmatter: ensure operations never occur before frontmatter end
                 pos = max(pos, frontmatter_end)
                 end_pos = max(end_pos, pos)
@@ -203,7 +305,7 @@ def resolve_editor_operation(
             search_from = pos + 1
         
         # If exact match failed, try with normalized whitespace
-        if not found_positions:
+        if not all_matches:
             logger.warning(f"⚠️ Exact match failed for original_text (length: {len(original_text)})")
             logger.debug(f"   original_text preview: {repr(original_text[:100])}")
             
@@ -307,35 +409,63 @@ def resolve_editor_operation(
         # Always find the LAST occurrence to ensure consistent behavior (new chapters at end, edits to most recent section)
         search_start = frontmatter_end
         
-        # Search entire document (from frontmatter_end to end) for anchor text
-        # Use last occurrence for consistency - this ensures:
-        # - New chapters are added at the end (last "## Chapter 2" match)
-        # - Edits to sections use the most recent occurrence
-        # - Cursor position doesn't constrain where we can anchor
-        pos = content.rfind(anchor_text, search_start)
+        # Progressive fuzzy search for anchor text
+        # Try exact match first, then fall back to fuzzy matching strategies
+        anchor_result = _find_anchor_text_fuzzy(content, anchor_text, search_start)
         
         # If not found in body, try searching from start (in case frontmatter_end calculation was off)
-        if pos == -1:
-            pos = content.rfind(anchor_text)
+        if anchor_result is None:
+            anchor_result = _find_anchor_text_fuzzy(content, anchor_text, 0)
         
-        if pos != -1:
-            # For chapter headings, find the end of the entire chapter (not just the heading line)
-            # This ensures proper sequential ordering: Chapter 4 comes after Chapter 3, etc.
+        if anchor_result:
+            pos, confidence = anchor_result
+            # For chapter headings, need to determine WHERE to insert based on what we're inserting
             if anchor_text.startswith("## Chapter") or anchor_text.startswith("# Chapter"):
-                # Find end of this chapter by looking for next chapter heading
-                # This ensures new chapters are inserted in the correct order:
-                # - If anchor is "## Chapter 3", we find where Chapter 3 ends
-                # - If Chapter 4 already exists, insert before it (shouldn't happen when adding new chapter)
-                # - If Chapter 4 doesn't exist yet, insert at end (correct - new chapter goes at end)
-                next_chapter_pattern = re.compile(r"\n##\s+Chapter\s+\d+", re.MULTILINE)
-                match = next_chapter_pattern.search(content, pos + len(anchor_text))
-                if match:
-                    # Insert before the next chapter (maintains sequential order)
-                    end_pos = match.start()
+                # Log content after anchor for debugging
+                after_anchor_pos = pos + len(anchor_text)
+                preview_end = min(len(content), after_anchor_pos + 300)
+                content_after = content[after_anchor_pos:preview_end]
+                logger.debug(f"Content after chapter anchor (first 300 chars): {repr(content_after[:300])}")
+                
+                # Check if we're inserting subsections (###) vs new chapter or beats
+                # Subsections (### Status, ### Pacing) should go RIGHT AFTER the chapter heading
+                # New chapters or beats should go at the END of the chapter
+                text_preview = text.strip()[:50]  # Look at first 50 chars of what we're inserting
+                
+                if text_preview.startswith("###"):
+                    # Inserting subsections within the chapter - put right after heading line
+                    # Find the end of the heading line (next newline after anchor)
+                    end_of_line = content.find("\n", pos + len(anchor_text))
+                    if end_of_line != -1:
+                        end_pos = end_of_line + 1  # After the newline
+                    else:
+                        # No newline found - use right after anchor text
+                        end_pos = pos + len(anchor_text)
+                    logger.info(f"Inserting subsection (###) right after chapter heading at position {end_pos}")
                 else:
-                    # This is the last chapter, insert at end of document
-                    # This is correct for adding new chapters - they go after the last existing chapter
-                    end_pos = len(content)
+                    # Inserting new chapter or beats - find end of this chapter
+                    # Find end of this chapter by looking for next chapter heading
+                    # This ensures new chapters are inserted in the correct order:
+                    # - If anchor is "## Chapter 3", we find where Chapter 3 ends
+                    # - If Chapter 4 already exists, insert before it (shouldn't happen when adding new chapter)
+                    # - If Chapter 4 doesn't exist yet, insert at end (correct - new chapter goes at end)
+                    next_chapter_pattern = re.compile(r"\n##\s+Chapter\s+\d+", re.MULTILINE)
+                    search_start_pos = pos + len(anchor_text)
+                    match = next_chapter_pattern.search(content, search_start_pos)
+                    if match:
+                        # Insert before the next chapter (maintains sequential order)
+                        end_pos = match.start()
+                        logger.debug(f"Found next chapter at position {match.start()}, inserting before it")
+                    else:
+                        # This is the last chapter, insert at end of document
+                        # This is correct for adding new chapters - they go after the last existing chapter
+                        end_pos = len(content)
+                        # Log to help diagnose why next chapter wasn't found
+                        snippet_start = max(0, search_start_pos)
+                        snippet_end = min(len(content), search_start_pos + 500)
+                        snippet = content[snippet_start:snippet_end]
+                        logger.debug(f"No next chapter found after position {search_start_pos}")
+                        logger.debug(f"Content snippet after anchor (first 200 chars): {repr(snippet[:200])}")
             elif op_type == "insert_after":
                 # For insert_after (continuing text), find the end of the paragraph containing the anchor
                 # This ensures we continue from the END of the paragraph, not mid-paragraph
@@ -395,7 +525,9 @@ def resolve_editor_operation(
                         end_pos += 1
             # Guard frontmatter: ensure insertions never occur before frontmatter end
             end_pos = max(end_pos, frontmatter_end)
-            return end_pos, end_pos, text, 0.9
+            # Use confidence from fuzzy matching (0.8-1.0), but cap minimum at 0.8 for successful matches
+            final_confidence = max(confidence, 0.8)
+            return end_pos, end_pos, text, final_confidence
         else:
             # Anchor text not found - return failure signal so fallback can handle it
             logger.warning(f"⚠️ Anchor text not found: {repr(anchor_text[:50])}")
@@ -428,6 +560,11 @@ def resolve_editor_operation(
     if not original_text or op_type not in ("replace_range", "delete_range"):
         start = op_dict.get("start", 0)
         end = op_dict.get("end", 0)
+        # Handle None values (malformed operations)
+        if start is None:
+            start = 0
+        if end is None:
+            end = 0
         # Guard frontmatter: ensure operations never occur before frontmatter end
         start = max(start, frontmatter_end)
         end = max(end, start)

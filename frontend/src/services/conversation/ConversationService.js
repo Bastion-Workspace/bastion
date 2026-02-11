@@ -27,8 +27,10 @@ class ConversationService extends ApiServiceBase {
     return this.get(`/api/conversations/${conversationId}`);
   }
 
-  getConversationMessages = async (conversationId, skip = 0, limit = 100) => {
-    return this.get(`/api/conversations/${conversationId}/messages?skip=${skip}&limit=${limit}`);
+  getConversationMessages = async (conversationId, skip = 0, limit = 100, skipCheckpoint = false) => {
+    const params = new URLSearchParams({ skip, limit });
+    if (skipCheckpoint) params.set('skip_checkpoint', 'true');
+    return this.get(`/api/conversations/${conversationId}/messages?${params}`);
   }
 
   addMessageToConversation = async (conversationId, messageData) => {
@@ -92,6 +94,34 @@ class ConversationService extends ApiServiceBase {
     return this.put(`/api/conversations/${conversationId}/share/${shareId}`, {
       share_type: shareType
     });
+  }
+
+  // Attachment methods
+  uploadAttachment = async (conversationId, messageId, file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    return this.post(
+      `/api/conversations/${conversationId}/messages/${messageId}/attachments`,
+      formData,
+      {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+      }
+    );
+  }
+
+  getAttachmentUrl = (conversationId, messageId, attachmentId) => {
+    return `/api/conversations/${conversationId}/messages/${messageId}/attachments/${attachmentId}`;
+  }
+
+  deleteAttachment = async (conversationId, messageId, attachmentId) => {
+    return this.delete(`/api/conversations/${conversationId}/messages/${messageId}/attachments/${attachmentId}`);
+  }
+
+  listAttachments = async (conversationId, messageId) => {
+    return this.get(`/api/conversations/${conversationId}/messages/${messageId}/attachments`);
   }
 }
 

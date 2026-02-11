@@ -22,14 +22,7 @@ AGENT_CAPABILITIES = {
         'context_boost': 20  # Strong preference when editor matches
         # Note: Can handle queries without editor, but route_within_domain enforces editor for editing actions
     },
-    'fiction_editing_agent': {
-        'domains': ['fiction', 'writing', 'story', 'manuscript'],
-        'actions': ['observation', 'generation', 'modification'],
-        'editor_types': ['fiction'],
-        'keywords': ['chapter', 'scene', 'dialogue', 'character', 'plot', 'manuscript', 'story', 'prose'],
-        'context_boost': 20,
-        'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
-    },
+    # fiction_editing_agent removed; fiction only via writing_assistant_agent → fiction_editing_subgraph
     'story_analysis_agent': {
         'domains': ['fiction', 'writing', 'story'],
         'actions': ['analysis'],
@@ -38,43 +31,20 @@ AGENT_CAPABILITIES = {
         'context_boost': 15,
         'requires_explicit_keywords': True  # Must have explicit analysis keywords to route here
     },
-    'outline_editing_agent': {
-        'domains': ['fiction', 'writing', 'outline'],
+    'writing_assistant_agent': {
+        'domains': ['fiction', 'writing', 'outline', 'character', 'rules', 'style', 'series', 'content'],
         'actions': ['observation', 'generation', 'modification'],
-        'editor_types': ['outline'],
-        'keywords': ['outline', 'structure', 'act', 'plot points'],
+        'editor_types': ['outline', 'rules', 'style', 'character', 'nfoutline', 'article', 'substack', 'blog', 'fiction'],  # outline + article/substack/blog via subgraphs
+        'keywords': ['outline', 'structure', 'act', 'plot points', 'character', 'rules', 'style', 'series', 'build an outline', 'non-fiction outline', 'article', 'blog', 'substack'],
         'context_boost': 20,
         'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
     },
-    'character_development_agent': {
-        'domains': ['fiction', 'writing', 'character'],
-        'actions': ['observation', 'generation', 'modification'],
-        'editor_types': ['character'],
-        'keywords': ['character', 'protagonist', 'antagonist', 'backstory', 'motivation'],
-        'context_boost': 20,
-        'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
-    },
-    'rules_editing_agent': {
-        'domains': ['fiction', 'writing', 'worldbuilding'],
-        'actions': ['observation', 'generation', 'modification'],
-        'editor_types': ['rules'],
-        'keywords': ['rules', 'worldbuilding', 'canon', 'magic system', 'lore'],
-        'context_boost': 20,
-        'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
-    },
+    # Standalone agents removed; only via writing_assistant_agent → subgraphs: outline, character, rules, style, article
     'series_editing_agent': {
         'domains': ['fiction', 'writing', 'series'],
         'actions': ['observation', 'generation', 'modification'],
         'editor_types': ['series'],
         'keywords': ['series', 'synopsis', 'book status', 'series continuity', 'future books'],
-        'context_boost': 20,
-        'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
-    },
-    'style_editing_agent': {
-        'domains': ['fiction', 'writing', 'style'],
-        'actions': ['observation', 'generation', 'modification'],
-        'editor_types': ['style'],
-        'keywords': ['style guide', 'narrative voice', 'pov', 'tense', 'pacing', 'analyze examples', 'generate style'],
         'context_boost': 20,
         'requires_editor': True  # Must have active editor - no keyword bypass for editing agents
     },
@@ -85,9 +55,33 @@ AGENT_CAPABILITIES = {
         'keywords': ['weather', 'temperature', 'forecast', 'rain', 'snow', 'sunny', 'cloudy'],
         'context_boost': 0
     },
+    'email_agent': {
+        'domains': ['email', 'inbox', 'mail'],
+        'actions': ['query', 'observation', 'generation', 'modification'],
+        'editor_types': [],
+        'keywords': [
+            'email', 'inbox', 'emails', 'mail', 'message', 'messages',
+            'send email', 'reply to', 'read my email', 'check email', 'search email',
+            'unread', 'draft', 'compose', 'forward'
+        ],
+        'context_boost': 0
+    },
+    'navigation_agent': {
+        'domains': ['navigation', 'locations', 'routes', 'maps'],
+        'actions': ['observation', 'query', 'management'],
+        'editor_types': [],
+        'keywords': [
+            'create location', 'save location', 'add location', 'new location at',
+            'list locations', 'show my locations', 'saved locations', 'my locations',
+            'delete location', 'remove location',
+            'route from', 'route to', 'directions', 'how do i get', 'navigate',
+            'drive from', 'walk from', 'map', 'turn by turn', 'save route'
+        ],
+        'context_boost': 0
+    },
     'research_agent': {
-        'domains': ['general', 'research', 'information'],
-        'actions': ['query'],
+        'domains': ['general', 'research', 'information', 'management'],
+        'actions': ['query', 'analysis'],
         'editor_types': [],
         'keywords': [
             'research', 'find information', 'tell me about', 'what is',
@@ -102,14 +96,26 @@ AGENT_CAPABILITIES = {
             'where can i find', 'where do i find', 'where is',
             'tell me how', 'show me how', 'explain how',
             'instructions for', 'manual for', 'guide for', 'tutorial for',
-            'change the', 'set the', 'adjust the', 'configure the'
+            'change the', 'set the', 'adjust the', 'configure the',
+            # Image/picture search patterns
+            'find me a picture', 'find me a pic', 'find me an image', 'find me a photo',
+            'find me pictures', 'find me images', 'find me photos',
+            'show me a picture', 'show me a pic', 'show me an image', 'show me a photo',
+            'show me pictures', 'show me images', 'show me photos',
+            'get me a picture', 'get me an image', 'get me a photo',
+            'do some research', 'do research', 'can you research', 'please research',
+            # Aggregate-from-my-docs: local search + stitch (journals, entries, graph my X)
+            'from the journals', 'from my journals', 'from my documents', 'from the documents',
+            'graph my', 'chart my', 'from my entries', 'journal entries', 'my journals',
+            'from my notes', 'from the last month', 'from the last week', 'weight loss', 'track my'
         ],
-        'context_boost': 0
+        'context_boost': 0,
+        'override_continuity': True  # Explicit research requests override conversation continuity
     },
     'content_analysis_agent': {
         'domains': ['general', 'analysis', 'documents'],
         'actions': ['analysis'],
-        'editor_types': [],
+        'editor_types': ['article', 'blog', 'substack', 'nfoutline', 'reference', 'document'],
         'keywords': ['compare', 'summarize', 'analyze', 'find differences', 'find conflicts'],
         'context_boost': 0
     },
@@ -132,11 +138,35 @@ AGENT_CAPABILITIES = {
         ],
         'context_boost': 0
     },
+    'image_description_agent': {
+        'domains': ['general', 'image', 'vision'],
+        'actions': ['observation', 'query'],
+        'editor_types': [],
+        'keywords': [
+            'describe this image', 'describe the image', 'what is in this image',
+            'what\'s in this image', 'what does this image show', 'describe this picture',
+            'what do you see', 'analyze this image', 'what is this image', 'caption this',
+            'describe this photo', 'what\'s in the image', 'tell me about this image'
+        ],
+        'context_boost': 0,
+        'requires_image_context': True
+    },
     'site_crawl_agent': {
         'domains': ['research', 'web', 'information'],
         'actions': ['query'],
         'editor_types': [],
         'keywords': ['crawl site', 'crawl website', 'site crawl', 'domain crawl', 'crawl domain'],
+        'context_boost': 0
+    },
+    'security_analysis_agent': {
+        'domains': ['general', 'security', 'web'],
+        'actions': ['analysis', 'query'],
+        'editor_types': [],
+        'keywords': [
+            'security scan', 'vulnerability scan', 'security analysis', 'check for vulnerabilities',
+            'security audit', 'pen test', 'security assessment', 'exposed files', 'security headers',
+            'scan for vulnerabilities', 'security check', 'website security'
+        ],
         'context_boost': 0
     },
     'general_project_agent': {
@@ -185,31 +215,37 @@ AGENT_CAPABILITIES = {
         'context_boost': 0,
         'requires_explicit_keywords': False
     },
-    'org_agent': {
-        'domains': ['general', 'management'],
-        'actions': ['management', 'query', 'generation', 'modification'],
-        'editor_types': [],  # Can work with or without editor
+    'org_content_agent': {
+        'domains': ['general'],
+        'actions': ['query', 'observation'],  # READ-ONLY: no modification/management
+        'editor_types': ['org'],
         'keywords': [
-            'org', 'org-mode', 'orgmode', 'inbox', 'todo', 'task',
-            'add todo', 'capture', 'list todos', 'toggle done',
-            'archive done', 'schedule', 'project capture',
-            'start project', 'create project', 'new project',
-            'org file', 'inbox.org'
+            'org', 'org-mode', 'orgmode', 'todo', 'task', 
+            'project', 'what', 'show', 'list', 'find',
+            'tagged', 'tag', 'org file'
         ],
-        'context_boost': 10,  # Moderate boost when org-related keywords present
+        'context_boost': 15,  # Higher boost for org file context
+        'requires_editor': False  # Can answer without editor if query references org files
+    },
+    'org_capture_agent': {
+        'domains': ['general', 'management'],
+        'actions': ['generation', 'management'],
+        'editor_types': [],
+        'keywords': [
+            'capture', 'inbox', 'capture to inbox', 'for my inbox', 'add to inbox', 'quick capture'
+        ],
+        'context_boost': 0,
         'requires_editor': False
     },
-    'technical_hyperspace_agent': {
-        'domains': ['systems', 'engineering', 'technical', 'topology', 'failure'],
-        'actions': ['observation', 'generation', 'modification', 'analysis', 'query'],
-        'editor_types': ['system', 'systems'],  # Accept both singular and plural
-        'keywords': [
-            'system', 'systems', 'topology', 'failure mode', 'component', 'failure analysis',
-            'system design', 'system modeling', 'technical hyperspace', 'hyperspace',
-            'system architecture', 'system components', 'failure simulation'
-        ],
-        'context_boost': 20,  # Strong preference when systems editor is active
-        'requires_editor': False  # Can work without editor, but prefers systems editor
+    # technical_hyperspace_agent removed - implementation plan in dev-notes/TECHNICAL_HYPERSPACE_IMPLEMENTATION.md
+    # article/substack/blog only via writing_assistant_agent → article_writing_subgraph
+    'podcast_script_agent': {
+        'domains': ['content', 'writing', 'podcast'],
+        'actions': ['observation', 'generation', 'modification'],
+        'editor_types': ['podcast'],
+        'keywords': ['podcast', 'script', 'episode', 'show notes'],
+        'context_boost': 20,
+        'requires_editor': True
     }
 }
 
@@ -244,6 +280,8 @@ def detect_domain(
                 'character': 'fiction',
                 'rules': 'fiction',
                 'style': 'fiction',
+                'nfoutline': 'content',
+                'article': 'content',
                 'podcast': 'content',
                 'substack': 'content',
                 'blog': 'content',
@@ -279,17 +317,18 @@ def detect_domain(
                 'electronics_agent': 'electronics',
                 'fiction_editing_agent': 'fiction',
                 'story_analysis_agent': 'fiction',
-                'outline_editing_agent': 'fiction',
-                'character_development_agent': 'fiction',
-                'rules_editing_agent': 'fiction',
+                'writing_assistant_agent': 'fiction',
                 'series_editing_agent': 'fiction',
-                'style_editing_agent': 'fiction',
                 'weather_agent': 'weather',
+                'email_agent': 'email',
                 'research_agent': 'general',
                 'site_crawl_agent': 'general',
+                'security_analysis_agent': 'general',
                 'reference_agent': 'general',
                 'image_generation_agent': 'general',
-                'org_agent': 'general'
+                'org_content_agent': 'general',
+                'org_capture_agent': 'general',
+                'podcast_script_agent': 'content'
             }
             domain = agent_domain_map.get(last_agent)
             if domain:
@@ -348,6 +387,15 @@ def route_within_domain(
     query_lower = query.lower()
     editor_type = editor_context.get('type', '').strip().lower() if editor_context else ''
     
+    # If no type in editor_context, detect from filename or language
+    if not editor_type and editor_context:
+        filename = editor_context.get('filename', '').lower()
+        language = editor_context.get('language', '').lower()
+        
+        # Detect org files by extension or language
+        if filename.endswith('.org') or language == 'org':
+            editor_type = 'org'
+    
     # Domain-specific routing rules
     if domain == 'electronics':
         # Check if this is an information lookup query (how-to, instructions, documentation)
@@ -373,18 +421,17 @@ def route_within_domain(
         if action_intent == 'analysis':
             return 'story_analysis_agent'
         elif editor_type == 'outline':
-            return 'outline_editing_agent'
+            return 'writing_assistant_agent'  # Phase 1: Writing Assistant handles outline
         elif editor_type == 'character':
-            return 'character_development_agent'
+            return 'writing_assistant_agent'  # character_development_subgraph
         elif editor_type == 'rules':
-            return 'rules_editing_agent'
+            return 'writing_assistant_agent'  # Phase 2: Writing Assistant handles rules
         elif editor_type == 'series':
             return 'series_editing_agent'
         elif editor_type == 'style':
-            return 'style_editing_agent'
+            return 'writing_assistant_agent'  # Phase 3: Writing Assistant handles style
         elif editor_type == 'fiction':
-            # Only route to fiction_editing_agent if fiction editor is active
-            return 'fiction_editing_agent'
+            return 'writing_assistant_agent'
         else:
             # No editor active - route to chat_agent for general fiction discussion
             logger.info(f"🎯 FICTION DOMAIN: No active editor - routing to chat_agent instead of fiction_editing_agent")
@@ -392,9 +439,29 @@ def route_within_domain(
     
     elif domain == 'weather':
         return 'weather_agent'
+
+    elif domain == 'email':
+        return 'email_agent'
+    
+    elif domain == 'navigation':
+        return 'navigation_agent'
+    
+    elif domain == 'content':
+        if editor_type in ['article', 'substack', 'blog']:
+            return 'writing_assistant_agent'  # Article subgraph handles article/substack/blog
+        if editor_type == 'nfoutline':
+            return 'writing_assistant_agent'
+        if editor_type == 'podcast':
+            return 'podcast_script_agent'
+        logger.info(f"🎯 CONTENT DOMAIN: No matching editor (editor_type='{editor_type}') - routing to chat_agent")
+        return 'chat_agent'
     
     elif domain == 'general':
         # General domain routing
+        # Capture-to-inbox: route first (no editor required)
+        capture_patterns = ['capture to', 'for my inbox', 'add to inbox', 'to my inbox']
+        if any(p in query_lower for p in capture_patterns):
+            return 'org_capture_agent'
         # Check if reference editor is active - prefer reference_agent
         if editor_type == 'reference':
             return 'reference_agent'
@@ -404,7 +471,25 @@ def route_within_domain(
             return 'general_project_agent'
         
         if action_intent == 'query':
-            # Check for help/documentation queries first
+            # Check for org-related content queries first
+            # BUT require active org editor - org_content_agent is editor-gated
+            org_keywords = ['org', 'org-mode', 'todo', 'project', 'task']
+            if any(kw in query_lower for kw in org_keywords):
+                # Verify active org editor exists
+                if editor_context:
+                    editor_type = editor_context.get('type', '').strip().lower()
+                    if not editor_type:
+                        # Try to detect from filename or language
+                        filename = editor_context.get('filename', '').lower()
+                        language = editor_context.get('language', '').lower()
+                        if filename.endswith('.org') or language == 'org':
+                            editor_type = 'org'
+                    if editor_type == 'org':
+                        return 'org_content_agent'
+                # No active org editor - route to chat_agent instead
+                logger.info(f"🎯 ORG CONTENT QUERY: No active org editor - routing to chat_agent instead of org_content_agent")
+                return 'chat_agent'
+            # Check for help/documentation queries
             help_keywords = ['how do i', 'how can i', 'help with', 'what is [feature]', 'how does [agent] work',
                            'show me how to', 'guide for', 'instructions for', 'what can i do',
                            'what agents are available', 'available features', 'how to use', 'getting started',
@@ -422,9 +507,30 @@ def route_within_domain(
         elif action_intent == 'analysis':
             return 'content_analysis_agent'
         elif action_intent == 'observation':
+            # Check for org-related content queries
+            # BUT require active org editor - org_content_agent is editor-gated
+            org_keywords = ['org', 'org-mode', 'todo', 'project', 'task']
+            if any(kw in query_lower for kw in org_keywords):
+                # Verify active org editor exists
+                if editor_context:
+                    editor_type = editor_context.get('type', '').strip().lower()
+                    if not editor_type:
+                        # Try to detect from filename or language
+                        filename = editor_context.get('filename', '').lower()
+                        language = editor_context.get('language', '').lower()
+                        if filename.endswith('.org') or language == 'org':
+                            editor_type = 'org'
+                    if editor_type == 'org':
+                        return 'org_content_agent'
+                # No active org editor - route to chat_agent instead
+                logger.info(f"🎯 ORG CONTENT OBSERVATION: No active org editor - routing to chat_agent instead of org_content_agent")
+                return 'chat_agent'
             # Conversational statements, greetings, checking status → chat_agent
             return 'chat_agent'
         elif action_intent == 'generation':
+            # Check for org capture (add to inbox) before image generation
+            if any(p in query_lower for p in ['capture to', 'for my inbox', 'add to inbox', 'to my inbox']):
+                return 'org_capture_agent'
             # Check for image generation keywords first
             image_keywords = ['create image', 'generate image', 'generate picture', 'draw', 'visualize',
                             'image', 'picture', 'photo', 'photography', 'create a picture',
@@ -439,10 +545,10 @@ def route_within_domain(
             # Modification without specific editor context → chat_agent
             return 'chat_agent'
         elif action_intent == 'management':
-            # Management operations → check for org-related keywords
-            org_keywords = ['org', 'org-mode', 'inbox', 'todo', 'task', 'project capture']
-            if any(kw in query_lower for kw in org_keywords):
-                return 'org_agent'
+            # Org capture (add to inbox) → org_capture_agent
+            if any(p in query_lower for p in ['capture to', 'for my inbox', 'add to inbox', 'to my inbox']):
+                return 'org_capture_agent'
+            # Other management operations → chat_agent (org_content_agent is read-only)
             return 'chat_agent'
         else:
             # Default fallback
@@ -485,6 +591,28 @@ def score_agent_capabilities(
     requires_editor = capabilities.get('requires_editor', False)
     has_editor_types = bool(capabilities.get('editor_types', []))
     editing_actions = ['generation', 'modification']
+    
+    # HARD GATE: Editor-gated agents (agents with editor_types) require an active editor when editor_preference == 'prefer'
+    # This ensures that editor-gated agents like org_content_agent only route when an editor is actually open
+    if has_editor_types and editor_preference == 'prefer':
+        if not editor_context:
+            # Editor-gated agent but no active editor - block routing
+            logger.debug(f"  🚫 HARD GATE: Blocking {agent} - editor_preference is 'prefer' but no active editor, agent has editor_types: {capabilities.get('editor_types')}")
+            return 0.0
+        
+        # Verify editor type matches agent's editor_types
+        editor_type = editor_context.get('type', '').strip().lower()
+        if not editor_type:
+            # Try to detect from filename or language
+            filename = editor_context.get('filename', '').lower()
+            language = editor_context.get('language', '').lower()
+            if filename.endswith('.org') or language == 'org':
+                editor_type = 'org'
+        
+        if editor_type not in capabilities.get('editor_types', []):
+            # Editor type doesn't match - block routing
+            logger.debug(f"  🚫 HARD GATE: Blocking {agent} - editor type '{editor_type}' doesn't match agent editor_types: {capabilities.get('editor_types')}")
+            return 0.0
     
     # HARD GATE: Editor-gated agents (agents with editor_types) can ONLY route when editor_preference == 'prefer'
     # This ensures that "prefer editor" MUST be checked for editor-gated agents like reference_agent
@@ -573,6 +701,18 @@ def score_agent_capabilities(
         score += 15.0  # Strong boost to override electronics domain routing
         logger.debug(f"  +15.0 information lookup boost for research_agent")
     
+    # Strong boost for explicit research keywords (overrides continuity)
+    explicit_research_keywords = [
+        'do some research', 'do research', 'can you research', 'please research',
+        'find me a picture', 'find me a pic', 'find me an image', 'find me a photo',
+        'find me pictures', 'find me images', 'find me photos',
+        'show me a picture', 'show me a pic', 'show me an image', 'show me a photo',
+        'show me pictures', 'show me images', 'show me photos'
+    ]
+    if agent == 'research_agent' and any(kw in query_lower for kw in explicit_research_keywords):
+        score += 20.0  # Very strong boost to override continuity
+        logger.debug(f"  +20.0 explicit research keyword boost for research_agent (overrides continuity)")
+    
     # Special boost for editor-matched agents when question is about current document
     if editor_context and is_document_question and editor_type in capabilities['editor_types']:
         score += 10.0  # Strong boost for document-specific questions
@@ -617,6 +757,16 @@ def find_best_agent_match(
     # route directly to that agent (editor type is PRIMARY signal)
     if editor_preference == 'prefer' and editor_context:
         editor_type = editor_context.get('type', '').strip().lower()
+        
+        # If no type in editor_context, detect from filename or language
+        if not editor_type:
+            filename = editor_context.get('filename', '').lower()
+            language = editor_context.get('language', '').lower()
+            
+            # Detect org files by extension or language
+            if filename.endswith('.org') or language == 'org':
+                editor_type = 'org'
+        
         if editor_type:
             # Find agents that support this editor type
             matching_agents = []
@@ -687,22 +837,37 @@ def find_best_agent_match(
     # Higher threshold when switching FROM chat_agent (since it handles general conversation)
     # CRITICAL: Use continuity_agent (last_agent or primary_agent_selected) for continuity checks
     MIN_SCORE_DIFFERENCE_FOR_SWITCH = 3.0  # Default minimum score difference
-    MIN_SCORE_DIFFERENCE_FROM_CHAT = 8.0  # Higher threshold when switching from chat_agent
-    MIN_SCORE_DIFFERENCE_FROM_HYPERSPACE = 10.0  # Very high threshold when switching from technical_hyperspace_agent (maintain continuity)
+    MIN_SCORE_DIFFERENCE_FROM_CHAT = 1.5  # Lower threshold so research/local-lookup can switch from chat
+    
+    # OVERRIDE: Explicit research keywords bypass continuity (so we don't stay in chat)
+    query_lower = query.lower()
+    explicit_research_keywords = [
+        'do some research', 'do research', 'can you research', 'please research',
+        'research and ', 'research and see', 'research and find', 'research and check',
+        'see if we have', 'check if we have', 'do we have any', 'find any ',
+        'find me a picture', 'find me a pic', 'find me an image', 'find me a photo',
+        'find me pictures', 'find me images', 'find me photos',
+        'show me a picture', 'show me a pic', 'show me an image', 'show me a photo',
+        'show me pictures', 'show me images', 'show me photos',
+    ]
+    has_explicit_research = any(kw in query_lower for kw in explicit_research_keywords)
     
     if continuity_agent and continuity_agent != best_agent:
         continuity_agent_score = scores.get(continuity_agent, 0.0)
         score_difference = best_score - continuity_agent_score
         
-        # Use higher threshold when switching from chat_agent or technical_hyperspace_agent
+        # Use higher threshold when switching from chat_agent
         if continuity_agent == 'chat_agent':
             threshold = MIN_SCORE_DIFFERENCE_FROM_CHAT
-        elif continuity_agent == 'technical_hyperspace_agent':
-            threshold = MIN_SCORE_DIFFERENCE_FROM_HYPERSPACE
         else:
             threshold = MIN_SCORE_DIFFERENCE_FOR_SWITCH
         
-        if score_difference < threshold:
+        # OVERRIDE: Explicit research keywords bypass continuity check
+        if has_explicit_research and best_agent == 'research_agent':
+            # User explicitly asked for research - override continuity
+            logger.info(f"🔍 RESEARCH OVERRIDE: Explicit research keyword detected - routing to research_agent (bypassing continuity)")
+            logger.info(f"   → {continuity_agent}: {continuity_agent_score:.1f} vs {best_agent}: {best_score:.1f}")
+        elif score_difference < threshold:
             # Score difference is too small - maintain continuity
             logger.info(f"🔄 CONTINUITY: Keeping {continuity_agent} (score difference {score_difference:.1f} < {threshold} threshold)")
             logger.info(f"   → {continuity_agent}: {continuity_agent_score:.1f} vs {best_agent}: {best_score:.1f}")
@@ -722,4 +887,3 @@ def find_best_agent_match(
     logger.info(f"🎯 CAPABILITY MATCHING: Selected {best_agent} (score: {best_score:.1f}, confidence: {confidence:.2f})")
     
     return best_agent, confidence
-

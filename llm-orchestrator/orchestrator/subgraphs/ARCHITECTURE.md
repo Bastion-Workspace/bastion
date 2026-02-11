@@ -9,10 +9,10 @@ The fiction editing system has been refactored into modular subgraphs to meet th
 ```
 llm-orchestrator/orchestrator/
 ├── agents/
-│   ├── fiction_editing_agent.py          (~4,200 lines) - Main orchestration
-│   │                                      Note: Old node methods still present but unused
-│   │                                      TODO: Remove old methods in follow-up cleanup
-│   └── proofreading_agent.py             (~530 lines) - Uses context subgraph
+│   └── fiction_editing_agent.py          (~4,200 lines) - Main orchestration
+│                                          Note: Old node methods still present but unused
+│                                          TODO: Remove old methods in follow-up cleanup
+│                                          Proofreading: uses proofreading_subgraph (no standalone agent)
 ├── subgraphs/
 │   ├── fiction_context_subgraph.py       (~517 lines) - Reusable context prep
 │   └── fiction_validation_subgraph.py    (~636 lines) - Continuity & validation
@@ -44,8 +44,7 @@ llm-orchestrator/orchestrator/
 - Sets both `manuscript` and `manuscript_content` for compatibility
 
 **Used By:**
-- `fiction_editing_agent` - Full context preparation
-- `proofreading_agent` - Chapter detection and reference loading
+- `fiction_editing_agent` - Full context preparation (proofreading path uses proofreading_subgraph)
 
 ### Validation Subgraph
 

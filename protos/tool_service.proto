@@ -2,6 +2,30 @@ syntax = "proto3";
 
 package tool_service;
 
+// Audio Transcription Messages (Future Implementation)
+// Defined early so they can be used in service RPC declarations
+message TranscribeAudioRequest {
+  string audio_file_path = 1;
+  optional string language = 2;  // Language code (e.g., "en", "es", "fr") - auto-detect if not provided
+  optional string model = 3;  // Transcription model (e.g., "whisper-1", "whisper-large-v3")
+  string user_id = 4;
+}
+
+message TranscriptSegment {
+  int32 start_time_ms = 1;  // Start time in milliseconds
+  int32 end_time_ms = 2;  // End time in milliseconds
+  string text = 3;  // Transcript text for this segment
+  float confidence = 4;  // Confidence score (0.0-1.0)
+}
+
+message TranscribeAudioResponse {
+  bool success = 1;
+  string transcript = 2;
+  optional string language_detected = 3;
+  repeated TranscriptSegment segments = 4;  // Timestamped segments
+  optional string error = 5;
+}
+
 // Tool Service - Backend exposes data access to orchestrator
 service ToolService {
   // Document operations
@@ -34,6 +58,10 @@ service ToolService {
   
   // Image generation operations
   rpc GenerateImage(ImageGenerationRequest) returns (ImageGenerationResponse);
+  rpc GetReferenceImageForObject(GetReferenceImageForObjectRequest) returns (GetReferenceImageForObjectResponse);
+
+  // Audio transcription operations (future implementation)
+  rpc TranscribeAudio(TranscribeAudioRequest) returns (TranscribeAudioResponse);
   
   // Org-mode operations
   rpc SearchOrgFiles(OrgSearchRequest) returns (OrgSearchResponse);
@@ -61,10 +89,22 @@ service ToolService {
   rpc ExpandQuery(QueryExpansionRequest) returns (QueryExpansionResponse);
   rpc SearchConversationCache(CacheSearchRequest) returns (CacheSearchResponse);
   
+  // Image search operations
+  rpc SearchImages(ImageSearchRequest) returns (ImageSearchResponse);
+  
+  // Face analysis operations
+  rpc DetectFaces(DetectFacesRequest) returns (DetectFacesResponse);
+  rpc IdentifyFaces(IdentifyFacesRequest) returns (IdentifyFacesResponse);
+
+  // Object detection operations
+  rpc DetectObjects(DetectObjectsRequest) returns (DetectObjectsResponse);
+  rpc IdentifyObjects(IdentifyObjectsRequest) returns (IdentifyObjectsResponse);
+
   // File creation operations (user documents only)
   rpc CreateUserFile(CreateUserFileRequest) returns (CreateUserFileResponse);
   rpc CreateUserFolder(CreateUserFolderRequest) returns (CreateUserFolderResponse);
-  
+  rpc GetFolderTree(GetFolderTreeRequest) returns (GetFolderTreeResponse);
+
   // Document editing operations (user documents only)
   rpc UpdateDocumentMetadata(UpdateDocumentMetadataRequest) returns (UpdateDocumentMetadataResponse);
   rpc UpdateDocumentContent(UpdateDocumentContentRequest) returns (UpdateDocumentContentResponse);
@@ -87,6 +127,33 @@ service ToolService {
   rpc DesignSystemComponent(DesignSystemComponentRequest) returns (DesignSystemComponentResponse);
   rpc SimulateSystemFailure(SimulateSystemFailureRequest) returns (SimulateSystemFailureResponse);
   rpc GetSystemTopology(GetSystemTopologyRequest) returns (GetSystemTopologyResponse);
+  
+  // Data Workspace operations
+  rpc ListDataWorkspaces(ListDataWorkspacesRequest) returns (ListDataWorkspacesResponse);
+  rpc GetWorkspaceSchema(GetWorkspaceSchemaRequest) returns (GetWorkspaceSchemaResponse);
+  rpc QueryDataWorkspace(QueryDataWorkspaceRequest) returns (QueryDataWorkspaceResponse);
+
+  // Navigation operations (locations and routes)
+  rpc CreateLocation(CreateLocationRequest) returns (CreateLocationResponse);
+  rpc ListLocations(ListLocationsRequest) returns (ListLocationsResponse);
+  rpc DeleteLocation(DeleteLocationRequest) returns (DeleteLocationResponse);
+  rpc ComputeRoute(ComputeRouteRequest) returns (ComputeRouteResponse);
+  rpc SaveRoute(NavSaveRouteRequest) returns (NavSaveRouteResponse);
+  rpc ListSavedRoutes(ListSavedRoutesRequest) returns (ListSavedRoutesResponse);
+  rpc DeleteSavedRoute(DeleteSavedRouteRequest) returns (DeleteSavedRouteResponse);
+
+  // Security analysis operations
+  rpc AnalyzeWebsiteSecurity(SecurityAnalysisRequest) returns (SecurityAnalysisResponse);
+
+  // Email operations (via connections-service)
+  rpc GetEmails(GetEmailsRequest) returns (GetEmailsResponse);
+  rpc SearchEmails(SearchEmailsRequest) returns (SearchEmailsResponse);
+  rpc GetEmailThread(GetEmailThreadRequest) returns (GetEmailThreadResponse);
+  rpc SendEmail(SendEmailRequest) returns (SendEmailResponse);
+  rpc ReplyToEmail(ReplyToEmailRequest) returns (ReplyToEmailResponse);
+  rpc GetEmailFolders(GetEmailFoldersRequest) returns (GetEmailFoldersResponse);
+  rpc GetEmailStatistics(GetEmailStatisticsRequest) returns (GetEmailStatisticsResponse);
+  rpc MarkEmailRead(MarkEmailReadRequest) returns (MarkEmailReadResponse);
 }
 
 // Document Messages
@@ -95,6 +162,7 @@ message SearchRequest {
   string query = 2;
   int32 limit = 3;
   repeated string filters = 4;
+  repeated string exclude_document_ids = 5;
 }
 
 message SearchResponse {
@@ -418,7 +486,7 @@ message OrgInboxItemDetails {
 message AddOrgInboxItemRequest {
   string user_id = 1;
   string text = 2;
-  string kind = 3;  // "todo", "event", "contact", "checkbox"
+  string kind = 3;  // "todo", "note", "event", "contact", "checkbox"
   optional string schedule = 4;  // org timestamp
   optional string repeater = 5;  // +1w, .+1m, etc.
   repeated string tags = 6;
@@ -668,6 +736,37 @@ message CacheEntry {
   float relevance_score = 4;
 }
 
+// Image Search Messages
+message ImageSearchRequest {
+  string query = 1;
+  string image_type = 2;  // Optional: comic, artwork, meme, screenshot, etc.
+  string date = 3;  // Optional: YYYY-MM-DD format
+  string author = 4;  // Optional: author/creator name
+  string series = 5;  // Optional: series/comic name (e.g., "Dilbert")
+  int32 limit = 6;  // Maximum number of results
+  string user_id = 7;
+  bool is_random = 8;  // If true, return random images instead of semantic search
+  repeated string exclude_document_ids = 9;  // Document IDs already shown to user (for "show me more")
+}
+
+message ImageSearchResponse {
+  string results = 1;  // Markdown-formatted results with image URLs (backward compat)
+  bool success = 2;
+  string error = 3;
+  repeated ImageMetadata metadata = 4;  // Structured metadata for LLM
+  optional string structured_images_json = 5;  // JSON array of {url, alt_text, type, metadata} for UI/Telegram
+}
+
+message ImageMetadata {
+  string title = 1;
+  string date = 2;
+  string series = 3;
+  string author = 4;
+  string content = 5;  // Full description from metadata
+  repeated string tags = 6;
+  string image_type = 7;
+}
+
 // Image Generation Messages
 message ImageGenerationRequest {
   string prompt = 1;
@@ -677,6 +776,12 @@ message ImageGenerationRequest {
   int32 num_images = 5;
   optional string negative_prompt = 6;
   string user_id = 7;
+  optional string model = 8;  // User's preferred image generation model (overrides settings)
+  
+  // Image-to-image generation support
+  optional bytes reference_image_data = 9;  // Base64-encoded reference image
+  optional string reference_image_url = 10;  // Alternative: URL to reference image
+  optional float reference_strength = 11;  // 0.0-1.0, default 0.5 (how much to follow reference)
 }
 
 message ImageGenerationResponse {
@@ -696,6 +801,18 @@ message GeneratedImage {
   int32 width = 4;
   int32 height = 5;
   string format = 6;
+}
+
+message GetReferenceImageForObjectRequest {
+  string object_name = 1;  // e.g. "Farmall Tractor", "BMW i3"
+  string user_id = 2;
+}
+
+message GetReferenceImageForObjectResponse {
+  bool success = 1;
+  optional bytes reference_image_data = 2;  // Image bytes for use as reference
+  optional string document_id = 3;
+  optional string error = 4;
 }
 
 // File Creation Messages
@@ -733,6 +850,23 @@ message CreateUserFolderResponse {
   optional string parent_folder_id = 4;
   string message = 5;
   optional string error = 6;
+}
+
+message GetFolderTreeRequest {
+  string user_id = 1;
+}
+
+message FolderInfo {
+  string folder_id = 1;
+  string name = 2;
+  string parent_folder_id = 3;
+  string collection_type = 4;
+  int32 document_count = 5;
+}
+
+message GetFolderTreeResponse {
+  repeated FolderInfo folders = 1;
+  int32 total_folders = 2;
 }
 
 // Document Editing Messages
@@ -985,4 +1119,456 @@ message GetSystemTopologyResponse {
   int32 edge_count = 4;
   repeated string redundancy_groups = 5;
   optional string error = 6;
+}
+
+// Data Workspace Messages
+message ListDataWorkspacesRequest {
+  string user_id = 1;
+}
+
+message ListDataWorkspacesResponse {
+  repeated DataWorkspaceInfo workspaces = 1;
+  int32 total_count = 2;
+}
+
+message DataWorkspaceInfo {
+  string workspace_id = 1;
+  string name = 2;
+  string description = 3;
+  string icon = 4;
+  string color = 5;
+  bool is_pinned = 6;
+}
+
+message GetWorkspaceSchemaRequest {
+  string workspace_id = 1;
+  string user_id = 2;
+}
+
+message GetWorkspaceSchemaResponse {
+  string workspace_id = 1;
+  repeated TableSchema tables = 2;
+  int32 total_tables = 3;
+  optional string error = 4;
+}
+
+message TableSchema {
+  string table_id = 1;
+  string name = 2;
+  string description = 3;
+  string database_id = 4;
+  string database_name = 5;
+  repeated ColumnInfo columns = 6;
+  int32 row_count = 7;
+}
+
+message ColumnInfo {
+  string name = 1;
+  string type = 2;  // e.g., "text", "number", "date", "boolean"
+  bool is_nullable = 3;
+}
+
+message QueryDataWorkspaceRequest {
+  string workspace_id = 1;
+  string query = 2;  // SQL query or natural language query
+  string query_type = 3;  // "sql" or "natural_language"
+  string user_id = 4;
+  int32 limit = 5;  // Maximum rows to return (default: 100)
+}
+
+message QueryDataWorkspaceResponse {
+  bool success = 1;
+  repeated string column_names = 2;
+  string results_json = 3;  // JSON array of result rows
+  int32 result_count = 4;
+  int32 execution_time_ms = 5;
+  string generated_sql = 6;  // SQL that was executed (for transparency)
+  optional string error_message = 7;
+}
+
+// Face Analysis Messages
+message DetectFacesRequest {
+  string attachment_path = 1;  // Full path to image file
+  string user_id = 2;
+}
+
+message FaceDetection {
+  repeated float face_encoding = 1;  // 128-dim vector
+  int32 bbox_x = 2;
+  int32 bbox_y = 3;
+  int32 bbox_width = 4;
+  int32 bbox_height = 5;
+}
+
+message DetectFacesResponse {
+  bool success = 1;
+  repeated FaceDetection faces = 2;
+  int32 face_count = 3;
+  optional int32 image_width = 4;
+  optional int32 image_height = 5;
+  optional string error = 6;
+}
+
+message IdentifyFacesRequest {
+  string attachment_path = 1;  // Full path to image file
+  string user_id = 2;
+  optional float confidence_threshold = 3;  // Default 0.85
+}
+
+message IdentifiedFace {
+  string identity_name = 1;
+  float confidence = 2;
+  int32 bbox_x = 3;
+  int32 bbox_y = 4;
+  int32 bbox_width = 5;
+  int32 bbox_height = 6;
+}
+
+message IdentifyFacesResponse {
+  bool success = 1;
+  repeated IdentifiedFace identified_faces = 2;
+  int32 face_count = 3;
+  int32 identified_count = 4;
+  optional string error = 5;
+}
+
+// Object detection messages
+message DetectObjectsRequest {
+  string attachment_path = 1;
+  string document_id = 2;
+  string user_id = 3;
+  repeated string class_filter = 4;
+  float confidence_threshold = 5;
+  repeated string semantic_descriptions = 6;
+}
+
+message DetectedObjectProto {
+  string class_name = 1;
+  int32 class_id = 2;
+  float confidence = 3;
+  int32 bbox_x = 4;
+  int32 bbox_y = 5;
+  int32 bbox_width = 6;
+  int32 bbox_height = 7;
+  string detection_method = 8;
+  string matched_description = 9;
+}
+
+message DetectObjectsResponse {
+  bool success = 1;
+  repeated DetectedObjectProto objects = 2;
+  int32 object_count = 3;
+  optional int32 image_width = 4;
+  optional int32 image_height = 5;
+  optional float processing_time_seconds = 6;
+  optional string error = 7;
+}
+
+message IdentifyObjectsRequest {
+  string attachment_path = 1;
+  string document_id = 2;
+  string user_id = 3;
+  repeated string class_filter = 4;
+  float confidence_threshold = 5;
+  repeated string semantic_descriptions = 6;
+  bool match_user_annotations = 7;
+  float user_annotation_threshold = 8;
+}
+
+message IdentifiedObjectProto {
+  string class_name = 1;
+  float confidence = 2;
+  int32 bbox_x = 3;
+  int32 bbox_y = 4;
+  int32 bbox_width = 5;
+  int32 bbox_height = 6;
+  string detection_method = 7;
+  optional string annotation_id = 8;
+}
+
+message IdentifyObjectsResponse {
+  bool success = 1;
+  repeated IdentifiedObjectProto identified_objects = 2;
+  int32 object_count = 3;
+  int32 identified_count = 4;
+  optional string error = 5;
+}
+
+// Navigation Messages (locations and routes)
+message CreateLocationRequest {
+  string user_id = 1;
+  string name = 2;
+  string address = 3;
+  optional double latitude = 4;
+  optional double longitude = 5;
+  optional string notes = 6;
+  bool is_global = 7;
+  optional string metadata_json = 8;
+  string user_role = 9;  // "user" or "admin"
+}
+
+message CreateLocationResponse {
+  bool success = 1;
+  string location_id = 2;
+  string user_id = 3;
+  string name = 4;
+  optional string address = 5;
+  double latitude = 6;
+  double longitude = 7;
+  optional string notes = 8;
+  bool is_global = 9;
+  optional string metadata_json = 10;
+  optional string created_at = 11;
+  optional string updated_at = 12;
+  optional string error = 13;
+}
+
+message ListLocationsRequest {
+  string user_id = 1;
+  string user_role = 2;
+}
+
+message LocationProto {
+  string location_id = 1;
+  string user_id = 2;
+  string name = 3;
+  optional string address = 4;
+  double latitude = 5;
+  double longitude = 6;
+  optional string notes = 7;
+  bool is_global = 8;
+  optional string metadata_json = 9;
+  optional string created_at = 10;
+  optional string updated_at = 11;
+}
+
+message ListLocationsResponse {
+  bool success = 1;
+  repeated LocationProto locations = 2;
+  int32 total = 3;
+  optional string error = 4;
+}
+
+message DeleteLocationRequest {
+  string user_id = 1;
+  string location_id = 2;
+  string user_role = 3;
+}
+
+message DeleteLocationResponse {
+  bool success = 1;
+  optional string message = 2;
+  optional string error = 3;
+}
+
+message ComputeRouteRequest {
+  string user_id = 1;
+  optional string from_location_id = 2;
+  optional string to_location_id = 3;
+  optional string coordinates = 4;  // "lat1,lng1;lat2,lng2"
+  string profile = 5;  // driving, car, bike, foot
+  string user_role = 6;
+}
+
+message ComputeRouteResponse {
+  bool success = 1;
+  string geometry_json = 2;
+  string legs_json = 3;
+  double distance = 4;
+  double duration = 5;
+  string waypoints_json = 6;
+  optional string error = 7;
+}
+
+message NavSaveRouteRequest {
+  string user_id = 1;
+  string name = 2;
+  string waypoints_json = 3;
+  string geometry_json = 4;
+  string steps_json = 5;
+  double distance_meters = 6;
+  double duration_seconds = 7;
+  string profile = 8;
+  string user_role = 9;
+}
+
+message NavSaveRouteResponse {
+  bool success = 1;
+  string route_id = 2;
+  string user_id = 3;
+  string name = 4;
+  string waypoints_json = 5;
+  string geometry_json = 6;
+  string steps_json = 7;
+  double distance_meters = 8;
+  double duration_seconds = 9;
+  string profile = 10;
+  optional string created_at = 11;
+  optional string updated_at = 12;
+  optional string error = 13;
+}
+
+message ListSavedRoutesRequest {
+  string user_id = 1;
+  string user_role = 2;
+}
+
+message SavedRouteProto {
+  string route_id = 1;
+  string user_id = 2;
+  string name = 3;
+  string waypoints_json = 4;
+  string geometry_json = 5;
+  string steps_json = 6;
+  double distance_meters = 7;
+  double duration_seconds = 8;
+  string profile = 9;
+  optional string created_at = 10;
+  optional string updated_at = 11;
+}
+
+message ListSavedRoutesResponse {
+  bool success = 1;
+  repeated SavedRouteProto routes = 2;
+  int32 total = 3;
+  optional string error = 4;
+}
+
+message DeleteSavedRouteRequest {
+  string user_id = 1;
+  string route_id = 2;
+  string user_role = 3;
+}
+
+message DeleteSavedRouteResponse {
+  bool success = 1;
+  optional string message = 2;
+  optional string error = 3;
+}
+
+// Security analysis messages
+message SecurityAnalysisRequest {
+  string target_url = 1;
+  string user_id = 2;
+  string scan_depth = 3;  // "basic", "intermediate", "comprehensive"
+}
+
+message SecurityFinding {
+  string category = 1;
+  string severity = 2;
+  string title = 3;
+  string description = 4;
+  optional string url = 5;
+  optional string evidence = 6;
+  string remediation = 7;
+}
+
+message SecurityAnalysisResponse {
+  bool success = 1;
+  string target_url = 2;
+  string scan_timestamp = 3;
+  repeated SecurityFinding findings = 4;
+  map<string, string> technology_stack = 5;
+  map<string, string> security_headers = 6;
+  float risk_score = 7;
+  string summary = 8;
+  string disclaimer = 9;
+  optional string error = 10;
+}
+
+// Email operation messages (result strings are LLM-ready formatted text)
+message GetEmailsRequest {
+  string user_id = 1;
+  string folder = 2;   // e.g. "inbox"
+  int32 top = 3;
+  int32 skip = 4;
+  bool unread_only = 5;
+}
+
+message GetEmailsResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message SearchEmailsRequest {
+  string user_id = 1;
+  string query = 2;
+  int32 top = 3;
+  string from_address = 4;
+}
+
+message SearchEmailsResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message GetEmailThreadRequest {
+  string user_id = 1;
+  string conversation_id = 2;
+}
+
+message GetEmailThreadResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message SendEmailRequest {
+  string user_id = 1;
+  repeated string to = 2;
+  string subject = 3;
+  string body = 4;
+  repeated string cc = 5;
+}
+
+message SendEmailResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message ReplyToEmailRequest {
+  string user_id = 1;
+  string message_id = 2;
+  string body = 3;
+  bool reply_all = 4;
+}
+
+message ReplyToEmailResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message GetEmailFoldersRequest {
+  string user_id = 1;
+}
+
+message GetEmailFoldersResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message GetEmailStatisticsRequest {
+  string user_id = 1;
+}
+
+message GetEmailStatisticsResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message MarkEmailReadRequest {
+  string user_id = 1;
+  string message_id = 2;
+}
+
+message MarkEmailReadResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
 }

@@ -91,10 +91,10 @@ class BaseAgent:
             # website_crawler_agent removed - migrated to llm-orchestrator gRPC service
             # Content and Writing Agents
             "fiction_editing_agent": AgentType.FICTION_EDITING_AGENT,
-            "outline_editing_agent": AgentType.OUTLINE_EDITING_AGENT,
+            # outline_editing_agent removed - outline handled by Writing Assistant → outline_editing_subgraph
             # character_development_agent removed - migrated to llm-orchestrator gRPC service
             # rules_editing_agent removed - migrated to llm-orchestrator gRPC service
-            "style_editing_agent": AgentType.STYLE_EDITING_AGENT,
+            # style_editing_agent removed - style handled by Writing Assistant → style_editing_subgraph
             # SysMLAgent removed - not fully fleshed out
             # story_analysis_agent removed - migrated to llm-orchestrator gRPC service
             # content_analysis_agent removed - migrated to llm-orchestrator gRPC service
@@ -103,7 +103,7 @@ class BaseAgent:
             # podcast_script_agent removed - migrated to llm-orchestrator gRPC service
             # substack_agent removed - migrated to llm-orchestrator gRPC service
             # email_agent removed - not used, functionality not migrated
-            "messaging_agent": AgentType.MESSAGING_AGENT,
+            # messaging_agent removed - not used, no agent implementation
             # entertainment_agent removed - migrated to llm-orchestrator gRPC service
             # Intent and Intelligence Agents
             # DEPRECATED: simple_intent_agent removed - intent classification now in llm-orchestrator

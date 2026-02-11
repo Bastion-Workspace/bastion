@@ -587,13 +587,13 @@ class AuthenticationService:
                 logger.error("❌ Auth service not initialized")
                 return None
                 
-            logger.info(f"🔍 Verifying JWT token: {token[:50]}...")
+            logger.debug(f"🔍 Verifying JWT token: {token[:50]}...")
             payload = self.verify_jwt_token(token)
             if not payload:
                 logger.warning("❌ JWT token verification failed")
                 return None
             
-            logger.info(f"✅ JWT token verified for user: {payload.get('username', 'unknown')}")
+            logger.debug(f"✅ JWT token verified for user: {payload.get('username', 'unknown')}")
             
             token_hash = hashlib.sha256(token.encode()).hexdigest()
             

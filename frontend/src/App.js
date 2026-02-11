@@ -14,6 +14,9 @@ import { ChatSidebarProvider, useChatSidebar } from './contexts/ChatSidebarConte
 import { MessagingProvider } from './contexts/MessagingContext';
 import { TeamProvider } from './contexts/TeamContext';
 import { MusicProvider } from './contexts/MediaContext';
+import { ImageLightboxProvider } from './components/common/ImageLightbox';
+import { LearningProvider } from './contexts/LearningContext';
+import LearningQuizOverlay from './components/LearningQuizOverlay';
 import ModelConfigurationNotification from './components/ModelConfigurationNotification';
 import Navigation from './components/Navigation';
 import ChatSidebar from './components/ChatSidebar';
@@ -29,6 +32,7 @@ import TeamDetailPage from './components/teams/TeamDetailPage';
 import OrgQuickCapture from './components/OrgQuickCapture';
 import StatusBar from './components/StatusBar';
 import MediaPage from './components/MediaPage';
+import MapPage from './components/maps/MapPage';
 
 import PDFTextLayerEditor from './components/PDFTextLayerEditor';
 
@@ -138,6 +142,11 @@ const MainContent = () => {
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/media" element={<MediaPage />} />
               <Route path="/music" element={<MediaPage />} />
+              <Route path="/map" element={
+                <ProtectedRoute>
+                  <MapPage />
+                </ProtectedRoute>
+              } />
             </Routes>
           </motion.div>
         </Container>
@@ -233,6 +242,8 @@ function App() {
           <TeamProvider>
           <MusicProvider>
           <EditorProvider>
+          <ImageLightboxProvider>
+          <LearningProvider>
           <div className="App">
             <Routes>
               {/* Public route */}
@@ -246,10 +257,13 @@ function App() {
                   <StatusBar />
                   <MessagingDrawer />
                   <ModelConfigurationNotification />
+                  <LearningQuizOverlay />
                 </ProtectedRoute>
               } />
             </Routes>
           </div>
+          </LearningProvider>
+          </ImageLightboxProvider>
           </EditorProvider>
           </MusicProvider>
           </TeamProvider>

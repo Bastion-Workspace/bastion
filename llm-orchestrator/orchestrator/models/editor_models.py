@@ -1,8 +1,8 @@
 """
-Editor Operation Models for Fiction and Outline Editing Agents
+Editor Operation Models for Fiction and Outline Editing Workflows
 
 Provides Pydantic models for structured editor operations with validation.
-Used by fiction_editing_agent and outline_editing_agent for type-safe operation handling.
+Used by fiction_editing_agent and outline_editing_subgraph for type-safe operation handling.
 """
 
 from typing import List, Literal, Optional
@@ -144,7 +144,7 @@ class EditorOperation(BaseModel):
 class ManuscriptEdit(BaseModel):
     """Structured, validated edit plan for fiction and outline manuscript changes.
     
-    Used by both fiction_editing_agent and outline_editing_agent for type-safe
+    Used by both fiction_editing_agent and outline_editing_subgraph for type-safe
     operation planning and validation.
     """
     target_filename: str = Field(description="The manuscript filename the operations target")

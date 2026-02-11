@@ -7,7 +7,6 @@ Roosevelt's "Structured Logging" System - Dual format for AI analysis and human 
 
 import logging
 import sys
-from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
 import structlog
@@ -232,11 +231,7 @@ class CleanFormatter(logging.Formatter):
 
 
 def setup_logging():
-    """Configure structured logging for the application"""
-    
-    # Create logs directory if it doesn't exist
-    logs_dir = Path(settings.LOGS_DIR)
-    logs_dir.mkdir(exist_ok=True)
+    """Configure structured logging for the application - stdout only for Docker"""
     
     # Configure structlog
     structlog.configure(
@@ -260,25 +255,25 @@ def setup_logging():
     # Create formatter that strips trailing whitespace
     formatter = CleanFormatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     
-    # Create handlers with clean formatter
+    # Create console handler only - Docker captures stdout/stderr
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(formatter)
     
-    file_handler = logging.FileHandler(logs_dir / "codex.log")
-    file_handler.setFormatter(formatter)
-    
-    # Configure standard logging
+    # Configure standard logging - stdout only, no file I/O
     logging.basicConfig(
         level=getattr(logging, settings.LOG_LEVEL.upper()),
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-        handlers=[console_handler, file_handler],
+        handlers=[console_handler],
         force=True  # Override any existing configuration
     )
     
     # Set specific log levels for noisy libraries
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("openai._base_client").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("qdrant_client").setLevel(logging.WARNING)
+    logging.getLogger("grpc._cython.cygrpc").setLevel(logging.WARNING)
     
     logger = logging.getLogger(__name__)
     logger.info("🔧 Logging configured successfully")

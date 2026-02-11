@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Box,
   Typography,
@@ -46,17 +46,53 @@ import { useMusic } from '../contexts/MediaContext';
 import DeezerSearch from './music/DeezerSearch';
 
 const MediaPage = () => {
-  const [activeTab, setActiveTab] = useState(0); // 0: Music, 1: Audiobooks, 2: Podcasts
-  const [selectedView, setSelectedView] = useState('albums'); // 'albums', 'artists', 'playlists'
-  const [selectedItem, setSelectedItem] = useState(null);
-  const [selectedItemType, setSelectedItemType] = useState(null);
-  const [selectedArtist, setSelectedArtist] = useState(null); // Track selected artist for hierarchical nav
-  const [selectedSeries, setSelectedSeries] = useState(null); // Track selected series for Audiobooks
-  const [selectedAuthor, setSelectedAuthor] = useState(null); // Track selected author for Audiobooks series navigation
+  // Load persisted state from localStorage on mount
+  const loadPersistedState = () => {
+    try {
+      const saved = localStorage.getItem('mediaPageState');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          activeTab: parsed.activeTab ?? 0,
+          selectedView: parsed.selectedView ?? 'albums',
+          selectedItem: parsed.selectedItem ?? null,
+          selectedItemType: parsed.selectedItemType ?? null,
+          selectedArtist: parsed.selectedArtist ?? null,
+          selectedSeries: parsed.selectedSeries ?? null,
+          selectedAuthor: parsed.selectedAuthor ?? null,
+          searchQuery: parsed.searchQuery ?? '',
+          itemsToShow: parsed.itemsToShow ?? 200,
+        };
+      }
+    } catch (e) {
+      console.error('Failed to load media page state:', e);
+    }
+    return {
+      activeTab: 0,
+      selectedView: 'albums',
+      selectedItem: null,
+      selectedItemType: null,
+      selectedArtist: null,
+      selectedSeries: null,
+      selectedAuthor: null,
+      searchQuery: '',
+      itemsToShow: 200,
+    };
+  };
+
+  const initialState = loadPersistedState();
+  
+  const [activeTab, setActiveTab] = useState(initialState.activeTab); // 0: Music, 1: Audiobooks, 2: Podcasts
+  const [selectedView, setSelectedView] = useState(initialState.selectedView); // 'albums', 'artists', 'playlists'
+  const [selectedItem, setSelectedItem] = useState(initialState.selectedItem);
+  const [selectedItemType, setSelectedItemType] = useState(initialState.selectedItemType);
+  const [selectedArtist, setSelectedArtist] = useState(initialState.selectedArtist); // Track selected artist for hierarchical nav
+  const [selectedSeries, setSelectedSeries] = useState(initialState.selectedSeries); // Track selected series for Audiobooks
+  const [selectedAuthor, setSelectedAuthor] = useState(initialState.selectedAuthor); // Track selected author for Audiobooks series navigation
   const [selectedTracks, setSelectedTracks] = useState(new Set()); // Multi-select tracks
   const [contextMenu, setContextMenu] = useState(null); // Context menu state
-  const [searchQuery, setSearchQuery] = useState(''); // Search filter
-  const [itemsToShow, setItemsToShow] = useState(200); // Pagination: show first 200 items
+  const [searchQuery, setSearchQuery] = useState(initialState.searchQuery); // Search filter
+  const [itemsToShow, setItemsToShow] = useState(initialState.itemsToShow); // Pagination: show first 200 items
   const [searchDialogOpen, setSearchDialogOpen] = useState(false); // Deezer search dialog
   const [trackSortField, setTrackSortField] = useState(() => {
     // Load from localStorage
@@ -74,7 +110,27 @@ const MediaPage = () => {
       return 'asc';
     }
   });
-  const { playTrack } = useMusic();
+  const { playTrack, shuffleMode } = useMusic();
+
+  // Persist state to localStorage whenever relevant state changes
+  useEffect(() => {
+    try {
+      const stateToSave = {
+        activeTab,
+        selectedView,
+        selectedItem,
+        selectedItemType,
+        selectedArtist,
+        selectedSeries,
+        selectedAuthor,
+        searchQuery,
+        itemsToShow,
+      };
+      localStorage.setItem('mediaPageState', JSON.stringify(stateToSave));
+    } catch (e) {
+      console.error('Failed to save media page state:', e);
+    }
+  }, [activeTab, selectedView, selectedItem, selectedItemType, selectedArtist, selectedSeries, selectedAuthor, searchQuery, itemsToShow]);
 
   // Fetch all configured sources
   const { data: sourcesData } = useQuery(
@@ -249,7 +305,11 @@ const MediaPage = () => {
     try {
       const tracks = await apiService.music.getTracks(item.id, type, serviceType);
       if (tracks.tracks && tracks.tracks.length > 0) {
-        playTrack(tracks.tracks[0], tracks.tracks, item.id);
+        // If shuffle is enabled, pick a random track to start with
+        const startTrack = shuffleMode && tracks.tracks.length > 1
+          ? tracks.tracks[Math.floor(Math.random() * tracks.tracks.length)]
+          : tracks.tracks[0];
+        playTrack(startTrack, tracks.tracks, item.id);
       }
     } catch (error) {
       console.error('Failed to play item:', error);

@@ -384,8 +384,8 @@ async def _async_poll_rss_feeds(
         
         update_task_progress(task, 3, 4, "Polling RSS feeds...")
         
-        # Process RSS feeds
-        result = await rss_agent._process_request(state)
+        # Process RSS feeds (RSSBackgroundAgent exposes process(), not _process_request)
+        result = await rss_agent.process(state)
         
         update_task_progress(task, 4, 4, "RSS feed polling completed")
         

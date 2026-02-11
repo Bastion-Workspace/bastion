@@ -823,7 +823,7 @@ class TeamService:
                 # Set user context for RLS
                 await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 
-                logger.info(f"📊 Fetching unread counts for user {user_id}")
+                logger.debug(f"📊 Fetching unread counts for user {user_id}")
                 rows = await conn.fetch("""
                     SELECT 
                         tm.team_id,
@@ -847,12 +847,12 @@ class TeamService:
                     is_muted = row.get('muted', False)
                     unread_count = row['posts_after_last_read'] if not is_muted else 0
                     
-                    logger.info(f"  Team {team_id}: muted={is_muted}, posts_after_last_read={row['posts_after_last_read']}, will show={unread_count}")
+                    logger.debug(f"  Team {team_id}: muted={is_muted}, posts_after_last_read={row['posts_after_last_read']}, will show={unread_count}")
                     
                     if unread_count > 0:
                         result[team_id] = unread_count
                 
-                logger.info(f"📊 Final unread counts for user {user_id}: {result}")
+                logger.debug(f"📊 Final unread counts for user {user_id}: {result}")
                 return result
         
         except Exception as e:

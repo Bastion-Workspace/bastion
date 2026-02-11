@@ -163,121 +163,17 @@ class ElectronicsSaveNodes:
             
             routing_items = save_plan.get("routing", [])
             
-            # **PHASE 1: CREATE NEW REFERENCE FILES**
-            # 🔒 Use locked target_document_id to prevent race conditions during tab switches
+            # Locked target_document_id for plan edits (prevents race conditions during tab switches)
             project_plan_doc_id = (
-                metadata.get("target_document_id") or 
+                metadata.get("target_document_id") or
                 (active_editor.get("document_id") if active_editor else None)
             )
-            
-            # Defensive logging: warn if document_id differs from active_editor
             if active_editor:
                 active_editor_doc_id = active_editor.get("document_id")
                 if project_plan_doc_id and active_editor_doc_id and project_plan_doc_id != active_editor_doc_id:
                     logger.warning(f"⚠️ RACE CONDITION DETECTED (electronics_save): target={project_plan_doc_id}, active_editor={active_editor_doc_id}")
-            
-            new_files_created = []
-            
-            for item in routing_items[:]:  # Iterate over copy
-                create_new = item.get("create_new_file", False)
-                if not create_new:
-                    continue
-                
-                suggested_filename = item.get("suggested_filename", "")
-                file_summary = item.get("file_summary", "")
-                
-                if not suggested_filename:
-                    logger.warning("create_new_file=true but no suggested_filename provided - skipping")
-                    continue
-                
-                logger.info(f"🔌 Creating new reference file: {suggested_filename} ({file_summary})")
-                
-                try:
-                    # Determine folder from active_editor
-                    # PRIORITY 1: Use folder_id if available (most reliable)
-                    folder_id = None
-                    folder_path = None
-                    
-                    if active_editor:
-                        folder_id = active_editor.get("folder_id")
-                        if folder_id:
-                            logger.info(f"🔌 Using folder_id from active_editor: {folder_id}")
-                    
-                    # PRIORITY 2: Extract relative folder_path from canonical_path
-                    if not folder_id and active_editor and active_editor.get("canonical_path"):
-                        from pathlib import Path
-                        canonical_path = active_editor.get("canonical_path")
-                        try:
-                            # Parse canonical_path to get folder hierarchy
-                            # Format: /app/uploads/Users/{username}/Projects/NGen Oscillators/project_plan.md
-                            path_parts = Path(canonical_path).parts
-                            
-                            # Find "Users" to start folder path
-                            if "Users" in path_parts:
-                                users_idx = path_parts.index("Users")
-                                if users_idx + 2 < len(path_parts) - 1:  # username + at least one folder + filename
-                                    # Get folder parts (skip username and filename)
-                                    folder_parts = path_parts[users_idx + 2:-1]
-                                    if folder_parts:
-                                        folder_path = "/".join(folder_parts)
-                                        logger.info(f"🔌 Extracted folder_path from canonical_path: {folder_path}")
-                        except Exception as e:
-                            logger.warning(f"⚠️ Failed to extract folder_path from canonical_path: {e}")
-                    
-                    if not folder_id and not folder_path:
-                        logger.warning("⚠️ Could not determine folder_id or folder_path - file will be created in My Documents root")
-                    
-                    # Create the new file with initial frontmatter
-                    from orchestrator.tools.file_creation_tools import create_user_file_tool
-                    initial_content = f"""---
-type: electronics
-summary: {file_summary}
----
+            new_files_created = []  # File creation disabled; agent suggests files only
 
-# {suggested_filename.replace('.md', '').replace('-', ' ').title()}
-
-{item.get('content', '')}
-"""
-                    
-                    new_doc_id = await create_user_file_tool(
-                        filename=suggested_filename,
-                        content=initial_content,
-                        user_id=user_id,
-                        folder_id=folder_id,
-                        folder_path=folder_path
-                    )
-                    
-                    logger.info(f"✅ Created new reference file: {suggested_filename} (doc_id: {new_doc_id})")
-                    
-                    # Add to project plan frontmatter
-                    if project_plan_doc_id:
-                        from orchestrator.utils.document_batch_editor import DocumentEditBatch
-                        plan_batch = DocumentEditBatch(project_plan_doc_id, user_id, "electronics_agent")
-                        await plan_batch.initialize()
-                        
-                        # Determine the appropriate frontmatter list based on file type
-                        list_key = "files"  # Default
-                        if "component" in suggested_filename.lower():
-                            list_key = "components"
-                        elif "protocol" in suggested_filename.lower() or "communication" in suggested_filename.lower():
-                            list_key = "protocols"
-                        elif "schematic" in suggested_filename.lower() or "circuit" in suggested_filename.lower():
-                            list_key = "schematics"
-                        elif "spec" in suggested_filename.lower():
-                            list_key = "specifications"
-                        
-                        plan_batch.add_frontmatter_update({}, {list_key: [f"./{suggested_filename}"]})
-                        await plan_batch.apply()
-                        logger.info(f"✅ Added {suggested_filename} reference to project plan frontmatter ({list_key})")
-                    
-                    new_files_created.append(suggested_filename)
-                    routing_items.remove(item)
-                    
-                except Exception as e:
-                    logger.error(f"❌ Failed to create new reference file {suggested_filename}: {e}")
-                    import traceback
-                    logger.error(traceback.format_exc())
-            
             # **PHASE 2: SPLIT EDITS - PLAN VS REFERENCED FILES**
             editing_mode = state.get("editing_mode", False)
             plan_edits = []

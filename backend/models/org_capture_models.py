@@ -45,6 +45,10 @@ class OrgCaptureRequest(BaseModel):
     priority: Optional[str] = Field(None, description="Priority for TODO items (A, B, C)")
     scheduled: Optional[str] = Field(None, description="Scheduled date (YYYY-MM-DD)")
     deadline: Optional[str] = Field(None, description="Deadline date (YYYY-MM-DD)")
+    entry_date: Optional[str] = Field(
+        None,
+        description="Date for journal entry (YYYY-MM-DD). If None, uses today."
+    )
     
     class Config:
         json_schema_extra = {

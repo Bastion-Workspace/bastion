@@ -55,6 +55,7 @@ import {
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import apiService from '../services/apiService';
+import JournalLocationPicker from './JournalLocationPicker';
 
 const OrgModeSettingsTab = () => {
   // State
@@ -227,6 +228,42 @@ const OrgModeSettingsTab = () => {
     saveSettings({ display_preferences: updatedPrefs });
   };
 
+  // Journal Preferences Handlers
+  const handleJournalEnabledChange = (e) => {
+    const updatedPrefs = {
+      ...settings.journal_preferences,
+      enabled: e.target.checked
+    };
+    saveSettings({ journal_preferences: updatedPrefs });
+  };
+
+  const handleOrganizationModeChange = (e) => {
+    const updatedPrefs = {
+      ...settings.journal_preferences,
+      organization_mode: e.target.value
+    };
+    saveSettings({ journal_preferences: updatedPrefs });
+  };
+
+  const handleTimestampsChange = (e) => {
+    const updatedPrefs = {
+      ...settings.journal_preferences,
+      include_timestamps: e.target.checked
+    };
+    saveSettings({ journal_preferences: updatedPrefs });
+  };
+
+  const handleDefaultTagsChange = (e) => {
+    const tags = e.target.value
+      ? e.target.value.split(',').map(t => t.trim()).filter(t => t)
+      : ['journal'];
+    const updatedPrefs = {
+      ...settings.journal_preferences,
+      default_tags: tags
+    };
+    saveSettings({ journal_preferences: updatedPrefs });
+  };
+
   if (loading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: 400 }}>
@@ -329,6 +366,155 @@ const OrgModeSettingsTab = () => {
                   <Alert severity="info">
                     Auto-discovery enabled: The system will search for any existing inbox.org in your directory
                   </Alert>
+                )}
+              </CardContent>
+            </Card>
+          </motion.div>
+        </Grid>
+
+        {/* Archive Preferences */}
+        <Grid item xs={12}>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.02 }}
+          >
+            <Card>
+              <CardContent>
+                <Typography variant="h6" gutterBottom>
+                  Archive Preferences
+                </Typography>
+                <Typography variant="body2" color="text.secondary" paragraph>
+                  Configure default archive location for archived entries (Ctrl+Shift+A). This reduces clutter in the archive dialog.
+                </Typography>
+                
+                <TextField
+                  fullWidth
+                  label="Default Archive Location"
+                  value={settings?.archive_preferences?.default_archive_location || ''}
+                  onChange={(e) => {
+                    const updatedPrefs = {
+                      ...settings.archive_preferences,
+                      default_archive_location: e.target.value || null
+                    };
+                    saveSettings({ archive_preferences: updatedPrefs });
+                  }}
+                  helperText="Use %s for source filename. Examples: '%s_archive' (same directory), 'OrgMode/archives/%s_archive' (central folder), 'OrgMode/archive.org' (single file)"
+                  placeholder="%s_archive"
+                  sx={{ mb: 2 }}
+                />
+                
+                {settings?.archive_preferences?.default_archive_location && (
+                  <Alert severity="info" sx={{ mb: 2 }}>
+                    <Typography variant="body2" gutterBottom>
+                      <strong>Archive location:</strong> {settings.archive_preferences.default_archive_location}
+                    </Typography>
+                    <Typography variant="caption" component="div">
+                      <strong>Examples:</strong>
+                      <ul style={{ marginTop: 4, marginBottom: 0, paddingLeft: 20 }}>
+                        <li><code>%s_archive</code> → Archives to <code>filename_archive.org</code> in same directory</li>
+                        <li><code>OrgMode/archives/%s_archive</code> → Archives to central <code>archives/</code> folder</li>
+                        <li><code>OrgMode/archive.org</code> → All archives go to single file</li>
+                      </ul>
+                    </Typography>
+                  </Alert>
+                )}
+                
+                {!settings?.archive_preferences?.default_archive_location && (
+                  <Alert severity="info">
+                    Default behavior: Archives to <code>{'{filename}'}_archive.org</code> in the same directory as the source file
+                  </Alert>
+                )}
+              </CardContent>
+            </Card>
+          </motion.div>
+        </Grid>
+
+        {/* Journal Settings */}
+        <Grid item xs={12}>
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.05 }}
+          >
+            <Card>
+              <CardContent>
+                <Typography variant="h6" gutterBottom>
+                  Journal Settings
+                </Typography>
+                <Typography variant="body2" color="text.secondary" paragraph>
+                  Configure journal entry organization and capture preferences
+                </Typography>
+                
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={settings.journal_preferences?.enabled || false}
+                      onChange={handleJournalEnabledChange}
+                    />
+                  }
+                  label="Enable Journal"
+                  sx={{ mb: 2 }}
+                />
+                
+                {settings.journal_preferences?.enabled && (
+                  <>
+                    <Box sx={{ mb: 2, mt: 2 }}>
+                      <JournalLocationPicker
+                        value={settings.journal_preferences?.journal_location || ''}
+                        onChange={(newValue) => {
+                          const updatedPrefs = {
+                            ...settings.journal_preferences,
+                            journal_location: newValue || null
+                          };
+                          saveSettings({ journal_preferences: updatedPrefs });
+                        }}
+                        disabled={saving}
+                        error={error && error.includes('Journal location')}
+                      />
+                    </Box>
+                    
+                    <FormControl fullWidth margin="normal" sx={{ mb: 2 }}>
+                      <InputLabel>Organization Mode</InputLabel>
+                      <Select
+                        value={settings.journal_preferences?.organization_mode || 'monolithic'}
+                        onChange={handleOrganizationModeChange}
+                        label="Organization Mode"
+                      >
+                        <MenuItem value="monolithic">Monolithic (Single journal.org file)</MenuItem>
+                        <MenuItem value="yearly">Yearly (YYYY - Journal.org)</MenuItem>
+                        <MenuItem value="monthly">Monthly (YYYY-MM - Journal.org)</MenuItem>
+                        <MenuItem value="daily">Daily (YYYY-MM-DD - Journal.org)</MenuItem>
+                      </Select>
+                    </FormControl>
+                    
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={settings.journal_preferences?.include_timestamps !== false}
+                          onChange={handleTimestampsChange}
+                        />
+                      }
+                      label="Include timestamps in entries"
+                      sx={{ mb: 2, display: 'block' }}
+                    />
+                    
+                    <TextField
+                      fullWidth
+                      label="Default Tags"
+                      value={(settings.journal_preferences?.default_tags || ['journal']).join(', ')}
+                      onChange={handleDefaultTagsChange}
+                      helperText="Comma-separated tags (e.g., journal, personal)"
+                      margin="normal"
+                    />
+                    
+                    <Alert severity="info" sx={{ mt: 2 }}>
+                      <Typography variant="body2">
+                        <strong>Note:</strong> Changing organization mode does not migrate existing entries.
+                        You'll need to manually reorganize if you switch modes.
+                      </Typography>
+                    </Alert>
+                  </>
                 )}
               </CardContent>
             </Card>
@@ -622,6 +808,19 @@ const OrgModeSettingsTab = () => {
                     }
                     label="Indent Subheadings"
                   />
+
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={settings.display_preferences?.indent_content_to_heading ?? false}
+                        onChange={(e) => handleDisplayPreferenceChange('indent_content_to_heading', e.target.checked)}
+                      />
+                    }
+                    label="Indent Content to Heading Level"
+                  />
+                  <Typography variant="caption" color="text.secondary" sx={{ ml: 4, display: 'block', mb: 1 }}>
+                    Visually indent body text under headings (does not modify file content)
+                  </Typography>
 
                   <Divider sx={{ my: 1 }} />
 

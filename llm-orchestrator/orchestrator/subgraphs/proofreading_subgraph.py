@@ -1,9 +1,10 @@
 """
 Proofreading Subgraph
 
-Reusable subgraph for proofreading workflows that can be integrated into:
+Reusable subgraph for proofreading workflows. Standalone proofreading_agent removed;
+this subgraph is the canonical implementation, integrated into:
 - Fiction Editing Agent
-- Article Writing Agent
+- Article Writing (subgraph)
 - Podcast Script Agent
 
 Handles:

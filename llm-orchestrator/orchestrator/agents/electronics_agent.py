@@ -118,7 +118,7 @@ class ElectronicsAgent(BaseAgent):
         self.decision_nodes = ElectronicsDecisionNodes(self)
         self.project_plan_nodes = ElectronicsProjectPlanNodes(self)
         self.maintenance_nodes = ElectronicsMaintenanceNodes(self)
-        logger.info("🔌 Electronics Agent ready for circuit design and embedded programming!")
+        logger.debug("🔌 Electronics Agent ready for circuit design and embedded programming!")
     
     def _get_diagramming_subgraph(self, checkpointer):
         """Get or build diagramming subgraph"""
@@ -373,7 +373,7 @@ class ElectronicsAgent(BaseAgent):
                 return "save"
             
             # Check if there's a pending maintenance plan
-            maintenance_plan = state.get("documentation_maintenance_plan", {})
+            maintenance_plan = state.get("documentation_maintenance_plan") or {}
             maintenance_items = maintenance_plan.get("maintenance_items", [])
             if maintenance_items:
                 logger.info("🔌 User approved pending maintenance - resuming maintenance execution")
@@ -456,9 +456,9 @@ class ElectronicsAgent(BaseAgent):
     
     def _route_from_verification(self, state: ElectronicsState) -> str:
         """Route from verification - execute maintenance if inconsistencies found"""
-        verification_result = state.get("documentation_verification_result", {})
+        verification_result = state.get("documentation_verification_result") or {}
         inconsistencies = verification_result.get("inconsistencies", [])
-        maintenance_plan = state.get("documentation_maintenance_plan", {})
+        maintenance_plan = state.get("documentation_maintenance_plan") or {}
         maintenance_items = maintenance_plan.get("maintenance_items", [])
         
         if inconsistencies or maintenance_items:
@@ -667,7 +667,7 @@ class ElectronicsAgent(BaseAgent):
         
         # Early exit optimization: If we have a pending operation, skip LLM call
         pending_save_plan = state.get("pending_save_plan")
-        maintenance_plan = state.get("documentation_maintenance_plan", {})
+        maintenance_plan = state.get("documentation_maintenance_plan") or {}
         maintenance_items = maintenance_plan.get("maintenance_items", [])
         
         is_approval = self._is_approval_response(query)
@@ -1423,6 +1423,9 @@ Files referenced in the primary document's frontmatter are loaded as READ-ONLY c
 - Reviewing schematic details
 - Understanding system constraints
 
+**FILE SUGGESTIONS**:
+When content would benefit from a dedicated reference file (e.g., a detailed component datasheet, a protocol implementation doc, a schematic reference), include a `suggested_files` list in your structured JSON response. You must NEVER create files automatically—only suggest them. Each suggestion: filename (e.g. nrf24l01_datasheet_notes.md), type (components|protocols|schematics|specifications|firmware|bom|other), and reason (short explanation).
+
 **CONTENT ROUTING RULES**:
 - **ALL content goes into the primary document** using the standard sections above
 - **Use granular edits** for small changes (replace specific lines, insert after specific text)
@@ -1493,7 +1496,14 @@ You MUST respond with valid JSON matching this exact schema:
     }
   ],
   "recommendations": ["Design tip 1", "Safety note 2", "Best practice 3"],
-  "confidence": 0.85
+  "confidence": 0.85,
+  "suggested_files": [
+    {
+      "filename": "nrf24l01_datasheet_notes.md",
+      "type": "components",
+      "reason": "Detailed datasheet notes for NRF24L01+ would benefit from a dedicated reference file"
+    }
+  ]
 }
 
 **DIAGRAM GENERATION**:
@@ -1528,6 +1538,7 @@ When a diagram would help explain your response, you can request diagram generat
   * Testing coverage and results
   * Areas needing attention or improvement
 - **REFERENCED FILES (READ-ONLY CONTEXT)**: Files referenced in the primary document's frontmatter are loaded as READ-ONLY context. Use them for understanding existing specifications, protocols, and schematics, but do NOT edit them directly. All edits go to the primary document.
+- **NO AUTOMATIC FILE CREATION**: Never create new files. When a dedicated reference file would help (e.g. component datasheet, protocol doc), suggest it in `suggested_files` with filename, type, and reason.
 - **SIMPLE TECHNICAL QUERIES**: For queries like "calculate resistor", "design a circuit", "troubleshoot", etc.:
   * Provide technical help directly, updating the primary document in the appropriate section
 - **GRANULAR VS SECTION-LEVEL EDITS**:

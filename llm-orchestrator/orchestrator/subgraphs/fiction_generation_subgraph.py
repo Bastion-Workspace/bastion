@@ -29,6 +29,7 @@ from orchestrator.utils.fiction_utilities import (
     extract_chapter_outline,
     extract_story_overview,
     extract_book_map,
+    extract_pacing_block,
 )
 from orchestrator.utils.anchor_correction import (
     auto_correct_operation_anchor,
@@ -53,7 +54,7 @@ FictionGenerationState = Dict[str, Any]
 async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Build generation context: assemble manuscript chapters, references, outlines"""
     try:
-        logger.info("Building generation context...")
+        logger.debug("Building generation context...")
         
         manuscript = state.get("manuscript", "")
         filename = state.get("filename", "manuscript.md")
@@ -80,7 +81,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         explicit_primary_chapter = state.get("explicit_primary_chapter")
         
         # DIAGNOSTIC: Log what we received
-        logger.info(f"📖 [CONTEXT] explicit_primary_chapter={explicit_primary_chapter}, requested_chapter_number={requested_chapter_number}, current_chapter_number={current_chapter_number}")
+        logger.debug(f"📖 [CONTEXT] explicit_primary_chapter={explicit_primary_chapter}, requested_chapter_number={requested_chapter_number}, current_chapter_number={current_chapter_number}")
         
         # Initialize is_fresh_request to avoid UnboundLocalError
         is_fresh_request = False
@@ -91,7 +92,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
             # User explicitly mentioned a chapter - use it regardless of cursor position
             target_chapter_number = explicit_primary_chapter
             is_fresh_request = True  # Explicit chapter mention is always fresh
-            logger.info(f"📖 Using EXPLICIT chapter {explicit_primary_chapter} (user mentioned it in query, overriding cursor-based detection)")
+            logger.debug(f"📖 Using EXPLICIT chapter {explicit_primary_chapter} (user mentioned it in query, overriding cursor-based detection)")
         elif requested_chapter_number is not None:
             # Check if requested_chapter_number is "fresh" (matches explicit mention)
             is_fresh_request = (
@@ -101,15 +102,15 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
             if is_fresh_request:
                 # User explicitly requested this chapter in the current query - use it
                 target_chapter_number = requested_chapter_number
-                logger.info(f"📖 Using FRESH requested chapter {requested_chapter_number} (explicitly mentioned in current query)")
+                logger.debug(f"📖 Using FRESH requested chapter {requested_chapter_number} (explicitly mentioned in current query)")
             else:
                 # Stale requested_chapter_number - ignore it, use cursor-based detection
                 target_chapter_number = current_chapter_number
-                logger.info(f"📖 Ignoring STALE requested_chapter_number={requested_chapter_number} (not in current query), using cursor-based current_chapter_number={current_chapter_number}")
+                logger.debug(f"📖 Ignoring STALE requested_chapter_number={requested_chapter_number} (not in current query), using cursor-based current_chapter_number={current_chapter_number}")
         else:
             # Use cursor-based detection (current_chapter_number from cursor position)
             target_chapter_number = current_chapter_number
-            logger.info(f"📖 Using cursor-based current_chapter_number={current_chapter_number}")
+            logger.debug(f"📖 Using cursor-based current_chapter_number={current_chapter_number}")
         
         # Determine chapter labels with actual chapter numbers
         prev_chapter_number = state.get("prev_chapter_number")
@@ -272,7 +273,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                         "content_length": len(ref_text),
                         "chapter_number": ref_ch_num
                     })
-                    logger.info(f"📖 Added reference Chapter {ref_ch_num} as READ-ONLY ({len(ref_text)} chars)")
+                    logger.debug(f"📖 Added reference Chapter {ref_ch_num} as READ-ONLY ({len(ref_text)} chars)")
         
         # Close manuscript section explicitly
         context_parts.append("=== END OF MANUSCRIPT CONTEXT ===\n")
@@ -301,23 +302,31 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         # References (if present, add usage guidance)
         has_any_refs = bool(style_body or rules_body or characters_bodies or outline_body)
         if has_any_refs:
-            context_parts.append("=== REFERENCE DOCUMENTS (USE FOR CONSISTENCY, NOT FOR TEXT MATCHING) ===\n")
+            context_parts.append("=== REFERENCE DOCUMENTS (NOT MANUSCRIPT TEXT — DO NOT USE FOR ANCHORS) ===\n")
             context_parts.append("="*80 + "\n")
-            context_parts.append("⚠️ WARNING: THESE ARE PLANNING DOCUMENTS - NOT MANUSCRIPT TEXT ⚠️\n")
+            context_parts.append("⚠️ THESE ARE PLANNING DOCUMENTS — NOT MANUSCRIPT TEXT ⚠️\n")
             context_parts.append("="*80 + "\n")
-            context_parts.append("The following references are provided to ensure consistency. Use them when generating narrative prose:\n")
-            context_parts.append("- Style Guide: Internalize voice, POV, tense, pacing BEFORE writing - permeate every sentence\n")
-            context_parts.append("- Outline: Follow story structure and plot beats through natural storytelling\n")
-            context_parts.append("- Character Profiles: Reference traits, actions, dialogue patterns when writing character moments\n")
-            context_parts.append("- Universe Rules: Verify world-building elements align with established constraints\n\n")
-            context_parts.append("**CRITICAL**: These documents DO NOT exist in the manuscript file!\n")
             context_parts.append("**DO NOT** copy text from these sections into 'original_text' or 'anchor_text' fields!\n")
-            context_parts.append("**ONLY** use them for understanding story context and maintaining consistency!\n\n")
+            context_parts.append("These documents DO NOT exist in the manuscript file.\n\n")
+            context_parts.append("**Reference Hierarchy (in order of creative authority):**\n")
+            context_parts.append("1. STYLE GUIDE — Your voice. Every word choice and sentence must conform to it.\n")
+            context_parts.append("2. OUTLINE — Your story knowledge. What happens, not how to write it.\n")
+            context_parts.append("3. CHARACTER PROFILES — Authentic character details for dialogue and behavior.\n")
+            context_parts.append("4. UNIVERSE RULES — World-building constraints that must not be violated.\n\n")
         
         if style_body:
-            context_parts.append("=== STYLE GUIDE (voice and tone - READ FIRST) ===\n")
-            context_parts.append("Use this guide to establish narrative voice, techniques, and craft. Internalize BEFORE writing:\n")
+            context_parts.append("="*80 + "\n")
+            context_parts.append("★ STYLE GUIDE — PRIMARY CREATIVE AUTHORITY ★\n")
+            context_parts.append("="*80 + "\n")
+            context_parts.append("READ THIS FIRST. This defines how you write — your voice, tone, pacing,\n")
+            context_parts.append("sentence length, word choices, what to avoid, and narrative technique.\n")
+            context_parts.append("If a writing sample is included, study it: match its rhythms, density,\n")
+            context_parts.append("and feel. Your prose must read as though it came from the same author.\n")
+            context_parts.append("When the Style Guide conflicts with your instincts, the Style Guide wins.\n\n")
             context_parts.append(f"{style_body}\n\n")
+            context_parts.append("="*80 + "\n")
+            context_parts.append("END OF STYLE GUIDE — Every sentence you write must conform to the above.\n")
+            context_parts.append("="*80 + "\n\n")
         
         if rules_body:
             context_parts.append("=== RULES (universe constraints) ===\n")
@@ -343,7 +352,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         # Include outline for story context with full continuity support
         # Show previous, current (emphasized), and next chapter outlines for better continuity
         if outline_body and target_chapter_number:
-            logger.info(f"Drafting outline.md content for Chapter {target_chapter_number} and surroundings")
+            logger.debug(f"Drafting outline.md content for Chapter {target_chapter_number} and surroundings")
             
             # Extract and include story overview (synopsis before first chapter)
             story_overview = state.get("story_overview")
@@ -351,7 +360,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                 story_overview = extract_story_overview(outline_body)
             
             if story_overview:
-                logger.info(f"Sending: outline.md -> Story Overview (Global narrative context)")
+                logger.debug(f"Sending: outline.md -> Story Overview (Global narrative context)")
                 context_parts.append("="*80 + "\n")
                 context_parts.append("STORY OVERVIEW AND NARRATIVE THEMES\n")
                 context_parts.append("="*80 + "\n")
@@ -372,7 +381,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                 book_map = extract_book_map(outline_body)
             
             if book_map:
-                logger.info(f"Sending: outline.md -> Book Structure Map ({len(book_map)} sections)")
+                logger.debug(f"Sending: outline.md -> Book Structure Map ({len(book_map)} sections)")
                 context_parts.append("=== BOOK STRUCTURE MAP ===\n\n")
                 context_parts.append("This shows the complete structure of the book. Use this to understand where the current chapter fits in the larger narrative arc.\n\n")
                 for section_id, header_text in book_map:
@@ -386,35 +395,40 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                         context_parts.append(f"  Chapter {section_id}: {header_text}{marker}\n")
                 context_parts.append("\n=== END OF BOOK STRUCTURE MAP ===\n\n")
             
-            warning_banner = "\n" + "="*80 + "\n" + "⚠️ WARNING: STORY OUTLINE BELOW - NOT MANUSCRIPT TEXT ⚠️\n" + "="*80 + "\n"
+            warning_banner = "\n" + "="*80 + "\n" + "STORY OUTLINE — YOUR STORY KNOWLEDGE (NOT MANUSCRIPT TEXT)\n" + "="*80 + "\n"
             context_parts.append(warning_banner)
-            context_parts.append("=== STORY OUTLINE (FOR CONTINUITY CONTEXT - NOT EDITABLE, NOT FOR TEXT MATCHING) ===\n\n")
-            context_parts.append("="*80 + "\n")
-            context_parts.append("⚠️ ABSOLUTE PROHIBITION: OUTLINE TEXT CANNOT BE USED AS ANCHOR TEXT ⚠️\n")
-            context_parts.append("="*80 + "\n")
-            context_parts.append("The outline sections below tell you WHAT happens in the story.\n")
-            context_parts.append("**THESE SECTIONS DO NOT EXIST IN THE MANUSCRIPT FILE!**\n")
-            context_parts.append("**DO NOT** use outline text for 'original_text', 'anchor_text', or any text matching!\n")
-            context_parts.append("**DO NOT** copy, paraphrase, or reuse outline synopsis/beat text in your narrative prose!\n")
-            context_parts.append("**DO** use the outline as inspiration for story structure and plot beats.\n")
-            context_parts.append("**DO** write original narrative prose that achieves the outline's story goals.\n")
-            context_parts.append("**REMEMBER**: For text matching, ONLY use text from MANUSCRIPT TEXT sections above!\n")
-            context_parts.append("="*80 + "\n\n")
+            context_parts.append("=== STORY OUTLINE (WHAT HAPPENS — NOT FOR TEXT MATCHING) ===\n\n")
+            context_parts.append("The outline below is your story knowledge. Read it to understand what\n")
+            context_parts.append("happens, then write the chapter as original prose in the Style Guide's voice.\n\n")
+            context_parts.append("**CRITICAL REMINDERS:**\n")
+            context_parts.append("- Outline text does NOT exist in the manuscript — never use for anchors or text matching\n")
+            context_parts.append("- Never copy or paraphrase outline language into your prose\n")
+            context_parts.append("- These are story ingredients — craft them into scenes using the Style Guide's voice\n")
+            context_parts.append("- For text matching, ONLY use text from MANUSCRIPT TEXT sections above\n\n")
             
             # Include previous chapter outline (extracted by context subgraph)
             outline_prev_chapter_text = state.get("outline_prev_chapter_text")
             prev_chapter_number = state.get("prev_chapter_number")
             if outline_prev_chapter_text and prev_chapter_number:
-                logger.info(f"Sending: outline.md -> Chapter {prev_chapter_number} (PREVIOUS)")
+                logger.debug(f"Sending: outline.md -> Chapter {prev_chapter_number} (PREVIOUS)")
                 context_parts.append(f"=== OUTLINE: CHAPTER {prev_chapter_number} (PREVIOUS - FOR CONTINUITY CONTEXT) ===\n")
                 context_parts.append(f"This shows what happened in the previous chapter for continuity reference.\n")
                 context_parts.append(f"Use this to ensure smooth transitions and character state consistency.\n\n")
+                
+                # Extract pacing from previous chapter to understand where it ended emotionally
+                prev_pacing = extract_pacing_block(outline_prev_chapter_text)
+                if prev_pacing and prev_pacing.get("to_state"):
+                    context_parts.append(f"**PREVIOUS CHAPTER EMOTIONAL STATE**:\n")
+                    context_parts.append(f"The previous chapter (Chapter {prev_chapter_number}) ended with this emotional/tonal state:\n")
+                    context_parts.append(f"  {prev_pacing['to_state']}\n")
+                    context_parts.append(f"This is where your new chapter should BEGIN emotionally.\n\n")
+                
                 context_parts.append(f"{outline_prev_chapter_text}\n\n")
                 context_parts.append(f"=== END OF CHAPTER {prev_chapter_number} OUTLINE ===\n\n")
             
             # Extract and emphasize CURRENT chapter outline
             if outline_current_chapter_text:
-                logger.info(f"Sending: outline.md -> Chapter {target_chapter_number} (CURRENT TARGET)")
+                logger.debug(f"Sending: outline.md -> Chapter {target_chapter_number} (CURRENT TARGET)")
                 context_parts.append("="*80 + "\n")
                 context_parts.append(f"CURRENT CHAPTER OUTLINE - PRIMARY FOCUS\n")
                 context_parts.append("="*80 + "\n")
@@ -422,12 +436,43 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                 context_parts.append(f"⚠️ THIS IS OUTLINE TEXT - NOT MANUSCRIPT TEXT - DO NOT USE FOR ANCHORS ⚠️\n\n")
                 context_parts.append(f"**CRITICAL**: You are generating Chapter {target_chapter_number} RIGHT NOW.\n")
                 context_parts.append(f"**MANDATORY CHAPTER HEADER**: Your generated text MUST start with '## Chapter {target_chapter_number}' (NOT Chapter {target_chapter_number - 1}, NOT Chapter {target_chapter_number + 1}, ONLY Chapter {target_chapter_number}!)\n")
-                context_parts.append(f"**PRIMARY TASK**: Generate narrative prose for Chapter {target_chapter_number} based on these beats.\n")
+                context_parts.append(f"**PRIMARY TASK**: Write Chapter {target_chapter_number} as a cohesive narrative in the Style Guide's voice.\n")
+                context_parts.append(f"The outline below tells you what happens. The Style Guide (above) tells you how to write it.\n")
                 context_parts.append(f"**DO NOT** include events, characters, or plot points from LATER chapters in this chapter!\n")
                 context_parts.append(f"**DO NOT** use a different chapter number in your header - it MUST be Chapter {target_chapter_number}!\n")
-                context_parts.append(f"**DO NOT** copy text from this outline into 'original_text' or 'anchor_text' fields!\n")
-                context_parts.append(f"**DO** use this outline to understand what should happen in THIS chapter.\n")
-                context_parts.append(f"**DO** write original narrative prose that achieves these story goals.\n\n")
+                context_parts.append(f"**DO NOT** copy text from this outline into 'original_text' or 'anchor_text' fields!\n\n")
+                context_parts.append(f"**OUTLINE STRUCTURE NOTE**: This outline uses structured headers:\n")
+                context_parts.append(f"  - '### Status' (if present): State of tracked items at chapter beginning\n")
+                context_parts.append(f"  - '### Pacing' (if present): Emotional/tonal transition guidance\n")
+                context_parts.append(f"  - '### Summary': High-level overview of the chapter's narrative arc\n")
+                context_parts.append(f"  - '### Beats': The events that occur in this chapter\n")
+                context_parts.append(f"  These are story INGREDIENTS — raw material for you to craft into scenes.\n")
+                context_parts.append(f"  Combine, reorder, interleave, or restructure beats into cohesive scenes.\n")
+                context_parts.append(f"  Not every beat needs its own scene or paragraph. Let the Style Guide's\n")
+                context_parts.append(f"  pacing determine how much space each moment gets.\n\n")
+                
+                # Extract and emphasize pacing guidance if present
+                current_pacing = extract_pacing_block(outline_current_chapter_text)
+                if current_pacing:
+                    context_parts.append(f"**PACING TRANSITION GUIDANCE** (CRITICAL FOR SMOOTH TRANSITIONS):\n")
+                    if current_pacing.get("from_state"):
+                        context_parts.append(f"  FROM: {current_pacing['from_state']}\n")
+                        context_parts.append(f"  This tells you where the previous chapter left off emotionally.\n")
+                        context_parts.append(f"  Your chapter should BEGIN in this emotional/tonal state.\n\n")
+                    if current_pacing.get("to_state"):
+                        context_parts.append(f"  TO: {current_pacing['to_state']}\n")
+                        context_parts.append(f"  This tells you where this chapter should END emotionally.\n")
+                        context_parts.append(f"  Your chapter should build toward this emotional/tonal state.\n\n")
+                    if current_pacing.get("technique"):
+                        context_parts.append(f"  TECHNIQUE: {current_pacing['technique']}\n")
+                        context_parts.append(f"  This tells you HOW to transition between the FROM and TO states.\n")
+                        context_parts.append(f"  Use this as guidance for pacing, scene structure, and emotional development.\n\n")
+                    elif current_pacing.get("full_text"):
+                        context_parts.append(f"  PACING GUIDANCE: {current_pacing['full_text']}\n")
+                        context_parts.append(f"  Use this to understand the emotional arc and transition approach for this chapter.\n\n")
+                    context_parts.append(f"**REMEMBER**: Pacing guidance helps create smooth transitions and prevents jarring tonal shifts.\n")
+                    context_parts.append(f"Interpret this creatively while achieving the transition goals - it's guidance, not a script.\n\n")
+                
                 context_parts.append(f"{outline_current_chapter_text}\n\n")
                 context_parts.append(f"=== END OF CHAPTER {target_chapter_number} OUTLINE (CURRENT) ===\n")
                 context_parts.append("="*80 + "\n")
@@ -456,7 +501,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
             if next_chapter_num_to_extract:
                 next_outline = extract_chapter_outline(outline_body, next_chapter_num_to_extract)
                 if next_outline:
-                    logger.info(f"Sending: outline.md -> Chapter {next_chapter_num_to_extract} (NEXT - for transition awareness)")
+                    logger.debug(f"Sending: outline.md -> Chapter {next_chapter_num_to_extract} (NEXT - for transition awareness)")
                     context_parts.append(f"=== OUTLINE: CHAPTER {next_chapter_num_to_extract} (NEXT - FOR TRANSITION PLANNING ONLY) ===\n")
                     context_parts.append(f"This shows what will happen in the next chapter for transition planning.\n")
                     context_parts.append(f"**CRITICAL**: Use this ONLY to plan smooth transitions and set up future events.\n")
@@ -465,15 +510,15 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                     context_parts.append(f"{next_outline}\n\n")
                     context_parts.append(f"=== END OF CHAPTER {next_chapter_num_to_extract} OUTLINE ===\n\n")
                 else:
-                    logger.info(f"No outline found for Chapter {next_chapter_num_to_extract} (skipping NEXT context)")
+                    logger.debug(f"No outline found for Chapter {next_chapter_num_to_extract} (skipping NEXT context)")
             
-            context_parts.append("=== END OF STORY OUTLINE ===\n")
-            context_parts.append("**FINAL REMINDER**: The outline above is for STORY CONTEXT ONLY.\n")
-            context_parts.append(f"**PRIMARY FOCUS**: Generate Chapter {target_chapter_number} based on its outline section (marked as CURRENT above).\n")
-            context_parts.append(f"**CRITICAL**: Do NOT include any events, characters, or plot points from later chapters in Chapter {target_chapter_number}!\n\n")
+            context_parts.append("=== END OF STORY OUTLINE ===\n\n")
+            context_parts.append(f"**NOW WRITE**: You know the story (outline above) and you know the voice (Style Guide above).\n")
+            context_parts.append(f"Write Chapter {target_chapter_number} as cohesive narrative prose — scenes, not beat summaries.\n")
+            context_parts.append(f"Do NOT include events from later chapters. Stay within Chapter {target_chapter_number}'s scope.\n\n")
         elif outline_body:
             # FALLBACK: If we have outline but couldn't extract current chapter, show warning
-            logger.info("Sending: outline.md -> No matching chapter found (Safe fallback - skipping outline)")
+            logger.debug("Sending: outline.md -> No matching chapter found (Safe fallback - skipping outline)")
             logger.error(f"CRITICAL: Failed to extract chapter-specific outline for Chapter {target_chapter_number}")
             logger.error(f"   Falling back to NO outline (safe) rather than full outline (dangerous - would leak later chapters)")
             logger.error(f"   This means the LLM will generate without chapter-specific outline guidance")
@@ -591,16 +636,15 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
             )
         elif outline_current_chapter_text:
             context_parts.append(
-                "=== OUTLINE AS NARRATIVE BLUEPRINT ===\n"
-                "The chapter outline provides story beats and structure, NOT a script to paraphrase or copy.\n\n"
-                "**ABSOLUTE PROHIBITION: DO NOT COPY OR PARAPHRASE OUTLINE TEXT**\n"
-                "- DO NOT copy outline synopsis text into your narrative prose\n"
-                "- DO NOT paraphrase outline beats word-for-word\n"
-                "- DO NOT convert outline bullets into simple prose sentences\n"
-                "- DO NOT use outline language directly in your writing\n"
-                "- DO creatively interpret outline beats into full narrative scenes\n"
-                "- DO write original prose that achieves the outline's story goals\n"
-                "- DO use the outline as inspiration, not as source text to copy\n\n"
+                "=== STYLE-FIRST NARRATIVE APPROACH ===\n"
+                "You have a Style Guide that defines your voice and an Outline that defines your story.\n"
+                "Your job: write the story of what happened, in the style provided.\n\n"
+                "**HOW TO WRITE THIS CHAPTER:**\n"
+                "1. The Style Guide is your voice — every sentence must sound like it belongs to that voice\n"
+                "2. The Outline is your story knowledge — you know what happens, now WRITE it as literature\n"
+                "3. Think in SCENES, not beats — combine related events into cohesive narrative moments\n"
+                "4. Let the Style Guide's pacing determine how much space each moment gets\n"
+                "5. Write original prose — never copy, paraphrase, or echo the outline's language\n\n"
             )
         
         # Add operation guidance
@@ -621,8 +665,8 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         
         # 🎯 ROOSEVELT DEBUG: Log context_parts size before returning
         total_context_size = sum(len(part) for part in context_parts)
-        logger.info(f"📊 CONTEXT_PARTS DEBUG: {len(context_parts)} parts, total size: {total_context_size:,} chars")
-        logger.info(f"📊 CONTEXT_PARTS type check: {type(context_parts)}, is list: {isinstance(context_parts, list)}")
+        logger.debug(f"📊 CONTEXT_PARTS DEBUG: {len(context_parts)} parts, total size: {total_context_size:,} chars")
+        logger.debug(f"📊 CONTEXT_PARTS type check: {type(context_parts)}, is list: {isinstance(context_parts, list)}")
         
         return {
             "generation_context_parts": context_parts,
@@ -699,13 +743,13 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
 async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Build generation prompt: construct system prompt and user message"""
     try:
-        logger.info("Building generation prompt...")
+        logger.debug("Building generation prompt...")
         
         # Get system prompt from state (built by main agent)
         system_prompt = state.get("system_prompt", "")
-        logger.info(f"📊 SYSTEM PROMPT DEBUG: length = {len(system_prompt):,} chars (~{len(system_prompt) // 4:,} tokens)")
-        logger.info(f"📊 SYSTEM PROMPT first 500 chars: {system_prompt[:500]}")
-        logger.info(f"📊 SYSTEM PROMPT last 500 chars: {system_prompt[-500:]}")
+        logger.debug(f"📊 SYSTEM PROMPT DEBUG: length = {len(system_prompt):,} chars (~{len(system_prompt) // 4:,} tokens)")
+        logger.debug(f"📊 SYSTEM PROMPT first 500 chars: {system_prompt[:500]}")
+        logger.debug(f"📊 SYSTEM PROMPT last 500 chars: {system_prompt[-500:]}")
         
         # CRITICAL DEBUG: Check if references are INSIDE the system prompt
         if "===  OUTLINE" in system_prompt or "outline_body" in system_prompt or len(system_prompt) > 100000:
@@ -739,7 +783,7 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
         target_chapter_number = state.get("target_chapter_number")
         
         # DIAGNOSTIC: Log what we received
-        logger.info(f"📖 [PROMPT] explicit_primary_chapter={explicit_primary_chapter}, requested_chapter_number={requested_chapter_number}, current_chapter_number={current_chapter_number}, target_chapter_number={target_chapter_number}")
+        logger.debug(f"📖 [PROMPT] explicit_primary_chapter={explicit_primary_chapter}, requested_chapter_number={requested_chapter_number}, current_chapter_number={current_chapter_number}, target_chapter_number={target_chapter_number}")
         
         if target_chapter_number is None:
             # CRITICAL: When user explicitly mentions a chapter, prioritize it over cursor position
@@ -747,7 +791,7 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
             if explicit_primary_chapter is not None:
                 # User explicitly mentioned a chapter - use it regardless of cursor position
                 target_chapter_number = explicit_primary_chapter
-                logger.info(f"📖 [PROMPT] Using EXPLICIT chapter {explicit_primary_chapter} (user mentioned it in query)")
+                logger.debug(f"📖 [PROMPT] Using EXPLICIT chapter {explicit_primary_chapter} (user mentioned it in query)")
             elif requested_chapter_number is not None:
                 # Check if requested_chapter_number is "fresh" (matches explicit mention)
                 is_fresh_request = (
@@ -803,7 +847,7 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
         messages = [m for m in messages if m is not None]
         
         if conversation_history:
-            logger.info(f"📜 Included {len(conversation_history)} previous conversational messages for context")
+            logger.debug(f"📜 Included {len(conversation_history)} previous conversational messages for context")
         
         # Add selection/cursor context
         selection_context = ""
@@ -834,7 +878,7 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
             )
             
             # 🎯 ROOSEVELT DEBUG: Check what's in these hint variables
-            logger.info(f"📊 HINTS DEBUG: is_granular={is_granular}")
+            logger.debug(f"📊 HINTS DEBUG: is_granular={is_granular}")
             
             if is_granular:
                 granular_correction_hints = (
@@ -944,7 +988,7 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # Build chapter clarification if there's a discrepancy
             chapter_clarification = ""
             # Only show clarification if target_chapter_number was explicitly requested (fresh)
-            logger.info(f"📖 [CLARIFICATION CHECK] explicit_primary_chapter={explicit_primary_chapter}, target_chapter_number={target_chapter_number}, will_show_clarification={(explicit_primary_chapter is not None and target_chapter_number == explicit_primary_chapter)}")
+            logger.debug(f"📖 [CLARIFICATION CHECK] explicit_primary_chapter={explicit_primary_chapter}, target_chapter_number={target_chapter_number}, will_show_clarification={(explicit_primary_chapter is not None and target_chapter_number == explicit_primary_chapter)}")
             if explicit_primary_chapter is not None and target_chapter_number == explicit_primary_chapter:
                 # Check if this is a new chapter generation or editing an existing chapter
                 current_chapter_text = state.get("current_chapter_text", "")
@@ -986,16 +1030,16 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     )
             
             # 🎯 ROOSEVELT DEBUG: Log component sizes BEFORE concatenation
-            logger.info(f"📊 PRE-CONCAT DEBUG:")
-            logger.info(f"   chapter_clarification type: {type(chapter_clarification)}, len: {len(chapter_clarification)}")
-            logger.info(f"   chapter_clarification preview: {repr(chapter_clarification[:200])}")
-            logger.info(f"   selection_context type: {type(selection_context)}, len: {len(selection_context)}")
-            logger.info(f"   selection_context preview: {repr(selection_context[:200])}")
-            logger.info(f"   granular_correction_hints type: {type(granular_correction_hints)}, len: {len(granular_correction_hints)}")
-            logger.info(f"   granular_correction_hints preview: {repr(granular_correction_hints[:200])}")
-            logger.info(f"   new_chapter_hints type: {type(new_chapter_hints)}, len: {len(new_chapter_hints)}")
-            logger.info(f"   new_chapter_hints preview: {repr(new_chapter_hints[:200])}")
-            logger.info(f"   current_request type: {type(current_request)}, len: {len(current_request)}")
+            logger.debug(f"📊 PRE-CONCAT DEBUG:")
+            logger.debug(f"   chapter_clarification type: {type(chapter_clarification)}, len: {len(chapter_clarification)}")
+            logger.debug(f"   chapter_clarification preview: {repr(chapter_clarification[:200])}")
+            logger.debug(f"   selection_context type: {type(selection_context)}, len: {len(selection_context)}")
+            logger.debug(f"   selection_context preview: {repr(selection_context[:200])}")
+            logger.debug(f"   granular_correction_hints type: {type(granular_correction_hints)}, len: {len(granular_correction_hints)}")
+            logger.debug(f"   granular_correction_hints preview: {repr(granular_correction_hints[:200])}")
+            logger.debug(f"   new_chapter_hints type: {type(new_chapter_hints)}, len: {len(new_chapter_hints)}")
+            logger.debug(f"   new_chapter_hints preview: {repr(new_chapter_hints[:200])}")
+            logger.debug(f"   current_request type: {type(current_request)}, len: {len(current_request)}")
             
             # Build the message content as a single string ONCE
             # 🎯 ROOSEVELT DEBUG: Build incrementally to find where duplication occurs
@@ -1027,7 +1071,35 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     "- **DO NOT return empty operations** - the user expects actual changes to be made\n\n"
                 )
             
+            # Scene-thinking creative framing (only for generation, not questions)
+            scene_framing = ""
+            if not is_question:
+                scene_framing = (
+                    "\n" + ("="*80) + "\n" +
+                    "CREATIVE APPROACH — WRITE SCENES, NOT EXPANDED BEATS\n" +
+                    ("="*80) + "\n\n" +
+                    "Before you write, internalize this approach:\n\n"
+                    "1. **You are a novelist, not a transcriber.** You have absorbed the Style Guide's voice\n"
+                    "   and you know what happens in this chapter from the outline. Now forget the outline's\n"
+                    "   words entirely and write the chapter as original literature.\n\n"
+                    "2. **Think in scenes.** Group related beats into unified scenes with a setting, action,\n"
+                    "   and emotional arc. A scene may encompass several beats, or a single beat may span\n"
+                    "   multiple paragraphs — let the Style Guide's pacing determine the proportion.\n\n"
+                    "3. **The Style Guide controls everything about HOW you write:**\n"
+                    "   - Sentence length and rhythm\n"
+                    "   - Words and phrasing to use or avoid\n"
+                    "   - Level of sensory detail and interiority\n"
+                    "   - Dialogue style and attribution patterns\n"
+                    "   - Tone, register, and narrative distance\n"
+                    "   - If a writing sample was provided, your prose must feel like it was written by\n"
+                    "     the same author — match its cadence, density, and style choices\n\n"
+                    "4. **The reader should never feel they are reading an expanded outline.**\n"
+                    "   If your output reads like 'First X happened, then Y happened, then Z happened,'\n"
+                    "   you are summarizing, not writing fiction. Immerse the reader in the scene.\n\n"
+                )
+            
             base_template = (
+                scene_framing +
                 "\n" + ("="*80) + "\n" +
                 "OUTPUT FORMAT REQUIREMENTS\n" +
                 ("="*80) + "\n\n" +
@@ -1040,19 +1112,19 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 f"USER REQUEST: {current_request}\n\n" +
                 operations_requirement
             )
-            logger.info(f"📊 STEP 1 - base_template: {len(base_template):,} chars")
+            logger.debug(f"📊 STEP 1 - base_template: {len(base_template):,} chars")
             
             step2 = base_template + chapter_clarification
-            logger.info(f"📊 STEP 2 - after chapter_clarification: {len(step2):,} chars")
+            logger.debug(f"📊 STEP 2 - after chapter_clarification: {len(step2):,} chars")
             
             step3 = step2 + selection_context
-            logger.info(f"📊 STEP 3 - after selection_context: {len(step3):,} chars")
+            logger.debug(f"📊 STEP 3 - after selection_context: {len(step3):,} chars")
             
             step4 = step3 + granular_correction_hints
-            logger.info(f"📊 STEP 4 - after granular_correction_hints: {len(step4):,} chars")
+            logger.debug(f"📊 STEP 4 - after granular_correction_hints: {len(step4):,} chars")
             
             step5 = step4 + new_chapter_hints
-            logger.info(f"📊 STEP 5 - after new_chapter_hints: {len(step5):,} chars")
+            logger.debug(f"📊 STEP 5 - after new_chapter_hints: {len(step5):,} chars")
             
             rest_of_template = (
                 "\n" + ("="*80) + "\n" +
@@ -1072,7 +1144,13 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "**FOR replace_range/delete_range:**\n"
                 "- **MANDATORY**: You MUST provide 'original_text' with EXACT text from the manuscript\n"
                 "- **CRITICAL**: If you don't provide 'original_text', the operation will FAIL completely\n"
-                "- **NEVER** create a replace_range operation without 'original_text' - it will fail!\n\n"
+                "- **NEVER** create a replace_range operation without 'original_text' - it will fail!\n"
+                "- **REPLACEMENT TEXT MUST BE COMPLETE**: The 'text' field is the FULL replacement - everything in 'original_text' will be replaced with ONLY what's in 'text'\n"
+                "  - Example: If original_text = \"caught Walter's eye and smiled\" and text = \"caught his eye\"\n"
+                "  - Result: \"caught Walter's eye and smiled\" → \"caught his eye\" (loses \"Walter's\" unless included in text)\n"
+                "  - **USE MINIMAL MATCHES**: Only include the portion you're actually changing in 'original_text'\n"
+                "  - BAD: original_text=\"John Smith walked\" + text=\"walked\" → Result: \"John Smith walked\" becomes just \"walked\"\n"
+                "  - GOOD: original_text=\"walked\" + text=\"ran\" → Result: \"John Smith walked\" becomes \"John Smith ran\"\n\n"
                 "**FOR insert_after_heading (NEW TEXT):**\n"
                 "- Use this when adding NEW content that doesn't exist in the manuscript\n"
                 "- **MANDATORY**: You MUST provide 'anchor_text' with EXACT text from the manuscript to insert after\n"
@@ -1160,6 +1238,13 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "- **CRITICAL**: Copy EXACT, VERBATIM text from the MANUSCRIPT TEXT sections above\n"
                 "- If you don't provide 'original_text', the operation will FAIL completely\n\n"
                 "**PREFER GRANULAR EDITS: Use the SMALLEST possible 'original_text' match**\n"
+                "- MINIMIZE the text you replace - only replace what actually needs to change\n"
+                "- If changing one word/phrase, only include that word/phrase in 'original_text'\n"
+                "- If you include extra context in 'original_text', you MUST re-include it in 'text'\n"
+                "- Example editing \"caught Walter's eye and smiled, though tension showed\" → \"caught Walter's eye and smiled, slight shadows showing\":\n"
+                "  - GOOD: original_text=\"though tension showed\" + text=\"slight shadows showing\" (minimal match)\n"
+                "  - BAD: original_text=\"caught Walter's eye and smiled, though tension showed\" + text=\"caught Walter's eye and smiled, slight shadows showing\" (too broad)\n"
+                "  - VERY BAD: original_text=\"caught Walter's eye and smiled, though tension showed\" + text=\"slight shadows showing\" (loses context!)\n\n"
                 "- For word-level changes: 10-15 words of context (minimal, unique match)\n"
                 "- For phrase changes: 15-20 words of context (minimal, unique match)\n"
                 "- For sentence changes: Just the sentence(s) that need changing (15-30 words)\n"
@@ -1208,17 +1293,17 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "Your response must be valid JSON that can be parsed by json.loads()\n\n"
                 "NOW GENERATE YOUR JSON RESPONSE:\n"
             )
-            logger.info(f"📊 STEP 6 - rest_of_template: {len(rest_of_template):,} chars")
-            logger.info(f"📊 STEP 6 - rest_of_template preview (first 500): {repr(rest_of_template[:500])}")
-            logger.info(f"📊 STEP 6 - rest_of_template preview (last 500): {repr(rest_of_template[-500:])}")
+            logger.debug(f"📊 STEP 6 - rest_of_template: {len(rest_of_template):,} chars")
+            logger.debug(f"📊 STEP 6 - rest_of_template preview (first 500): {repr(rest_of_template[:500])}")
+            logger.debug(f"📊 STEP 6 - rest_of_template preview (last 500): {repr(rest_of_template[-500:])}")
             
             # Final concatenation
             message_4_content = step5 + rest_of_template
-            logger.info(f"📊 STEP 7 - FINAL (step5 + rest_of_template): {len(message_4_content):,} chars (expected: {len(step5) + len(rest_of_template)})")
+            logger.debug(f"📊 STEP 7 - FINAL (step5 + rest_of_template): {len(message_4_content):,} chars (expected: {len(step5) + len(rest_of_template)})")
             
             # 🎯 ROOSEVELT DEBUG: Check message_4_content length before adding to messages
-            logger.info(f"📊 MESSAGE_4_CONTENT BUILT: {len(message_4_content):,} chars")
-            logger.info(f"📊 MESSAGE_4_CONTENT type: {type(message_4_content)}")
+            logger.debug(f"📊 MESSAGE_4_CONTENT BUILT: {len(message_4_content):,} chars")
+            logger.debug(f"📊 MESSAGE_4_CONTENT type: {type(message_4_content)}")
             
             # Append as single HumanMessage
             messages.append(HumanMessage(content=message_4_content))
@@ -1226,15 +1311,14 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # 🎯 ROOSEVELT DEBUG: Log the actual size of Message 4 to identify bloat source
         if len(messages) > 3:
             msg4_content = messages[3].content if hasattr(messages[3], 'content') else str(messages[3])
-            logger.info(f"📊 MESSAGE 4 AFTER APPEND: length = {len(msg4_content):,} chars")
-            logger.info(f"📊 MESSAGE 4 AFTER APPEND first 500 chars: {msg4_content[:500]}")
-            logger.info(f"📊 MESSAGE 4 AFTER APPEND last 500 chars: {msg4_content[-500:]}")
+            logger.debug(f"📊 MESSAGE 4 AFTER APPEND: length = {len(msg4_content):,} chars")
+            logger.debug(f"📊 MESSAGE 4 AFTER APPEND first 500 chars: {msg4_content[:500]}")
+            logger.debug(f"📊 MESSAGE 4 AFTER APPEND last 500 chars: {msg4_content[-500:]}")
         
         return {
             "generation_messages": messages,
-            "system_prompt": system_prompt,
             # CRITICAL: Preserve state for subsequent nodes
-            "system_prompt": state.get("system_prompt", ""),
+            "system_prompt": system_prompt,  # Use the processed system_prompt (not state.get)
             "datetime_context": state.get("datetime_context", ""),
             "generation_context_parts": state.get("generation_context_parts", []),  # CRITICAL: Needed for self-healing!
             "metadata": state.get("metadata", {}),
@@ -1447,6 +1531,17 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
             
             # Ensure required fields have defaults
             if isinstance(raw, dict):
+                # NORMALIZE: LLM sometimes returns a single operation object at top level
+                # instead of {"operations": [...], "summary": ..., ...}
+                if "op_type" in raw and "operations" not in raw:
+                    logger.info("LLM returned single operation at top level - wrapping in ManuscriptEdit structure")
+                    raw = {
+                        "target_filename": raw.get("target_filename", filename),
+                        "scope": raw.get("scope", "chapter"),
+                        "summary": raw.get("summary", "Planned edit generated from context."),
+                        "safety": raw.get("safety", "medium"),
+                        "operations": [raw],
+                    }
                 raw.setdefault("target_filename", filename)
                 # DEFENSIVE: Force scope to valid value if missing or invalid
                 raw_scope = raw.get("scope", "paragraph")
@@ -1501,7 +1596,13 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                 elif request_type != "question" and operations_count == 0:
                     logger.warning(f"⚠️ Non-question request ({request_type}) returned 0 operations - this may indicate the LLM misunderstood the task")
                     logger.warning(f"⚠️ User request was: {state.get('current_request', 'unknown')}")
-                    logger.warning(f"⚠️ LLM summary: {manuscript_edit.summary[:200] if manuscript_edit.summary else 'No summary'}")
+                    summary_preview = manuscript_edit.summary[:200] if manuscript_edit.summary else 'No summary'
+                    logger.warning(f"⚠️ LLM summary: {summary_preview}")
+                    logger.warning(f"⚠️ Full LLM response length: {len(content)} chars")
+                    # Log a snippet of the actual response to help debug
+                    if len(content) > 0:
+                        response_preview = content[:500] if len(content) > 500 else content
+                        logger.warning(f"⚠️ LLM response preview: {response_preview}")
             except ValidationError as ve:
                 # Provide detailed validation error
                 error_details = []
@@ -1838,7 +1939,7 @@ async def validate_anchors_node(state: Dict[str, Any]) -> Dict[str, Any]:
             elif op_type in ("insert_after_heading", "insert_after"):
                 if is_empty_file:
                     # Empty file - anchor_text is optional
-                    logger.info(f"✅ Operation {i} ({op_type}): Empty file, anchor_text optional")
+                    logger.debug(f"✅ Operation {i} ({op_type}): Empty file, anchor_text optional")
                     validated_operations.append(op_dict)
                     validation_report_lines.append(f"✅ Operation {i} ({op_type}): Empty file, anchor_text optional")
                     continue
@@ -1861,7 +1962,7 @@ async def validate_anchors_node(state: Dict[str, Any]) -> Dict[str, Any]:
             if text_to_validate:
                 # Try exact match first
                 if text_to_validate in manuscript:
-                    logger.info(f"✅ Operation {i} ({op_type}): {text_type} found in manuscript (exact match)")
+                    logger.debug(f"✅ Operation {i} ({op_type}): {text_type} found in manuscript (exact match)")
                     validated_operations.append(op_dict)
                     validation_report_lines.append(f"✅ Operation {i} ({op_type}): {text_type} found (exact match)")
                 else:
@@ -1870,7 +1971,7 @@ async def validate_anchors_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     normalized_manuscript = " ".join(manuscript.split())
                     
                     if normalized_text in normalized_manuscript:
-                        logger.info(f"✅ Operation {i} ({op_type}): {text_type} found in manuscript (normalized match)")
+                        logger.debug(f"✅ Operation {i} ({op_type}): {text_type} found in manuscript (normalized match)")
                         validated_operations.append(op_dict)
                         validation_report_lines.append(f"✅ Operation {i} ({op_type}): {text_type} found (normalized match)")
                     else:
@@ -1888,7 +1989,7 @@ async def validate_anchors_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         
                         if was_corrected:
                             # Fuzzy match succeeded! Use corrected operation
-                            logger.info(f"✅ Operation {i} ({op_type}): AUTO-CORRECTED via fuzzy match")
+                            logger.debug(f"✅ Operation {i} ({op_type}): AUTO-CORRECTED via fuzzy match")
                             score = corrected_op.get("_anchor_correction_score", 0.0)
                             original_attempt = corrected_op.get("_anchor_original_attempt", "")
                             logger.info(f"   Original attempt: {original_attempt[:100]}...")
@@ -2084,7 +2185,7 @@ async def self_heal_anchors_node(state: Dict[str, Any], llm_factory) -> Dict[str
             healed_data = json.loads(unwrapped)
             healed_operations = healed_data.get("operations", [])
             
-            logger.info(f"✅ Parsed {len(healed_operations)} healed operations")
+            logger.debug(f"✅ Parsed {len(healed_operations)} healed operations")
             
             return {
                 "healed_operations": healed_operations,
@@ -2185,7 +2286,7 @@ async def merge_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     "text": original_operation.get("text", ""),  # This is the generated content!
                     "error": invalid_op.get("error", "Anchor text not found - healing failed")
                 })
-            logger.info(f"✅ Created {len(failed_operations)} failed_operations entries for chat sidebar display")
+            logger.debug(f"✅ Created {len(failed_operations)} failed_operations entries for chat sidebar display")
         elif invalid_operations and len(healed_operations) < len(invalid_operations):
             # Some operations weren't healed
             unhealed_count = len(invalid_operations) - len(healed_operations)
@@ -2213,7 +2314,7 @@ async def merge_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
             
             try:
                 updated_structured_edit = ManuscriptEdit(**updated_edit_dict)
-                logger.info(f"✅ Updated ManuscriptEdit with {len(final_operations)} merged operations")
+                logger.debug(f"✅ Updated ManuscriptEdit with {len(final_operations)} merged operations")
             except ValidationError as e:
                 logger.error(f"Failed to create updated ManuscriptEdit: {e}")
                 # Keep original structured_edit
@@ -2223,6 +2324,7 @@ async def merge_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         return {
             "structured_edit": updated_structured_edit,
+            "validated_operations": final_operations,  # CRITICAL: Pass operations for resolution subgraph!
             "failed_operations": failed_operations,  # CRITICAL: Pass failed ops for chat display!
             "generation_context_parts": state.get("generation_context_parts", []),
             "metadata": state.get("metadata", {}),
@@ -2244,6 +2346,7 @@ async def merge_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {
             "structured_edit": state.get("structured_edit"),
+            "validated_operations": [],  # CRITICAL: Pass empty list for resolution subgraph
             "failed_operations": [],
             "generation_context_parts": state.get("generation_context_parts", []),
             "metadata": state.get("metadata", {}),
@@ -2317,7 +2420,7 @@ def build_generation_subgraph(checkpointer, llm_factory, get_datetime_context):
         
         if anchor_validation_passed:
             # All anchors valid - skip healing, go straight to merge (which will just use validated ops)
-            logger.info("✅ All anchor validations passed - proceeding to merge")
+            logger.debug("✅ All anchor validations passed - proceeding to merge")
             return "merge_operations"
         else:
             # Some anchors invalid - attempt self-healing

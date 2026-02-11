@@ -550,27 +550,3 @@ async def grpc_orchestrator_health():
             "message": str(e)
         }
 
-
-async def _load_conversation_state(user_id: str, conversation_id: str) -> Optional[Dict[str, Any]]:
-    """
-    DEPRECATED: This function is no longer needed.
-    
-    The llm-orchestrator loads shared_memory (including primary_agent_selected, 
-    last_agent, etc.) directly from the LangGraph checkpoint in its StreamChat handler.
-    
-    Returning None here - orchestrator handles all checkpoint loading.
-    
-    Args:
-        user_id: User UUID
-        conversation_id: Conversation UUID
-
-    Returns:
-        None - orchestrator loads checkpoint directly
-    """
-    # The llm-orchestrator microservice loads checkpoint shared_memory directly
-    # in grpc_service.py::StreamChat() at line ~580 via _load_checkpoint_shared_memory()
-    # This includes primary_agent_selected, last_agent, and all continuity data.
-    # No need for backend to duplicate this loading.
-    logger.debug(f"Conversation state loading delegated to llm-orchestrator for {conversation_id}")
-    return None
-

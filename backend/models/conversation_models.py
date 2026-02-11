@@ -21,6 +21,26 @@ class PermissionLevel(str, Enum):
     EDIT = "edit"
 
 
+class AttachmentMetadata(BaseModel):
+    """Metadata for a message attachment"""
+    attachment_id: str  # UUID
+    filename: str
+    content_type: str  # MIME type
+    file_size: int  # bytes
+    file_path: str  # Relative path in storage
+    uploaded_at: datetime
+
+    # Image-specific metadata
+    is_image: bool = False
+    image_width: Optional[int] = None
+    image_height: Optional[int] = None
+
+    # Analysis results (populated after processing)
+    face_detection_results: Optional[Dict[str, Any]] = None
+    vision_description: Optional[str] = None
+    detected_identities: Optional[List[str]] = None
+
+
 # Base models for conversation system
 class ConversationMessage(BaseModel):
     model_config = {"protected_namespaces": ()}
@@ -38,6 +58,7 @@ class ConversationMessage(BaseModel):
     parent_message_id: Optional[str] = None
     is_edited: bool = False
     edit_history: List[Dict[str, Any]] = Field(default_factory=list)
+    attachments: List[AttachmentMetadata] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 

@@ -707,18 +707,23 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             user_id = request.user_id if request.user_id else None
             user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
             
-            # For now, basic implementation - just return error
-            # TODO: Implement NL to SQL conversion using LLM
-            error_message = "Natural language query conversion not yet implemented"
+            # Call query service to execute NL query
+            result = await self.query_service.execute_nl_query(
+                workspace_id=request.workspace_id,
+                natural_query=request.natural_language_query,
+                user_id=user_id,
+                limit=1000,  # Default limit
+                user_team_ids=user_team_ids
+            )
             
             return data_service_pb2.QueryResultResponse(
-                query_id=str(uuid.uuid4()),
-                column_names=[],
-                results_json=json.dumps([]),
-                result_count=0,
-                execution_time_ms=0,
-                generated_sql="",
-                error_message=error_message
+                query_id=result.get('query_id', str(uuid.uuid4())),
+                column_names=result.get('column_names', []),
+                results_json=result.get('results_json', json.dumps([])),
+                result_count=result.get('result_count', 0),
+                execution_time_ms=result.get('execution_time_ms', 0),
+                generated_sql=result.get('generated_sql', ''),
+                error_message=result.get('error_message', '') if result.get('error_message') else None
             )
             
         except Exception as e:
@@ -726,7 +731,7 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return data_service_pb2.QueryResultResponse(
-                query_id="",
+                query_id=str(uuid.uuid4()),
                 column_names=[],
                 results_json=json.dumps([]),
                 result_count=0,

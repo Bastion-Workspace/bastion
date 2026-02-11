@@ -32,6 +32,8 @@ import {
   MailOutline,
   Group,
   MusicNote,
+  HelpOutline,
+  Map,
 } from '@mui/icons-material';
 import { useQuery } from 'react-query';
 import { useAuth } from '../contexts/AuthContext';
@@ -40,6 +42,7 @@ import { useCapabilities } from '../contexts/CapabilitiesContext';
 import { useMessaging } from '../contexts/MessagingContext';
 import { useTeam } from '../contexts/TeamContext';
 import apiService from '../services/apiService';
+import HelpOverlay from './HelpOverlay';
 
 const Navigation = () => {
   const navigate = useNavigate();
@@ -52,6 +55,7 @@ const Navigation = () => {
   const [anchorEl, setAnchorEl] = useState(null);
   const [logoError, setLogoError] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   // Check if user has any media source configured
   const { data: mediaSources } = useQuery(
@@ -73,6 +77,7 @@ const Navigation = () => {
       { label: 'Documents', path: '/documents', icon: <Description /> },
       { label: 'Teams', path: '/teams', icon: <Group />, badge: totalTeamNotifications },
       ...(isAdmin || has('feature.news.view') ? [{ label: 'News', path: '/news', icon: <Description /> }] : []),
+      ...(isAdmin || has('feature.maps.view') ? [{ label: 'Map', path: '/map', icon: <Map /> }] : []),
       ...(hasMediaConfig ? [{ label: 'Media', path: '/media', icon: <MusicNote /> }] : []),
   ];
 
@@ -245,6 +250,11 @@ const Navigation = () => {
               </MenuItem>
             )}
             
+            <MenuItem onClick={() => { handleUserMenuClose(); setHelpOpen(true); }}>
+              <HelpOutline sx={{ mr: 1 }} />
+              Help
+            </MenuItem>
+            
             <Divider />
             
             <MenuItem onClick={handleLogout}>
@@ -252,6 +262,8 @@ const Navigation = () => {
               Logout
             </MenuItem>
           </Menu>
+          
+          <HelpOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
         </Box>
       </Toolbar>
       {/* Mobile Drawer */}
@@ -299,6 +311,10 @@ const Navigation = () => {
           <ListItemButton onClick={() => { setMobileOpen(false); navigate('/settings'); }}>
             <ListItemIcon><Settings /></ListItemIcon>
             <ListItemText primary="Settings" />
+          </ListItemButton>
+          <ListItemButton onClick={() => { setMobileOpen(false); setHelpOpen(true); }}>
+            <ListItemIcon><HelpOutline /></ListItemIcon>
+            <ListItemText primary="Help" />
           </ListItemButton>
           <ListItemButton onClick={() => { setMobileOpen(false); handleLogout(); }}>
             <ListItemIcon><Logout /></ListItemIcon>

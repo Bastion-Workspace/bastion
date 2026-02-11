@@ -424,9 +424,9 @@ async def validate_consistency_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
 def build_validation_subgraph(checkpointer, llm_factory, get_datetime_context) -> StateGraph:
     """Build validation subgraph for fiction agents"""
-    # Use Dict[str, Any] for state compatibility
+    # Use dict for state compatibility (Dict[str, Any] is a type alias, not a valid StateGraph schema)
     from typing import Dict, Any
-    subgraph = StateGraph(Dict[str, Any])
+    subgraph = StateGraph(dict)
     
     # Create node functions with dependencies
     async def detect_outline_node(state):

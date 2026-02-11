@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from typing import List
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 from models.conversation_models import (
     CreateConversationRequest,
@@ -20,6 +20,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 from services.service_container import get_service_container
+from services.chat_attachment_service import chat_attachment_service
 
 # Helper function to get services from container
 async def _get_conversation_service():
@@ -174,6 +175,26 @@ async def list_conversations(skip: int = 0, limit: int = 50, current_user: Authe
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _is_recently_created(created_at, within_seconds: int = 30) -> bool:
+    """Return True if created_at is within the last within_seconds (for skipping checkpoint lookup)."""
+    if created_at is None:
+        return False
+    try:
+        if hasattr(created_at, "isoformat"):
+            now = datetime.now(timezone.utc)
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=timezone.utc)
+            return (now - created_at).total_seconds() < within_seconds
+        if isinstance(created_at, str):
+            parsed = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - parsed).total_seconds() < within_seconds
+    except Exception:
+        pass
+    return False
+
+
 @router.get("/api/conversations/{conversation_id}", response_model=ConversationResponse)
 async def get_conversation(conversation_id: str, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
     conversation_service = await _get_conversation_service()
@@ -188,97 +209,123 @@ async def get_conversation(conversation_id: str, current_user: AuthenticatedUser
             raise HTTPException(status_code=403, detail="You do not have access to this conversation")
         
         logger.info(f"💬 Getting conversation: {conversation_id}")
-        from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
-        checkpointer = await get_postgres_checkpointer()
-        if not checkpointer.is_initialized:
-            logger.error("❌ LangGraph checkpointer not initialized")
-            raise HTTPException(status_code=500, detail="LangGraph checkpointer not initialized")
         conversation_dict = None
-        try:
-            import asyncpg
-            from config import settings
-            connection_string = f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
-            conn = await asyncpg.connect(connection_string)
+
+        # Fast path: for just-created conversations, skip checkpoint lookup and use DB only
+        conversation_service.set_current_user(current_user.user_id)
+        db_conversation = await conversation_service.lifecycle_manager.get_conversation_lifecycle(
+            conversation_id, current_user.user_id
+        )
+        if db_conversation and _is_recently_created(db_conversation.get("created_at")):
+            if db_conversation.get("user_id") == current_user.user_id:
+                message_count = db_conversation.get("message_count", 0)
+                conversation_dict = {
+                    "conversation_id": conversation_id,
+                    "user_id": current_user.user_id,
+                    "title": db_conversation.get("title", "New Conversation"),
+                    "description": db_conversation.get("description"),
+                    "is_pinned": db_conversation.get("is_pinned", False),
+                    "is_archived": db_conversation.get("is_archived", False),
+                    "tags": db_conversation.get("tags", []),
+                    "metadata_json": db_conversation.get("metadata_json", {}),
+                    "message_count": message_count,
+                    "last_message_at": db_conversation.get("last_message_at"),
+                    "manual_order": db_conversation.get("manual_order"),
+                    "order_locked": db_conversation.get("order_locked", False),
+                    "created_at": db_conversation.get("created_at", datetime.now(timezone.utc)),
+                    "updated_at": db_conversation.get("updated_at", datetime.now(timezone.utc)),
+                    "messages": [],
+                }
+                logger.info(f"✅ Conversation {conversation_id} found in DB (recent), skipping checkpoint")
+
+        if not conversation_dict:
+            from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
+            checkpointer = await get_postgres_checkpointer()
+            if not checkpointer.is_initialized:
+                logger.error("❌ LangGraph checkpointer not initialized")
+                raise HTTPException(status_code=500, detail="LangGraph checkpointer not initialized")
             try:
-                from services.orchestrator_utils import normalize_thread_id
-                normalized_thread_id = normalize_thread_id(current_user.user_id, conversation_id)
-                row = await conn.fetchrow(
-                    """
-                    SELECT DISTINCT ON (c.thread_id) 
-                        c.thread_id,
-                        c.checkpoint,
-                        c.checkpoint_id
-                    FROM checkpoints c
-                    WHERE c.thread_id = $1 
-                    AND c.checkpoint -> 'channel_values' ->> 'user_id' = $2
-                    ORDER BY c.thread_id, c.checkpoint_id DESC
-                    LIMIT 1
-                """, normalized_thread_id, current_user.user_id)
-                if row:
-                    checkpoint_data = row['checkpoint']
-                    if isinstance(checkpoint_data, str):
-                        import json
-                        try:
-                            checkpoint_data = json.loads(checkpoint_data)
-                        except json.JSONDecodeError as e:
-                            logger.error(f"❌ Failed to parse checkpoint JSON: {e}")
+                import asyncpg
+                from config import settings
+                connection_string = f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+                conn = await asyncpg.connect(connection_string)
+                try:
+                    from services.orchestrator_utils import normalize_thread_id
+                    normalized_thread_id = normalize_thread_id(current_user.user_id, conversation_id)
+                    row = await conn.fetchrow(
+                        """
+                        SELECT DISTINCT ON (c.thread_id) 
+                            c.thread_id,
+                            c.checkpoint,
+                            c.checkpoint_id
+                        FROM checkpoints c
+                        WHERE c.thread_id = $1 
+                        AND c.checkpoint -> 'channel_values' ->> 'user_id' = $2
+                        ORDER BY c.thread_id, c.checkpoint_id DESC
+                        LIMIT 1
+                    """, normalized_thread_id, current_user.user_id)
+                    if row:
+                        checkpoint_data = row['checkpoint']
+                        if isinstance(checkpoint_data, str):
+                            import json
+                            try:
+                                checkpoint_data = json.loads(checkpoint_data)
+                            except json.JSONDecodeError as e:
+                                logger.error(f"❌ Failed to parse checkpoint JSON: {e}")
+                                checkpoint_data = {}
+                        elif checkpoint_data is None:
                             checkpoint_data = {}
-                    elif checkpoint_data is None:
-                        checkpoint_data = {}
-                    channel_values = checkpoint_data.get('channel_values', {})
-                    conversation_dict = {
-                        "conversation_id": conversation_id,
-                        "user_id": current_user.user_id,
-                        "title": channel_values.get('conversation_title', 'New Conversation'),
-                        "description": channel_values.get('conversation_description'),
-                        "is_pinned": channel_values.get('is_pinned', False),
-                        "is_archived": channel_values.get('is_archived', False),
-                        "tags": channel_values.get('conversation_tags', []),
-                        "metadata_json": {},
-                        "message_count": len(channel_values.get('messages', [])),
-                        "last_message_at": channel_values.get('conversation_updated_at'),
-                        "manual_order": None,
-                        "order_locked": False,
-                        "created_at": channel_values.get('conversation_created_at', datetime.now().isoformat()),
-                        "updated_at": channel_values.get('conversation_updated_at', datetime.now().isoformat()),
-                        "messages": []
-                    }
-                    logger.info(f"✅ Found conversation in LangGraph checkpoint: {conversation_id}")
-                    
-                    # CRITICAL FIX: Always check database for title, even when checkpoint exists
-                    # Database is source of truth for conversation metadata
-                    try:
-                        from services.conversation_service import ConversationService
-                        conversation_service = ConversationService()
-                        conversation_service.set_current_user(current_user.user_id)
-                        db_conversation = await conversation_service.lifecycle_manager.get_conversation_lifecycle(conversation_id, current_user.user_id)
-                        if db_conversation:
-                            db_title = db_conversation.get("title")
-                            # Prefer database title if it exists and is not default
-                            if db_title and db_title != "New Conversation" and db_title != "Untitled Conversation":
-                                conversation_dict["title"] = db_title
-                                logger.info(f"✅ Using database title for conversation {conversation_id}: {db_title}")
-                            # Also update other metadata from database if checkpoint values are defaults
-                            if db_conversation.get("is_pinned") is not None:
-                                conversation_dict["is_pinned"] = db_conversation.get("is_pinned", False)
-                            if db_conversation.get("is_archived") is not None:
-                                conversation_dict["is_archived"] = db_conversation.get("is_archived", False)
-                            if db_conversation.get("tags"):
-                                conversation_dict["tags"] = db_conversation.get("tags", [])
-                            if db_conversation.get("description"):
-                                conversation_dict["description"] = db_conversation.get("description")
-                            if db_conversation.get("manual_order") is not None:
-                                conversation_dict["manual_order"] = db_conversation.get("manual_order")
-                            if db_conversation.get("order_locked") is not None:
-                                conversation_dict["order_locked"] = db_conversation.get("order_locked", False)
-                    except Exception as db_title_error:
-                        logger.warning(f"⚠️ Failed to fetch database title for conversation {conversation_id}: {db_title_error}")
-                else:
-                    logger.info(f"💬 Conversation {conversation_id} not found in LangGraph checkpoints")
-            finally:
-                await conn.close()
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to query LangGraph checkpoints for conversation {conversation_id}: {e}")
+                        channel_values = checkpoint_data.get('channel_values', {})
+                        conversation_dict = {
+                            "conversation_id": conversation_id,
+                            "user_id": current_user.user_id,
+                            "title": channel_values.get('conversation_title', 'New Conversation'),
+                            "description": channel_values.get('conversation_description'),
+                            "is_pinned": channel_values.get('is_pinned', False),
+                            "is_archived": channel_values.get('is_archived', False),
+                            "tags": channel_values.get('conversation_tags', []),
+                            "metadata_json": {},
+                            "message_count": len(channel_values.get('messages', [])),
+                            "last_message_at": channel_values.get('conversation_updated_at'),
+                            "manual_order": None,
+                            "order_locked": False,
+                            "created_at": channel_values.get('conversation_created_at', datetime.now().isoformat()),
+                            "updated_at": channel_values.get('conversation_updated_at', datetime.now().isoformat()),
+                            "messages": []
+                        }
+                        logger.info(f"✅ Found conversation in LangGraph checkpoint: {conversation_id}")
+                        
+                        # CRITICAL FIX: Always check database for title, even when checkpoint exists
+                        try:
+                            from services.conversation_service import ConversationService
+                            conversation_service = ConversationService()
+                            conversation_service.set_current_user(current_user.user_id)
+                            db_conversation = await conversation_service.lifecycle_manager.get_conversation_lifecycle(conversation_id, current_user.user_id)
+                            if db_conversation:
+                                db_title = db_conversation.get("title")
+                                if db_title and db_title != "New Conversation" and db_title != "Untitled Conversation":
+                                    conversation_dict["title"] = db_title
+                                    logger.info(f"✅ Using database title for conversation {conversation_id}: {db_title}")
+                                if db_conversation.get("is_pinned") is not None:
+                                    conversation_dict["is_pinned"] = db_conversation.get("is_pinned", False)
+                                if db_conversation.get("is_archived") is not None:
+                                    conversation_dict["is_archived"] = db_conversation.get("is_archived", False)
+                                if db_conversation.get("tags"):
+                                    conversation_dict["tags"] = db_conversation.get("tags", [])
+                                if db_conversation.get("description"):
+                                    conversation_dict["description"] = db_conversation.get("description")
+                                if db_conversation.get("manual_order") is not None:
+                                    conversation_dict["manual_order"] = db_conversation.get("manual_order")
+                                if db_conversation.get("order_locked") is not None:
+                                    conversation_dict["order_locked"] = db_conversation.get("order_locked", False)
+                        except Exception as db_title_error:
+                            logger.warning(f"⚠️ Failed to fetch database title for conversation {conversation_id}: {db_title_error}")
+                    else:
+                        logger.info(f"💬 Conversation {conversation_id} not found in LangGraph checkpoints")
+                finally:
+                    await conn.close()
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to query LangGraph checkpoints for conversation {conversation_id}: {e}")
         
         # ROOSEVELT'S DUAL SOURCE FIX: Fall back to conversation database if not found in checkpoints
         if not conversation_dict:
@@ -658,6 +705,14 @@ async def _cleanup_conversation_images(conversation_id: str, user_id: str):
                     image_file_path.unlink()
                     deleted_count += 1
                     logger.info(f"🗑️ Deleted image file: {image_file_path}")
+                    # Delete sidecar .metadata.json if present (stem: image.jpg -> image.metadata.json)
+                    sidecar_path = image_file_path.parent / f"{image_file_path.stem}.metadata.json"
+                    if sidecar_path.exists():
+                        try:
+                            sidecar_path.unlink()
+                            logger.info(f"🗑️ Deleted image metadata sidecar: {sidecar_path}")
+                        except Exception as sidecar_e:
+                            logger.warning(f"⚠️ Failed to delete sidecar {sidecar_path}: {sidecar_e}")
             except Exception as e:
                 logger.error(f"❌ Failed to delete image file {image_file_path}: {e}")
         
@@ -715,7 +770,13 @@ async def create_conversation(request: CreateConversationRequest, current_user: 
 
 
 @router.get("/api/conversations/{conversation_id}/messages", response_model=MessageListResponse)
-async def get_conversation_messages(conversation_id: str, skip: int = 0, limit: int = 100, current_user: AuthenticatedUserResponse = Depends(get_current_user)):
+async def get_conversation_messages(
+    conversation_id: str,
+    skip: int = 0,
+    limit: int = 100,
+    skip_checkpoint: bool = False,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
     """
     Get messages for a conversation - MIGRATION-COMPATIBLE APPROACH
     
@@ -723,8 +784,7 @@ async def get_conversation_messages(conversation_id: str, skip: int = 0, limit: 
     1. Conversation database (primary source - populated by backend proxy)
     2. LangGraph checkpoints (fallback for legacy conversations)
     
-    This ensures new orchestrator conversations work correctly while maintaining
-    backward compatibility with old conversations that only have checkpoints.
+    skip_checkpoint: when True and DB returned 0 messages, skip checkpoint fallback (faster for new conversations).
     """
     conversation_service = await _get_conversation_service()
     try:
@@ -782,7 +842,8 @@ async def get_conversation_messages(conversation_id: str, skip: int = 0, limit: 
                             "sequence_number": msg.get("sequence_number", 0),
                             "created_at": msg.get("created_at").isoformat() if hasattr(msg.get("created_at"), "isoformat") else str(msg.get("created_at")),
                             "updated_at": msg.get("updated_at").isoformat() if hasattr(msg.get("updated_at"), "isoformat") else str(msg.get("updated_at")),
-                            "metadata_json": metadata_json,
+                            "metadata_json": metadata_json,  # Keep for backward compatibility
+                            "metadata": metadata_json,  # Frontend expects this name
                             "citations": metadata_json.get("citations", []) if isinstance(metadata_json, dict) else [],
                             "edit_history": []
                         }
@@ -802,8 +863,8 @@ async def get_conversation_messages(conversation_id: str, skip: int = 0, limit: 
         except Exception as db_error:
             logger.warning(f"⚠️ Failed to load messages from conversation database: {db_error}")
         
-        # PRIORITY 2: Fallback to LangGraph checkpoints (for legacy conversations)
-        if not messages_from_database:
+        # PRIORITY 2: Fallback to LangGraph checkpoints (for legacy conversations). Skip when skip_checkpoint=True (new conversation).
+        if not messages_from_database and not (skip_checkpoint and len(messages) == 0):
             logger.info(f"📚 Falling back to LangGraph checkpoints for conversation {conversation_id}")
             try:
                 from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
@@ -1073,6 +1134,10 @@ async def delete_conversation(conversation_id: str, current_user: AuthenticatedU
         # Step 0: Clean up generated images before deletion
         await _cleanup_conversation_images(conversation_id, current_user.user_id)
         
+        # Step 0.5: Clean up chat attachments
+        await chat_attachment_service.initialize()
+        await chat_attachment_service.cleanup_conversation_attachments(conversation_id)
+        
         # ROOSEVELT'S DUAL DELETION: Delete from both LangGraph checkpoints AND legacy tables
         
         # Step 1: Delete from LangGraph checkpoints
@@ -1195,8 +1260,9 @@ async def delete_all_conversations(current_user: AuthenticatedUserResponse = Dep
         conversation_service.set_current_user(current_user.user_id)
         
         # Get all conversations for the user to delete them one by one (to ensure cleanup)
-        conversations_result = await conversation_service.list_conversations(skip=0, limit=1000)
-        user_conversations = conversations_result.get("conversations", [])
+        user_conversations = await conversation_service.list_conversations(
+            current_user.user_id, skip=0, limit=1000
+        )
         
         for conv in user_conversations:
             await conversation_service.delete_conversation(conv["conversation_id"])
@@ -1209,3 +1275,257 @@ async def delete_all_conversations(current_user: AuthenticatedUserResponse = Dep
     except Exception as e:
         logger.error(f"❌ Failed to delete all conversations: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# =====================
+# ATTACHMENT ENDPOINTS
+# =====================
+
+@router.post("/api/conversations/{conversation_id}/messages/{message_id}/attachments")
+async def upload_chat_attachment(
+    conversation_id: str,
+    message_id: str,
+    file: UploadFile = File(...),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Upload an attachment for a chat message"""
+    try:
+        # Check access permission
+        has_access = await validate_conversation_access(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            required_permission="comment"
+        )
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have permission to add attachments to this conversation")
+        
+        logger.info(f"📎 Uploading attachment for message {message_id} in conversation {conversation_id}")
+        
+        # Initialize attachment service if needed
+        await chat_attachment_service.initialize()
+        
+        # Save attachment
+        attachment = await chat_attachment_service.save_attachment(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            file=file,
+            user_id=current_user.user_id
+        )
+        
+        # Update message metadata with attachment info
+        conversation_service = await _get_conversation_service()
+        conversation_service.set_current_user(current_user.user_id)
+        
+        # Get current message metadata
+        import asyncpg
+        from config import settings
+        connection_string = f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+        conn = await asyncpg.connect(connection_string)
+        try:
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", current_user.user_id)
+            
+            # Get current message
+            row = await conn.fetchrow("""
+                SELECT metadata_json FROM conversation_messages
+                WHERE message_id = $1 AND conversation_id = $2
+            """, message_id, conversation_id)
+            
+            if row:
+                metadata = row.get("metadata_json", {}) or {}
+                if not isinstance(metadata, dict):
+                    import json
+                    if isinstance(metadata, str):
+                        metadata = json.loads(metadata)
+                    else:
+                        metadata = {}
+                
+                # Add attachment to metadata
+                if "attachments" not in metadata:
+                    metadata["attachments"] = []
+                
+                metadata["attachments"].append(attachment)
+                
+                # Update message metadata
+                await conn.execute("""
+                    UPDATE conversation_messages
+                    SET metadata_json = $1
+                    WHERE message_id = $2 AND conversation_id = $3
+                """, json.dumps(metadata), message_id, conversation_id)
+        finally:
+            await conn.close()
+        
+        logger.info(f"✅ Attachment uploaded: {attachment['attachment_id']}")
+        return attachment
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to upload attachment: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload attachment")
+
+
+@router.get("/api/conversations/{conversation_id}/messages/{message_id}/attachments")
+async def list_chat_attachments(
+    conversation_id: str,
+    message_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get all attachments for a message"""
+    try:
+        # Check access permission
+        has_access = await validate_conversation_access(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            required_permission="read"
+        )
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have access to this conversation")
+        
+        # Get message metadata
+        import asyncpg
+        from config import settings
+        connection_string = f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+        conn = await asyncpg.connect(connection_string)
+        try:
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", current_user.user_id)
+            
+            row = await conn.fetchrow("""
+                SELECT metadata_json FROM conversation_messages
+                WHERE message_id = $1 AND conversation_id = $2
+            """, message_id, conversation_id)
+            
+            if not row:
+                raise HTTPException(status_code=404, detail="Message not found")
+            
+            metadata = row.get("metadata_json", {}) or {}
+            if not isinstance(metadata, dict):
+                import json
+                if isinstance(metadata, str):
+                    metadata = json.loads(metadata)
+                else:
+                    metadata = {}
+            
+            attachments = metadata.get("attachments", [])
+        finally:
+            await conn.close()
+        
+        return {"attachments": attachments, "total": len(attachments)}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to get attachments: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get attachments")
+
+
+@router.get("/api/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}")
+async def get_chat_attachment_file(
+    conversation_id: str,
+    message_id: str,
+    attachment_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Serve attachment file"""
+    try:
+        # Check access permission
+        has_access = await validate_conversation_access(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            required_permission="read"
+        )
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have access to this conversation")
+        
+        await chat_attachment_service.initialize()
+        
+        return await chat_attachment_service.serve_attachment_file(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            attachment_id=attachment_id,
+            user_id=current_user.user_id
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to serve attachment: {e}")
+        raise HTTPException(status_code=500, detail="Failed to serve attachment")
+
+
+@router.delete("/api/conversations/{conversation_id}/messages/{message_id}/attachments/{attachment_id}")
+async def delete_chat_attachment(
+    conversation_id: str,
+    message_id: str,
+    attachment_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Delete an attachment"""
+    try:
+        # Check access permission
+        has_access = await validate_conversation_access(
+            user_id=current_user.user_id,
+            conversation_id=conversation_id,
+            required_permission="edit"
+        )
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have permission to delete attachments from this conversation")
+        
+        await chat_attachment_service.initialize()
+        
+        # Delete file
+        success = await chat_attachment_service.delete_attachment(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            attachment_id=attachment_id,
+            user_id=current_user.user_id
+        )
+        
+        if not success:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        
+        # Remove from message metadata
+        import asyncpg
+        import json
+        from config import settings
+        connection_string = f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+        conn = await asyncpg.connect(connection_string)
+        try:
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", current_user.user_id)
+            
+            row = await conn.fetchrow("""
+                SELECT metadata_json FROM conversation_messages
+                WHERE message_id = $1 AND conversation_id = $2
+            """, message_id, conversation_id)
+            
+            if row:
+                metadata = row.get("metadata_json", {}) or {}
+                if not isinstance(metadata, dict):
+                    if isinstance(metadata, str):
+                        metadata = json.loads(metadata)
+                    else:
+                        metadata = {}
+                
+                # Remove attachment from list
+                if "attachments" in metadata:
+                    metadata["attachments"] = [
+                        att for att in metadata["attachments"]
+                        if att.get("attachment_id") != attachment_id
+                    ]
+                
+                # Update message metadata
+                await conn.execute("""
+                    UPDATE conversation_messages
+                    SET metadata_json = $1
+                    WHERE message_id = $2 AND conversation_id = $3
+                """, json.dumps(metadata), message_id, conversation_id)
+        finally:
+            await conn.close()
+        
+        logger.info(f"✅ Attachment deleted: {attachment_id}")
+        return {"success": True, "attachment_id": attachment_id}
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to delete attachment: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete attachment")

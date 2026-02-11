@@ -42,7 +42,7 @@ class ChatService:
     
     async def initialize(self, shared_db_pool=None, shared_embedding_manager=None, shared_kg_service=None):
         """Initialize chat service with parallel component loading and shared dependencies"""
-        logger.info("🔧 Initializing Chat Service with ROOSEVELT'S PARALLEL OPTIMIZATION...")
+        logger.debug("🔧 Initializing Chat Service with ROOSEVELT'S PARALLEL OPTIMIZATION...")
         
         # Initialize synchronous components first (fast)
         # Use OpenRouterClient wrapper for automatic reasoning support
@@ -77,7 +77,7 @@ class ChatService:
             logger.debug("✅ Model selection completed")
         
         # Execute heavy initializations in parallel
-        logger.info("⚡ Running parallel component initialization...")
+        logger.debug("⚡ Running parallel component initialization...")
         start_time = datetime.now()
         
         await asyncio.gather(
@@ -88,7 +88,7 @@ class ChatService:
         )
         
         parallel_duration = (datetime.now() - start_time).total_seconds()
-        logger.info(f"✅ Chat Service initialized with parallel optimization in {parallel_duration:.2f}s")
+        logger.debug(f"✅ Chat Service initialized with parallel optimization in {parallel_duration:.2f}s")
     
     def set_current_user(self, user_id: str):
         """Set the current user for operations (for multi-user support)"""

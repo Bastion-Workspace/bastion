@@ -79,6 +79,27 @@
 
 ---
 
+### Insert File Link
+**Hotkey:** `Ctrl+Alt+L` (Windows/Linux) or `Cmd+Alt+L` (Mac)
+
+**What it does:**
+- Opens document picker dialog
+- Select a document from your document tree
+- Inserts Org Mode file link at cursor position
+- Automatically calculates relative path
+
+**Usage:**
+- Open any .org file in DocumentViewer
+- Put cursor where you want the link
+- Press `Ctrl+Alt+L`
+- Search and select a document
+- Press `Enter` or click "Insert Link"
+- Link is inserted in format: `[[file:./path/to/file.md][Description]]`
+
+**Note:** Only works when viewing .org files in the editor. Relative paths are calculated automatically based on current document location.
+
+---
+
 ## Pattern: Ctrl+Shift + Letter
 
 **Why this pattern?**
@@ -92,6 +113,7 @@
 - **Ctrl+Shift+M** = **M**ove/refile (move existing entry)
 - **Ctrl+Shift+A** = **A**rchive (archive DONE entries)
 - **Ctrl+Shift+E** = tag **E**ntry (add tags to entry)
+- **Ctrl+Alt+L** = **L**ink (insert file link)
 
 **Note:** We use M instead of R for refile because Ctrl+Shift+R is the browser's hard refresh shortcut.
 
@@ -151,6 +173,7 @@
 │   Ctrl+Shift+M    Refile entry at cursor (M = Move)   │
 │   Ctrl+Shift+A    Archive entry at cursor             │
 │   Ctrl+Shift+E    Tag entry at cursor (E = Entry)     │
+│   Ctrl+Alt+L     Insert file link at cursor (L = Link)│
 │   Ctrl+Shift+I    Clock in to task                    │
 │   Ctrl+Shift+O    Clock out from task                 │
 │                                                         │

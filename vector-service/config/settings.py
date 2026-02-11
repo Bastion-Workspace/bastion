@@ -22,6 +22,8 @@ class Settings:
     # Qdrant Configuration (Knowledge Hub Extension!)
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://qdrant:6333")
     QDRANT_API_KEY: Optional[str] = os.getenv("QDRANT_API_KEY")
+    QDRANT_TIMEOUT: int = int(os.getenv("QDRANT_TIMEOUT", "30"))
+    QDRANT_UPSERT_MAX_RETRIES: int = int(os.getenv("QDRANT_UPSERT_MAX_RETRIES", "3"))
     TOOL_COLLECTION_NAME: str = os.getenv("TOOL_COLLECTION_NAME", "tools")
     
     # Performance Tuning

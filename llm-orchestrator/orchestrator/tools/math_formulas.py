@@ -27,12 +27,85 @@ def _calculate_manual_j_heat_loss(inputs: Dict[str, Any]) -> float:
     - V = volume in cubic feet
     - ACH = air changes per hour
     - CFM = cubic feet per minute
+    
+    Can calculate:
+    - Whole-building heat loss (pass floor_area or rooms list)
+    - Per-room heat loss (set per_room_calculation=True with rooms list)
+    """
+    # Check if this is a per-room calculation request
+    per_room_calc = inputs.get("per_room_calculation", False)
+    rooms = inputs.get("rooms") or []
+    
+    # If per-room calculation requested, process each room individually
+    if per_room_calc and isinstance(rooms, list) and len(rooms) > 0:
+        results = []
+        total_building_loss = 0.0
+        
+        for room in rooms:
+            room_name = room.get("name", "Unnamed Room")
+            room_area = _room_area_sqft(room)
+            
+            if room_area == 0:
+                continue
+            
+            # Create inputs for this specific room
+            room_inputs = inputs.copy()
+            room_inputs["floor_area"] = room_area
+            room_inputs["rooms"] = None  # Prevent recursion
+            room_inputs["per_room_calculation"] = False  # Calculate this room as a "building"
+            
+            # Proportionally allocate whole-building envelope to this room by floor area.
+            # Otherwise we'd apply the full building's windows/doors/walls to every room,
+            # which wildly overstates heat loss for small rooms (e.g. 48 sq ft bathroom
+            # with 275 sq ft of windows).
+            total_area = sum(_room_area_sqft(r) for r in rooms)
+            room_proportion = room_area / total_area if total_area > 0 else 0
+            
+            room_inputs["wall_area"] = (room_proportion * (inputs.get("wall_area") or 0)) or 0.0
+            room_inputs["window_area"] = (room_proportion * (inputs.get("window_area") or 0)) or 0.0
+            room_inputs["door_area"] = (room_proportion * (inputs.get("door_area") or 0)) or 0.0
+            # roof_area is handled inside _calculate_manual_j_single_space (defaults to floor_area)
+            # ventilation_cfm: allocate by proportion so total CFM is preserved conceptually
+            room_inputs["ventilation_cfm"] = room_proportion * (inputs.get("ventilation_cfm") or 0.0)
+            
+            # Calculate heat loss for this room as if it were its own building
+            room_loss = _calculate_manual_j_single_space(room_inputs)
+            
+            total_building_loss += room_loss
+            results.append({
+                "room_name": room_name,
+                "floor_area": room_area,
+                "heat_loss_btu_hr": round(room_loss, 1),
+                "proportion_of_total": round(room_proportion * 100, 1)
+            })
+        
+        # Store per-room results in inputs for step generator
+        inputs["_per_room_results"] = results
+        inputs["_total_building_loss"] = total_building_loss
+        
+        return total_building_loss
+    
+    # Standard whole-building calculation
+    return _calculate_manual_j_single_space(inputs)
+
+
+def _calculate_manual_j_single_space(inputs: Dict[str, Any]) -> float:
+    """
+    Calculate Manual J heat loss for a single space (room or whole building).
+    This is the core calculation logic.
     """
     # Temperature difference
     delta_t = inputs["indoor_design_temp"] - inputs["outdoor_design_temp"]
     
-    # Building volume
-    floor_area = inputs["floor_area"]
+    # Building/room volume - accept floor_area OR sum rooms
+    floor_area = inputs.get("floor_area")
+    if floor_area is None or floor_area == 0:
+        # Sum room areas if provided (for whole-building mode)
+        rooms = inputs.get("rooms") or []
+        floor_area = sum(_room_area_sqft(r) for r in rooms) if isinstance(rooms, list) else 0.0
+    if floor_area == 0:
+        raise ValueError("floor_area is required (or rooms list with areas)")
+    
     ceiling_height = inputs.get("ceiling_height", 8.0)
     volume = floor_area * ceiling_height
     
@@ -137,17 +210,65 @@ def _calculate_manual_j_heat_loss(inputs: Dict[str, Any]) -> float:
     return net_heat_loss
 
 
+def _generate_per_room_steps(inputs: Dict[str, Any], total_result: float, per_room_results: List[Dict[str, Any]]) -> List[str]:
+    """Generate calculation steps for per-room Manual J calculations"""
+    delta_t = inputs["indoor_design_temp"] - inputs["outdoor_design_temp"]
+    
+    steps = [
+        f"Manual J Heat Loss Calculation (Per-Room)",
+        f"Design Conditions: Indoor {inputs['indoor_design_temp']}°F, Outdoor {inputs['outdoor_design_temp']}°F",
+        f"Temperature Difference (ΔT): {delta_t:.1f}°F",
+        f"Ceiling Height: {inputs.get('ceiling_height', 8.0):.1f} ft",
+        ""
+    ]
+    
+    steps.append("Per-Room Heat Loss Requirements:")
+    steps.append("-" * 70)
+    
+    for room in per_room_results:
+        room_name = room['room_name']
+        floor_area = room['floor_area']
+        heat_loss = room['heat_loss_btu_hr']
+        proportion = room['proportion_of_total']
+        
+        steps.append(f"{room_name:30s} {floor_area:8.1f} sq ft → {heat_loss:8.1f} BTU/hr ({proportion:5.1f}%)")
+    
+    steps.append("-" * 70)
+    steps.append(f"{'TOTAL BUILDING':30s} {sum(r['floor_area'] for r in per_room_results):8.1f} sq ft → {total_result:8.1f} BTU/hr")
+    
+    return steps
+
+
 def _generate_manual_j_steps(inputs: Dict[str, Any], result: float) -> List[str]:
     """Generate detailed calculation steps for Manual J heat loss"""
+    
+    # Check if this was a per-room calculation
+    per_room_results = inputs.get("_per_room_results")
+    if per_room_results:
+        return _generate_per_room_steps(inputs, result, per_room_results)
+    
+    # Standard whole-building calculation steps
     components = inputs.get("_loss_components", {})
     delta_t = inputs.get("_delta_t", 0)
     volume = inputs.get("_volume", 0)
     
+    # Determine if floor_area came from summing rooms
+    floor_area_source = ""
+    if inputs.get("rooms"):
+        room_count = len(inputs["rooms"])
+        floor_area_source = f" (summed from {room_count} rooms)"
+    
+    # Get actual floor_area used (after any summing)
+    floor_area = inputs.get("floor_area")
+    if floor_area is None or floor_area == 0:
+        rooms = inputs.get("rooms") or []
+        floor_area = sum(_room_area_sqft(r) for r in rooms) if isinstance(rooms, list) else 0.0
+    
     steps = [
-        f"Manual J Heat Loss Calculation",
+        f"Manual J Heat Loss Calculation (Whole-Building)",
         f"Design Conditions: Indoor {inputs['indoor_design_temp']}°F, Outdoor {inputs['outdoor_design_temp']}°F",
         f"Temperature Difference (ΔT): {delta_t:.1f}°F",
-        f"Building Volume: {inputs['floor_area']:.0f} sq ft × {inputs.get('ceiling_height', 8.0):.1f} ft = {volume:.0f} cu ft"
+        f"Building Volume: {floor_area:.0f} sq ft{floor_area_source} × {inputs.get('ceiling_height', 8.0):.1f} ft = {volume:.0f} cu ft"
     ]
     
     # Conduction losses
@@ -160,12 +281,12 @@ def _generate_manual_j_steps(inputs: Dict[str, Any], result: float) -> List[str]
     
     if components.get("roof_loss", 0) > 0:
         roof_r = inputs.get("roof_r_value", 30.0)
-        roof_area = inputs.get("roof_area", inputs["floor_area"])
-        steps.append(f"  Roof/Ceiling: U={1.0/roof_r:.4f} × {roof_area:.0f} sq ft × {delta_t:.1f}°F = {components['roof_loss']:.0f} BTU/hr")
+        roof_area_used = inputs.get("roof_area", floor_area)
+        steps.append(f"  Roof/Ceiling: U={1.0/roof_r:.4f} × {roof_area_used:.0f} sq ft × {delta_t:.1f}°F = {components['roof_loss']:.0f} BTU/hr")
     
     if components.get("floor_loss", 0) > 0:
         floor_r = inputs.get("floor_r_value", 19.0)
-        steps.append(f"  Floor: U={1.0/floor_r:.4f} × {inputs['floor_area']:.0f} sq ft × {delta_t:.1f}°F = {components['floor_loss']:.0f} BTU/hr")
+        steps.append(f"  Floor: U={1.0/floor_r:.4f} × {floor_area:.0f} sq ft × {delta_t:.1f}°F = {components['floor_loss']:.0f} BTU/hr")
     
     if components.get("window_loss", 0) > 0:
         window_u = inputs.get("window_u_value", 0.5)
@@ -211,48 +332,66 @@ def _generate_manual_j_steps(inputs: Dict[str, Any], result: float) -> List[str]
     return steps
 
 
+def _room_area_sqft(room: Dict[str, Any]) -> float:
+    """Return room area from room dict; accept 'floor_area', 'square_feet', or 'sq_ft'."""
+    return float(room.get("floor_area") or room.get("square_feet") or room.get("sq_ft") or 0)
+
+
+def _btu_hvac_total_sqft(inputs: Dict[str, Any]) -> float:
+    """Total square footage for btu_hvac: single square_feet or sum of room areas (square_feet or sq_ft)."""
+    single = inputs.get("square_feet")
+    if single is not None and single > 0:
+        return float(single)
+    rooms = inputs.get("rooms") or []
+    return sum(_room_area_sqft(r) for r in rooms) if isinstance(rooms, list) else 0.0
+
+
 # Formula library structure
 FORMULA_LIBRARY: Dict[str, Dict[str, Any]] = {
     # HVAC/BTU Calculations
     "btu_hvac": {
-        "description": "Calculate BTU requirements for HVAC room sizing. Can handle 'square_feet' for a single area or a 'rooms' list for multiple rooms.",
+        "description": "Calculate BTU requirements for HVAC room sizing. Can handle 'square_feet' for a single area or a 'rooms' list for multiple rooms. Each room may use 'square_feet' or 'sq_ft' for area.",
         "formula": lambda inputs: (
-            (inputs.get("square_feet") if inputs.get("square_feet") else sum(room.get("square_feet", 0) for room in inputs.get("rooms", []))) * 
-            inputs.get("btu_per_sqft", 25) * 
-            inputs.get("climate_factor", 1.0) *
-            inputs.get("ceiling_height_factor", 1.0) *
-            inputs.get("insulation_factor", 1.0)
+            _btu_hvac_total_sqft(inputs)
+            * inputs.get("btu_per_sqft", 25)
+            * inputs.get("climate_factor", 1.0)
+            * inputs.get("ceiling_height_factor", 1.0)
+            * inputs.get("insulation_factor", 1.0)
         ),
-        "required_inputs": [], # We'll validate in the validation function
+        "required_inputs": [],  # validated in validation
         "optional_inputs": {
             "square_feet": None,
             "rooms": [],
             "btu_per_sqft": 25,  # Default for moderate climate
             "climate_factor": 1.0,  # 1.0 = moderate, 1.2-1.5 = hot, 0.8-0.9 = cold
             "ceiling_height_factor": 1.0,  # 1.0 = 8ft, adjust for taller ceilings
-            "insulation_factor": 1.0  # 1.0 = standard, <1.0 = well insulated, >1.0 = poor insulation
+            "insulation_factor": 1.0,  # 1.0 = standard, <1.0 = well insulated, >1.0 = poor insulation
+            "design_temp_f": None,  # Optional; document design temp (not used in simple formula)
         },
         "output_unit": "BTU/hr",
-        "validation": lambda inputs: (inputs.get("square_feet") is not None and inputs["square_feet"] > 0) or (isinstance(inputs.get("rooms"), list) and len(inputs["rooms"]) > 0),
+        "validation": lambda inputs: _btu_hvac_total_sqft(inputs) > 0,
         "step_generator": lambda inputs, result: (
             [
-                f"Base calculation (rooms): Sum of room areas = {sum(room.get('square_feet', 0) for room in inputs.get('rooms', []))} sq ft",
-                f"Total area × {inputs.get('btu_per_sqft', 25)} BTU/sq ft = {sum(room.get('square_feet', 0) for room in inputs.get('rooms', [])) * inputs.get('btu_per_sqft', 25)} BTU/hr",
-                f"Apply climate factor: × {inputs.get('climate_factor', 1.0)} = {sum(room.get('square_feet', 0) for room in inputs.get('rooms', [])) * inputs.get('btu_per_sqft', 25) * inputs.get('climate_factor', 1.0)} BTU/hr",
-                f"Apply insulation factor: × {inputs.get('insulation_factor', 1.0)} = {result} BTU/hr"
+                f"Base calculation (rooms): Sum of room areas = {_btu_hvac_total_sqft(inputs):.0f} sq ft",
+                f"Total area × {inputs.get('btu_per_sqft', 25)} BTU/sq ft = {_btu_hvac_total_sqft(inputs) * inputs.get('btu_per_sqft', 25):.0f} BTU/hr",
+                f"Apply climate factor: × {inputs.get('climate_factor', 1.0)} = {_btu_hvac_total_sqft(inputs) * inputs.get('btu_per_sqft', 25) * inputs.get('climate_factor', 1.0):.0f} BTU/hr",
+                f"Apply insulation factor: × {inputs.get('insulation_factor', 1.0)} = {result:.0f} BTU/hr"
             ] if not inputs.get("square_feet") else [
-                f"Base calculation: {inputs['square_feet']} sq ft × {inputs.get('btu_per_sqft', 25)} BTU/sq ft = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25)} BTU/hr",
-                f"Apply climate factor: × {inputs.get('climate_factor', 1.0)} = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25) * inputs.get('climate_factor', 1.0)} BTU/hr",
-                f"Apply ceiling height factor: × {inputs.get('ceiling_height_factor', 1.0)} = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25) * inputs.get('climate_factor', 1.0) * inputs.get('ceiling_height_factor', 1.0)} BTU/hr",
-                f"Apply insulation factor: × {inputs.get('insulation_factor', 1.0)} = {result} BTU/hr"
+                f"Base calculation: {inputs['square_feet']} sq ft × {inputs.get('btu_per_sqft', 25)} BTU/sq ft = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25):.0f} BTU/hr",
+                f"Apply climate factor: × {inputs.get('climate_factor', 1.0)} = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25) * inputs.get('climate_factor', 1.0):.0f} BTU/hr",
+                f"Apply ceiling height factor: × {inputs.get('ceiling_height_factor', 1.0)} = {inputs['square_feet'] * inputs.get('btu_per_sqft', 25) * inputs.get('climate_factor', 1.0) * inputs.get('ceiling_height_factor', 1.0):.0f} BTU/hr",
+                f"Apply insulation factor: × {inputs.get('insulation_factor', 1.0)} = {result:.0f} BTU/hr"
             ]
         )
     },
     "manual_j_heat_loss": {
-        "description": "Calculate heat loss according to ACCA Manual J methodology. Includes conduction losses through building envelope, infiltration losses, ventilation losses, and subtracts internal heat gains.",
+        "description": "Calculate heat loss according to ACCA Manual J methodology. Can calculate whole-building heat loss OR per-room heat loss (set per_room_calculation=true). Includes conduction losses through building envelope, infiltration losses, ventilation losses, and subtracts internal heat gains.",
         "formula": lambda inputs: _calculate_manual_j_heat_loss(inputs),
-        "required_inputs": ["outdoor_design_temp", "indoor_design_temp", "floor_area"],
+        "required_inputs": ["outdoor_design_temp", "indoor_design_temp"],  # floor_area OR rooms required (validated in formula)
         "optional_inputs": {
+            "floor_area": None,  # Total building area (OR provide rooms list)
+            "rooms": [],  # List of rooms with floor_area or sq_ft (will be summed for whole-building OR calculated individually if per_room_calculation=true)
+            "per_room_calculation": False,  # Set to true to get heat loss for EACH room individually (requires rooms list)
             "ceiling_height": 8.0,  # feet, default 8ft
             # Wall losses
             "wall_area": 0.0,  # sq ft
@@ -281,8 +420,9 @@ FORMULA_LIBRARY: Dict[str, Dict[str, Any]] = {
         "output_unit": "BTU/hr",
         "validation": lambda inputs: (
             inputs["outdoor_design_temp"] < inputs["indoor_design_temp"] and
-            inputs["floor_area"] > 0 and
-            inputs.get("ceiling_height", 8.0) > 0
+            (inputs.get("ceiling_height") or 8.0) > 0 and
+            # Either floor_area or rooms must be provided (floor_area can be None after optional defaults)
+            ((inputs.get("floor_area") or 0) > 0 or (isinstance(inputs.get("rooms"), list) and len(inputs.get("rooms", [])) > 0))
         ),
         "step_generator": lambda inputs, result: _generate_manual_j_steps(inputs, result)
     },
@@ -418,6 +558,128 @@ FORMULA_LIBRARY: Dict[str, Dict[str, Any]] = {
 }
 
 
+def get_formula_catalog_for_agents() -> List[Dict[str, Any]]:
+    """
+    Return an agent-facing catalog of formulas with EXACT specifications from FORMULA_LIBRARY.
+    
+    This exposes the actual parameter names, types, defaults, and format requirements
+    so agents can construct inputs correctly without hallucinating parameters.
+    """
+    return [
+        {
+            "name": "manual_j_heat_loss",
+            "description": "ACCA Manual J heat loss calculation. Can calculate WHOLE-BUILDING heat loss OR PER-ROOM heat loss (set per_room_calculation=true). Uses indoor/outdoor design temp, floor area, and envelope details. Use when the user wants to verify or compute heat loss from design temperature.",
+            "when_to_use": [
+                "verify or check BTU/heat loss numbers against design temp",
+                "design temp and square footage",
+                "Manual J",
+                "actual heat loss",
+                "heat loss for this building or per-room",
+                "calculate heat loss",
+                "what SHOULD the BTU be (with design temp)",
+                "per-room BTU requirements",
+                "radiator sizing",
+            ],
+            "required_inputs": {
+                "outdoor_design_temp": {"type": "number", "description": "Outdoor design temperature (°F), e.g., 4.1"},
+                "indoor_design_temp": {"type": "number", "description": "Indoor design temperature (°F), typically 70"},
+            },
+            "optional_inputs": {
+                "floor_area": {"type": "number", "default": None, "description": "Total building floor area (sq ft). OR provide 'rooms' list."},
+                "rooms": {"type": "array", "default": [], "description": "List of rooms. Each room: {name: string, floor_area: number} OR {name: string, sq_ft: number}. Will be summed for whole-building OR calculated individually if per_room_calculation=true."},
+                "per_room_calculation": {"type": "boolean", "default": False, "description": "Set to TRUE to get heat loss for EACH room individually (requires rooms list). Returns per-room BTU requirements for radiator sizing."},
+                "ceiling_height": {"type": "number", "default": 8.0, "description": "Average ceiling height (feet)"},
+                "wall_area": {"type": "number", "default": 0.0, "description": "Total exterior wall area (sq ft)"},
+                "wall_r_value": {"type": "number", "default": 13.0, "description": "Wall insulation R-value"},
+                "roof_area": {"type": "number", "default": 0.0, "description": "Roof area (sq ft). If 0, uses floor_area."},
+                "roof_r_value": {"type": "number", "default": 30.0, "description": "Roof/ceiling insulation R-value"},
+                "floor_r_value": {"type": "number", "default": 19.0, "description": "Floor insulation R-value"},
+                "floor_over_unconditioned": {"type": "boolean", "default": False, "description": "True if floor is over unconditioned space"},
+                "window_area": {"type": "number", "default": 0.0, "description": "Total window area (sq ft)"},
+                "window_u_value": {"type": "number", "default": 0.5, "description": "Window U-value (default 0.5 for double-pane)"},
+                "door_area": {"type": "number", "default": 0.0, "description": "Total door area (sq ft)"},
+                "door_u_value": {"type": "number", "default": 0.2, "description": "Door U-value (default 0.2 for insulated door)"},
+                "air_changes_per_hour": {"type": "number", "default": 0.5, "description": "Air changes per hour (ACH), default 0.5 for tight construction"},
+                "ventilation_cfm": {"type": "number", "default": 0.0, "description": "Mechanical ventilation rate (CFM)"},
+                "occupant_count": {"type": "number", "default": 0, "description": "Number of occupants (for internal heat gain)"},
+                "appliance_heat_gain": {"type": "number", "default": 0.0, "description": "Heat gain from appliances (BTU/hr)"},
+                "lighting_heat_gain": {"type": "number", "default": 0.0, "description": "Heat gain from lighting (BTU/hr)"},
+            },
+            "output_unit": "BTU/hr",
+            "important_notes": [
+                "For rooms list, use ONLY these keys per room: 'name', 'floor_area' (or 'sq_ft'). Do NOT add other fields.",
+                "outdoor_design_temp is the design temp from the document (e.g., 4.1°F)",
+                "indoor_design_temp is typically 70°F unless document specifies otherwise",
+                "ONLY use parameter NAMES listed in required_inputs and optional_inputs above",
+                "Do NOT invent parameter NAMES like 'insulation' or 'insulation_quality' - use wall_r_value, roof_r_value instead",
+                "**INTERPRET qualitative descriptions**: 'low insulation'→wall_r_value:10, '1970s window'→window_u_value:0.7, 'drafty'→air_changes_per_hour:1.0",
+                "**Make intelligent estimates** from document context rather than refusing to calculate",
+                "**For per-room BTU requirements (e.g., radiator sizing): set per_room_calculation=true with rooms list**",
+                "**For whole-building heat loss: leave per_room_calculation=false (default) or omit it**",
+                "Each room is treated as its own building when per_room_calculation=true",
+            ],
+        },
+        {
+            "name": "btu_hvac",
+            "description": "Rule-of-thumb BTU sizing: total area × BTU per sq ft × factors. Does NOT use design temperature. Use for rough total BTU need or room sizing when design-temp verification is not requested.",
+            "when_to_use": [
+                "rough BTU requirements",
+                "total BTU for these rooms",
+                "HVAC sizing (no design temp)",
+            ],
+            "required_inputs": {},  # Either square_feet or rooms is required, validated in formula
+            "optional_inputs": {
+                "square_feet": {"type": "number", "default": None, "description": "Total area (sq ft). OR provide 'rooms' list."},
+                "rooms": {"type": "array", "default": [], "description": "List of rooms. Each room: {name: string, square_feet: number} OR {name: string, sq_ft: number} OR {name: string, floor_area: number}. Will be summed."},
+                "btu_per_sqft": {"type": "number", "default": 25, "description": "BTU per square foot (default 25 for moderate climate)"},
+                "climate_factor": {"type": "number", "default": 1.0, "description": "Climate adjustment (1.0=moderate, 1.2-1.5=hot, 0.8-0.9=cold)"},
+                "ceiling_height_factor": {"type": "number", "default": 1.0, "description": "Ceiling height factor (1.0 for 8ft, adjust for taller)"},
+                "insulation_factor": {"type": "number", "default": 1.0, "description": "Insulation factor (1.0=standard, <1.0=well insulated, >1.0=poor)"},
+                "design_temp_f": {"type": "number", "default": None, "description": "Optional design temp (not used in calculation, just for reference)"},
+            },
+            "output_unit": "BTU/hr",
+            "important_notes": [
+                "This is a simple rule-of-thumb calculation, NOT Manual J",
+                "Does NOT use design temperature in calculations",
+                "For design-temp-based verification, use manual_j_heat_loss instead",
+            ],
+        },
+        {
+            "name": "ohms_law_voltage",
+            "description": "Voltage = current × resistance (V = I × R).",
+            "when_to_use": ["voltage from current and resistance"],
+            "required_inputs": {
+                "current": {"type": "number", "description": "Current in amperes (A)"},
+                "resistance": {"type": "number", "description": "Resistance in ohms (Ω)"},
+            },
+            "optional_inputs": {},
+            "output_unit": "volts",
+        },
+        {
+            "name": "ohms_law_current",
+            "description": "Current = voltage / resistance (I = V / R).",
+            "when_to_use": ["current from voltage and resistance"],
+            "required_inputs": {
+                "voltage": {"type": "number", "description": "Voltage in volts (V)"},
+                "resistance": {"type": "number", "description": "Resistance in ohms (Ω)"},
+            },
+            "optional_inputs": {},
+            "output_unit": "amps",
+        },
+        {
+            "name": "ohms_law_resistance",
+            "description": "Resistance = voltage / current (R = V / I).",
+            "when_to_use": ["resistance from voltage and current"],
+            "required_inputs": {
+                "voltage": {"type": "number", "description": "Voltage in volts (V)"},
+                "current": {"type": "number", "description": "Current in amperes (A)"},
+            },
+            "optional_inputs": {},
+            "output_unit": "ohms",
+        },
+    ]
+
+
 async def evaluate_formula_tool(
     formula_name: str,
     inputs: Dict[str, Any]
@@ -465,6 +727,23 @@ async def evaluate_formula_tool(
                 "steps": [],
                 "success": False,
                 "error": f"Missing required inputs: {', '.join(missing_inputs)}"
+            }
+        
+        # Validate that no unknown parameters are passed
+        optional_inputs = formula_def.get("optional_inputs", {})
+        allowed_params = set(required_inputs) | set(optional_inputs.keys())
+        # Filter out internal fields that start with underscore
+        provided_params = {k for k in inputs.keys() if not k.startswith('_')}
+        unknown_params = provided_params - allowed_params
+        if unknown_params:
+            logger.warning(f"⚠️ Unknown parameters passed to {formula_name}: {unknown_params}")
+            return {
+                "result": None,
+                "unit": None,
+                "formula_used": formula_name,
+                "steps": [],
+                "success": False,
+                "error": f"Unknown parameters: {', '.join(unknown_params)}. Valid parameters are: {', '.join(sorted(allowed_params))}"
             }
         
         # Fill in optional inputs with defaults

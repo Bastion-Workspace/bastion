@@ -700,6 +700,104 @@ class ArchiveRequest(BaseModel):
     line_number: int
     archive_location: Optional[str] = None
 
+@router.get("/api/org/archive-location")
+async def get_archive_location(
+    source_file: str = Query(..., description="Source file relative path (e.g., 'OrgMode/tasks.org')"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """
+    Get archive location for a source file
+    
+    **ROOSEVELT ARCHIVE LOCATION!** Check where entries will be archived!
+    
+    Returns archive location with priority:
+    1. File-level #+ARCHIVE: directive (if present)
+    2. User's settings default archive location
+    3. Default behavior ({filename}_archive.org)
+    
+    **Query Parameters:**
+    - **source_file**: Source file relative path (e.g., "OrgMode/tasks.org")
+    
+    **Returns:**
+    - Archive location information with source and preview
+    """
+    try:
+        from services.org_archive_service import get_org_archive_service
+        from services.folder_service import FolderService
+        from pathlib import Path
+        from config import settings
+        
+        archive_service = await get_org_archive_service()
+        folder_service = FolderService()
+        
+        # Resolve source file path
+        from services.database_manager.database_helpers import fetch_one
+        row = await fetch_one("SELECT username FROM users WHERE user_id = $1", current_user.user_id)
+        username = row['username'] if row else current_user.user_id
+        upload_dir = Path(settings.UPLOAD_DIR)
+        user_base_dir = upload_dir / "Users" / username
+        source_path = user_base_dir / source_file
+        
+        if not source_path.exists():
+            raise HTTPException(status_code=404, detail=f"Source file not found: {source_file}")
+        
+        # Check file-level directive
+        file_archive = None
+        try:
+            with open(source_path, 'r', encoding='utf-8') as f:
+                file_content = f.read()
+            file_archive = archive_service._parse_file_archive_directive(file_content)
+        except Exception as e:
+            logger.warning(f"Failed to read file for archive directive: {e}")
+        
+        # Check settings
+        from services.org_settings_service import OrgSettingsService
+        settings_service = OrgSettingsService()
+        org_settings = await settings_service.get_settings(current_user.user_id)
+        settings_archive = None
+        if (org_settings.archive_preferences and 
+            org_settings.archive_preferences.default_archive_location):
+            settings_archive = org_settings.archive_preferences.default_archive_location
+        
+        # Determine which one is being used
+        source_stem = source_path.stem
+        archive_location = None
+        source_type = None
+        
+        if file_archive:
+            archive_location = file_archive.replace('%s', source_stem)
+            source_type = 'file'
+        elif settings_archive:
+            archive_location = settings_archive.replace('%s', source_stem)
+            source_type = 'settings'
+        else:
+            archive_location = f"{source_stem}_archive.org"
+            source_type = 'default'
+        
+        # Get preview of full path (resolve relative to source file's directory if it's a relative path)
+        archive_path = await archive_service._resolve_file_path(
+            current_user.user_id,
+            archive_location,
+            folder_service,
+            base_path=source_path
+        )
+        
+        return {
+            "success": True,
+            "archive_location": archive_location,
+            "source_type": source_type,
+            "file_archive": file_archive,
+            "settings_archive": settings_archive,
+            "preview": str(archive_path.relative_to(user_base_dir)) if archive_path.is_relative_to(user_base_dir) else str(archive_path)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to get archive location: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/api/org/archive")
 async def archive_entry(
     request: ArchiveRequest,
@@ -713,7 +811,7 @@ async def archive_entry(
     **Body Parameters:**
     - **source_file**: Source file relative path (e.g., "OrgMode/tasks.org")
     - **line_number**: Line number of entry to archive (1-based)
-    - **archive_location**: Optional custom archive location (defaults to {source}_archive.org)
+    - **archive_location**: Optional custom archive location (overrides file-level and settings)
     
     **Returns:**
     - Success status and operation details

@@ -31,6 +31,7 @@ pydantic-settings==2.6.1
 # Utilities
 python-dotenv==1.0.1
 numpy==1.26.4
+pytz==2024.1
 
 # Vector Database
 qdrant-client==1.12.0

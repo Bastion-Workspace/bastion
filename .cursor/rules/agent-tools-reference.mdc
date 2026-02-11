@@ -571,6 +571,63 @@ If no ZIP code is found in the user's profile, the system will log a warning and
 
 **Note**: Requires OpenWeatherMap One Call API 3.0 subscription for historical data access
 
+### Navigation Tools (tools-service, gRPC via BackendToolClient)
+**Location management and route planning**
+
+Navigation tools live in `tools-service/services/navigation_tools.py` and are exposed via gRPC. The LLM orchestrator calls them through `BackendToolClient` in `orchestrator/backend_tool_client.py`. The Navigation Agent uses the location_management and route_planning subgraphs, which call these methods.
+
+**Location operations:**
+- `create_location(user_id, name, address, latitude, longitude, notes, is_global)` - Create a saved location (address is geocoded by backend if needed)
+- `list_locations(user_id)` - List all saved locations for the user
+- `get_location_by_name(user_id, name)` - Find a location by name
+- `delete_location(user_id, location_id)` - Delete a saved location
+
+**Route operations:**
+- `compute_route(user_id, from_location_id, to_location_id, coordinates, profile)` - Compute route between locations or raw coordinates (profile: driving, walking, etc.)
+- `save_route(user_id, name, route_data)` - Save a computed route with a name
+- `list_saved_routes(user_id)` - List saved routes
+- `get_saved_route(user_id, route_id)` - Get a saved route by ID
+- `delete_saved_route(user_id, route_id)` - Delete a saved route
+
+**Usage (from orchestrator):**
+```python
+from orchestrator.backend_tool_client import get_backend_tool_client
+
+client = await get_backend_tool_client()
+
+# Create a location
+result = await client.create_location(
+    user_id=user_id,
+    name="Home",
+    address="123 Main St",
+    latitude=None,
+    longitude=None,
+    notes="",
+    is_global=False
+)
+
+# List locations
+locations = await client.list_locations(user_id=user_id)
+
+# Compute route (from saved location ID to another, or use coordinates)
+route = await client.compute_route(
+    user_id=user_id,
+    from_location_id=from_id,
+    to_location_id=to_id,
+    coordinates=None,
+    profile="driving"
+)
+
+# Save route
+saved = await client.save_route(user_id=user_id, name="Daily Commute", route_data=route)
+```
+
+**Map visualization (Phase 1):**
+- Turn-by-turn directions are formatted as markdown by the route_planning subgraph
+- A Google Maps URL is generated for the route (`https://www.google.com/maps/dir/?api=1&origin=...&destination=...`) for user follow-up
+
+**Error handling:** Tools return `{"success": False, "error": "..."}` for location not found, geocoding failures, OSRM errors, and permission issues.
+
 ### Visualization Tools (`orchestrator/tools/visualization_tools.py`)
 **Pure utility tools for generating charts and graphs from structured data**
 

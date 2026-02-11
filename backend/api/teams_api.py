@@ -32,8 +32,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["teams"])
 
 # Debug: Log all routes when module loads
-import sys
-print(f"🔍 Teams API routes registered with prefix: /api/teams", file=sys.stderr)
+logger.debug("🔍 Teams API routes registered with prefix: /api/teams")
 
 # Global service instances (will be initialized in main.py)
 team_service = TeamService()
@@ -92,9 +91,9 @@ async def get_unread_post_counts(
 ):
     """Get unread post counts for all user's teams"""
     try:
-        logger.info(f"📊 Getting unread counts for user {current_user.user_id}")
+        logger.debug(f"📊 Getting unread counts for user {current_user.user_id}")
         counts = await team_service.get_unread_post_counts(current_user.user_id)
-        logger.info(f"📊 Unread counts for user {current_user.user_id}: {counts}")
+        logger.debug(f"📊 Unread counts for user {current_user.user_id}: {counts}")
         return counts
     except Exception as e:
         logger.error(f"Failed to get unread post counts: {e}", exc_info=True)

@@ -382,6 +382,17 @@ class FileManagerService:
                 # Move the file
                 shutil.move(str(old_file_path), str(new_file_path))
                 logger.info(f"📦 Moved file on disk: {old_file_path} -> {new_file_path}")
+
+                # Move image metadata sidecar if present ({stem}.metadata.json)
+                sidecar_name = f"{old_file_path.stem}.metadata.json"
+                old_sidecar_path = old_file_path.parent / sidecar_name
+                if old_sidecar_path.exists():
+                    new_sidecar_path = new_file_path.parent / sidecar_name
+                    try:
+                        shutil.move(str(old_sidecar_path), str(new_sidecar_path))
+                        logger.info(f"📦 Moved metadata sidecar: {old_sidecar_path} -> {new_sidecar_path}")
+                    except Exception as sidecar_e:
+                        logger.warning(f"⚠️ Failed to move metadata sidecar: {sidecar_e}")
             else:
                 logger.warning(f"⚠️ File not found on disk: {old_file_path} (database will be updated anyway)")
             
@@ -497,9 +508,9 @@ class FileManagerService:
             
             folder_id = doc.folder_id
             items_deleted = 1
-            
-            # Delete document with proper user context
-            success = await self.document_service.document_repository.delete(request.document_id, doc.user_id)
+
+            # Full delete: metadata + image embeddings, face/object data, file, and document record
+            success = await self.document_service.delete_document(request.document_id)
             if not success:
                 raise ValueError(f"Failed to delete document: {request.document_id}")
             
@@ -542,6 +553,8 @@ class FileManagerService:
 
             old_filename = doc.filename
             folder_id = doc.folder_id
+            user_id = getattr(doc, 'user_id', request.user_id)
+            collection_type = getattr(doc, 'collection_type', 'user')
 
             desired = request.new_filename.strip()
             if not desired:
@@ -559,13 +572,82 @@ class FileManagerService:
                 if new_filename.lower().endswith(e + e):
                     new_filename = new_filename[:-len(e)]
 
-            # Rename on disk (best effort)
+            # Rename on disk using proper folder structure
+            old_path = None
+            new_path = None
             try:
-                upload_dir = Path(settings.UPLOAD_DIR)
-                old_path = upload_dir / f"{request.document_id}_{old_filename}"
-                new_path = upload_dir / f"{request.document_id}_{new_filename}"
-                if old_path.exists() and old_path != new_path:
-                    old_path.rename(new_path)
+                # Get old file path using folder service (new folder structure)
+                try:
+                    old_path_str = await self.folder_service.get_document_file_path(
+                        filename=old_filename,
+                        folder_id=folder_id,
+                        user_id=user_id,
+                        collection_type=collection_type
+                    )
+                    old_path = Path(old_path_str)
+                    
+                    # Verify path is within uploads directory (security check)
+                    uploads_base = Path(settings.UPLOAD_DIR).resolve()
+                    old_path_resolved = old_path.resolve()
+                    if str(old_path_resolved).startswith(str(uploads_base)):
+                        # Path is valid, check if file exists
+                        if not old_path.exists():
+                            old_path = None
+                    else:
+                        logger.warning(f"⚠️ Old file path outside uploads directory: {old_path}")
+                        old_path = None
+                except Exception as e:
+                    logger.debug(f"Could not get old path via folder service: {e}")
+                    old_path = None
+                
+                # Fallback to legacy flat structure if new structure path not found
+                if old_path is None:
+                    upload_dir = Path(settings.UPLOAD_DIR)
+                    legacy_paths = [
+                        upload_dir / f"{request.document_id}_{old_filename}",
+                        upload_dir / old_filename
+                    ]
+                    for legacy_path in legacy_paths:
+                        if legacy_path.exists():
+                            old_path = legacy_path
+                            logger.info(f"📄 Found file in legacy location: {old_path}")
+                            break
+                
+                # If we found the old file, get new path and rename
+                if old_path and old_path.exists():
+                    # Get new file path using folder service
+                    try:
+                        new_path_str = await self.folder_service.get_document_file_path(
+                            filename=new_filename,
+                            folder_id=folder_id,
+                            user_id=user_id,
+                            collection_type=collection_type
+                        )
+                        new_path = Path(new_path_str)
+                        
+                        # Verify new path is within uploads directory (security check)
+                        uploads_base = Path(settings.UPLOAD_DIR).resolve()
+                        new_path_resolved = new_path.resolve()
+                        if not str(new_path_resolved).startswith(str(uploads_base)):
+                            logger.error(f"❌ New file path outside uploads directory: {new_path}")
+                            raise ValueError("Invalid file path")
+                        
+                        # Ensure parent directory exists
+                        new_path.parent.mkdir(parents=True, exist_ok=True)
+                    except Exception as e:
+                        logger.warning(f"⚠️ Could not get new path via folder service: {e}")
+                        # Fallback to legacy structure for new path too
+                        upload_dir = Path(settings.UPLOAD_DIR)
+                        new_path = upload_dir / f"{request.document_id}_{new_filename}"
+                    
+                    # Perform the rename
+                    if old_path != new_path:
+                        old_path.rename(new_path)
+                        logger.info(f"✅ Renamed file on disk: {old_path} -> {new_path}")
+                    else:
+                        logger.debug(f"File path unchanged: {old_path}")
+                else:
+                    logger.warning(f"⚠️ File not found on disk for rename: {old_filename}")
             except Exception as re:
                 logger.warning(f"⚠️ Disk rename warning: {re}")
 

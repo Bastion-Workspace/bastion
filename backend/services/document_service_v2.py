@@ -15,7 +15,6 @@ from uuid import uuid4
 
 import aiofiles
 from fastapi import UploadFile
-from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, PointStruct
 import PyPDF2
 import pdfplumber
@@ -33,6 +32,7 @@ from utils.document_processor import DocumentProcessor
 from utils.parallel_document_processor import ParallelDocumentProcessor, ProcessingConfig, ProcessingStrategy
 from services.knowledge_graph_service import KnowledgeGraphService
 from services.embedding_service_wrapper import get_embedding_service
+from services.link_extraction_service import get_link_extraction_service
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,6 @@ class DocumentService:
     """Service for document management and processing using PostgreSQL storage"""
     
     def __init__(self):
-        self.qdrant_client = None
         self.document_processor = None
         self.embedding_manager = None
         self.kg_service = None
@@ -59,26 +58,8 @@ class DocumentService:
             self.document_repository = DocumentRepository()
             await self.document_repository.initialize()
         
-        # Initialize Qdrant client
-        self.qdrant_client = QdrantClient(url=settings.QDRANT_URL)
-        
-        # Create collection if it doesn't exist
-        try:
-            collections = self.qdrant_client.get_collections()
-            collection_names = [col.name for col in collections.collections]
-            
-            if settings.VECTOR_COLLECTION_NAME not in collection_names:
-                self.qdrant_client.create_collection(
-                    collection_name=settings.VECTOR_COLLECTION_NAME,
-                    vectors_config=VectorParams(
-                        size=settings.EMBEDDING_DIMENSIONS,
-                        distance=Distance.COSINE
-                    )
-                )
-                logger.info(f"✅ Created Qdrant collection: {settings.VECTOR_COLLECTION_NAME}")
-        except Exception as e:
-            logger.error(f"❌ Failed to initialize Qdrant: {e}")
-            raise
+        # Collection management now handled by VectorStoreService (which routes through Vector Service)
+        # No direct Qdrant client needed
         
         # Initialize processors (use singleton)
         self.document_processor = DocumentProcessor.get_instance()
@@ -633,7 +614,17 @@ class DocumentService:
             
             # Process all documents using standard processing
             await self._process_standard_document(document_id, file_path, doc_type, user_id)
-            
+
+            # Extract and store document links for file relation graph (text types only)
+            if doc_type in ('org', 'md', 'txt'):
+                try:
+                    content = file_path.read_text(encoding='utf-8')
+                    link_service = await get_link_extraction_service()
+                    rls_context = {'user_id': user_id or '', 'user_role': 'admin' if not user_id else 'user'}
+                    await link_service.extract_and_store_links(document_id, content, rls_context)
+                except Exception as link_err:
+                    logger.warning("Link extraction failed for %s: %s", document_id, link_err)
+
             logger.info(f"✅ Document processing completed: {document_id}")
             
         except Exception as e:
@@ -659,6 +650,68 @@ class DocumentService:
             await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
             await self._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
             logger.info(f"✅ Org file ready for structured queries: {document_id}")
+            return
+        
+        # ROOSEVELT DOCTRINE: Image files stored with auto-generated metadata for searchability!
+        if doc_type == 'image':
+            logger.info(f"📸 Image file stored: {document_id}")
+            
+            # Auto-generate metadata.json with image_filename and image_url for searchability
+            try:
+                # Get document info to construct image_url
+                doc_info = await self.document_repository.get_document_by_id(document_id, user_id)
+                if doc_info:
+                    filename = doc_info.get("filename", "")
+                    folder_id = doc_info.get("folder_id")
+                    collection_type = doc_info.get("collection_type", "user")
+                    
+                    # Construct image_url based on collection type
+                    image_url = ""
+                    if collection_type == "global":
+                        # Get folder path for global images
+                        if folder_id:
+                            folder_info = await self.document_repository.get_folder_by_id(folder_id, user_id)
+                            folder_path = folder_info.get("full_path", "") if folder_info else ""
+                            if folder_path:
+                                # Remove "Global/" prefix if present
+                                if folder_path.startswith("Global/"):
+                                    folder_path = folder_path[7:]
+                                image_url = f"/api/images/{folder_path}/{filename}"
+                            else:
+                                image_url = f"/api/images/{filename}"
+                        else:
+                            image_url = f"/api/images/{filename}"
+                    else:
+                        # User/team collections
+                        image_url = f"/api/images/{filename}"
+                    
+                    # Create minimal metadata.json content
+                    # Note: image_url is NOT stored - it's constructed dynamically from folder path
+                    # This ensures URLs stay valid when files are moved
+                    metadata_json = {
+                        "image_filename": filename,
+                        "image_type": "photo",  # Default type
+                        "has_searchable_metadata": True
+                    }
+                    
+                    # Store metadata_json in database for searchability
+                    await self.document_repository.update(
+                        document_id=document_id,
+                        user_id=user_id,
+                        metadata_json=metadata_json
+                    )
+                    
+                    logger.info(f"✅ Auto-generated metadata for image: {filename}")
+                else:
+                    logger.warning(f"⚠️ Could not retrieve document info for metadata generation: {document_id}")
+            except Exception as e:
+                logger.error(f"❌ Failed to auto-generate image metadata: {e}")
+                # Continue even if metadata generation fails
+            
+            # Mark as completed immediately - no embedding needed
+            await self.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
+            await self._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+            logger.info(f"✅ Image file ready for viewing: {document_id}")
             return
         
         # Check if document is exempt from vectorization BEFORE processing
@@ -1324,10 +1377,12 @@ class DocumentService:
         )
     
     async def check_qdrant_health(self) -> bool:
-        """Check Qdrant health"""
+        """Check Qdrant health via Vector Service"""
         try:
-            self.qdrant_client.get_collections()
-            return True
+            from clients.vector_service_client import get_vector_service_client
+            vector_client = await get_vector_service_client(required=False)
+            result = await vector_client.list_collections()
+            return result.get("success", False)
         except Exception as e:
             logger.error(f"❌ Qdrant health check failed: {e}")
             return False
@@ -1363,13 +1418,6 @@ class DocumentService:
             else:
                 collection_name = settings.VECTOR_COLLECTION_NAME
             
-            # Check if collection exists
-            collections = self.qdrant_client.get_collections()
-            collection_names = [col.name for col in collections.collections]
-            if collection_name not in collection_names:
-                logger.warning(f"⚠️ Collection {collection_name} doesn't exist for metadata update")
-                return
-            
             # Build the metadata payload to update
             payload_updates = {}
             if document_category is not None:
@@ -1387,23 +1435,29 @@ class DocumentService:
                 logger.info(f"⚠️ No metadata to update for document {document_id}")
                 return
             
-            # Use Qdrant's set_payload to update all points matching document_id
-            # This updates the payload without re-vectorizing!
-            self.qdrant_client.set_payload(
+            # Update metadata via Vector Service
+            from clients.vector_service_client import get_vector_service_client
+            vector_client = await get_vector_service_client(required=False)
+            
+            filters = [{
+                "field": "document_id",
+                "value": document_id,
+                "operator": "equals"
+            }]
+            
+            result = await vector_client.update_vector_metadata(
                 collection_name=collection_name,
-                payload=payload_updates,
-                points=Filter(
-                    must=[
-                        FieldCondition(
-                            key="document_id",
-                            match=MatchValue(value=document_id)
-                        )
-                    ]
-                )
+                filters=filters,
+                metadata_updates=payload_updates
             )
             
-            logger.info(f"✅ Updated Qdrant payloads for document {document_id} in {collection_name}")
-            logger.info(f"   Updated fields: {list(payload_updates.keys())}")
+            if result.get("success"):
+                logger.info(f"✅ Updated Qdrant payloads for document {document_id} in {collection_name}")
+                logger.info(f"   Updated {result.get('points_updated', 0)} points, fields: {list(payload_updates.keys())}")
+            else:
+                error = result.get("error", "Unknown error")
+                logger.error(f"❌ Failed to update Qdrant metadata: {error}")
+                raise Exception(f"Vector Service update failed: {error}")
             
         except Exception as e:
             logger.error(f"❌ Failed to update Qdrant metadata for {document_id}: {e}")
@@ -1460,11 +1514,57 @@ class DocumentService:
             
             # Always delete embeddings from vector database (even if file is missing)
             try:
-                await self.embedding_manager.delete_document_chunks(document_id)
-                logger.info(f"🗑️  Deleted embeddings for document {document_id}")
+                await self.embedding_manager.delete_document_chunks(document_id, getattr(doc_info, "user_id", None))
+                logger.info(f"🗑️  Deleted metadata embeddings for document {document_id}")
             except Exception as e:
                 logger.warning(f"⚠️  Failed to delete embeddings for {document_id}: {e}")
                 # Continue with deletion even if embeddings fail
+
+            # Delete IMAGE embeddings: face encodings in Qdrant that were added from this document
+            user_id = getattr(doc_info, "user_id", None)
+            try:
+                from services.face_encoding_service import get_face_encoding_service
+                face_service = await get_face_encoding_service()
+                n_face = await face_service.delete_encodings_by_source_document(document_id, user_id)
+                if n_face > 0:
+                    logger.info(f"🗑️  Deleted {n_face} face encoding(s) for document {document_id}")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to delete face encodings for {document_id}: {e}")
+
+            # Delete IMAGE embeddings: object annotation vectors in Qdrant from this document
+            try:
+                from services.object_encoding_service import get_object_encoding_service
+                obj_enc = await get_object_encoding_service()
+                n_obj = await obj_enc.delete_vectors_by_source_document(document_id, user_id)
+                if n_obj > 0:
+                    logger.info(f"🗑️  Deleted {n_obj} object vector(s) for document {document_id}")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to delete object vectors for {document_id}: {e}")
+
+            # Delete object DB rows (annotations/examples/detections) for this document
+            try:
+                from services.database_manager.database_helpers import execute
+                await execute("DELETE FROM object_annotation_examples WHERE source_document_id = $1", document_id)
+                await execute("DELETE FROM user_object_annotations WHERE source_document_id = $1", document_id)
+                await execute("DELETE FROM detected_objects WHERE document_id = $1", document_id)
+                logger.info(f"✅ Deleted object detection/annotation data for document {document_id}")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to delete object data for {document_id}: {e}")
+
+            # Delete face DB rows for this document
+            try:
+                from services.database_manager.database_helpers import fetch_all, execute
+                faces = await fetch_all(
+                    "SELECT id FROM detected_faces WHERE document_id = $1",
+                    document_id
+                )
+                if faces and len(faces) > 0:
+                    logger.info(f"🗑️  Deleting {len(faces)} face(s) for document {document_id}")
+                await execute("DELETE FROM detected_faces WHERE document_id = $1", document_id)
+                logger.info(f"✅ Deleted face detection data for document {document_id}")
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to delete face detection data for {document_id}: {e}")
+                # Continue with deletion even if face cleanup fails
             
             # Try to delete original file using folder service
             from services.service_container import get_service_container
@@ -1486,6 +1586,16 @@ class DocumentService:
                     file_path.unlink()
                     files_deleted += 1
                     logger.info(f"🗑️  Deleted file: {file_path}")
+                    
+                    # Check for and delete sidecar metadata file if it exists (stem: image.jpg -> image.metadata.json)
+                    sidecar_path = file_path.parent / f"{file_path.stem}.metadata.json"
+                    if sidecar_path.exists():
+                        try:
+                            sidecar_path.unlink()
+                            files_deleted += 1
+                            logger.info(f"🗑️  Deleted sidecar metadata: {sidecar_path}")
+                        except Exception as sidecar_e:
+                            logger.warning(f"⚠️  Failed to delete sidecar {sidecar_path}: {sidecar_e}")
                 else:
                     logger.warning(f"⚠️  File not found at expected path: {file_path}")
             except Exception as e:
@@ -1535,7 +1645,66 @@ class DocumentService:
         except Exception as e:
             logger.error(f"❌ Failed to delete document {document_id}: {e}")
             return False
-    
+
+    async def delete_document_database_only(self, document_id: str) -> bool:
+        """Remove document from database and indexes only; do not delete files from disk.
+        Use when re-syncing from disk so files can be re-read by the file watcher."""
+        try:
+            doc_info = await self.document_repository.get_by_id(document_id)
+            if not doc_info:
+                logger.warning(f"Document {document_id} not found in database")
+                return False
+
+            user_id = getattr(doc_info, "user_id", None)
+            try:
+                await self.embedding_manager.delete_document_chunks(document_id, user_id)
+            except Exception as e:
+                logger.warning(f"Failed to delete embeddings for {document_id}: {e}")
+
+            try:
+                from services.face_encoding_service import get_face_encoding_service
+                face_service = await get_face_encoding_service()
+                await face_service.delete_encodings_by_source_document(document_id, user_id)
+            except Exception as e:
+                logger.warning(f"Failed to delete face encodings for {document_id}: {e}")
+
+            try:
+                from services.object_encoding_service import get_object_encoding_service
+                obj_enc = await get_object_encoding_service()
+                await obj_enc.delete_vectors_by_source_document(document_id, user_id)
+            except Exception as e:
+                logger.warning(f"Failed to delete object vectors for {document_id}: {e}")
+
+            try:
+                from services.database_manager.database_helpers import execute
+                await execute("DELETE FROM object_annotation_examples WHERE source_document_id = $1", document_id)
+                await execute("DELETE FROM user_object_annotations WHERE source_document_id = $1", document_id)
+                await execute("DELETE FROM detected_objects WHERE document_id = $1", document_id)
+            except Exception as e:
+                logger.warning(f"Failed to delete object data for {document_id}: {e}")
+
+            try:
+                from services.database_manager.database_helpers import execute
+                await execute("DELETE FROM detected_faces WHERE document_id = $1", document_id)
+            except Exception as e:
+                logger.warning(f"Failed to delete face detection data for {document_id}: {e}")
+
+            deleted = await self.document_repository.delete(document_id, doc_info.user_id)
+            if not deleted:
+                return False
+
+            if self.kg_service:
+                try:
+                    await self.kg_service.delete_document_entities(document_id)
+                except Exception as e:
+                    logger.warning(f"Failed to delete KG entities for {document_id}: {e}")
+
+            logger.info(f"Removed document {document_id} from database (files left on disk)")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete document {document_id} (database only): {e}")
+            return False
+
     async def exempt_document_from_vectorization(self, document_id: str, user_id: str = None) -> bool:
         """Exempt document from vectorization and delete existing vectors/entities"""
         try:
@@ -1707,16 +1876,24 @@ class DocumentService:
             registered_doc_ids = await self.document_repository.get_all_document_ids()
             registered_doc_ids = set(registered_doc_ids)
             
-            # Get all document IDs from vector database
-            vector_doc_ids = set()
-            scroll_result = self.qdrant_client.scroll(
-                collection_name=settings.VECTOR_COLLECTION_NAME,
-                limit=10000,  # Adjust based on your needs
-                with_payload=["document_id"]
+            # Get all document IDs from vector database via VectorStoreService
+            # Note: VectorStoreService now routes through Vector Service
+            from services.vector_store_service import get_vector_store
+            vector_store = await get_vector_store()
+            
+            # Use search with dummy vector to get all document IDs
+            # This is a workaround until Vector Service has scroll RPC
+            dummy_vector = [0.0] * settings.EMBEDDING_DIMENSIONS
+            search_results = await vector_store.search_similar(
+                query_embedding=dummy_vector,
+                limit=10000,
+                score_threshold=0.0,  # Very low threshold to get all
+                collection_name=settings.VECTOR_COLLECTION_NAME
             )
             
-            for point in scroll_result[0]:
-                doc_id = point.payload.get("document_id")
+            vector_doc_ids = set()
+            for result in search_results:
+                doc_id = result.get("document_id")
                 if doc_id:
                     vector_doc_ids.add(doc_id)
             
@@ -1858,6 +2035,15 @@ class DocumentService:
             
             # Store in database - use create_with_folder to inherit exemption from parent folder
             await self.document_repository.create_with_folder(document_info, folder_id)
+
+            # Extract and store document links for file relation graph (text types only)
+            if filename and filename.lower().endswith(('.org', '.md', '.txt')):
+                try:
+                    link_service = await get_link_extraction_service()
+                    rls_context = {'user_id': user_id or '', 'user_role': 'admin' if not user_id else 'user'}
+                    await link_service.extract_and_store_links(doc_id, content, rls_context)
+                except Exception as link_err:
+                    logger.warning("Link extraction failed for %s: %s", doc_id, link_err)
             
             # Check if document is exempt from vectorization BEFORE processing
             # This prevents unnecessary processing work for exempt documents
@@ -2059,6 +2245,5 @@ class DocumentService:
         if self.document_repository:
             await self.document_repository.close()
         
-        if self.qdrant_client:
-            self.qdrant_client.close()
+        # Qdrant client removed - VectorStoreService handles cleanup
         logger.info("🔄 Document Service V2 closed")

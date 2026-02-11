@@ -26,6 +26,7 @@ import {
 import ChatMessagesArea from './chat/ChatMessagesArea';
 import ChatInputArea from './chat/ChatInputArea';
 import { useEditor } from '../contexts/EditorContext';
+import { useTheme } from '../contexts/ThemeContext';
 import FloatingHistoryWindow from './FloatingHistoryWindow';
 import { useChatSidebar } from '../contexts/ChatSidebarContext';
 import { useQuery, useQueryClient } from 'react-query';
@@ -47,6 +48,7 @@ const ChatSidebar = () => {
     createNewConversation,
   } = useChatSidebar();
   const { editorState } = useEditor();
+  const { darkMode } = useTheme();
   const editorOpen = !!editorState?.isEditable;
   const { 
     editorPreference, 
@@ -435,9 +437,9 @@ const ChatSidebar = () => {
         </Box>
       </Box>
 
-      {/* Messages Area */}
+      {/* Messages Area - darkMode prop ensures re-render when theme toggles (React.memo blocks context-only updates) */}
       <Box sx={{ flexGrow: 1, overflow: 'hidden', backgroundColor: 'background.default' }}>
-        <ChatMessagesArea />
+        <ChatMessagesArea darkMode={darkMode} />
       </Box>
 
       {/* Input Area */}

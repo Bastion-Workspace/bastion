@@ -418,9 +418,10 @@ export const MusicProvider = ({ children }) => {
       return;
     }
 
-    if (repeatMode === 'album' && currentParentId) {
-      // Repeat album/playlist - restart from beginning
-      if (queue.length > 0) {
+    if (repeatMode === 'album' && currentParentId && queue.length > 0) {
+      // Repeat album/playlist: only restart from beginning when we just finished the last track
+      const isLastTrack = currentIndex === queue.length - 1;
+      if (isLastTrack) {
         setCurrentIndex(0);
         setCurrentTrack(queue[0]);
         shouldPlayRef.current = true;
@@ -429,11 +430,11 @@ export const MusicProvider = ({ children }) => {
       }
     }
 
-    // Move to next track
+    // Move to next track (repeat off, or repeat album but not at end yet)
     if (handleNextRef.current) {
       handleNextRef.current();
     }
-  }, [repeatMode, currentTrack, currentParentId, queue]);
+  }, [repeatMode, currentTrack, currentParentId, queue, currentIndex]);
 
   // Update refs when callbacks change
   useEffect(() => {

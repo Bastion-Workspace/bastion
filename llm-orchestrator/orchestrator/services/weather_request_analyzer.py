@@ -273,6 +273,8 @@ Return ONLY the location string, nothing else."""
             response = await llm.ainvoke([HumanMessage(content=location_prompt)])
             extracted_location = response.content if hasattr(response, 'content') else str(response)
             extracted_location = extracted_location.strip()
+            # Strip common LLM preambles that slip through (e.g. "Let me correct that: 14532" -> "14532")
+            extracted_location = self._strip_location_preamble(extracted_location, user_message)
             
             # Handle special cases
             if extracted_location == "DEFAULT_LOCATION":
@@ -319,6 +321,30 @@ Return ONLY the location string, nothing else."""
         
         # Use fallback location from preferences/config
         return await self._get_fallback_location(shared_memory, user_id)
+    
+    def _strip_location_preamble(self, extracted_location: str, user_message: str) -> str:
+        """Strip common LLM preambles from location so we get only the actual place (e.g. ZIP or city)."""
+        if not extracted_location or extracted_location == "LOCATION_NEEDED":
+            return extracted_location
+        # Common preambles that some models prepend despite "Return ONLY the location"
+        preambles = [
+            r"^Let me correct that:\s*",
+            r"^Actually,?\s*",
+            r"^I think you mean\s*",
+            r"^You probably meant\s*",
+            r"^I believe you mean\s*",
+            r"^Did you mean\s*",
+            r"^Perhaps you meant\s*",
+        ]
+        cleaned = extracted_location
+        for pattern in preambles:
+            cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
+        # If nothing left or only preamble (no real location), try ZIP from user message
+        if not cleaned or len(cleaned) < 2:
+            zip_match = re.search(r"\b\d{5}\b", user_message)
+            if zip_match:
+                return zip_match.group()
+        return cleaned if cleaned else extracted_location
     
     async def _get_fallback_location(self, shared_memory: Dict[str, Any], user_id: Optional[str] = None) -> str:
         """Get fallback location from preferences or config"""

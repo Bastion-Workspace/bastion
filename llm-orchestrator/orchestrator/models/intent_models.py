@@ -15,7 +15,7 @@ class SimpleIntentResult(BaseModel):
     Provides agent routing, action intent, and permission requirements.
     """
     # Required routing target
-    target_agent: str = Field(description="Agent to route to (research_agent, chat_agent, rules_editing_agent, etc.)")
+    target_agent: str = Field(description="Agent to route to (research_agent, chat_agent, writing_assistant_agent, etc.)")
 
     # Semantic action type for intelligent routing
     action_intent: str = Field(

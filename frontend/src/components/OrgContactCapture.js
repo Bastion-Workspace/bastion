@@ -100,20 +100,20 @@ const OrgContactCapture = ({ open, onClose }) => {
     }
   }, [open]);
 
-  // Auto-generate display name as user types
-  useEffect(() => {
-    const generated = generateDisplayName(firstName, middleName, lastName);
-    if (!displayName || displayName === generated) {
-      // Only auto-update if user hasn't manually edited it
-      setDisplayName(generated);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [firstName, middleName, lastName]);
-
   // Helper to generate display name
   const generateDisplayName = (first, middle, last) => {
     const parts = [first.trim(), middle.trim(), last.trim()].filter(Boolean);
     return parts.join(' ');
+  };
+
+  // Auto-update display name when leaving name fields
+  const handleNameBlur = () => {
+    const generated = generateDisplayName(firstName, middleName, lastName);
+    // Only auto-update if display name is empty or matches the generated value
+    // (meaning user hasn't manually edited it)
+    if (!displayName || displayName === generated) {
+      setDisplayName(generated);
+    }
   };
 
   // Load existing contacts for autocomplete
@@ -316,6 +316,7 @@ const OrgContactCapture = ({ open, onClose }) => {
               label="First Name"
               value={firstName}
               onChange={(e) => setFirstName(e.target.value)}
+              onBlur={handleNameBlur}
               fullWidth
               required
               placeholder="John"
@@ -324,6 +325,7 @@ const OrgContactCapture = ({ open, onClose }) => {
               label="Last Name"
               value={lastName}
               onChange={(e) => setLastName(e.target.value)}
+              onBlur={handleNameBlur}
               fullWidth
               placeholder="Smith"
             />

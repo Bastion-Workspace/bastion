@@ -122,39 +122,102 @@ The metadata editing feature allows you to view and edit comprehensive document 
 - **Real-time Updates**: Changes are immediately reflected in the system
 - **Search Integration**: Updated metadata improves search results
 
-#### Auto-Re-processing (Future Feature)
-When the document editor is implemented, saving a file will automatically trigger re-processing:
-- **Auto-save**: Changes are automatically saved and re-processed
-- **Manual Save**: Ctrl+S will save and re-process the document
-- **Background Processing**: Re-processing happens in the background
-- **Progress Indication**: Visual feedback during re-processing
-
-## Planned Features (Phase 2)
-
 ### Document Editor Integration
 
-#### Monaco Editor Integration
+#### CodeMirror Editor Implementation
+The document editor uses **CodeMirror 6** for a full-featured editing experience with the following capabilities:
+
 - **Rich Text Editing**: Full-featured text editor with syntax highlighting
-- **Markdown Support**: Live preview and editing for `.md` files
-- **Org Mode Support**: Specialized editing for `.org` files
-- **Auto-save**: Automatic saving of changes
-- **Version History**: Track changes and revert to previous versions
+- **Markdown Support**: Live editing for `.md` files with syntax highlighting
+- **Org Mode Support**: Specialized editing for `.org` files with org-mode specific features
+- **Auto-save**: Changes are automatically saved as you type
+- **Frontmatter Support**: Automatic parsing and editing of YAML frontmatter in markdown files
 
 #### Editor Features
-- **Syntax Highlighting**: 
-  - Markdown syntax highlighting
-  - Org Mode syntax highlighting
-  - Code block support
-- **Live Preview**: Real-time preview for Markdown documents
-- **Auto-completion**: Intelligent suggestions and completions
-- **Error Detection**: Real-time error checking and validation
-- **Search & Replace**: Advanced search and replace functionality
 
-#### File Operations
+**Syntax Highlighting:**
+- Markdown syntax highlighting (headers, links, code blocks, lists, etc.)
+- Org Mode syntax highlighting (headings, TODO states, checkboxes, links, properties)
+- Code block support with language detection
+- Dark mode and light mode themes
+
+**Search & Replace:**
+- Advanced search and replace functionality (Ctrl+F / Cmd+F)
+- Persistent search - remembers last search term
+- Case-sensitive and regex search options
+- Search across entire document
+
+**Code Folding (Org Mode):**
+- Fold/unfold headings with `Ctrl+Shift+H` (or `Cmd+Shift+H` on Mac)
+- Fold all headings with `Ctrl+Alt+H`
+- Unfold all headings with `Ctrl+Alt+Shift+H`
+- Fold state persists between sessions
+- Supports Emacs-compatible `#+STARTUP` keywords
+
+**Org Mode Specific Features:**
+
+**Keyboard Shortcuts:**
+- **M-RET (Alt+Enter)**: Create new list item or heading at same level
+- **Ctrl+Shift+H**: Toggle fold for current heading
+- **Ctrl+Shift+T**: Toggle checkbox at cursor
+- **Ctrl+Alt+L**: Insert file link at cursor
+- **Ctrl+Shift+M**: Refile entry at cursor (opens refile dialog)
+- **Ctrl+Shift+A**: Archive entry at cursor
+- **Ctrl+Shift+E**: Tag entry at cursor
+- **Ctrl+Alt+H**: Fold all headings
+- **Ctrl+Alt+Shift+H**: Unfold all headings
+
+**Note:** For complete keyboard shortcut documentation, see [ORG_MODE_HOTKEYS.md](org_mode/ORG_MODE_HOTKEYS.md)
+
+**Org Mode Capabilities:**
+- **Checkbox Management**: Toggle checkboxes with `Ctrl+Shift+T`
+  - Parent checkboxes auto-update when children change
+  - Progress indicators auto-update when checkboxes toggle
+  - Supports `- [ ]`, `- [x]`, and `- [-]` (partially done) states
+- **File Links**: Insert file links with `Ctrl+Alt+L`
+  - Automatically calculates relative paths
+  - Opens document picker dialog
+  - Inserts in format: `[[file:./path/to/file.md][Description]]`
+- **Refile**: Move entries between org files with `Ctrl+Shift+M`
+  - AI suggests best location
+  - Works from editor or from All TODOs page
+- **Archive**: Archive DONE entries with `Ctrl+Shift+A`
+  - Moves to `{filename}_archive.org`
+  - Preserves entry with ARCHIVE_TIME and ARCHIVE_FILE properties
+- **Tagging**: Add tags to entries with `Ctrl+Shift+E`
+  - Merge with existing tags or replace them
+  - Supports org-mode tag syntax
+- **Content Indentation**: Optional visual indentation of content to heading level
+  - Enable in Org Mode Settings
+  - Improves readability of nested structures
+
+**Markdown Editor Features:**
+- Frontmatter editing with visual editor
+- Syntax highlighting for all markdown elements
+- Code block support
+- Link and image support
+- List formatting (ordered and unordered)
+
+**Chat Integration:**
+- **"Prefer Editor" Toggle**: Control whether editor context is sent to chat agents
+  - Located in chat sidebar header (toggle button)
+  - When enabled (`prefer`): Active editor content and context is sent to agents
+  - When disabled (`ignore`): Editor context is excluded from chat
+  - Context-aware: Only active on documents page, automatically disabled elsewhere
+  - Persists user preference across sessions
+  - Enables domain-specific agent routing (e.g., electronics_agent when project_plan.md is open)
+
+**File Operations:**
 - **Create New Files**: Right-click folders to create new `.md` or `.org` files
-- **Save As**: Save documents with different names or formats
-- **Export**: Export documents in various formats
-- **Templates**: Pre-defined templates for common document types
+- **Auto-save**: Changes saved automatically as you type
+- **Scroll Position**: Remembers scroll position between sessions
+- **Line Navigation**: Jump to specific lines or headings
+
+#### Auto-Re-processing
+When editing documents, you can manually trigger re-processing:
+- **Right-click** document in file tree
+- **Select "Re-process Document"** to update embeddings and metadata
+- Future: Automatic re-processing on save (planned)
 
 ### Advanced Features
 
@@ -164,11 +227,44 @@ When the document editor is implemented, saving a file will automatically trigge
 - **Comments**: Add comments and annotations
 - **Conflict Resolution**: Handle editing conflicts gracefully
 
+#### Editor-Chat Integration
+
+**"Prefer Editor" Feature:**
+The "Prefer Editor" toggle in the chat sidebar controls whether the active editor context is included in chat requests:
+
+- **When Enabled (`prefer`)**:
+  - Active editor content is sent to chat agents
+  - Editor metadata (filename, frontmatter, document type) is included
+  - Enables domain-specific agent routing:
+    - `electronics_agent` when `project_plan.md` with `type: electronics` is open
+    - `reference_agent` when reference documents are open
+    - `org_content_agent` when org files are open
+  - Agents can make context-aware edits to the open document
+  - Editor-gated agents (agents that require editor context) can be routed
+
+- **When Disabled (`ignore`)**:
+  - Editor context is excluded from chat requests
+  - Agents operate without document context
+  - Editor-gated agents are blocked from routing
+
+**How It Works:**
+1. Open a document in the editor
+2. Open or focus the chat sidebar
+3. Toggle "Prefer Editor" button in chat header (on/off)
+4. Your preference is saved and persists across sessions
+5. Preference is context-aware: automatically disabled when not on documents page
+
+**Technical Details:**
+- Editor state is tracked via `EditorContext` React context
+- Editor preference stored in `localStorage` as `userEditorPreference`
+- Editor context sent via `active_editor` in gRPC requests
+- Orchestrator uses editor context for intelligent agent routing
+
 #### Integration Features
-- **Chat Integration**: "Save as Note" functionality from chat
+- **Chat Integration**: "Prefer Editor" toggle for context-aware chat interactions
 - **Search Integration**: Direct search from within documents
 - **Knowledge Graph**: Link documents to knowledge graph entities
-- **Version Control**: Git-like version control for documents
+- **Version Control**: Git-like version control for documents (planned)
 
 #### Advanced Processing
 - **Custom Processing**: User-defined processing pipelines
@@ -209,9 +305,13 @@ GET    /api/documents/categories      # Get available categories and tags
 
 #### React Components
 - **FileTreeSidebar**: Main file tree component
-- **DocumentEditor**: Monaco editor integration (planned)
+- **DocumentViewer**: Main document viewing and editing component
+- **OrgCMEditor**: CodeMirror-based org mode editor with org-specific features
+- **MarkdownCMEditor**: CodeMirror-based markdown editor with frontmatter support
+- **OrgEditorPlugins**: Org mode specific plugins (folding, checkboxes, list insertion, etc.)
 - **ContextMenu**: Right-click context menus
 - **UploadDialog**: File upload interface
+- **ChatSidebar**: Chat interface with "Prefer Editor" toggle
 
 #### State Management
 - **React Query**: Server state management
@@ -262,14 +362,23 @@ GET    /api/documents/categories      # Get available categories and tags
 
 ## Future Roadmap
 
+### Phase 2: Enhanced Editor Features (In Progress)
+- **Auto-Re-processing on Save**: Automatic re-processing when documents are saved
+- **Version History**: Track changes and revert to previous versions
+- **Live Preview**: Real-time preview for Markdown documents
+- **Auto-completion**: Intelligent suggestions and completions
+- **Error Detection**: Real-time error checking and validation
+
 ### Phase 3: Advanced Editor Features
 - **Rich Media Support**: Images, videos, and interactive content
 - **Advanced Formatting**: Tables, charts, and diagrams
 - **Plugin System**: Extensible editor with plugins
 - **Mobile Support**: Full mobile editing experience
+- **Export**: Export documents in various formats
+- **Templates**: Pre-defined templates for common document types
 
 ### Phase 4: AI Integration
-- **AI-Assisted Editing**: AI-powered writing assistance
+- **AI-Assisted Editing**: AI-powered writing assistance (partially implemented via chat integration)
 - **Content Generation**: AI-generated content suggestions
 - **Smart Organization**: AI-powered document organization
 - **Intelligent Search**: AI-enhanced search capabilities
@@ -279,6 +388,9 @@ GET    /api/documents/categories      # Get available categories and tags
 - **Audit Logging**: Comprehensive activity logging
 - **Integration APIs**: Third-party system integration
 - **Scalability**: Enterprise-grade performance and reliability
+- **Collaborative Editing**: Real-time collaboration with multiple users
+- **Change Tracking**: Track who made what changes
+- **Comments**: Add comments and annotations
 
 ---
 

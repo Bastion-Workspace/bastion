@@ -35,69 +35,71 @@ class EmailService:
         cc: Optional[List[str]] = None,
         bcc: Optional[List[str]] = None,
         from_email: Optional[str] = None,
-        from_name: Optional[str] = None
+        from_name: Optional[str] = None,
+        smtp_config: Optional[dict] = None,
     ) -> bool:
         """
-        Send an email via SMTP
-        
-        Args:
-            to_email: Recipient email address
-            subject: Email subject
-            body_text: Plain text email body
-            body_html: Optional HTML email body
-            cc: Optional CC recipients
-            bcc: Optional BCC recipients
-            
-        Returns:
-            True if sent successfully, False otherwise
+        Send an email via SMTP. Uses smtp_config when provided (e.g. from DB), else instance config (env).
         """
-        if not self.enabled:
-            logger.warning("Email sending is disabled")
-            return False
-        
-        try:
-            # Create message
-            msg = MIMEMultipart('alternative')
-            msg['Subject'] = subject
-            # Use custom from_email/from_name if provided, otherwise use default
+        if smtp_config:
+            enabled = bool(
+                smtp_config.get("host")
+                and (smtp_config.get("from_email") or smtp_config.get("user"))
+            )
+            host = smtp_config.get("host", "")
+            port = int(smtp_config.get("port", 587))
+            user = smtp_config.get("user", "")
+            password = smtp_config.get("password", "")
+            use_tls = smtp_config.get("use_tls", True)
+            sender_email = from_email or smtp_config.get("from_email", "")
+            sender_name = from_name or smtp_config.get("from_name", "")
+        else:
+            enabled = self.enabled
+            host = self.smtp_host
+            port = self.smtp_port
+            user = self.smtp_user
+            password = self.smtp_password
+            use_tls = self.smtp_use_tls
             sender_email = from_email or self.from_email
             sender_name = from_name or self.from_name
-            msg['From'] = f"{sender_name} <{sender_email}>"
+
+        if not enabled or not host:
+            logger.warning("Email sending is disabled or SMTP host not set")
+            return False
+
+        try:
+            msg = MIMEMultipart('alternative')
+            msg['Subject'] = subject
+            msg['From'] = f"{sender_name} <{sender_email}>" if sender_name else sender_email
             msg['To'] = to_email
-            
+
             if cc:
                 msg['Cc'] = ', '.join(cc)
-            
-            # Add text and HTML parts
+
             text_part = MIMEText(body_text, 'plain')
             msg.attach(text_part)
-            
             if body_html:
                 html_part = MIMEText(body_html, 'html')
                 msg.attach(html_part)
-            
-            # Determine recipients
+
             recipients = [to_email]
             if cc:
                 recipients.extend(cc)
             if bcc:
                 recipients.extend(bcc)
-            
-            # Send via SMTP
-            with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-                if self.smtp_use_tls:
+
+            with smtplib.SMTP(host, port) as server:
+                if use_tls:
                     server.starttls()
-                
-                if self.smtp_user and self.smtp_password:
-                    server.login(self.smtp_user, self.smtp_password)
-                
+                if user and password:
+                    server.login(user, password)
                 server.send_message(msg, to_addrs=recipients)
-            
-            logger.info(f"Email sent successfully to {to_email}")
+
+            logger.info("Email sent successfully to %s", to_email)
             return True
-            
+
         except Exception as e:
-            logger.error(f"Failed to send email to {to_email}: {e}")
+            logger.error("Failed to send email to %s: %s", to_email, e)
             return False
     
     async def send_password_reset_email(

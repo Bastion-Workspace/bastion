@@ -214,8 +214,20 @@ const ConversationSidebar = ({
 
   // Delete all conversations mutation
   const deleteAllConversationsMutation = useMutation(
-    () => {
-      console.log('🔄 Attempting to delete ALL conversations');
+    async () => {
+      const currentConv = conversations.find(c => c.conversation_id === currentConversationId);
+      const isCurrentEmpty =
+        currentConversationId &&
+        currentConv &&
+        (currentConv.message_count === 0 || currentConv.message_count == null) &&
+        !currentConv.is_shared;
+      if (isCurrentEmpty) {
+        const toDelete = conversations.filter(
+          c => !c.is_shared && c.conversation_id !== currentConversationId
+        );
+        await Promise.all(toDelete.map(c => apiService.deleteConversation(c.conversation_id)));
+        return { keptCurrentEmpty: true };
+      }
       return apiService.deleteAllConversations();
     },
     {
@@ -223,9 +235,9 @@ const ConversationSidebar = ({
         console.log('✅ All conversations deleted successfully:', data);
         queryClient.invalidateQueries(['conversations']);
         setDeleteAllDialog({ open: false });
-        // Clear current conversation if it exists
-        if (onClearCurrentConversation) {
-          onClearCurrentConversation();
+        if (!data?.keptCurrentEmpty) {
+          if (onClearCurrentConversation) onClearCurrentConversation();
+          if (onNewConversation) onNewConversation();
         }
       },
       onError: (error) => {
@@ -280,13 +292,6 @@ const ConversationSidebar = ({
   };
 
   const handleDeleteConversation = () => {
-    console.log('🗑️ Delete conversation clicked:', contextMenu.conversation);
-    console.log('🗑️ Conversation title:', contextMenu.conversation?.title);
-    console.log('🗑️ Conversation ID:', contextMenu.conversation?.conversation_id);
-    
-    // Immediate feedback
-    alert('Delete option selected from context menu!');
-    
     setDeleteDialog({ open: true, conversation: contextMenu.conversation });
     handleCloseContextMenu();
   };
@@ -792,22 +797,11 @@ const ConversationSidebar = ({
           <Button 
             variant="contained" 
             color="error"
-            onClick={(e) => {
-              console.log('🗑️ Delete button clicked! Event:', e);
-              console.log('🗑️ Delete button clicked in dialog:', deleteDialog.conversation);
-              console.log('🗑️ Conversation ID to delete:', deleteDialog.conversation?.conversation_id);
-              console.log('🗑️ Delete mutation available:', !!deleteConversationMutation);
-              console.log('🗑️ Delete mutation function:', deleteConversationMutation.mutate);
-              
-              // Immediate visual feedback
-              alert('Delete button clicked!');
-              
+            onClick={() => {
               if (deleteDialog.conversation?.conversation_id) {
-                console.log('🗑️ Calling delete mutation with ID:', deleteDialog.conversation.conversation_id);
                 deleteConversationMutation.mutate(deleteDialog.conversation.conversation_id);
               } else {
-                console.error('❌ No conversation ID found for deletion');
-                alert('Error: No conversation ID found for deletion');
+                console.error('No conversation ID found for deletion');
               }
             }}
             sx={{ 

@@ -45,11 +45,11 @@ class WorkerWarmupService:
         warmup_tasks = []
         
         # Create parallel warmup tasks for all services
+        # Note: Chat service removed - not used by any active Celery tasks (only deprecated base_agent)
+        # Note: Prompt service removed - lightweight service, doesn't need warmup (used lazily by grpc_context_gatherer)
         warmup_tasks.extend([
             self._warmup_settings_service(),
-            self._warmup_chat_service(),
             self._warmup_conversation_service(),
-            self._warmup_prompt_service(),
             self._warmup_category_service(),
         ])
         
@@ -60,7 +60,7 @@ class WorkerWarmupService:
         successful_services = []
         failed_services = []
         
-        service_names = ["settings", "chat", "conversation", "prompt", "category"]
+        service_names = ["settings", "conversation", "category"]
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 failed_services.append(f"{service_names[i]}: {result}")

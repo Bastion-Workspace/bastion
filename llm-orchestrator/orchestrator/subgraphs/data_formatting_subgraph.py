@@ -159,7 +159,13 @@ async def prepare_formatting_context_node(state: Dict[str, Any]) -> Dict[str, An
         
         return {
             "conversation_context": conversation_context,
-            "system_prompt": system_prompt
+            "system_prompt": system_prompt,
+            # ✅ CRITICAL: Preserve all state
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", "")
         }
         
     except Exception as e:
@@ -167,7 +173,13 @@ async def prepare_formatting_context_node(state: Dict[str, Any]) -> Dict[str, An
         return {
             "conversation_context": "Error extracting conversation context.",
             "system_prompt": "",
-            "error": str(e)
+            "error": str(e),
+            # ✅ CRITICAL: Preserve even on error
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", "")
         }
 
 
@@ -258,7 +270,13 @@ async def format_data_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "confidence_level": structured_result.get("confidence_level", 0.9),
             "data_sources_used": structured_result.get("data_sources_used", []),
             "formatting_notes": structured_result.get("formatting_notes", ""),
-            "processing_time": processing_time
+            "processing_time": processing_time,
+            # ✅ CRITICAL: Preserve all state
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", "")
         }
         
     except Exception as e:
@@ -272,7 +290,13 @@ async def format_data_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "confidence_level": 0.0,
             "data_sources_used": [],
             "formatting_notes": f"Formatting error: {str(e)}",
-            "error": str(e)
+            "error": str(e),
+            # ✅ CRITICAL: Preserve even on error
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "query": state.get("query", "")
         }
 
 

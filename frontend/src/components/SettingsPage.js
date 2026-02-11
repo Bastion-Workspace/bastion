@@ -54,7 +54,9 @@ import {
   Movie,
   Info,
   Visibility,
-  VisibilityOff
+  VisibilityOff,
+  Email,
+  Link as LinkIcon
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
@@ -70,6 +72,7 @@ import { useModel } from '../contexts/ModelContext';
 import OrgModeSettingsTab from './OrgModeSettingsTab';
 import MediaSettingsTab from './music/MediaSettingsTab';
 import EntertainmentSyncManager from './EntertainmentSyncManager';
+import ExternalConnectionsSettings from './ExternalConnectionsSettings';
 
 // Model Status Display Component
 const ModelStatusDisplay = () => {
@@ -145,7 +148,7 @@ const ModelStatusDisplay = () => {
 
 const SettingsPage = () => {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
+  const { user, updateUser } = useAuth();
   const { darkMode, toggleDarkMode } = useTheme();
   const { systemPrefersDark, syncWithSystem, isSystemTheme } = useThemeMode();
   const [currentTab, setCurrentTab] = useState(0);
@@ -160,6 +163,8 @@ const SettingsPage = () => {
   const [qdrantDialogOpen, setQdrantDialogOpen] = useState(false);
   const [neo4jDialogOpen, setNeo4jDialogOpen] = useState(false);
   const [documentsDialogOpen, setDocumentsDialogOpen] = useState(false);
+  const [documentsDatabaseOnlyDialogOpen, setDocumentsDatabaseOnlyDialogOpen] = useState(false);
+  const [faceIdentitiesDialogOpen, setFaceIdentitiesDialogOpen] = useState(false);
   const [snackbar, setSnackbar] = useState({ open: false, message: '', severity: 'success' });
 
   // User profile state
@@ -169,6 +174,10 @@ const SettingsPage = () => {
   const [userTimeFormat, setUserTimeFormat] = useState('24h');
   const [userPreferredName, setUserPreferredName] = useState('');
   const [userAiContext, setUserAiContext] = useState('');
+  const [visionFeaturesEnabled, setVisionFeaturesEnabled] = useState(false);
+  const [visionServiceAvailable, setVisionServiceAvailable] = useState(false);
+  const [profileEmail, setProfileEmail] = useState('');
+  const [profileDisplayName, setProfileDisplayName] = useState('');
   
   // Password change state
   const [passwordChange, setPasswordChange] = useState({
@@ -204,13 +213,42 @@ const SettingsPage = () => {
     persona_style: 'professional'
   });
 
+  // Sync profile fields from auth user (email and display_name editable in profile)
+  React.useEffect(() => {
+    if (user) {
+      setProfileEmail(user.email || '');
+      setProfileDisplayName(user.display_name || '');
+    }
+  }, [user?.user_id, user?.email, user?.display_name]);
+
   // Check for users tab from URL params
   React.useEffect(() => {
     const urlParams = new URLSearchParams(window.location.search);
     if (urlParams.get('tab') === 'users' && user?.role === 'admin') {
-      setCurrentTab(8); // Database tab is at 7, User Management is at 8
+      setCurrentTab(9); // User Management tab index
     }
   }, [user]);
+
+  // Handle OAuth callback redirect: connections=success | connections=error&message=...
+  React.useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const status = urlParams.get('connections');
+    if (status === 'success') {
+      setSnackbar({ open: true, message: 'Email connected successfully.', severity: 'success' });
+      setCurrentTab(7); // Connections tab
+      urlParams.delete('connections');
+      const newSearch = urlParams.toString();
+      window.history.replaceState({}, '', newSearch ? `?${newSearch}` : window.location.pathname);
+    } else if (status === 'error') {
+      const msg = urlParams.get('message') || 'Connection failed.';
+      setSnackbar({ open: true, message: msg, severity: 'error' });
+      setCurrentTab(7);
+      urlParams.delete('connections');
+      urlParams.delete('message');
+      const newSearch = urlParams.toString();
+      window.history.replaceState({}, '', newSearch ? `?${newSearch}` : window.location.pathname);
+    }
+  }, []);
 
   // Fetch enabled models from backend
   const { data: enabledModelsData, isLoading: enabledModelsLoading } = useQuery(
@@ -336,6 +374,36 @@ const SettingsPage = () => {
       },
       onError: (error) => {
         console.error('Failed to fetch user AI context:', error);
+      }
+    }
+  );
+
+  // Fetch vision service status and user preference
+  const { data: visionServiceStatusData } = useQuery(
+    'visionServiceStatus',
+    () => apiService.settings.getVisionServiceStatus(),
+    {
+      onSuccess: (data) => {
+        setVisionServiceAvailable(data?.available || false);
+      },
+      onError: (error) => {
+        console.error('Failed to fetch vision service status:', error);
+        setVisionServiceAvailable(false);
+      }
+    }
+  );
+
+  const { data: visionFeaturesData, refetch: refetchVisionFeatures } = useQuery(
+    'visionFeatures',
+    () => apiService.settings.getVisionFeaturesEnabled(),
+    {
+      onSuccess: (data) => {
+        if (data?.enabled !== undefined) {
+          setVisionFeaturesEnabled(data.enabled);
+        }
+      },
+      onError: (error) => {
+        console.error('Failed to fetch vision features setting:', error);
       }
     }
   );
@@ -484,6 +552,28 @@ const SettingsPage = () => {
     }
   );
 
+  // Profile (email, display name) update mutation – same data admins see in User Management
+  const updateProfileMutation = useMutation(
+    (data) => apiService.updateProfile({ email: data.email, display_name: data.display_name }),
+    {
+      onSuccess: (data) => {
+        updateUser({ email: data.email, display_name: data.display_name });
+        setSnackbar({
+          open: true,
+          message: 'Profile updated successfully',
+          severity: 'success'
+        });
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: Array.isArray(error.response?.data?.detail) ? error.response.data.detail[0] : (error.response?.data?.detail || error.message || 'Failed to update profile'),
+          severity: 'error'
+        });
+      }
+    }
+  );
+
   // Preferred name update mutation
   const preferredNameMutation = useMutation(
     (preferredName) => apiService.settings.setUserPreferredName({ preferred_name: preferredName }),
@@ -522,6 +612,28 @@ const SettingsPage = () => {
         setSnackbar({
           open: true,
           message: `Failed to update AI context: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  // Vision features update mutation
+  const visionFeaturesMutation = useMutation(
+    (enabled) => apiService.settings.setVisionFeaturesEnabled(enabled),
+    {
+      onSuccess: (data) => {
+        setSnackbar({
+          open: true,
+          message: 'Vision features setting updated successfully',
+          severity: 'success'
+        });
+        refetchVisionFeatures();
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to update vision features: ${error.response?.data?.detail || error.message}`,
           severity: 'error'
         });
       }
@@ -755,6 +867,36 @@ const SettingsPage = () => {
     }
   );
 
+  const clearFaceIdentitiesMutation = useMutation(
+    () => apiService.delete('/api/vision/clear-all-identities'),
+    {
+      onSuccess: (data) => {
+        queryClient.invalidateQueries('systemStatus');
+        setFaceIdentitiesDialogOpen(false);
+      },
+    }
+  );
+
+  const cleanupOrphanedVectorsMutation = useMutation(
+    () => apiService.post('/api/vision/cleanup-orphaned-vectors'),
+    {
+      onSuccess: (data) => {
+        setSnackbar({
+          open: true,
+          message: data.message || `Cleaned up ${data.vectors_cleaned} orphaned vectors`,
+          severity: 'success'
+        });
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to cleanup vectors: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
   const clearDocumentsMutation = useMutation(
     () => apiService.clearAllDocuments(),
     {
@@ -794,6 +936,57 @@ const SettingsPage = () => {
         setSnackbar({
           open: true,
           message: `Failed to delete documents: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      },
+    }
+  );
+
+  const clearDocumentsDatabaseOnlyMutation = useMutation(
+    () => apiService.clearDocumentsDatabaseOnly(true),
+    {
+      onSuccess: (data) => {
+        queryClient.invalidateQueries('documents');
+        queryClient.invalidateQueries('documents-hierarchy');
+        queryClient.refetchQueries('documents');
+        queryClient.refetchQueries('documents-hierarchy');
+        queryClient.removeQueries('documents');
+        queryClient.removeQueries('documents-hierarchy');
+        setDocumentsDatabaseOnlyDialogOpen(false);
+        setSnackbar({
+          open: true,
+          message: data.message || 'Document database cleared; files on disk will be re-read.',
+          severity: 'success'
+        });
+        if (data.refresh_required) {
+          setTimeout(() => queryClient.invalidateQueries('systemStatus'), 1000);
+        }
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to clear document database: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      },
+    }
+  );
+
+  const rebuildAllLinksMutation = useMutation(
+    () => apiService.rebuildAllLinks(),
+    {
+      onSuccess: (data) => {
+        const { processed = 0, errors = 0, total = 0 } = data || {};
+        setSnackbar({
+          open: true,
+          message: `Links rebuilt: ${processed} processed, ${errors} errors, ${total} total documents.`,
+          severity: errors > 0 ? 'warning' : 'success'
+        });
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to rebuild links: ${error.response?.data?.detail || error.message}`,
           severity: 'error'
         });
       },
@@ -1009,6 +1202,7 @@ const SettingsPage = () => {
     { label: 'Org-Mode', icon: <ListAlt /> },
     { label: 'Media', icon: <MusicNote /> },
     { label: 'Entertainment', icon: <Movie /> },
+    { label: 'Connections', icon: <Email /> },
     ...(user?.role === 'admin' ? [
       { label: 'Database', icon: <DeleteSweep /> },
       { label: 'User Management', icon: <Security /> }
@@ -1156,6 +1350,49 @@ const SettingsPage = () => {
                     >
                       {aiContextMutation.isLoading ? 'Updating...' : 'Update AI Context'}
                     </Button>
+                  </Box>
+
+                  {/* Vision Features Setting */}
+                  <Box mb={3}>
+                    <Typography variant="h6" gutterBottom>
+                      Face Detection & Tagging
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" paragraph>
+                      Enable face detection and tagging features for images. This allows you to identify and search for people in your photos.
+                    </Typography>
+
+                    {!visionServiceAvailable && (
+                      <Alert severity="warning" sx={{ mb: 2 }}>
+                        Vision service is unavailable. The image-vision-service container may not be running.
+                        Face detection features will be disabled until the service is available.
+                      </Alert>
+                    )}
+
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={visionFeaturesEnabled}
+                          onChange={(e) => {
+                            const newValue = e.target.checked;
+                            setVisionFeaturesEnabled(newValue);
+                            visionFeaturesMutation.mutate(newValue);
+                          }}
+                          disabled={!visionServiceAvailable || visionFeaturesMutation.isLoading}
+                        />
+                      }
+                      label={
+                        visionServiceAvailable
+                          ? "Enable Face Detection & Tagging"
+                          : "Face Detection (Service Unavailable)"
+                      }
+                    />
+
+                    {visionServiceAvailable && visionFeaturesEnabled && (
+                      <Alert severity="info" sx={{ mt: 2 }}>
+                        Face detection is enabled. You can now use the "Tag Faces" button when viewing images.
+                        Processing may take 10-30 seconds per image on CPU.
+                      </Alert>
+                    )}
                   </Box>
 
                   {/* Timezone Setting */}
@@ -1360,20 +1597,48 @@ const SettingsPage = () => {
 
                   <Divider sx={{ my: 3 }} />
 
-                  {/* User Info Display */}
+                  {/* Account information – email and display name editable; same field admins see in User Management */}
                   <Box>
                     <Typography variant="h6" gutterBottom>
                       Account Information
                     </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      <strong>Username:</strong> {user?.username}
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                      <strong>Username:</strong> {user?.username} · <strong>Role:</strong> {user?.role}
                     </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      <strong>Email:</strong> {user?.email}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      <strong>Role:</strong> {user?.role}
-                    </Typography>
+                    <TextField
+                      fullWidth
+                      type="email"
+                      label="Email"
+                      value={profileEmail}
+                      onChange={(e) => setProfileEmail(e.target.value)}
+                      sx={{ mb: 2 }}
+                      disabled={updateProfileMutation.isLoading}
+                      helperText="Same email admins see in User Management. Used for test emails and notifications."
+                    />
+                    <TextField
+                      fullWidth
+                      label="Display name"
+                      value={profileDisplayName}
+                      onChange={(e) => setProfileDisplayName(e.target.value)}
+                      sx={{ mb: 2 }}
+                      disabled={updateProfileMutation.isLoading}
+                      placeholder="Optional"
+                    />
+                    <Button
+                      variant="contained"
+                      onClick={() => {
+                        const email = profileEmail.trim();
+                        if (!email) {
+                          setSnackbar({ open: true, message: 'Email is required', severity: 'error' });
+                          return;
+                        }
+                        updateProfileMutation.mutate({ email, display_name: profileDisplayName.trim() || null });
+                      }}
+                      disabled={updateProfileMutation.isLoading}
+                      startIcon={updateProfileMutation.isLoading ? <CircularProgress size={20} /> : <Email />}
+                    >
+                      {updateProfileMutation.isLoading ? 'Saving…' : 'Save email & display name'}
+                    </Button>
                   </Box>
                 </CardContent>
               </Card>
@@ -1674,6 +1939,45 @@ const SettingsPage = () => {
                     enabledModels={enabledModels}
                     modelsData={modelsData}
                     modelsLoading={modelsLoading}
+                  />
+                </CardContent>
+              </Card>
+            </motion.div>
+          </Grid>
+        )}
+
+        {/* Image Analysis Model Selection - Admin Only */}
+        {user?.role === 'admin' && (
+          <Grid item xs={12}>
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.05 }}
+            >
+              <Card sx={{ border: '2px solid #9c27b0', borderRadius: 2 }}>
+                <CardContent>
+                  <Box display="flex" alignItems="center" mb={3}>
+                    <Visibility sx={{ mr: 2, color: 'secondary.main' }} />
+                    <Typography variant="h6" color="secondary.main">
+                      Image Analysis Model
+                    </Typography>
+                    <Chip 
+                      label="Vision / Describe" 
+                      size="small" 
+                      color="secondary" 
+                      sx={{ ml: 2 }}
+                    />
+                  </Box>
+
+                  <Alert severity="info" sx={{ mb: 3 }}>
+                    Select the vision model used for image description (metadata overlay and chat).
+                  </Alert>
+
+                  <ImageGenerationModelSelector 
+                    enabledModels={enabledModels}
+                    modelsData={modelsData}
+                    modelsLoading={modelsLoading}
+                    variant="analysis"
                   />
                 </CardContent>
               </Card>
@@ -2121,8 +2425,19 @@ const SettingsPage = () => {
         </motion.div>
       )}
 
+      {/* Connections Tab */}
+      {currentTab === 7 && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+        >
+          <ExternalConnectionsSettings />
+        </motion.div>
+      )}
+
       {/* Database Management Tab */}
-      {currentTab === 7 && user?.role === 'admin' && (
+      {currentTab === 8 && user?.role === 'admin' && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
         <motion.div
@@ -2169,8 +2484,19 @@ const SettingsPage = () => {
                           onClick={() => setDocumentsDialogOpen(true)}
                           disabled={clearDocumentsMutation.isLoading}
                           fullWidth
+                          sx={{ mb: 1 }}
                         >
                           {clearDocumentsMutation.isLoading ? 'Clearing...' : 'Delete All Documents'}
+                        </Button>
+                        <Button
+                          variant="outlined"
+                          color="warning"
+                          startIcon={<DeleteSweep />}
+                          onClick={() => setDocumentsDatabaseOnlyDialogOpen(true)}
+                          disabled={clearDocumentsDatabaseOnlyMutation.isLoading}
+                          fullWidth
+                        >
+                          {clearDocumentsDatabaseOnlyMutation.isLoading ? 'Clearing...' : 'Clear Database Only (Re-sync from disk)'}
                         </Button>
                       </Paper>
                     </Grid>
@@ -2222,6 +2548,64 @@ const SettingsPage = () => {
                         </Button>
                       </Paper>
                     </Grid>
+
+                    <Grid item xs={12} md={4}>
+                      <Paper sx={{ p: 3, textAlign: 'center', border: '1px solid #e0e0e0' }}>
+                        <Typography variant="h4" sx={{ mb: 1 }}>
+                          👤
+                        </Typography>
+                        <Typography variant="h6" gutterBottom>
+                          Face Recognition Data
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                          Contains detected faces and known identities
+                        </Typography>
+                        <Button
+                          variant="outlined"
+                          color="warning"
+                          startIcon={<DeleteSweep />}
+                          onClick={() => setFaceIdentitiesDialogOpen(true)}
+                          disabled={clearFaceIdentitiesMutation.isLoading}
+                          fullWidth
+                          sx={{ mb: 1 }}
+                        >
+                          {clearFaceIdentitiesMutation.isLoading ? 'Clearing...' : 'Clear Face Identities'}
+                        </Button>
+                        <Button
+                          variant="outlined"
+                          size="small"
+                          onClick={() => cleanupOrphanedVectorsMutation.mutate()}
+                          disabled={cleanupOrphanedVectorsMutation.isLoading}
+                          fullWidth
+                        >
+                          {cleanupOrphanedVectorsMutation.isLoading ? 'Cleaning...' : 'Cleanup Orphaned Vectors'}
+                        </Button>
+                      </Paper>
+                    </Grid>
+
+                    <Grid item xs={12} md={4}>
+                      <Paper sx={{ p: 3, textAlign: 'center', border: '1px solid #e0e0e0' }}>
+                        <Typography variant="h4" sx={{ mb: 1 }}>
+                          🔗
+                        </Typography>
+                        <Typography variant="h6" gutterBottom>
+                          Document Links
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                          File relation graph (org, markdown, and frontmatter links)
+                        </Typography>
+                        <Button
+                          variant="outlined"
+                          color="primary"
+                          startIcon={<LinkIcon />}
+                          onClick={() => rebuildAllLinksMutation.mutate()}
+                          disabled={rebuildAllLinksMutation.isLoading}
+                          fullWidth
+                        >
+                          {rebuildAllLinksMutation.isLoading ? 'Rebuilding...' : 'Rebuild All Links'}
+                        </Button>
+                      </Paper>
+                    </Grid>
                   </Grid>
 
                   {/* Success/Error Messages */}
@@ -2234,6 +2618,17 @@ const SettingsPage = () => {
                   {clearDocumentsMutation.isError && (
                     <Alert severity="error" sx={{ mt: 2 }}>
                       Failed to clear document database: {clearDocumentsMutation.error?.response?.data?.detail}
+                    </Alert>
+                  )}
+
+                  {clearDocumentsDatabaseOnlyMutation.isSuccess && (
+                    <Alert severity="success" sx={{ mt: 2 }}>
+                      Document database cleared (files left on disk). Documents will be re-read from disk.
+                    </Alert>
+                  )}
+                  {clearDocumentsDatabaseOnlyMutation.isError && (
+                    <Alert severity="error" sx={{ mt: 2 }}>
+                      Failed to clear document database only: {clearDocumentsDatabaseOnlyMutation.error?.response?.data?.detail}
                     </Alert>
                   )}
 
@@ -2260,6 +2655,29 @@ const SettingsPage = () => {
                       Failed to clear Neo4j database: {clearNeo4jMutation.error?.response?.data?.detail}
                     </Alert>
                   )}
+
+                  {clearFaceIdentitiesMutation.isSuccess && (
+                    <Alert severity="success" sx={{ mt: 2 }}>
+                      Face recognition data cleared successfully! All detected faces and known identities have been removed.
+                    </Alert>
+                  )}
+                  
+                  {clearFaceIdentitiesMutation.isError && (
+                    <Alert severity="error" sx={{ mt: 2 }}>
+                      Failed to clear face identities: {clearFaceIdentitiesMutation.error?.response?.data?.detail}
+                    </Alert>
+                  )}
+
+                  {rebuildAllLinksMutation.isSuccess && (
+                    <Alert severity="success" sx={{ mt: 2 }}>
+                      Document links rebuilt. {rebuildAllLinksMutation.data?.processed ?? 0} documents processed, {rebuildAllLinksMutation.data?.errors ?? 0} errors, {rebuildAllLinksMutation.data?.total ?? 0} total.
+                    </Alert>
+                  )}
+                  {rebuildAllLinksMutation.isError && (
+                    <Alert severity="error" sx={{ mt: 2 }}>
+                      Failed to rebuild links: {rebuildAllLinksMutation.error?.response?.data?.detail}
+                    </Alert>
+                  )}
                 </CardContent>
               </Card>
         </motion.div>
@@ -2268,7 +2686,7 @@ const SettingsPage = () => {
       )}
 
       {/* User Management Tab */}
-      {currentTab === 8 && user?.role === 'admin' && (
+      {currentTab === 9 && user?.role === 'admin' && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -2335,6 +2753,54 @@ const SettingsPage = () => {
             startIcon={clearDocumentsMutation.isLoading ? null : <DeleteSweep />}
           >
             {clearDocumentsMutation.isLoading ? 'Deleting All Data...' : 'Delete Everything'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Document Database – Clear Database Only (re-sync from disk) */}
+      <Dialog
+        open={documentsDatabaseOnlyDialogOpen}
+        onClose={() => setDocumentsDatabaseOnlyDialogOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center' }}>
+          <Warning sx={{ mr: 1, color: 'warning.main' }} />
+          Clear Document Database Only (Re-sync from Disk)
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            This will remove all document <strong>records and indexes</strong> but <strong>leave files on disk</strong>.
+            Use this when the database is out of sync with disk.
+          </DialogContentText>
+          <Box component="ul" sx={{ mt: 1, mb: 2, pl: 2 }}>
+            <li>Remove all document records from PostgreSQL</li>
+            <li>Clear embeddings and knowledge graph data</li>
+            <li><strong>Do not delete any files</strong> from the upload directory</li>
+            <li>Run a rescan so files on disk are re-added (or restart the app)</li>
+          </Box>
+          <Alert severity="info" sx={{ my: 2 }}>
+            After this operation, documents on disk will be re-read and re-indexed. Your files are safe.
+          </Alert>
+          <DialogContentText>
+            Continue?
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setDocumentsDatabaseOnlyDialogOpen(false)}
+            disabled={clearDocumentsDatabaseOnlyMutation.isLoading}
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={() => clearDocumentsDatabaseOnlyMutation.mutate()}
+            color="warning"
+            variant="contained"
+            disabled={clearDocumentsDatabaseOnlyMutation.isLoading}
+            startIcon={clearDocumentsDatabaseOnlyMutation.isLoading ? null : <DeleteSweep />}
+          >
+            {clearDocumentsDatabaseOnlyMutation.isLoading ? 'Clearing...' : 'Clear Database Only'}
           </Button>
         </DialogActions>
       </Dialog>
@@ -2430,6 +2896,56 @@ const SettingsPage = () => {
             startIcon={clearNeo4jMutation.isLoading ? null : <DeleteSweep />}
           >
             {clearNeo4jMutation.isLoading ? 'Clearing...' : 'Clear Database'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* Face Recognition Data Clear Confirmation */}
+      <Dialog
+        open={faceIdentitiesDialogOpen}
+        onClose={() => setFaceIdentitiesDialogOpen(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center' }}>
+          <Warning sx={{ mr: 1, color: 'warning.main' }} />
+          Clear Face Recognition Data
+        </DialogTitle>
+        <DialogContent>
+          <DialogContentText>
+            <strong>This action cannot be undone!</strong>
+          </DialogContentText>
+          <DialogContentText sx={{ mt: 2 }}>
+            You are about to permanently delete all face recognition data. This will:
+          </DialogContentText>
+          <Box component="ul" sx={{ mt: 1, mb: 2, pl: 2 }}>
+            <li>Remove all detected faces and their bounding boxes</li>
+            <li>Delete all known face identities and their encodings</li>
+            <li>Clear all face tagging data</li>
+            <li>Require re-analyzing images to detect and tag faces again</li>
+          </Box>
+          <DialogContentText>
+            This is useful when face encodings have drifted or you want to start fresh with face recognition.
+          </DialogContentText>
+          <DialogContentText sx={{ mt: 2 }}>
+            Are you sure you want to continue?
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button 
+            onClick={() => setFaceIdentitiesDialogOpen(false)} 
+            disabled={clearFaceIdentitiesMutation.isLoading}
+          >
+            Cancel
+          </Button>
+          <Button 
+            onClick={() => clearFaceIdentitiesMutation.mutate()} 
+            color="warning" 
+            variant="contained"
+            disabled={clearFaceIdentitiesMutation.isLoading}
+            startIcon={clearFaceIdentitiesMutation.isLoading ? null : <DeleteSweep />}
+          >
+            {clearFaceIdentitiesMutation.isLoading ? 'Clearing...' : 'Clear Face Data'}
           </Button>
         </DialogActions>
       </Dialog>

@@ -60,8 +60,8 @@ export const ChatSidebarProvider = ({ children }) => {
   const [sessionId] = useState(() => `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
   // LangGraph is the only system - no toggles needed
   const useLangGraphSystem = true; // Always use LangGraph
-  const [activeTasks, setActiveTasks] = useState(new Map()); // Track active async tasks
   const messagesConversationIdRef = React.useRef(null); // Track which conversation the current messages belong to
+  const lastCreatedConversationIdRef = React.useRef(null); // Skip redundant refetch after creating new conversation
   const isLoadingFromMetadataRef = React.useRef(false); // Track when we're loading preferences from metadata to prevent save loop
   
   // **CONVERSATION-SCOPED ACTIVITY STATE**: Isolate loading indicators, job IDs, and executing plans per conversation
@@ -201,54 +201,6 @@ export const ChatSidebarProvider = ({ children }) => {
     };
   }, []);
 
-  // NEWS NOTIFICATIONS: Poll headlines and raise browser notifications for breaking/urgent
-  useEffect(() => {
-    let intervalId;
-    let lastNotified = new Set();
-    const POLL_MS = 60000; // 60s
-    const requestPermission = async () => {
-      try {
-        if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
-          await Notification.requestPermission();
-        }
-      } catch {}
-    };
-    const notify = (headline) => {
-      try {
-        if (typeof Notification === 'undefined') return;
-        if (Notification.permission !== 'granted') return;
-        const n = new Notification(headline.title || 'Breaking News', {
-          body: headline.summary || '',
-          tag: headline.id,
-        });
-        n.onclick = () => {
-          try { window.focus(); } catch {}
-          window.location.href = `/news/${headline.id}`;
-        };
-      } catch {}
-    };
-    const poll = async () => {
-      try {
-        const res = await apiService.get('/api/news/headlines');
-        const headlines = (res && res.headlines) || [];
-        for (const h of headlines) {
-          if ((h.severity === 'breaking' || h.severity === 'urgent') && !lastNotified.has(h.id)) {
-            notify(h);
-            lastNotified.add(h.id);
-            if (lastNotified.size > 200) {
-              // Prevent unbounded growth
-              lastNotified = new Set(Array.from(lastNotified).slice(-100));
-            }
-          }
-        }
-      } catch {}
-    };
-    requestPermission();
-    poll();
-    intervalId = setInterval(poll, POLL_MS);
-    return () => intervalId && clearInterval(intervalId);
-  }, []);
-
   // CRITICAL: Log conversation ID changes for debugging
   useEffect(() => {
     console.log('🔄 ChatSidebarContext: currentConversationId changed to:', currentConversationId);
@@ -372,12 +324,15 @@ export const ChatSidebarProvider = ({ children }) => {
     }
   );
   
-  // Refetch conversation when switching to ensure we get latest metadata
+  // Refetch conversation when switching to ensure we get latest metadata (skip when we just created it; cache is primed)
   useEffect(() => {
-    if (currentConversationId && refetchConversation) {
-      console.log('🔄 Conversation switched, refetching to get latest metadata:', currentConversationId);
-      refetchConversation();
+    if (!currentConversationId || !refetchConversation) return;
+    if (lastCreatedConversationIdRef.current === currentConversationId) {
+      lastCreatedConversationIdRef.current = null;
+      return;
     }
+    console.log('🔄 Conversation switched, refetching to get latest metadata:', currentConversationId);
+    refetchConversation();
   }, [currentConversationId, refetchConversation]);
 
   // Load conversation-specific preferences from metadata
@@ -440,7 +395,9 @@ export const ChatSidebarProvider = ({ children }) => {
   // PRIORITY: Load messages using unified chat service
   const { data: messagesData, isLoading: messagesLoading, refetch: refetchMessages } = useQuery(
     ['conversationMessages', currentConversationId],
-    () => currentConversationId ? apiService.getConversationMessages(currentConversationId) : null,
+    () => currentConversationId
+      ? apiService.getConversationMessages(currentConversationId, 0, 100, lastCreatedConversationIdRef.current === currentConversationId)
+      : null,
     {
       enabled: !!currentConversationId,
       refetchOnWindowFocus: false,
@@ -463,9 +420,9 @@ export const ChatSidebarProvider = ({ children }) => {
             created_at: message.created_at,
             sequence_number: message.sequence_number,
             citations: message.citations || [],
-            metadata: message.metadata || {},
+            metadata: message.metadata_json || message.metadata || {},
             // ✅ CRITICAL FIX: Extract editor_operations from metadata to top level
-            editor_operations: message.metadata?.editor_operations || message.editor_operations || [],
+            editor_operations: (message.metadata_json || message.metadata || {})?.editor_operations || message.editor_operations || [],
             // Preserve any other fields
             ...message
           }));
@@ -549,11 +506,18 @@ export const ChatSidebarProvider = ({ children }) => {
     () => apiService.createConversation(),
     {
       onSuccess: (newConversation) => {
-        setCurrentConversationId(newConversation.conversation.conversation_id); // Access conversation_id through the conversation field
+        const id = newConversation.conversation.conversation_id;
+        // Prime cache so GET conversation and GET messages are skipped (faster new-chat UX)
+        queryClient.setQueryData(['conversation', id], newConversation);
+        queryClient.setQueryData(['conversationMessages', id], { messages: [], total_count: 0, has_more: false });
+        lastCreatedConversationIdRef.current = id;
+        setCurrentConversationId(id);
         setMessages([]);
-        messagesConversationIdRef.current = null; // Reset ref for new conversation
+        messagesConversationIdRef.current = null;
         setQuery('');
         queryClient.invalidateQueries(['conversations']);
+        // Clear "just created" ref after a short window so future refetches run normally
+        setTimeout(() => { lastCreatedConversationIdRef.current = null; }, 30000);
       },
       onError: (error) => {
         console.error('Failed to create conversation:', error);
@@ -663,185 +627,6 @@ export const ChatSidebarProvider = ({ children }) => {
     console.log('✅ Background job completion handling completed');
   };
 
-  // Handle plan execution
-  // ROOSEVELT: Execute Plan logic removed - pure LangGraph uses simple Yes/No responses
-  const handleExecutePlan = async (message) => {
-    console.log('🔍 Attempting to execute plan for message:', {
-      messageId: message.id,
-      hasResearchPlan: !!message.research_plan,
-      hasJobId: !!message.jobId,
-      hasMetadataJobId: !!message.metadata?.job_id,
-      content: message.content?.substring(0, 100),
-      metadata: message.metadata
-    });
-    
-    // Check for research plan in multiple ways to handle page refresh scenarios
-    const hasResearchPlan = message.research_plan || 
-                           (message.content && message.content.includes('## Research Plan')) ||
-                           (message.content && message.content.includes('**Research Plan**')) ||
-                           (message.content && message.content.includes('### Research Plan')) ||
-                           (message.content && message.content.includes('Research Plan:')) ||
-                           (message.content && message.content.includes('Step') && message.content.includes('Research'));
-    
-    const hasJobId = message.jobId || message.metadata?.job_id;
-    
-    console.log('🔍 Plan execution validation:', {
-      hasResearchPlan,
-      hasJobId,
-      researchPlanContent: message.research_plan?.substring(0, 50),
-      messageContent: message.content?.substring(0, 50)
-    });
-    
-    if (!hasResearchPlan || !hasJobId) {
-      console.warn('❌ Cannot execute plan - missing research plan or job ID:', {
-        hasResearchPlan,
-        hasJobId,
-        messageId: message.id,
-        content: message.content?.substring(0, 100)
-      });
-      return;
-    }
-    
-    try {
-      console.log('🚀 Executing research plan for job:', hasJobId);
-      
-      // Mark this plan as being executed
-      updateCurrentActivityState({
-        executingPlans: (() => {
-          const currentState = getCurrentActivityState();
-          const newSet = new Set(currentState.executingPlans);
-          newSet.add(hasJobId);
-          return newSet;
-        })()
-      });
-      
-      setMessages(prev => prev.map(msg => 
-        msg.id === message.id 
-          ? { ...msg, planApproved: true, isExecuting: true }
-          : msg
-      ));
-      
-      // Get the original query from the conversation messages
-      // Look for the most recent user message to get the original query
-      let originalQuery = 'Execute research plan';
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'user') {
-          originalQuery = messages[i].content;
-          break;
-        }
-      }
-      
-      console.log('🔍 Found original query:', originalQuery);
-      
-      console.log('🔬 Calling plan execution endpoint with original query:', originalQuery);
-      
-      const response = await apiService.executePlan({
-        query: originalQuery,
-        conversation_id: currentConversationId,
-        session_id: sessionId,
-        parent_job_id: hasJobId
-      });
-      
-      console.log('✅ Plan execution response:', response);
-      
-      if (response.success) {
-        // Add the execution job as a new message
-        const executionMessage = {
-          id: Date.now(),
-          role: 'assistant',
-          content: `🔄 **Executing research plan...** \n\nJob ID: \`${response.job_id}\`\n\nResearch tools are running to gather information. Results will appear when complete.`,
-          timestamp: new Date().toISOString(),
-          isResearchJob: true,
-          jobId: response.job_id,
-          executionMode: 'execute',
-          query: originalQuery,
-          metadata: {
-            job_id: response.job_id,
-            query: originalQuery,
-            execution_mode: 'execute',
-            session_id: sessionId,
-            conversation_id: currentConversationId,
-            parent_job_id: hasJobId
-          }
-        };
-        
-        setMessages(prev => [...prev, executionMessage]);
-        
-        // Connect to the execution job's WebSocket
-        backgroundJobService.connectToJobProgress(response.job_id, {
-          onProgress: (jobId, progress) => {
-            console.log('🔄 Plan execution progress:', jobId, progress);
-            handleBackgroundJobProgress(progress);
-          },
-          onCompletion: (jobData) => {
-            console.log('✅ Plan execution completed:', jobData);
-            handleBackgroundJobCompleted(jobData);
-          },
-          onError: (error) => {
-            console.error('❌ Plan execution WebSocket error:', error);
-          }
-        }, currentConversationId);
-        
-      } else {
-        console.error('❌ Plan execution failed:', response.error);
-        // Remove from executing plans on failure
-        updateCurrentActivityState({
-          executingPlans: (() => {
-            const currentState = getCurrentActivityState();
-            const newSet = new Set(currentState.executingPlans);
-            newSet.delete(hasJobId);
-            return newSet;
-          })()
-        });
-        
-        // Update message to show error
-        setMessages(prev => prev.map(msg => 
-          msg.id === message.id 
-            ? { ...msg, planApproved: false, isExecuting: false }
-            : msg
-        ));
-      }
-      
-    } catch (error) {
-      console.error('❌ Plan execution error:', error);
-      
-      // Remove from executing plans on error
-      updateCurrentActivityState({
-        executingPlans: (() => {
-          const currentState = getCurrentActivityState();
-          const newSet = new Set(currentState.executingPlans);
-          newSet.delete(hasJobId);
-          return newSet;
-        })()
-      });
-      
-      // Update message to show error
-      setMessages(prev => prev.map(msg => 
-        msg.id === message.id 
-          ? { ...msg, planApproved: false, isExecuting: false }
-          : msg
-      ));
-    }
-  };
-
-  // Check if a message is a follow-up command that should execute a plan
-  const isFollowUpCommand = (query) => {
-    const lowerQuery = query.toLowerCase().trim();
-    return (
-      lowerQuery === 'yes' ||
-      lowerQuery === 'execute' ||
-      lowerQuery === 'execute the plan' ||
-      lowerQuery === 'run the plan' ||
-      lowerQuery === 'go ahead' ||
-      lowerQuery === 'proceed' ||
-      lowerQuery === 'do it' ||
-      lowerQuery.startsWith('yes,') ||
-      lowerQuery.startsWith('execute') ||
-      lowerQuery.includes('execute the plan') ||
-      lowerQuery.includes('run the plan')
-    );
-  };
-
   // Check if a query is a HITL permission response
   const isHITLPermissionResponse = (query) => {
     const lowerQuery = query.toLowerCase().trim();
@@ -877,24 +662,6 @@ export const ChatSidebarProvider = ({ children }) => {
         message.content.includes('search the web') ||
         message.content.includes('external search')
       )) {
-        return message;
-      }
-    }
-    return null;
-  };
-
-  // Find the most recent research plan message
-  const findRecentResearchPlan = () => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i];
-      if (message.role === 'assistant' && 
-          (message.research_plan || 
-           (message.content && (
-             message.content.includes('## Research Plan') ||
-             message.content.includes('**Research Plan**') ||
-             message.content.includes('### Research Plan') ||
-             message.content.includes('Research Plan:')
-           )))) {
         return message;
       }
     }
@@ -981,15 +748,6 @@ export const ChatSidebarProvider = ({ children }) => {
         console.log('🛡️ Detected HITL permission response, continuing LangGraph flow:', currentQuery);
         // Continue with normal LangGraph flow - it will handle the permission response
         // Don't return early - let the normal flow handle it
-      }
-    }
-    // Check if this is a follow-up command to execute a research plan (ONLY if not HITL)
-    else if (isFollowUpCommand(currentQuery)) {
-      const recentPlan = findRecentResearchPlan();
-      if (recentPlan) {
-        console.log('🎯 Detected follow-up command, executing recent plan:', recentPlan);
-        await handleExecutePlan(recentPlan);
-        return;
       }
     }
 
@@ -1149,93 +907,125 @@ export const ChatSidebarProvider = ({ children }) => {
       // CRITICAL: Be very strict - check localStorage with strict validation
       // Note: EditorProvider is a child of ChatSidebarProvider, so we check localStorage directly
       let activeEditorPayload = null;
-      try {
-        // Get editor state from localStorage (updated by DocumentViewer when editor is open)
-        const editorCtx = JSON.parse(localStorage.getItem('editor_ctx_cache') || 'null');
-        
-        // DEBUG: Log what we got from localStorage
-        console.log('🔍 EDITOR_CTX_CACHE DEBUG:', {
-          exists: !!editorCtx,
-          isEditable: editorCtx?.isEditable,
-          filename: editorCtx?.filename,
-          hasContent: !!(editorCtx?.content && editorCtx.content.trim().length > 0),
-          contentLength: editorCtx?.content?.length || 0,
-          frontmatterType: editorCtx?.frontmatter?.type,
-          frontmatterKeys: editorCtx?.frontmatter ? Object.keys(editorCtx.frontmatter) : [],
-          fullFrontmatter: editorCtx?.frontmatter,
-          canonicalPath: editorCtx?.canonicalPath,
-          documentId: editorCtx?.documentId,
-          rawEditorCtxKeys: editorCtx ? Object.keys(editorCtx) : []
-        });
-        
-        // DEBUG: Log the raw cache value
-        console.log('🔍 RAW EDITOR_CTX_CACHE:', localStorage.getItem('editor_ctx_cache'));
-        
-        // STRICT VALIDATION: Must have ALL of these conditions met:
-        // 1. editorCtx exists
-        // 2. isEditable is EXACTLY true (not truthy, not undefined)
-        // 3. filename exists and ends with .md
-        // 4. content exists (not empty/null)
-        // 5. frontmatter.type is in allowed list
-        const filenameLower = editorCtx?.filename?.toLowerCase() || '';
-        const hasValidEditorState = editorCtx && 
-                                    editorCtx.isEditable === true && 
-                                    editorCtx.filename && 
-                                    (filenameLower.endsWith('.md') || filenameLower.endsWith('.org')) &&
-                                    editorCtx.content &&
-                                    editorCtx.content.trim().length > 0;
-        
-        console.log('🔍 EDITOR STATE VALIDATION:', {
-          hasValidEditorState,
-          passedCheck1_editorCtxExists: !!editorCtx,
-          passedCheck2_isEditableTrue: editorCtx?.isEditable === true,
-          passedCheck3_filenameEndsMdOrOrg: filenameLower.endsWith('.md') || filenameLower.endsWith('.org'),
-          passedCheck4_hasContent: !!(editorCtx?.content && editorCtx.content.trim().length > 0)
-        });
-        
-        if (hasValidEditorState) {
-          // All validation passed - editor is actually open and editable
-          const fmType = (editorCtx.frontmatter && editorCtx.frontmatter.type || '').toLowerCase().trim();
-          const allowedTypes = ['fiction','non-fiction','nonfiction','article','rules','outline','character','style','sysml','podcast','substack','blog','electronics','project','reference','system','systems'];
-          
-          if (allowedTypes.includes(fmType)) {
-            const language = filenameLower.endsWith('.org') ? 'org' : (editorCtx.language || 'markdown');
-            activeEditorPayload = {
-              is_editable: true,
-              filename: editorCtx.filename,
-              language: language,
-              content: editorCtx.content,
-              content_length: editorCtx.contentLength || editorCtx.content.length,
-              frontmatter: editorCtx.frontmatter || {},
-              cursor_offset: typeof editorCtx.cursorOffset === 'number' ? editorCtx.cursorOffset : -1,
-              selection_start: typeof editorCtx.selectionStart === 'number' ? editorCtx.selectionStart : -1,
-              selection_end: typeof editorCtx.selectionEnd === 'number' ? editorCtx.selectionEnd : -1,
-              canonical_path: editorCtx.canonicalPath || null,
-              document_id: editorCtx.documentId || null,
-              folder_id: editorCtx.folderId || null,
+      
+      // Check editor preference first - if set to 'ignore', don't send editor context
+      if (editorPreference !== 'ignore') {
+        try {
+          // Request fresh frontmatter parsing before reading cache (ensures frontmatter is current)
+          // Use a promise-based approach to ensure refresh completes
+          const refreshPromise = new Promise((resolve) => {
+            const handleRefreshComplete = () => {
+              window.removeEventListener('editorCacheRefreshed', handleRefreshComplete);
+              resolve();
             };
-            console.log('✅ Editor tab is open and editable - sending active_editor:', editorCtx.filename);
+            window.addEventListener('editorCacheRefreshed', handleRefreshComplete, { once: true });
+            
+            // Dispatch refresh event
+            window.dispatchEvent(new CustomEvent('refreshEditorCache'));
+            
+            // Fallback timeout in case event doesn't fire
+            setTimeout(() => {
+              window.removeEventListener('editorCacheRefreshed', handleRefreshComplete);
+              resolve();
+            }, 100);
+          });
+          
+          await refreshPromise;
+          
+          // Get editor state from localStorage (updated by DocumentViewer when editor is open)
+          const editorCtx = JSON.parse(localStorage.getItem('editor_ctx_cache') || 'null');
+          
+          // DEBUG: Log what we got from localStorage
+          console.log('🔍 EDITOR_CTX_CACHE DEBUG:', {
+            exists: !!editorCtx,
+            isEditable: editorCtx?.isEditable,
+            filename: editorCtx?.filename,
+            hasContent: !!(editorCtx?.content && editorCtx.content.trim().length > 0),
+            contentLength: editorCtx?.content?.length || 0,
+            frontmatterType: editorCtx?.frontmatter?.type,
+            frontmatterKeys: editorCtx?.frontmatter ? Object.keys(editorCtx.frontmatter) : [],
+            fullFrontmatter: editorCtx?.frontmatter,
+            canonicalPath: editorCtx?.canonicalPath,
+            documentId: editorCtx?.documentId,
+            rawEditorCtxKeys: editorCtx ? Object.keys(editorCtx) : []
+          });
+          
+          // DEBUG: Log the raw cache value
+          console.log('🔍 RAW EDITOR_CTX_CACHE:', localStorage.getItem('editor_ctx_cache'));
+          
+          // STRICT VALIDATION: Must have ALL of these conditions met:
+          // 1. editorCtx exists
+          // 2. isEditable is EXACTLY true (not truthy, not undefined)
+          // 3. filename exists and ends with .md
+          // 4. content exists (not empty/null)
+          // 5. frontmatter.type is in allowed list
+          const filenameLower = editorCtx?.filename?.toLowerCase() || '';
+          const hasValidEditorState = editorCtx && 
+                                      editorCtx.isEditable === true && 
+                                      editorCtx.filename && 
+                                      (filenameLower.endsWith('.md') || filenameLower.endsWith('.org')) &&
+                                      editorCtx.content &&
+                                      editorCtx.content.trim().length > 0;
+          
+          console.log('🔍 EDITOR STATE VALIDATION:', {
+            hasValidEditorState,
+            passedCheck1_editorCtxExists: !!editorCtx,
+            passedCheck2_isEditableTrue: editorCtx?.isEditable === true,
+            passedCheck3_filenameEndsMdOrOrg: filenameLower.endsWith('.md') || filenameLower.endsWith('.org'),
+            passedCheck4_hasContent: !!(editorCtx?.content && editorCtx.content.trim().length > 0)
+          });
+          
+          if (hasValidEditorState) {
+            // All validation passed - editor is actually open and editable
+            const fmType = (editorCtx.frontmatter && editorCtx.frontmatter.type || '').toLowerCase().trim();
+            const allowedTypes = ['fiction','non-fiction','nonfiction','nfoutline','article','rules','outline','character','style','sysml','podcast','substack','blog','electronics','project','reference','system','systems','org'];
+            
+            // For org files, allow even without frontmatter.type (org files may not have frontmatter)
+            const isOrgFile = filenameLower.endsWith('.org');
+            const hasAllowedType = allowedTypes.includes(fmType);
+            
+            if (hasAllowedType || (isOrgFile && !fmType)) {
+              const language = filenameLower.endsWith('.org') ? 'org' : (editorCtx.language || 'markdown');
+              activeEditorPayload = {
+                is_editable: true,
+                filename: editorCtx.filename,
+                language: language,
+                content: editorCtx.content,
+                content_length: editorCtx.contentLength || editorCtx.content.length,
+                frontmatter: editorCtx.frontmatter || {},
+                cursor_offset: typeof editorCtx.cursorOffset === 'number' ? editorCtx.cursorOffset : -1,
+                selection_start: typeof editorCtx.selectionStart === 'number' ? editorCtx.selectionStart : -1,
+                selection_end: typeof editorCtx.selectionEnd === 'number' ? editorCtx.selectionEnd : -1,
+                canonical_path: editorCtx.canonicalPath || null,
+                document_id: editorCtx.documentId || null,
+                folder_id: editorCtx.folderId || null,
+              };
+              console.log('✅ Editor tab is open and editable - sending active_editor:', editorCtx.filename);
+            } else {
+              console.log('🚫 Editor open but frontmatter.type not in allowed list:', fmType);
+              activeEditorPayload = null;
+            }
           } else {
-            console.log('🚫 Editor open but frontmatter.type not in allowed list:', fmType);
+            // Editor is NOT open or NOT editable - be very explicit about why
+            if (!editorCtx) {
+              console.log('🚫 NO EDITOR STATE IN CACHE - no editor tab is open');
+            } else if (editorCtx.isEditable !== true) {
+              console.log('🚫 EDITOR NOT EDITABLE (isEditable=' + editorCtx.isEditable + ') - viewing PDF or document, not editing');
+            } else if (!editorCtx.filename || (!editorCtx.filename.toLowerCase().endsWith('.md') && !editorCtx.filename.toLowerCase().endsWith('.org'))) {
+              console.log('🚫 NO VALID MARKDOWN OR ORG FILE - filename:', editorCtx.filename);
+            } else if (!editorCtx.content || !editorCtx.content.trim()) {
+              console.log('🚫 NO EDITOR CONTENT - editor state exists but content is empty');
+            }
+            // CRITICAL: Explicitly set to null - never send stale data
             activeEditorPayload = null;
           }
-        } else {
-          // Editor is NOT open or NOT editable - be very explicit about why
-          if (!editorCtx) {
-            console.log('🚫 NO EDITOR STATE IN CACHE - no editor tab is open');
-          } else if (editorCtx.isEditable !== true) {
-            console.log('🚫 EDITOR NOT EDITABLE (isEditable=' + editorCtx.isEditable + ') - viewing PDF or document, not editing');
-          } else if (!editorCtx.filename || !editorCtx.filename.toLowerCase().endsWith('.md')) {
-            console.log('🚫 NO VALID MARKDOWN FILE - filename:', editorCtx.filename);
-          } else if (!editorCtx.content || !editorCtx.content.trim()) {
-            console.log('🚫 NO EDITOR CONTENT - editor state exists but content is empty');
-          }
-          // CRITICAL: Explicitly set to null - never send stale data
+        } catch (e) {
+          console.error('❌ Error checking editor state:', e);
+          // On any error, don't send active_editor
           activeEditorPayload = null;
         }
-      } catch (e) {
-        console.error('❌ Error checking editor state:', e);
-        // On any error, don't send active_editor
+      } else {
+        console.log('🚫 Editor preference is "ignore" - not sending editor context');
         activeEditorPayload = null;
       }
       
@@ -1887,12 +1677,6 @@ export const ChatSidebarProvider = ({ children }) => {
     }
   };
 
-  // Stub for cancelAsyncTask - kept for compatibility but async tasks are no longer used
-  const cancelAsyncTask = async (taskId) => {
-    console.warn('⚠️ cancelAsyncTask called but async tasks are no longer supported');
-    // No-op since async tasks are removed
-  };
-
   const value = {
     // State
     isCollapsed,
@@ -1916,8 +1700,7 @@ export const ChatSidebarProvider = ({ children }) => {
     sessionId,
     executingPlans,
     currentJobId, // Add current job ID for cancellation
-    activeTasks, // Add active async tasks tracking
-    
+
     // Actions
     toggleSidebar,
     selectConversation,
@@ -1926,8 +1709,7 @@ export const ChatSidebarProvider = ({ children }) => {
     clearChat,
 
     cancelCurrentJob, // Add cancellation function
-    cancelAsyncTask, // Stub for compatibility (async tasks removed)
-    
+
     // **ROOSEVELT**: Editor preference (active = sent to backend, user = checkbox state)
     editorPreference, // Active preference sent to backend (context-aware)
     setEditorPreference: setUserEditorPreference, // UI checkboxes modify user preference

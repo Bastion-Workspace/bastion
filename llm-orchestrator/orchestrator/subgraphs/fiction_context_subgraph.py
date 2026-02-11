@@ -7,7 +7,7 @@ Reusable subgraph that handles:
 - Reference loading (outline, style, rules, characters)
 - Reference quality assessment
 
-Can be used by fiction_editing_agent, proofreading_agent, and other fiction-aware agents.
+Can be used by fiction_editing_agent and other fiction-aware agents (proofreading path uses proofreading_subgraph).
 """
 
 import logging
@@ -28,6 +28,7 @@ from orchestrator.utils.fiction_utilities import (
     extract_story_overview,
     extract_book_map,
 )
+from orchestrator.utils.writing_subgraph_utilities import preserve_fiction_state
 
 logger = logging.getLogger(__name__)
 
@@ -44,12 +45,22 @@ FictionContextState = Dict[str, Any]
 # Node Functions
 # ============================================
 
+def _get_active_editor_from_state(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Get active_editor from top-level state or shared_memory (nested subgraph may not have inject run)."""
+    ae = state.get("active_editor") or {}
+    if ae:
+        return ae if isinstance(ae, dict) else {}
+    sm = state.get("shared_memory") or {}
+    ae = sm.get("active_editor") if isinstance(sm, dict) else None
+    return (ae if isinstance(ae, dict) else {}) or {}
+
+
 async def prepare_context_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Prepare context: extract active editor, validate fiction type"""
     try:
         logger.info("Preparing context for fiction editing...")
         
-        active_editor = state.get("active_editor", {}) or {}
+        active_editor = _get_active_editor_from_state(state)
         
         manuscript = active_editor.get("content", "") or ""
         filename = active_editor.get("filename") or "manuscript.md"
@@ -62,165 +73,199 @@ async def prepare_context_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # Note: Type checking is handled by the calling agent (fiction_editing_agent gates on fiction)
         # This subgraph is reusable and doesn't gate on document type
         
-        # Extract user request
+        # Extract user request: prefer state["query"] (current turn from writing assistant)
+        # over messages[-1] so we always have the latest user input.
         metadata = state.get("metadata", {}) or {}
         messages = metadata.get("messages", [])
-        
         if not messages:
-            # Try getting from shared_memory
             shared_memory = state.get("shared_memory", {}) or {}
             messages = shared_memory.get("messages", [])
         
-        try:
-            if messages:
+        # DEBUG: Log what we're receiving
+        query_from_state = state.get("query", "")
+        logger.info(f"🔍 PREPARE CONTEXT: state['query'] = {repr(query_from_state)}")
+        logger.info(f"🔍 PREPARE CONTEXT: len(messages) = {len(messages)}")
+        
+        current_request = (state.get("query") or "").strip()
+        if not current_request and messages:
+            try:
                 latest_message = messages[-1]
                 current_request = latest_message.content if hasattr(latest_message, 'content') else str(latest_message)
-            else:
-                current_request = state.get("query", "")
-        except Exception as e:
-            logger.error(f"Exception extracting current_request: {e}")
-            current_request = ""
+                current_request = (current_request or "").strip()
+                logger.info(f"🔍 PREPARE CONTEXT: Used messages[-1], current_request = {repr(current_request)}")
+            except Exception as e:
+                logger.error(f"Exception extracting current_request from messages: {e}")
+                current_request = ""
+        else:
+            logger.info(f"🔍 PREPARE CONTEXT: Used state['query'], current_request = {repr(current_request)}")
         
-        current_request = current_request.strip()
-        
-        return {
+        return preserve_fiction_state(state, {
             "active_editor": active_editor,
-            "manuscript": manuscript,  # Use 'manuscript' for compatibility with main agent
-            "manuscript_content": manuscript,  # Also set for subgraph internal use
+            "manuscript": manuscript,
+            "manuscript_content": manuscript,
             "filename": filename,
             "frontmatter": frontmatter,
             "cursor_offset": cursor_offset,
             "selection_start": selection_start,
             "selection_end": selection_end,
             "current_request": current_request,
-            "user_id": state.get("user_id", "system"),  # CRITICAL: Preserve user_id from parent state
-            # ✅ CRITICAL: Preserve all critical state keys
-            "metadata": state.get("metadata", {}),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", "")
-        }
+        })
         
     except Exception as e:
         logger.error(f"Failed to prepare context: {e}")
-        return {
+        return preserve_fiction_state(state, {
             "error": str(e),
             "task_status": "error",
-            "user_id": state.get("user_id", "system"),  # CRITICAL: Preserve user_id even on error
-            # ✅ CRITICAL: Preserve all critical state keys even on error
-            "metadata": state.get("metadata", {}),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", "")
-        }
+        })
 
 
 async def detect_chapter_mentions_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Parse user query for explicit chapter mentions"""
+    """Parse user query for explicit chapter mentions with intent-aware prioritization"""
     try:
         logger.info("Detecting chapter mentions in user query...")
         
+        # DEBUG: Log what we received from prepare_context
         current_request = state.get("current_request", "")
-        if not current_request:
-            logger.info("No current request - skipping chapter detection")
-            return {
-                "explicit_primary_chapter": None,
-                "mentioned_chapters": [],  # No chapters mentioned
-                # ✅ CRITICAL: Preserve all critical state keys
-                "metadata": state.get("metadata", {}),
-                "user_id": state.get("user_id", "system"),
-                "shared_memory": state.get("shared_memory", {}),
-                "messages": state.get("messages", []),
-                "query": state.get("query", "")
-            }
+        query_from_state = state.get("query", "")
+        logger.info(f"🔍 DETECT CHAPTERS: state['current_request'] = {repr(current_request)}")
+        logger.info(f"🔍 DETECT CHAPTERS: state['query'] = {repr(query_from_state)}")
         
-        # Regex patterns for chapter detection
+        if not current_request:
+            logger.info("No current_request - skipping chapter detection")
+            return preserve_fiction_state(state, {
+                "explicit_primary_chapter": None,
+                "mentioned_chapters": [],
+                "wants_next_chapter": False,
+            })
+        
+        # Regex patterns for chapter detection with PRIORITY LEVELS
+        # Priority 1: Explicit action verbs (edit intent) - HIGHEST
+        # Priority 2: Generation verbs (create intent)
+        # Priority 3: Context mentions (no direct action)
         CHAPTER_PATTERNS = [
-            # Generation verbs + Chapter (HIGHEST PRIORITY - add first)
-            r'\b(?:Generate|Craft|Write|Create|Draft|Compose|Produce)\s+[Cc]hapter\s+(\d+)\b',
-            # Action verbs + Chapter
-            r'\b(?:Look over|Review|Check|Edit|Update|Revise|Modify|Address|Fix|Change)\s+[Cc]hapter\s+(\d+)\b',
-            # Preposition + Chapter
-            r'\b(?:in|at|for|to)\s+[Cc]hapter\s+(\d+)\b',
-            # Chapter + verb
-            r'\b[Cc]hapter\s+(\d+)\s+(?:needs|has|shows|contains|should|must|is|requires)',
-            # Verb + in/at + Chapter
-            r'\b(?:address|fix|change|edit|update|revise|modify|generate|craft|write|create)\s+(?:in|at)\s+[Cc]hapter\s+(\d+)\b',
-            # Chapter + punctuation + relative clause
-            r'\b[Cc]hapter\s+(\d+)[:,]?\s+(?:where|when|that|which)',
+            # PRIORITY 1: Editing/Action verbs + Chapter (STRONGEST INTENT)
+            {
+                "pattern": r'\b(?:Look over|Review|Check|Edit|Update|Revise|Modify|Address|Fix|Change|Rewrite|Polish|Proofread)\s+[Cc]hapter\s+(\d+)\b',
+                "priority": 1,
+                "description": "Action verb (editing intent)"
+            },
+            # PRIORITY 2: Generation verbs + Chapter (CREATE INTENT)
+            {
+                "pattern": r'\b(?:Generate|Craft|Write|Create|Draft|Compose|Produce|Add)\s+[Cc]hapter\s+(\d+)\b',
+                "priority": 2,
+                "description": "Generation verb (creation intent)"
+            },
+            # PRIORITY 2: Verb + in/at + Chapter (specific location action)
+            {
+                "pattern": r'\b(?:address|fix|change|edit|update|revise|modify|generate|craft|write|create)\s+(?:in|at)\s+[Cc]hapter\s+(\d+)\b',
+                "priority": 2,
+                "description": "Action verb with location preposition"
+            },
+            # PRIORITY 3: Preposition + Chapter (location reference only)
+            {
+                "pattern": r'\b(?:in|at|for|to)\s+[Cc]hapter\s+(\d+)\b',
+                "priority": 3,
+                "description": "Preposition (location reference)"
+            },
+            # PRIORITY 3: Chapter + modal/state verb (context description)
+            {
+                "pattern": r'\b[Cc]hapter\s+(\d+)\s+(?:needs|has|shows|contains|should|must|is|requires|will|would|can)',
+                "priority": 3,
+                "description": "Chapter + modal/state verb (context)"
+            },
+            # PRIORITY 3: Chapter + punctuation + relative clause (explanatory context)
+            {
+                "pattern": r'\b[Cc]hapter\s+(\d+)[:,]?\s+(?:where|when|that|which)',
+                "priority": 3,
+                "description": "Chapter + relative clause (explanation)"
+            },
         ]
         
         all_mentions = []
-        for pattern in CHAPTER_PATTERNS:
+        logger.info(f"🔍 CHAPTER DETECTION: Analyzing query '{current_request}'")
+        
+        for pattern_def in CHAPTER_PATTERNS:
+            pattern = pattern_def["pattern"]
+            priority = pattern_def["priority"]
+            description = pattern_def["description"]
+            
             matches = re.finditer(pattern, current_request, re.IGNORECASE)
             for match in matches:
                 chapter_num = int(match.group(1))
+                match_text = match.group(0)
                 all_mentions.append({
                     "chapter": chapter_num,
                     "position": match.start(),
-                    "text": match.group(0)
+                    "text": match_text,
+                    "priority": priority,
+                    "description": description
                 })
+                logger.info(f"   📍 Found: '{match_text}' → Chapter {chapter_num} (priority {priority}: {description})")
         
-        # Remove duplicates while preserving order
-        seen = set()
-        unique_mentions = []
+        # Remove duplicates: keep HIGHEST priority match for each chapter
+        chapter_best_match = {}
         for mention in all_mentions:
-            if mention["chapter"] not in seen:
-                seen.add(mention["chapter"])
-                unique_mentions.append(mention)
+            chapter_num = mention["chapter"]
+            if chapter_num not in chapter_best_match:
+                chapter_best_match[chapter_num] = mention
+            else:
+                # Keep the higher priority match (lower priority number = higher priority)
+                existing = chapter_best_match[chapter_num]
+                if mention["priority"] < existing["priority"]:
+                    logger.info(f"   🔄 Chapter {chapter_num}: Upgrading from priority {existing['priority']} ({existing['description']}) to priority {mention['priority']} ({mention['description']})")
+                    chapter_best_match[chapter_num] = mention
         
-        # Sort by position in query (first mention = primary)
-        unique_mentions.sort(key=lambda x: x["position"])
+        unique_mentions = list(chapter_best_match.values())
+        
+        # Sort by PRIORITY FIRST, then position (earlier mentions break ties)
+        unique_mentions.sort(key=lambda x: (x["priority"], x["position"]))
         
         primary_chapter = None
         all_mentioned_chapters = []
         
         if unique_mentions:
-            primary_chapter = unique_mentions[0]["chapter"]
+            primary_match = unique_mentions[0]
+            primary_chapter = primary_match["chapter"]
             all_mentioned_chapters = [m["chapter"] for m in unique_mentions]
-            logger.info(f"📖 DETECTED CHAPTER MENTION: primary={primary_chapter}, all_mentioned={all_mentioned_chapters}, from '{current_request}'")
+            
+            logger.info(f"📖 CHAPTER DETECTION RESULT:")
+            logger.info(f"   🎯 PRIMARY TARGET: Chapter {primary_chapter}")
+            logger.info(f"   📝 Reason: {primary_match['description']} (priority {primary_match['priority']})")
+            logger.info(f"   💬 Match text: '{primary_match['text']}'")
+            logger.info(f"   📍 Position in query: {primary_match['position']}")
+            
+            if len(all_mentioned_chapters) > 1:
+                other_chapters = [ch for ch in all_mentioned_chapters if ch != primary_chapter]
+                logger.info(f"   📚 OTHER MENTIONS: Chapters {other_chapters} (context references)")
+                for mention in unique_mentions[1:]:
+                    logger.info(f"      - Chapter {mention['chapter']}: '{mention['text']}' ({mention['description']})")
         else:
             logger.info(f"📖 NO CHAPTER MENTIONS DETECTED in '{current_request}'")
         
-        return {
+        # "Next chapter" (no number): resolve later from cursor + manuscript in analyze_scope
+        wants_next_chapter = False
+        next_chapter_pattern = re.compile(
+            r'\b(?:Generate|Craft|Write|Create|Draft|Compose|Produce|Add)\s+(?:the\s+)?next\s+chapter\b',
+            re.IGNORECASE
+        )
+        if next_chapter_pattern.search(current_request):
+            wants_next_chapter = True
+            logger.info(f"   📍 Found: 'craft/write/... (the) next chapter' → will resolve from cursor position")
+        
+        return preserve_fiction_state(state, {
             "explicit_primary_chapter": primary_chapter,
-            "mentioned_chapters": all_mentioned_chapters,  # All chapters mentioned in query
-            "current_request": state.get("current_request", ""),  # Preserve from prepare_context
-            "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
-            "selection_start": state.get("selection_start", -1),
-            "selection_end": state.get("selection_end", -1),
-            "active_editor": state.get("active_editor", {}),  # CRITICAL: Preserve active_editor
-            "manuscript": state.get("manuscript", ""),  # CRITICAL: Preserve manuscript
-            "filename": state.get("filename", ""),  # CRITICAL: Preserve filename
-            "frontmatter": state.get("frontmatter", {}),  # CRITICAL: Preserve frontmatter
-            "user_id": state.get("user_id", "system"),  # CRITICAL: Preserve user_id for DB queries
-            # ✅ CRITICAL: Preserve all critical state keys
-            "metadata": state.get("metadata", {}),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", "")
-        }
+            "mentioned_chapters": all_mentioned_chapters,
+            "wants_next_chapter": wants_next_chapter,
+        })
         
     except Exception as e:
         logger.error(f"Failed to detect chapter mentions: {e}")
-        return {
+        return preserve_fiction_state(state, {
             "explicit_primary_chapter": None,
-            "mentioned_chapters": [],  # No chapters mentioned on error
-            "current_request": state.get("current_request", ""),  # Preserve even on error
-            "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
-            "selection_start": state.get("selection_start", -1),
-            "selection_end": state.get("selection_end", -1),
-            "active_editor": state.get("active_editor", {}),  # CRITICAL: Preserve active_editor
-            "manuscript": state.get("manuscript", ""),
-            "filename": state.get("filename", ""),
-            "frontmatter": state.get("frontmatter", {}),
-            "user_id": state.get("user_id", "system"),  # CRITICAL: Preserve user_id for DB queries
-            # ✅ CRITICAL: Preserve all critical state keys even on error
-            "metadata": state.get("metadata", {}),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", "")
-        }
+            "mentioned_chapters": [],
+            "wants_next_chapter": False,
+            "error": str(e),
+        })
 
 
 async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -239,9 +284,25 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # Get explicit chapter mentions from query
         explicit_primary_chapter = state.get("explicit_primary_chapter")
         mentioned_chapters = state.get("mentioned_chapters", [])  # All chapters mentioned in query
+        wants_next_chapter = state.get("wants_next_chapter", False)
         
         # Find chapter ranges
         chapter_ranges = find_chapter_ranges(manuscript)
+        
+        # Resolve "the next chapter" to a number using cursor + manuscript (only when no numeric chapter in query)
+        if wants_next_chapter and explicit_primary_chapter is None:
+            if chapter_ranges:
+                cursor_chapter_idx = locate_chapter_index(chapter_ranges, cursor_offset)
+                if cursor_chapter_idx != -1:
+                    next_num = chapter_ranges[cursor_chapter_idx].chapter_number + 1
+                    logger.info(f"   📖 Resolved 'next chapter' to Chapter {next_num} (cursor is in Chapter {chapter_ranges[cursor_chapter_idx].chapter_number})")
+                else:
+                    next_num = chapter_ranges[-1].chapter_number + 1
+                    logger.info(f"   📖 Resolved 'next chapter' to Chapter {next_num} (cursor after last chapter)")
+                explicit_primary_chapter = next_num
+            else:
+                explicit_primary_chapter = 1
+                logger.info(f"   📖 Resolved 'next chapter' to Chapter 1 (empty manuscript)")
         
         # DIAGNOSTIC: Log first 500 chars of manuscript to debug chapter detection
         if len(chapter_ranges) == 0 and len(manuscript) > 0:
@@ -254,20 +315,83 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
         detection_method = "unknown"
         requested_chapter_number: Optional[int] = None  # For new chapter generation
         
-        # 1. Cursor position (ALWAYS highest priority for editable chapter)
+        logger.info(f"🔍 CHAPTER TARGET SELECTION: Starting priority resolution...")
+        logger.info(f"   📍 Cursor offset: {cursor_offset}")
+        logger.info(f"   💬 Explicit primary from query: {explicit_primary_chapter}")
+        logger.info(f"   📚 All mentioned chapters: {mentioned_chapters}")
+        logger.info(f"   📖 Existing chapters in manuscript: {[r.chapter_number for r in chapter_ranges] if chapter_ranges else 'None'}")
+        
+        # 1. Cursor position vs explicit "craft/generate Chapter N" for a chapter that doesn't exist
         if cursor_offset >= 0:
             active_idx = locate_chapter_index(chapter_ranges, cursor_offset)
             if active_idx != -1:
-                # Cursor is WITHIN a chapter
-                current_chapter_number = chapter_ranges[active_idx].chapter_number
-                detection_method = "cursor_position"
-                logger.info(f"📖 Using cursor position: Chapter {current_chapter_number} (cursor at offset {cursor_offset})")
+                # Cursor is WITHIN a chapter - but if user explicitly asked to craft/generate a
+                # different chapter that doesn't exist yet, honor that over cursor position
+                explicit_chapter_exists = (
+                    explicit_primary_chapter is not None
+                    and any(r.chapter_number == explicit_primary_chapter for r in chapter_ranges)
+                )
+                if (
+                    explicit_primary_chapter is not None
+                    and not explicit_chapter_exists
+                ):
+                    # User said e.g. "Craft Chapter 2" and Chapter 2 doesn't exist - generate it
+                    cursor_was_in_chapter = chapter_ranges[active_idx].chapter_number
+                    current_chapter_number = explicit_primary_chapter
+                    requested_chapter_number = explicit_primary_chapter
+                    active_idx = -1  # No existing chapter for target; prev_c will be set from last chapter below
+                    detection_method = "explicit_new_chapter_overrides_cursor"
+                    logger.info(f"✅ PRIORITY 1 WIN: Explicit craft/generate (overrides cursor)")
+                    logger.info(f"   🎯 Target: Chapter {explicit_primary_chapter} (NEW)")
+                    logger.info(f"   💬 Reason: User asked to craft/generate Chapter {explicit_primary_chapter}; it does not exist yet")
+                    logger.info(f"   📍 Note: Cursor was in Chapter {cursor_was_in_chapter}, but explicit request wins")
+                else:
+                    # Cursor is within a chapter and no conflicting explicit new-chapter request
+                    current_chapter_number = chapter_ranges[active_idx].chapter_number
+                    detection_method = "cursor_position"
+                    logger.info(f"✅ PRIORITY 1 WIN: Cursor position")
+                    logger.info(f"   🎯 Selected Chapter {current_chapter_number}")
+                    logger.info(f"   📍 Reason: Cursor at offset {cursor_offset} is inside Chapter {current_chapter_number}")
+                    if explicit_primary_chapter and explicit_primary_chapter != current_chapter_number:
+                        logger.info(f"   ℹ️ Note: Ignoring query mention of Chapter {explicit_primary_chapter} (cursor position overrides)")
             elif len(chapter_ranges) > 0 and cursor_offset >= chapter_ranges[-1].end:
-                # Cursor is AFTER all chapters - set to last existing chapter
-                last_chapter = chapter_ranges[-1]
-                current_chapter_number = last_chapter.chapter_number
-                logger.info(f"Cursor at end of file (offset {cursor_offset} after last chapter ending at {last_chapter.end}) - setting to last existing Chapter {current_chapter_number}")
-                detection_method = "cursor_after_all_chapters"
+                # Cursor is AFTER all chapters - check if explicit action verb should win
+                if explicit_primary_chapter is not None:
+                    # User has explicit action verb (e.g., "Revise Chapter 1") - honor it!
+                    # Check if the explicit chapter exists
+                    explicit_chapter_exists = any(r.chapter_number == explicit_primary_chapter for r in chapter_ranges)
+                    
+                    if explicit_chapter_exists:
+                        # Use the explicit chapter from query
+                        for i, ch_range in enumerate(chapter_ranges):
+                            if ch_range.chapter_number == explicit_primary_chapter:
+                                active_idx = i
+                                current_chapter_number = explicit_primary_chapter
+                                detection_method = "explicit_action_verb_overrides_eof_cursor"
+                                logger.info(f"✅ PRIORITY 1 WIN: Explicit action verb (overrides EOF cursor)")
+                                logger.info(f"   🎯 Selected Chapter {current_chapter_number}")
+                                logger.info(f"   💬 Reason: User said 'Revise Chapter {explicit_primary_chapter}' (explicit action verb)")
+                                logger.info(f"   📍 Note: Cursor is at EOF, but explicit action verb takes precedence")
+                                break
+                    else:
+                        # Explicit chapter doesn't exist - new chapter generation
+                        current_chapter_number = explicit_primary_chapter
+                        requested_chapter_number = explicit_primary_chapter
+                        detection_method = "explicit_new_chapter_at_eof"
+                        logger.info(f"✅ PRIORITY 1 WIN: New chapter generation")
+                        logger.info(f"   🎯 Target: Chapter {explicit_primary_chapter} (NEW)")
+                        logger.info(f"   💬 Reason: User requested Chapter {explicit_primary_chapter} which doesn't exist yet")
+                        logger.info(f"   📍 Cursor at EOF is appropriate for new chapter generation")
+                
+                # If no explicit chapter or we didn't handle it above, fall back to last chapter
+                if active_idx == -1 and current_chapter_number is None:
+                    last_chapter = chapter_ranges[-1]
+                    current_chapter_number = last_chapter.chapter_number
+                    detection_method = "cursor_after_all_chapters"
+                    logger.info(f"✅ PRIORITY 1 WIN: Cursor after all chapters (fallback)")
+                    logger.info(f"   🎯 Selected Chapter {current_chapter_number} (last existing)")
+                    logger.info(f"   📍 Reason: Cursor at offset {cursor_offset} is after last chapter (ends at {last_chapter.end})")
+                    logger.info(f"   ℹ️ Note: No explicit action verb found, using last chapter as safe default")
         
         # 2. If no cursor-based chapter found, check explicit chapter (for new chapter generation)
         if active_idx == -1 and current_chapter_number is None:
@@ -278,26 +402,37 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         active_idx = i
                         current_chapter_number = explicit_primary_chapter
                         detection_method = "explicit_query_fallback"
+                        logger.info(f"✅ PRIORITY 2 WIN: Explicit query mention")
+                        logger.info(f"   🎯 Selected Chapter {current_chapter_number}")
+                        logger.info(f"   💬 Reason: User explicitly mentioned Chapter {explicit_primary_chapter} in query")
+                        logger.info(f"   📍 Note: No cursor position available, using query intent")
                         break
                 
                 if active_idx == -1:
                     # Explicit chapter doesn't exist yet - this is a generation request
-                    logger.info(f"Explicit chapter {explicit_primary_chapter} not found in manuscript - treating as new chapter generation request")
                     current_chapter_number = explicit_primary_chapter
                     requested_chapter_number = explicit_primary_chapter
                     detection_method = "explicit_new_chapter"
+                    logger.info(f"✅ PRIORITY 2 WIN: New chapter generation")
+                    logger.info(f"   🎯 Target: Chapter {explicit_primary_chapter} (NEW)")
+                    logger.info(f"   💬 Reason: User requested Chapter {explicit_primary_chapter} which doesn't exist yet")
+                    logger.info(f"   📝 Mode: Generation (will create new chapter)")
         
         # 3. Smart default for empty or ambiguous files
         if active_idx == -1 and current_chapter_number is None:
             if len(chapter_ranges) == 0:
                 # Empty file or no chapters detected - default to Chapter 1
-                logger.info("Empty file or no chapters detected - defaulting to Chapter 1")
                 current_chapter_number = 1
                 requested_chapter_number = 1
                 detection_method = "empty_file_default"
+                logger.info(f"✅ PRIORITY 3 WIN: Default to Chapter 1")
+                logger.info(f"   🎯 Selected Chapter 1 (default)")
+                logger.info(f"   📄 Reason: Empty manuscript or no chapters detected")
             else:
                 # Fallback to entire manuscript
                 detection_method = "default_entire_manuscript"
+                logger.info(f"⚠️ FALLBACK: Using entire manuscript")
+                logger.info(f"   📄 Reason: Could not determine specific chapter target")
         
         # 🎯 NEW: Identify reference chapters (mentioned but not current/adjacent)
         reference_chapter_numbers = []
@@ -386,64 +521,87 @@ async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
         else:
             context_current_chapter_text = strip_frontmatter_block(current_chapter_text)
         
-        # Log chapter detection results for debugging
-        logger.info(f"📖 CHAPTER DETECTION: method={detection_method}, current_chapter={current_chapter_number}, requested_chapter={requested_chapter_number}, active_idx={active_idx}")
-        if chapter_ranges:
-            logger.info(f"   Existing chapters: {[r.chapter_number for r in chapter_ranges]}, cursor_offset={cursor_offset}")
-        else:
-            logger.info(f"   No existing chapters found, cursor_offset={cursor_offset}")
+        # Log comprehensive chapter detection summary
+        logger.info(f"=" * 80)
+        logger.info(f"📖 FINAL CHAPTER DETECTION SUMMARY:")
+        logger.info(f"   🎯 TARGET CHAPTER: {current_chapter_number}")
+        logger.info(f"   🔧 DETECTION METHOD: {detection_method}")
+        logger.info(f"   📍 ACTIVE INDEX: {active_idx} (in manuscript chapter list)")
         
-        return {
+        if requested_chapter_number:
+            logger.info(f"   ✨ GENERATION MODE: Will create new Chapter {requested_chapter_number}")
+        else:
+            logger.info(f"   ✏️ EDIT MODE: Will edit existing Chapter {current_chapter_number}")
+        
+        logger.info(f"")
+        logger.info(f"   📊 CONTEXT:")
+        if chapter_ranges:
+            logger.info(f"      - Manuscript contains chapters: {[r.chapter_number for r in chapter_ranges]}")
+        else:
+            logger.info(f"      - Manuscript contains NO chapters")
+        logger.info(f"      - Cursor position: {cursor_offset}")
+        logger.info(f"      - Query mentioned Chapter {explicit_primary_chapter}" if explicit_primary_chapter else "      - No explicit chapter in query")
+        if mentioned_chapters and len(mentioned_chapters) > 1:
+            other_mentions = [ch for ch in mentioned_chapters if ch != explicit_primary_chapter]
+            logger.info(f"      - Other chapters mentioned (context): {other_mentions}")
+        
+        logger.info(f"")
+        logger.info(f"   🔍 DECISION RATIONALE:")
+        if detection_method == "cursor_position":
+            logger.info(f"      ✅ Cursor is positioned in Chapter {current_chapter_number}")
+            logger.info(f"      ✅ Cursor position ALWAYS wins (highest priority)")
+            if explicit_primary_chapter and explicit_primary_chapter != current_chapter_number:
+                logger.info(f"      ℹ️ Query mentioned Chapter {explicit_primary_chapter}, but cursor overrides")
+        elif detection_method == "explicit_action_verb_overrides_eof_cursor":
+            logger.info(f"      ✅ User explicitly requested editing Chapter {current_chapter_number}")
+            logger.info(f"      ✅ Action verb ('Revise Chapter {current_chapter_number}') overrides EOF cursor")
+            logger.info(f"      ℹ️ Cursor is at end-of-file, but explicit intent is clear")
+        elif detection_method == "explicit_new_chapter_at_eof":
+            logger.info(f"      ✅ User requested non-existent Chapter {explicit_primary_chapter}")
+            logger.info(f"      ✅ Cursor at EOF is appropriate for new chapter generation")
+        elif detection_method == "explicit_new_chapter_overrides_cursor":
+            logger.info(f"      ✅ User asked to craft/generate Chapter {explicit_primary_chapter} (does not exist yet)")
+            logger.info(f"      ✅ Explicit chapter request overrides cursor position")
+        elif detection_method == "cursor_after_all_chapters":
+            logger.info(f"      ✅ Cursor is after all chapters, using last chapter")
+            logger.info(f"      ✅ Prevents accidental edits to wrong chapter")
+            logger.info(f"      ℹ️ No explicit action verb found, safe default applied")
+        elif detection_method == "explicit_query_fallback":
+            logger.info(f"      ✅ No cursor position, using explicit mention from query")
+            logger.info(f"      ✅ User action verb targeted Chapter {current_chapter_number}")
+        elif detection_method == "explicit_new_chapter":
+            logger.info(f"      ✅ User requested non-existent Chapter {explicit_primary_chapter}")
+            logger.info(f"      ✅ Will generate new chapter content")
+        elif detection_method == "empty_file_default":
+            logger.info(f"      ✅ Empty manuscript, defaulting to Chapter 1")
+        else:
+            logger.info(f"      ⚠️ Fallback method used")
+        
+        logger.info(f"=" * 80)
+        
+        return preserve_fiction_state(state, {
             "chapter_ranges": chapter_ranges,
-            "active_chapter_idx": active_idx,  # Use 'active_chapter_idx' for compatibility
-            "working_chapter_index": active_idx,  # Also set for subgraph internal use
+            "active_chapter_idx": active_idx,
+            "working_chapter_index": active_idx,
             "current_chapter_text": context_current_chapter_text,
             "current_chapter_number": current_chapter_number,
-            "requested_chapter_number": requested_chapter_number,  # NEW: For explicit chapter generation
+            "requested_chapter_number": requested_chapter_number,
             "prev_chapter_text": prev_chapter_text,
             "prev_chapter_number": prev_chapter_number,
             "next_chapter_text": next_chapter_text,
             "next_chapter_number": next_chapter_number,
-            "reference_chapter_numbers": reference_chapter_numbers,  # Chapters mentioned but not current/adjacent
-            "reference_chapter_texts": reference_chapter_texts,  # Text for reference chapters (READ-ONLY)
-            "current_request": state.get("current_request", ""),  # Preserve from earlier nodes
-            "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
-            "selection_start": state.get("selection_start", -1),
-            "selection_end": state.get("selection_end", -1),
-            "active_editor": state.get("active_editor", {}),  # CRITICAL: Preserve active_editor for next nodes
-            "manuscript": state.get("manuscript", ""),  # CRITICAL: Preserve manuscript
-            "filename": state.get("filename", ""),  # CRITICAL: Preserve filename
-            "frontmatter": state.get("frontmatter", {}),  # CRITICAL: Preserve frontmatter
-            "user_id": state.get("user_id", "system"),  # CRITICAL: Preserve user_id for DB queries
-            # ✅ CRITICAL: Preserve all critical state keys
-            "metadata": state.get("metadata", {}),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", "")
-        }
+            "reference_chapter_numbers": reference_chapter_numbers,
+            "reference_chapter_texts": reference_chapter_texts,
+        })
         
     except Exception as e:
         logger.error(f"Failed to analyze scope: {e}")
-        return {
+        return preserve_fiction_state(state, {
             "error": str(e),
             "task_status": "error",
-            "current_request": state.get("current_request", ""),  # Preserve even on error
-            "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
-            "selection_start": state.get("selection_start", -1),
-            "selection_end": state.get("selection_end", -1),
-            "active_editor": state.get("active_editor", {}),  # CRITICAL: Preserve active_editor
-            "manuscript": state.get("manuscript", ""),
-            "filename": state.get("filename", ""),
-            "frontmatter": state.get("frontmatter", {}),
-            "reference_chapter_numbers": [],  # No reference chapters on error
-            "reference_chapter_texts": {},  # No reference chapters on error
-            "user_id": state.get("user_id", "system"),  # CRITICAL: Preserve user_id for DB queries
-            # ✅ CRITICAL: Preserve all critical state keys even on error
-            "metadata": state.get("metadata", {}),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", "")
-        }
+            "reference_chapter_numbers": [],
+            "reference_chapter_texts": {},
+        })
 
 
 async def load_references_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -453,7 +611,7 @@ async def load_references_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         from orchestrator.tools.reference_file_loader import load_referenced_files
         
-        active_editor = state.get("active_editor", {})
+        active_editor = _get_active_editor_from_state(state)
         user_id = state.get("user_id", "system")
         
         # Fiction reference configuration
@@ -541,7 +699,7 @@ async def load_references_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         has_references_value = bool(outline_body)
         
-        return {
+        return preserve_fiction_state(state, {
             "outline_body": outline_body,
             "rules_body": rules_body,
             "style_body": style_body,
@@ -553,38 +711,13 @@ async def load_references_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "outline_prev_chapter_text": outline_prev_chapter_text,
             "loaded_references": loaded_files,
             "has_references": has_references_value,
-            "current_request": state.get("current_request", ""),  # Preserve from earlier nodes
-            "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
-            "selection_start": state.get("selection_start", -1),
-            "selection_end": state.get("selection_end", -1),
-            "user_id": state.get("user_id", "system"),  # CRITICAL: Preserve user_id
-            "active_editor": state.get("active_editor", {}),  # CRITICAL: Preserve for subsequent nodes
-            "manuscript": state.get("manuscript", ""),
-            "filename": state.get("filename", ""),
-            "frontmatter": state.get("frontmatter", {}),
-            # ✅ CRITICAL: Preserve chapter context from analyze_scope_node
-            "chapter_ranges": state.get("chapter_ranges", []),
-            "active_chapter_idx": state.get("active_chapter_idx", -1),
-            "working_chapter_index": state.get("working_chapter_index", -1),
-            "current_chapter_text": state.get("current_chapter_text", ""),
-            "current_chapter_number": state.get("current_chapter_number"),
-            "prev_chapter_text": state.get("prev_chapter_text"),
-            "prev_chapter_number": state.get("prev_chapter_number"),
-            "next_chapter_text": state.get("next_chapter_text"),
-            "next_chapter_number": state.get("next_chapter_number"),
-            "explicit_primary_chapter": state.get("explicit_primary_chapter"),
-            # ✅ CRITICAL: Preserve critical 5 keys for downstream nodes / parent agent
-            "metadata": state.get("metadata", {}),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", ""),
-        }
+        })
         
     except Exception as e:
         logger.error(f"Failed to load references: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
-        return {
+        return preserve_fiction_state(state, {
             "outline_body": None,
             "rules_body": None,
             "style_body": None,
@@ -597,32 +730,7 @@ async def load_references_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "loaded_references": {},
             "has_references": False,
             "error": str(e),
-            "current_request": state.get("current_request", ""),  # Preserve even on error
-            "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
-            "selection_start": state.get("selection_start", -1),
-            "selection_end": state.get("selection_end", -1),
-            "user_id": state.get("user_id", "system"),  # CRITICAL: Preserve user_id
-            "active_editor": state.get("active_editor", {}),  # CRITICAL: Preserve for subsequent nodes
-            "manuscript": state.get("manuscript", ""),
-            "filename": state.get("filename", ""),
-            "frontmatter": state.get("frontmatter", {}),
-            # ✅ CRITICAL: Preserve chapter context even on error
-            "chapter_ranges": state.get("chapter_ranges", []),
-            "active_chapter_idx": state.get("active_chapter_idx", -1),
-            "working_chapter_index": state.get("working_chapter_index", -1),
-            "current_chapter_text": state.get("current_chapter_text", ""),
-            "current_chapter_number": state.get("current_chapter_number"),
-            "prev_chapter_text": state.get("prev_chapter_text"),
-            "prev_chapter_number": state.get("prev_chapter_number"),
-            "next_chapter_text": state.get("next_chapter_text"),
-            "next_chapter_number": state.get("next_chapter_number"),
-            "explicit_primary_chapter": state.get("explicit_primary_chapter"),
-            # ✅ CRITICAL: Preserve critical 5 keys
-            "metadata": state.get("metadata", {}),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", ""),
-        }
+        })
 
 
 async def assess_reference_quality_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -688,115 +796,21 @@ async def assess_reference_quality_node(state: Dict[str, Any]) -> Dict[str, Any]
         has_references_final = state.get("has_references", False)
         
         # Preserve current_request and other important state from earlier nodes
-        return {
+        return preserve_fiction_state(state, {
             "reference_quality": reference_quality,
             "reference_warnings": warnings,
             "reference_guidance": reference_guidance,
-            "current_request": state.get("current_request", ""),  # Preserve from prepare_context_node
-            "has_references": has_references_final,  # Preserve from load_references_node
-            "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
-            "selection_start": state.get("selection_start", -1),
-            "selection_end": state.get("selection_end", -1),
-            "user_id": state.get("user_id", "system"),  # CRITICAL: Preserve user_id
-            "active_editor": state.get("active_editor", {}),  # CRITICAL: Preserve for parent
-            "manuscript": state.get("manuscript", ""),
-            "filename": state.get("filename", ""),
-            "frontmatter": state.get("frontmatter", {}),
-            "outline_body": state.get("outline_body"),  # CRITICAL: Pass outline to parent!
-            "rules_body": state.get("rules_body"),  # CRITICAL: Pass rules to parent!
-            "style_body": state.get("style_body"),  # CRITICAL: Pass style to parent!
-            "characters_bodies": state.get("characters_bodies", []),  # CRITICAL: Pass characters to parent!
-            "series_body": state.get("series_body"),  # CRITICAL: Pass series timeline to parent!
-            "outline_current_chapter_text": state.get("outline_current_chapter_text"),
-            "outline_prev_chapter_text": state.get("outline_prev_chapter_text"),
-            "loaded_references": state.get("loaded_references", {}),
-            # ✅ CRITICAL: Preserve chapter context for parent agent
-            "chapter_ranges": state.get("chapter_ranges", []),
-            "active_chapter_idx": state.get("active_chapter_idx", -1),
-            "working_chapter_index": state.get("working_chapter_index", -1),
-            "current_chapter_text": state.get("current_chapter_text", ""),
-            "current_chapter_number": state.get("current_chapter_number"),
-            "prev_chapter_text": state.get("prev_chapter_text"),
-            "prev_chapter_number": state.get("prev_chapter_number"),
-            "next_chapter_text": state.get("next_chapter_text"),
-            "next_chapter_number": state.get("next_chapter_number"),
-            "explicit_primary_chapter": state.get("explicit_primary_chapter"),
-            # ✅ CRITICAL: Preserve critical 5 keys
-            "metadata": state.get("metadata", {}),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", ""),
-        }
+        })
         
     except Exception as e:
         logger.error(f"Reference assessment failed: {e}")
-        return {
+        return preserve_fiction_state(state, {
             "reference_quality": {"completeness_score": 0.0},
             "reference_warnings": [],
             "reference_guidance": "",
-            "current_request": state.get("current_request", ""),  # Preserve even on error
-            "has_references": state.get("has_references", False),
-            "cursor_offset": state.get("cursor_offset", -1),  # CRITICAL: Preserve cursor
-            "selection_start": state.get("selection_start", -1),
-            "selection_end": state.get("selection_end", -1),
-            "user_id": state.get("user_id", "system"),  # CRITICAL: Preserve user_id
-            "active_editor": state.get("active_editor", {}),  # CRITICAL: Preserve for parent
-            "manuscript": state.get("manuscript", ""),
-            "filename": state.get("filename", ""),
-            "frontmatter": state.get("frontmatter", {}),
-            "outline_body": state.get("outline_body"),  # CRITICAL: Pass outline to parent!
-            "rules_body": state.get("rules_body"),  # CRITICAL: Pass rules to parent!
-            "style_body": state.get("style_body"),  # CRITICAL: Pass style to parent!
-            "characters_bodies": state.get("characters_bodies", []),  # CRITICAL: Pass characters to parent!
-            "series_body": state.get("series_body"),  # CRITICAL: Pass series timeline to parent!
-            "outline_current_chapter_text": state.get("outline_current_chapter_text"),
-            "outline_prev_chapter_text": state.get("outline_prev_chapter_text"),
-            "loaded_references": state.get("loaded_references", {}),
-            # ✅ CRITICAL: Preserve chapter context even on error
-            "chapter_ranges": state.get("chapter_ranges", []),
-            "active_chapter_idx": state.get("active_chapter_idx", -1),
-            "working_chapter_index": state.get("working_chapter_index", -1),
-            "current_chapter_text": state.get("current_chapter_text", ""),
-            "current_chapter_number": state.get("current_chapter_number"),
-            "prev_chapter_text": state.get("prev_chapter_text"),
-            "prev_chapter_number": state.get("prev_chapter_number"),
-            "next_chapter_text": state.get("next_chapter_text"),
-            "next_chapter_number": state.get("next_chapter_number"),
-            "explicit_primary_chapter": state.get("explicit_primary_chapter"),
-            # ✅ CRITICAL: Preserve critical 5 keys
-            "metadata": state.get("metadata", {}),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", []),
-            "query": state.get("query", ""),
-        }
+            "error": str(e),
+        })
 
 
-# ============================================
-# Subgraph Builder
-# ============================================
-
-def build_context_preparation_subgraph(checkpointer) -> StateGraph:
-    """Build context preparation subgraph for fiction agents"""
-    # Use Dict[str, Any] for state compatibility
-    from typing import Dict, Any
-    subgraph = StateGraph(Dict[str, Any])
-    
-    # Add nodes
-    subgraph.add_node("prepare_context", prepare_context_node)
-    subgraph.add_node("detect_chapter_mentions", detect_chapter_mentions_node)
-    subgraph.add_node("analyze_scope", analyze_scope_node)
-    subgraph.add_node("load_references", load_references_node)
-    subgraph.add_node("assess_references", assess_reference_quality_node)
-    
-    # Set entry point
-    subgraph.set_entry_point("prepare_context")
-    
-    # Flow
-    subgraph.add_edge("prepare_context", "detect_chapter_mentions")
-    subgraph.add_edge("detect_chapter_mentions", "analyze_scope")
-    subgraph.add_edge("analyze_scope", "load_references")
-    subgraph.add_edge("load_references", "assess_references")
-    subgraph.add_edge("assess_references", END)
-    
-    return subgraph.compile(checkpointer=checkpointer)
+# build_context_preparation_subgraph removed; fiction only via Writing Assistant → fiction_editing_subgraph (flat nodes from this module)
 

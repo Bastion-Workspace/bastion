@@ -4,6 +4,7 @@ Emacs-style quick capture to inbox.org
 """
 
 import logging
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
@@ -12,6 +13,39 @@ from config import settings
 from models.org_capture_models import OrgCaptureRequest, OrgCaptureResponse
 
 logger = logging.getLogger(__name__)
+
+
+def expand_capture_placeholders(content: str, now: datetime) -> str:
+    """
+    Expand Org-Mode capture template %-escapes in capture content.
+
+    Supported (same semantics as Emacs org-capture):
+    - %t   - Active timestamp, date only, e.g. [2025-02-06 Thu]
+    - %T   - Active timestamp, date and time, e.g. [2025-02-06 Thu 14:30]
+    - %u   - Inactive timestamp, date only, e.g. 2025-02-06 Thu
+    - %U   - Inactive timestamp, date and time, e.g. 2025-02-06 Thu 14:30
+    - %<FORMAT> - Custom format using Python strftime codes, e.g. %<%I:%M %p> → 02:30 PM
+
+    For time-only in a journal (date is the day header), use %<%I:%M %p> for 12h or %<%H:%M> for 24h.
+    """
+    if not content:
+        return content
+    ts_datetime = now.strftime("%Y-%m-%d %a %H:%M")
+    ts_date = now.strftime("%Y-%m-%d %a")
+    out = content
+    # %<FORMAT> first (custom strftime); use regex so we don't touch %t/%T/%u/%U inside
+    def replace_format(match: re.Match) -> str:
+        fmt = match.group(1)
+        try:
+            return now.strftime(fmt)
+        except (ValueError, TypeError):
+            return match.group(0)
+    out = re.sub(r"%<([^>]+)>", replace_format, out)
+    out = out.replace("%T", f"[{ts_datetime}]")
+    out = out.replace("%t", f"[{ts_date}]")
+    out = out.replace("%U", ts_datetime)
+    out = out.replace("%u", ts_date)
+    return out
 
 
 class OrgCaptureService:
@@ -135,6 +169,19 @@ class OrgCaptureService:
             OrgCaptureResponse with success status and preview
         """
         try:
+            # Check if this is a journal entry and journal is enabled
+            if request.template_type == "journal":
+                from services.org_settings_service import get_org_settings_service
+                settings_service = await get_org_settings_service()
+                settings = await settings_service.get_settings(user_id)
+                
+                if settings.journal_preferences.enabled:
+                    # Route to journal service
+                    from services.org_journal_service import get_org_journal_service
+                    journal_service = await get_org_journal_service()
+                    return await journal_service.capture_journal_entry(user_id, request)
+            
+            # Otherwise, continue with regular inbox capture
             # Get username for file path
             from services.database_manager.database_helpers import fetch_one
             
@@ -269,6 +316,7 @@ class OrgCaptureService:
             now = datetime.now()
         
         timestamp = now.strftime("%Y-%m-%d %a %H:%M")
+        content = expand_capture_placeholders(request.content, now)
         
         # Use Level 1 headings like BeOrg
         heading_prefix = "*"
@@ -277,7 +325,6 @@ class OrgCaptureService:
         if request.template_type == "todo":
             # TODO entry format - BeOrg style
             todo_state = "TODO"
-            content = request.content
             
             # Add priority if specified
             if request.priority:
@@ -322,12 +369,12 @@ class OrgCaptureService:
             padding_needed = max(1, 77 - len(heading_base) - len(tags_str))
             heading = heading_base + (" " * padding_needed) + tags_str
             
-            lines = [heading, f"[{timestamp}]", "", request.content]
+            lines = [heading, f"[{timestamp}]", "", content]
             return '\n'.join(lines)
         
         elif request.template_type == "meeting":
             # Meeting notes format - BeOrg style
-            heading_base = f"{heading_prefix} Meeting: {request.content}"
+            heading_base = f"{heading_prefix} Meeting: {content}"
             
             # Add tags - right-aligned
             if request.tags:
@@ -352,7 +399,7 @@ class OrgCaptureService:
         
         else:  # note (default)
             # Simple note format - BeOrg style
-            heading_base = f"{heading_prefix} {request.content}"
+            heading_base = f"{heading_prefix} {content}"
             
             # Add tags - right-aligned
             if request.tags:

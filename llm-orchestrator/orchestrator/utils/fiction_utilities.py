@@ -10,7 +10,7 @@ import logging
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -407,4 +407,184 @@ def extract_book_map(outline_body: str) -> List[Tuple[Union[int, str], str]]:
     
     book_map.sort(key=sort_key)
     return book_map
+
+
+# ============================================
+# Tracked Items and Status Block Utilities
+# ============================================
+
+def get_tracked_items(frontmatter: dict) -> dict:
+    """
+    Extract tracked items configuration from outline frontmatter.
+    
+    Args:
+        frontmatter: Outline document frontmatter dictionary
+        
+    Returns:
+        Dictionary with keys: 'characters', 'locations', 'items', 'relationships'
+        Each value is a list of item names (strings)
+    """
+    if not frontmatter:
+        return {}
+    
+    tracked_items = frontmatter.get("tracked_items", {})
+    if not isinstance(tracked_items, dict):
+        return {}
+    
+    result = {
+        "characters": [],
+        "locations": [],
+        "items": [],
+        "relationships": []
+    }
+    
+    for category in result.keys():
+        items = tracked_items.get(category, [])
+        if isinstance(items, list):
+            result[category] = [str(item) for item in items if item]
+    
+    return result
+
+
+def validate_tracked_item(item_name: str, category: str, tracked_items: dict) -> bool:
+    """
+    Validate that an item exists in the tracked items list for the given category.
+    
+    Args:
+        item_name: Name of the item to validate
+        category: Category ('characters', 'locations', 'items', 'relationships')
+        tracked_items: Dictionary from get_tracked_items()
+        
+    Returns:
+        True if item exists in category, False otherwise
+    """
+    if not item_name or not category or not tracked_items:
+        return False
+    
+    category_items = tracked_items.get(category, [])
+    if not isinstance(category_items, list):
+        return False
+    
+    return item_name in category_items
+
+
+def extract_status_block(chapter_text: str) -> Optional[str]:
+    """
+    Extract existing status block from chapter text.
+    
+    Status blocks appear immediately after chapter heading, before summary paragraph.
+    Format:
+    ### Status
+    - [Item name]: [Status description]
+    - [Item name]: [Status description]
+    
+    Args:
+        chapter_text: Full chapter text including heading
+        
+    Returns:
+        Status block text if found (including "### Status" header), None otherwise
+    """
+    if not chapter_text:
+        return None
+    
+    # Pattern: Match "### Status" or "Status:" followed by bullet list items
+    # Status block ends when we hit a paragraph (non-bullet line) or another heading
+    # Support both old format (Status:) and new format (### Status)
+    status_pattern = r'(?i)(?:^|\n)(?:###\s+Status|Status:)\s*\n((?:- .+?\n)+)(?=\n[^-]|\n##|\Z)'
+    match = re.search(status_pattern, chapter_text, re.MULTILINE)
+    
+    if match:
+        # Always return in new format (### Status)
+        status_block = "### Status\n" + match.group(1)
+        return status_block.strip()
+    
+    return None
+
+
+def format_status_block(status_items: List[dict]) -> str:
+    """
+    Format status items as a status block (bullet list format).
+    
+    Args:
+        status_items: List of dicts with keys 'item' and 'status'
+        Example: [{"item": "Clarissa", "status": "Went home in chapter 2"}]
+        
+    Returns:
+        Formatted status block text (with "### Status" header)
+    """
+    if not status_items:
+        return ""
+    
+    lines = ["### Status"]
+    for item in status_items:
+        item_name = item.get("item", "").strip()
+        item_status = item.get("status", "").strip()
+        if item_name and item_status:
+            lines.append(f"- {item_name}: {item_status}")
+    
+    if len(lines) == 1:  # Only "### Status" header, no items
+        return ""
+    
+    return "\n".join(lines) + "\n"
+
+
+def extract_pacing_block(chapter_text: str) -> Optional[Dict[str, str]]:
+    """
+    Extract pacing transition block from chapter text.
+    
+    Pacing blocks appear after Status (if present), before Summary.
+    Format:
+    ### Pacing
+    FROM: [Emotional/tonal state from previous chapter's ending]
+    TO: [Target emotional/tonal state for current chapter]
+    TECHNIQUE: [Specific transition approach - how to achieve the shift]
+    
+    Also supports free-form pacing text without explicit FROM:/TO:/TECHNIQUE: labels.
+    
+    Args:
+        chapter_text: Full chapter text including heading
+        
+    Returns:
+        Dictionary with keys: 'from_state', 'to_state', 'technique', 'full_text'
+        or None if no pacing block found.
+        If structured format (FROM:/TO:/TECHNIQUE:) is found, parses into dict.
+        If free-form text is found, stores in 'full_text' and sets other keys to None.
+    """
+    if not chapter_text:
+        return None
+    
+    # Pattern: Match "### Pacing" header followed by content
+    # Pacing block ends when we hit another heading (### or ##)
+    # Support both structured (FROM:/TO:/TECHNIQUE:) and free-form text
+    pacing_pattern = r'(?i)(?:^|\n)###\s+Pacing\s*\n((?:(?!\n###|\n##).)*?)(?=\n###|\n##|\Z)'
+    match = re.search(pacing_pattern, chapter_text, re.MULTILINE | re.DOTALL)
+    
+    if not match:
+        return None
+    
+    pacing_content = match.group(1).strip()
+    if not pacing_content:
+        return None
+    
+    # Try to parse structured format (FROM:/TO:/TECHNIQUE:)
+    from_match = re.search(r'(?i)^FROM:\s*(.+?)(?=\nTO:|\nTECHNIQUE:|\Z)', pacing_content, re.MULTILINE | re.DOTALL)
+    to_match = re.search(r'(?i)^TO:\s*(.+?)(?=\nFROM:|\nTECHNIQUE:|\Z)', pacing_content, re.MULTILINE | re.DOTALL)
+    technique_match = re.search(r'(?i)^TECHNIQUE:\s*(.+?)(?=\nFROM:|\nTO:|\Z)', pacing_content, re.MULTILINE | re.DOTALL)
+    
+    if from_match or to_match or technique_match:
+        # Structured format found
+        return {
+            "from_state": from_match.group(1).strip() if from_match else None,
+            "to_state": to_match.group(1).strip() if to_match else None,
+            "technique": technique_match.group(1).strip() if technique_match else None,
+            "full_text": pacing_content
+        }
+    else:
+        # Free-form text - store as full_text
+        return {
+            "from_state": None,
+            "to_state": None,
+            "technique": None,
+            "full_text": pacing_content
+        }
 

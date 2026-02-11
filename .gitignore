@@ -198,7 +198,7 @@ typings/
 # Yarn Integrity file
 .yarn-integrity
 
-# dotenv environment variables file
+# Sensitive / local-only (do not commit)
 .env
 .env.*
 .env.local
@@ -207,6 +207,10 @@ typings/
 .env.test
 .env.staging
 *.env
+*.env.local
+*.pem
+*.key
+*.crt
 
 # parcel-bundler cache (https://parceljs.org/)
 .cache
@@ -240,10 +244,12 @@ dist
 # TernJS port file
 .tern-port
 
-# Docker
+# Docker (local compose with secrets - use docker-compose.example.yml for GitHub)
 .dockerignore
 docker-compose.yml
 docker-compose.*.yml
+# Allow the example compose (no secrets) to be committed
+!docker-compose.example.yml
 
 # Kubernetes
 k8s-*.yaml

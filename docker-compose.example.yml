@@ -1,0 +1,679 @@
+# Docker Compose example for GitHub / public use. No hardcoded passwords or secrets.
+# Copy to docker-compose.yml and set values in .env (or export) before running.
+# Required: POSTGRES_PASSWORD, POSTGRES_APP_PASSWORD, JWT_SECRET_KEY, and API keys (OPENAI_API_KEY, etc.).
+# Note: backend/sql/01_init.sql creates bastion_user with a default password; set POSTGRES_APP_PASSWORD
+# to match that for first-run, or change the password in the init script and use a strong value.
+
+services:
+  # PostgreSQL Database for Settings and Metadata
+  postgres:
+    image: postgres:15-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-postgres
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    command: >
+      postgres
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
+      -c work_mem=4MB
+      -c min_wal_size=1GB
+      -c max_wal_size=4GB
+      -c max_worker_processes=8
+      -c max_parallel_workers_per_gather=4
+      -c max_parallel_workers=8
+      -c max_parallel_maintenance_workers=4
+    volumes:
+      - bastion_postgres_data:/var/lib/postgresql/data
+      - ./backend/sql:/docker-entrypoint-initdb.d
+    ports:
+      - "5433:5432"
+    restart: unless-stopped
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-postgres"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-redis
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-redis"
+    volumes:
+      - bastion_redis_data:/data
+    ports:
+      - "6380:6379"
+    command: redis-server --appendonly yes
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-searxng
+    ports:
+      - "8889:8080"
+    environment:
+      - SEARXNG_SECRET=${SEARXNG_SECRET:-changeme-searxng-secret}
+      - SEARXNG_URL=http://localhost:8889
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-searxng"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  backend:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: ${COMPOSE_PROJECT_NAME:-bastion}-backend:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-backend
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-backend"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      searxng:
+        condition: service_healthy
+      data-service:
+        condition: service_started
+      crawl4ai-service:
+        condition: service_healthy
+      tools-service:
+        condition: service_healthy
+      image-vision-service:
+        condition: service_started
+    environment:
+      - DATABASE_URL=postgresql://bastion_user:${POSTGRES_APP_PASSWORD:-changeme}@postgres:5432/bastion_knowledge_base
+      - QDRANT_URL=${QDRANT_URL:-http://localhost:6333}
+      - NEO4J_URI=${NEO4J_URI:-bolt://localhost:7687}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-changeme}
+      - REDIS_URL=redis://redis:6379
+      - SEARXNG_URL=http://searxng:8080
+      - CRAWL4AI_SERVICE_HOST=crawl4ai-service
+      - CRAWL4AI_SERVICE_PORT=50055
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
+      - OSRM_BASE_URL=${OSRM_BASE_URL:-http://osrm:5000}
+      - USE_VECTOR_SERVICE=true
+      - UPLOAD_MAX_SIZE=${UPLOAD_MAX_SIZE:-1500MB}
+      - QUALITY_THRESHOLD=${QUALITY_THRESHOLD:-0.7}
+      - DEBUG=${DEBUG:-false}
+      - SMTP_ENABLED=${SMTP_ENABLED:-false}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_USE_TLS=${SMTP_USE_TLS:-true}
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-noreply@bastion.local}
+      - SMTP_FROM_NAME=${SMTP_FROM_NAME:-Bastion AI Workspace}
+      - SITE_URL=${SITE_URL:-http://localhost:3051}
+      - DATA_SERVICE_HOST=data-service
+      - DATA_SERVICE_PORT=50054
+      - CRAWL4AI_SERVICE_HOST=crawl4ai-service
+      - CRAWL4AI_SERVICE_PORT=50055
+      - BACKEND_TOOL_SERVICE_HOST=tools-service
+      - BACKEND_TOOL_SERVICE_PORT=50052
+      - IMAGE_VISION_SERVICE_HOST=image-vision-service
+      - IMAGE_VISION_SERVICE_PORT=50056
+      - CONNECTIONS_SERVICE_HOST=connections-service
+      - CONNECTIONS_SERVICE_PORT=50057
+      - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
+      - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
+      - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-common}
+      - MICROSOFT_REDIRECT_URI=${MICROSOFT_REDIRECT_URI:-}
+      - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-changeme-internal-key}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-jwt-secret}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@localhost}
+      - DEVELOPMENT_BYPASS_AUTH=false
+      - LOG_LEVEL=${BACKEND_LOG_LEVEL:-INFO}
+      - USE_GRPC_ORCHESTRATOR=true
+      - GRPC_ORCHESTRATOR_PERCENTAGE=100
+    ports:
+      - "0.0.0.0:8081:8000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./processed:/app/processed
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  tools-service:
+    build:
+      context: .
+      dockerfile: ./tools-service/Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: ${COMPOSE_PROJECT_NAME:-bastion}-tools-service:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-tools-service
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-tools-service"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      searxng:
+        condition: service_healthy
+      crawl4ai-service:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://bastion_user:${POSTGRES_APP_PASSWORD:-changeme}@postgres:5432/bastion_knowledge_base
+      - QDRANT_URL=${QDRANT_URL:-http://localhost:6333}
+      - NEO4J_URI=${NEO4J_URI:-bolt://localhost:7687}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-changeme}
+      - REDIS_URL=redis://redis:6379
+      - SEARXNG_URL=http://searxng:8080
+      - CRAWL4AI_SERVICE_HOST=crawl4ai-service
+      - CRAWL4AI_SERVICE_PORT=50055
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
+      - GRPC_TOOL_SERVICE_PORT=50052
+      - LOG_LEVEL=${TOOLS_SERVICE_LOG_LEVEL:-INFO}
+    ports:
+      - "50062:50052"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+    networks:
+      - default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(5); s.connect((\"localhost\", 50052)); s.close()' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile.celery-worker
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: ${COMPOSE_PROJECT_NAME:-bastion}-celery-worker:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-celery-worker
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-worker"
+    command: celery -A services.celery_app worker --loglevel=info --queues=orchestrator,agents,rss,default
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      searxng:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://bastion_user:${POSTGRES_APP_PASSWORD:-changeme}@postgres:5432/bastion_knowledge_base
+      - QDRANT_URL=${QDRANT_URL:-http://localhost:6333}
+      - NEO4J_URI=${NEO4J_URI:-bolt://localhost:7687}
+      - NEO4J_USER=${NEO4J_USER:-neo4j}
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-changeme}
+      - REDIS_URL=redis://redis:6379
+      - SEARXNG_URL=http://searxng:8080
+      - CRAWL4AI_SERVICE_HOST=crawl4ai-service
+      - CRAWL4AI_SERVICE_PORT=50055
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
+      - UPLOAD_MAX_SIZE=${UPLOAD_MAX_SIZE:-1500MB}
+      - QUALITY_THRESHOLD=${QUALITY_THRESHOLD:-0.7}
+      - DEBUG=${DEBUG:-true}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-jwt-secret}
+      - LOG_LEVEL=${CELERY_WORKER_LOG_LEVEL:-INFO}
+      - CELERY_WORKER_TYPE=orchestrator
+    volumes:
+      - ./uploads:/app/uploads
+      - ./processed:/app/processed
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  celery_beat:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile.celery-beat
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: ${COMPOSE_PROJECT_NAME:-bastion}-celery-beat:latest
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-beat"
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-celery-beat
+    command: celery -A services.celery_app beat --loglevel=info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      - DATABASE_URL=postgresql://bastion_user:${POSTGRES_APP_PASSWORD:-changeme}@postgres:5432/bastion_knowledge_base
+      - REDIS_URL=redis://redis:6379
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
+      - DEBUG=${DEBUG:-true}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-jwt-secret}
+      - LOG_LEVEL=${CELERY_BEAT_LOG_LEVEL:-INFO}
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+
+  celery_flower:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile.celery-flower
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: ${COMPOSE_PROJECT_NAME:-bastion}-celery-flower:latest
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-flower"
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-celery-flower
+    command: celery -A services.celery_app flower --port=5555
+    depends_on:
+      - redis
+      - celery_worker
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    ports:
+      - "0.0.0.0:5555:5555"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: ${COMPOSE_PROJECT_NAME:-bastion}-frontend:latest
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-frontend"
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-frontend
+    depends_on:
+      - backend
+      - webdav
+    ports:
+      - "0.0.0.0:3051:80"
+    environment:
+      - REACT_APP_APP_NAME=Bastion
+      - REACT_APP_VERSION=1.0.0
+      - REACT_APP_MAP_TILE_URL=${REACT_APP_MAP_TILE_URL:-http://localhost:8080}
+    restart: unless-stopped
+
+  webdav:
+    build:
+      context: .
+      dockerfile: ./backend/Dockerfile.webdav
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: ${COMPOSE_PROJECT_NAME:-bastion}-webdav:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-webdav
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-webdav"
+    command: python webdav_server.py
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      - DATABASE_URL=postgresql://bastion_user:${POSTGRES_APP_PASSWORD:-changeme}@postgres:5432/bastion_knowledge_base
+      - REDIS_URL=redis://redis:6379
+      - WEBDAV_HOST=0.0.0.0
+      - WEBDAV_PORT=8001
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-jwt-secret}
+      - LOG_LEVEL=${WEBDAV_LOG_LEVEL:-INFO}
+    ports:
+      - "0.0.0.0:8002:8001"
+    volumes:
+      - ./uploads:/app/uploads
+    restart: unless-stopped
+
+  llm-orchestrator:
+    build:
+      context: .
+      dockerfile: ./llm-orchestrator/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-llm-orchestrator
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-llm-orchestrator"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      tools-service:
+        condition: service_healthy
+    environment:
+      - SERVICE_NAME=llm-orchestrator
+      - GRPC_PORT=50051
+      - LOG_LEVEL=${LLM_ORCHESTRATOR_LOG_LEVEL:-DEBUG}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=bastion_knowledge_base
+      - POSTGRES_USER=bastion_user
+      - POSTGRES_PASSWORD=${POSTGRES_APP_PASSWORD:-changeme}
+      - BACKEND_TOOL_SERVICE_HOST=tools-service
+      - BACKEND_TOOL_SERVICE_PORT=50052
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+      - DEFAULT_MODEL=${DEFAULT_MODEL:-anthropic/claude-3.5-sonnet}
+      - FAST_MODEL=${FAST_MODEL:-anthropic/claude-3-haiku}
+      - CLASSIFICATION_MODEL=${FAST_MODEL:-anthropic/claude-haiku-4.5}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ENABLE_STREAMING=true
+      - ENABLE_TOOL_CALLBACKS=false
+      - MAX_CONCURRENT_REQUESTS=10
+      - REQUEST_TIMEOUT_SECONDS=300
+    ports:
+      - "50051:50051"
+    networks:
+      - default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(5); s.connect((\"localhost\", 50051)); s.close()' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  vector-service:
+    build:
+      context: .
+      dockerfile: ./vector-service/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-vector-service
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-vector-service"
+    environment:
+      - SERVICE_NAME=vector-service
+      - GRPC_PORT=50053
+      - LOG_LEVEL=${VECTOR_SERVICE_LOG_LEVEL:-INFO}
+      - QDRANT_URL=${QDRANT_URL:-http://localhost:6333}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_EMBEDDING_MODEL=text-embedding-3-large
+      - OPENAI_MAX_RETRIES=3
+      - OPENAI_TIMEOUT=30
+      - PARALLEL_WORKERS=4
+      - BATCH_SIZE=100
+      - MAX_TEXT_LENGTH=8000
+      - EMBEDDING_CACHE_ENABLED=true
+      - EMBEDDING_CACHE_TTL=10800
+      - CACHE_CLEANUP_INTERVAL=3600
+    ports:
+      - "50053:50053"
+    networks:
+      - default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(5); s.connect((\"localhost\", 50053)); s.close()' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  postgres-data:
+    image: postgres:15-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-postgres-data
+    environment:
+      - POSTGRES_DB=data_workspace
+      - POSTGRES_USER=data_user
+      - POSTGRES_PASSWORD=${DATA_WORKSPACE_PASSWORD:-changeme}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-postgres-data"
+    command: >
+      postgres
+      -c max_connections=100
+      -c shared_buffers=256MB
+      -c work_mem=8MB
+    volumes:
+      - bastion_data_workspace_db:/var/lib/postgresql/data
+      - ./data-service/sql:/docker-entrypoint-initdb.d
+    ports:
+      - "5434:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U data_user -d data_workspace"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  data-service:
+    build:
+      context: .
+      dockerfile: ./data-service/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-data-service
+    depends_on:
+      postgres-data:
+        condition: service_healthy
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-data-service"
+    environment:
+      - SERVICE_NAME=data-service
+      - GRPC_PORT=50054
+      - LOG_LEVEL=${DATA_SERVICE_LOG_LEVEL:-INFO}
+      - POSTGRES_HOST=postgres-data
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=data_workspace
+      - POSTGRES_USER=data_user
+      - POSTGRES_PASSWORD=${DATA_WORKSPACE_PASSWORD:-changeme}
+      - MAX_IMPORT_FILE_SIZE=524288000
+      - IMPORT_BATCH_SIZE=1000
+    ports:
+      - "50054:50054"
+    volumes:
+      - ./uploads:/app/uploads
+    networks:
+      - default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(5); s.connect((\"localhost\", 50054)); s.close()' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  image-vision-service:
+    build:
+      context: .
+      dockerfile: ./image-vision-service/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-image-vision
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-image-vision"
+    environment:
+      - SERVICE_NAME=image-vision-service
+      - GRPC_PORT=50056
+      - SERVICE_VERSION=1.0.0
+      - LOG_LEVEL=${IMAGE_VISION_SERVICE_LOG_LEVEL:-INFO}
+      - DEVICE=${IMAGE_VISION_DEVICE:-auto}
+      - MAX_WORKERS=4
+    ports:
+      - "50057:50056"
+    volumes:
+      - ./uploads:/app/uploads:ro
+    networks:
+      - default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(5); s.connect((\"localhost\", 50056)); s.close()' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  connections-service:
+    build:
+      context: .
+      dockerfile: ./connections-service/Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: ${COMPOSE_PROJECT_NAME:-bastion}-connections-service:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-connections-service
+    logging:
+      driver: "journald"
+      options:
+        tag: "bastion-connections-service"
+    depends_on:
+      backend:
+        condition: service_started
+    environment:
+      - SERVICE_NAME=connections-service
+      - GRPC_PORT=50057
+      - LOG_LEVEL=${SERVICE_LOG_LEVEL:-INFO}
+      - MICROSOFT_GRAPH_BASE=https://graph.microsoft.com/v1.0
+      - BACKEND_URL=http://backend:8000
+      - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-changeme-internal-key}
+    ports:
+      - "50058:50057"
+    networks:
+      - default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(5); s.connect((\"localhost\", 50057)); s.close()' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+  crawl4ai-service:
+    build:
+      context: .
+      dockerfile: ./crawl4ai-service/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-crawl4ai-service
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-crawl4ai-service"
+    environment:
+      - SERVICE_NAME=crawl4ai-service
+      - GRPC_PORT=50055
+      - LOG_LEVEL=${CRAWL4AI_SERVICE_LOG_LEVEL:-INFO}
+      - MAX_CONCURRENT_CRAWLS=10
+      - DEFAULT_TIMEOUT_SECONDS=60
+      - DEFAULT_MAX_CONTENT_LENGTH=1000000
+      - BROWSER_POOL_SIZE=5
+      - HEADLESS=true
+      - RATE_LIMIT_SECONDS=1.0
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - DEFAULT_MODEL=${FAST_MODEL:-anthropic/claude-3-haiku}
+    ports:
+      - "50055:50055"
+    networks:
+      - default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(5); s.connect((\"localhost\", 50055)); s.close()' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 40s
+      retries: 3
+
+  osrm:
+    image: ghcr.io/project-osrm/osrm-backend:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-osrm
+    ports:
+      - "5000:5000"
+    volumes:
+      - ${OSRM_DATA_PATH:-./osrm-data}:/data:ro
+    command: ["sh", "-c", "if [ -f /data/map.osrm ]; then BASE=/data/map.osrm; elif [ -f /data/map.osrm.cnbg ]; then BASE=/data/map.osrm; elif [ -f /data/us-latest.osrm ]; then BASE=/data/us-latest.osrm; elif [ -f /data/us-latest.osrm.cnbg ]; then BASE=/data/us-latest.osrm; else echo 'Waiting for OSRM data (run: scripts/setup_osrm_data.sh)'; exec sleep infinity; fi; if [ -z \"$$BASE\" ]; then echo 'BASE not set'; exec sleep infinity; fi; exec osrm-routed \"$$BASE\" --algorithm mld --max-table-size 10000"]
+    restart: unless-stopped
+    logging:
+      driver: "journald"
+      options:
+        tag: "bastion-osrm"
+    healthcheck:
+      test: ["CMD-SHELL", "( test -f /data/map.osrm -o -f /data/map.osrm.cnbg -o -f /data/us-latest.osrm -o -f /data/us-latest.osrm.cnbg ) && wget -q --spider http://localhost:5000/route/v1/driving/-118.2437,34.0522;-118.2537,34.0622 || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  map-tiles:
+    image: maptiler/tileserver-gl:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-map-tiles
+    ports:
+      - "8080:8080"
+    volumes:
+      - ${OSRM_DATA_PATH:-./osrm-data}:/data:ro
+    environment:
+      - NODE_ENV=production
+    command: ["sh", "-c", "if [ -f /data/map.mbtiles ]; then exec tileserver-gl --file /data/map.mbtiles --verbose --bind 0.0.0.0; else echo 'Waiting for /data/map.mbtiles (run: scripts/setup_osrm_data.sh)'; exec sleep infinity; fi"]
+    restart: unless-stopped
+    logging:
+      driver: "journald"
+      options:
+        tag: "bastion-map-tiles"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /data/map.mbtiles && wget -q -O- http://localhost:8080/ >/dev/null || exit 0"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  bastion_redis_data:
+    driver: local
+  bastion_postgres_data:
+    driver: local
+  bastion_data_workspace_db:
+    driver: local
+  osrm_data:
+    name: ${COMPOSE_PROJECT_NAME:-bastion}_osrm_data
+networks:
+  default:
+    name: bastion-network

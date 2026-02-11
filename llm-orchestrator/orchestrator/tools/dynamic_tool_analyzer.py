@@ -21,6 +21,8 @@ class OrchestratorToolCategory:
     SEGMENT_SEARCH = "segment_search"
     INFORMATION_ANALYSIS = "information_analysis"
     VISUALIZATION = "visualization"
+    IMAGE_SEARCH = "image_search"  # Image/comic/visual content search
+    DATA_WORKSPACE = "data_workspace"  # Data workspace queries
 
 
 # Tool name to category mapping
@@ -40,6 +42,10 @@ TOOL_CATEGORY_MAP = {
     "analyze_information_needs_tool": OrchestratorToolCategory.INFORMATION_ANALYSIS,
     "generate_project_aware_queries_tool": OrchestratorToolCategory.INFORMATION_ANALYSIS,
     "create_chart_tool": OrchestratorToolCategory.VISUALIZATION,
+    "search_images_tool": OrchestratorToolCategory.IMAGE_SEARCH,  # Image/comic search tool
+    "list_data_workspaces_tool": OrchestratorToolCategory.DATA_WORKSPACE,
+    "get_workspace_schema_tool": OrchestratorToolCategory.DATA_WORKSPACE,
+    "query_data_workspace_tool": OrchestratorToolCategory.DATA_WORKSPACE,
 }
 
 
@@ -58,6 +64,17 @@ CATEGORY_KEYWORDS = {
     OrchestratorToolCategory.VISUALIZATION: [
         "chart", "graph", "plot", "visualize", "show me", "compare", "trend",
         "make a chart", "graph this", "plot the data", "visualization", "diagram"
+    ],
+    OrchestratorToolCategory.IMAGE_SEARCH: [
+        "show me", "display", "find image", "show image", "comic", "comics",
+        "picture", "pictures", "photo", "photos", "artwork", "meme", "memes",
+        "screenshot", "diagram", "visual", "image", "images", "show", "see"
+    ],
+    OrchestratorToolCategory.DATA_WORKSPACE: [
+        "workspace", "data workspace", "vendor", "vendors", "transaction", "transactions",
+        "table", "tables", "query data", "database query", "sql", "query workspace",
+        "spending", "purchase", "purchases", "cost", "costs", "price", "prices",
+        "data", "workspace data", "my data", "my vendors", "my transactions"
     ],
 }
 
