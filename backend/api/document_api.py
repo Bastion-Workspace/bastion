@@ -360,9 +360,11 @@ async def import_image(
         
         logger.info(f"🖼️ User {current_user.username} importing image: {request.image_url}")
         
-        # Extract filename from URL (e.g., /static/images/filename.png -> filename.png)
+        # Extract filename from URL (e.g., /api/images/filename.png or /static/images/filename.png -> filename.png)
         image_url = request.image_url
-        if image_url.startswith('/static/images/'):
+        if image_url.startswith('/api/images/'):
+            filename_from_url = image_url.replace('/api/images/', '').split('/')[-1]
+        elif image_url.startswith('/static/images/'):
             filename_from_url = image_url.replace('/static/images/', '').split('/')[-1]
         else:
             # Fallback: try to extract filename from any path
@@ -506,7 +508,10 @@ async def upload_user_document(
             
             # For admin users, allow uploading to global folders
             if folder.collection_type == "global" and current_user.role != "admin":
-                raise HTTPException(status_code=403, detail="Only admins can upload to global folders")
+                raise HTTPException(
+                    status_code=403,
+                    detail="Uploading files to Global folders requires Admin privileges"
+                )
         
         # ROOSEVELT FIX: Pass folder_id to upload_and_process for transaction-level folder assignment
         # This ensures folder assignment happens within the same transaction as document creation
@@ -807,31 +812,36 @@ async def clear_all_documents(
                 errors.append(error_msg)
                 logger.error(f"❌ {error_msg}")
         
-        # Step 4: Clear the global vector collection completely
+        # Step 4: Clear the global vector collection completely via Vector Service
         logger.info("🗑️ Clearing global vector collection...")
         try:
-            from qdrant_client import QdrantClient
+            from clients.vector_service_client import get_vector_service_client
             from config import settings
             
-            qdrant_client = QdrantClient(url=settings.QDRANT_URL)
+            vector_client = await get_vector_service_client(required=False)
             
             # Check if global collection exists
-            collections = qdrant_client.get_collections()
-            collection_names = [col.name for col in collections.collections]
+            collections_result = await vector_client.list_collections()
+            if not collections_result.get("success"):
+                raise Exception(f"Failed to list collections: {collections_result.get('error')}")
+            
+            collection_names = [col["name"] for col in collections_result.get("collections", [])]
             
             if settings.VECTOR_COLLECTION_NAME in collection_names:
-                # Delete and recreate the global collection
-                qdrant_client.delete_collection(settings.VECTOR_COLLECTION_NAME)
+                # Delete and recreate the global collection via Vector Service
+                delete_result = await vector_client.delete_collection(settings.VECTOR_COLLECTION_NAME)
+                if not delete_result.get("success"):
+                    raise Exception(f"Failed to delete collection: {delete_result.get('error')}")
                 
                 # Recreate empty collection
-                from qdrant_client.models import VectorParams, Distance
-                qdrant_client.create_collection(
+                create_result = await vector_client.create_collection(
                     collection_name=settings.VECTOR_COLLECTION_NAME,
-                    vectors_config=VectorParams(
-                        size=settings.EMBEDDING_DIMENSIONS,
-                        distance=Distance.COSINE
-                    )
+                    vector_size=settings.EMBEDDING_DIMENSIONS,
+                    distance="COSINE"
                 )
+                if not create_result.get("success"):
+                    raise Exception(f"Failed to create collection: {create_result.get('error')}")
+                
                 logger.info("🗑️ Cleared and recreated global vector collection")
             else:
                 logger.info("ℹ️ Global vector collection didn't exist")
@@ -906,6 +916,103 @@ async def clear_all_documents(
         raise HTTPException(status_code=500, detail=f"Failed to clear documents: {str(e)}")
 
 
+@router.post("/api/admin/clear-documents-database-only")
+async def clear_documents_database_only(
+    current_user: AuthenticatedUserResponse = Depends(require_admin()),
+    rescan: bool = True,
+):
+    """Clear document records and indexes only; leave files on disk so they can be re-read.
+    Use when the database is out of sync with disk. If rescan=true (default), trigger file
+    watcher rescan so documents are re-added without restart."""
+    document_service = await _get_document_service()
+    container = await get_service_container()
+    kg_service = getattr(container, "knowledge_graph_service", None)
+    try:
+        logger.info(f"Admin {current_user.username} starting database-only document clearance")
+
+        deleted_documents = 0
+        deleted_collections = 0
+        errors = []
+
+        all_documents = await document_service.list_documents(skip=0, limit=10000)
+        logger.info(f"Found {len(all_documents)} document records to remove (files will remain on disk)")
+
+        for doc in all_documents:
+            try:
+                success = await document_service.delete_document_database_only(doc.document_id)
+                if success:
+                    deleted_documents += 1
+                else:
+                    errors.append(f"Failed to remove record for {doc.filename}")
+            except Exception as e:
+                errors.append(f"Error removing {doc.filename}: {str(e)}")
+                logger.error(f"Error removing document record: {e}")
+
+        users_response = await auth_service.get_users(skip=0, limit=1000)
+        user_doc_service = UserDocumentService()
+        await user_doc_service.initialize()
+        for user in users_response.users:
+            try:
+                if await user_doc_service.delete_user_collection(user.user_id):
+                    deleted_collections += 1
+            except Exception as e:
+                errors.append(f"Error clearing collection for {user.username}: {str(e)}")
+
+        try:
+            from clients.vector_service_client import get_vector_service_client
+            vector_client = await get_vector_service_client(required=False)
+            collections_result = await vector_client.list_collections()
+            if collections_result.get("success"):
+                names = [c["name"] for c in collections_result.get("collections", [])]
+                if settings.VECTOR_COLLECTION_NAME in names:
+                    await vector_client.delete_collection(settings.VECTOR_COLLECTION_NAME)
+                    await vector_client.create_collection(
+                        collection_name=settings.VECTOR_COLLECTION_NAME,
+                        vector_size=settings.EMBEDDING_DIMENSIONS,
+                        distance="COSINE",
+                    )
+        except Exception as e:
+            errors.append(f"Error clearing global vector collection: {str(e)}")
+
+        if kg_service:
+            try:
+                await kg_service.clear_all_data()
+            except Exception as e:
+                errors.append(f"Error clearing knowledge graph: {str(e)}")
+
+        rescan_result = None
+        if rescan and deleted_documents >= 0:
+            try:
+                from services.file_watcher_service import get_file_watcher
+                file_watcher = await get_file_watcher()
+                rescan_result = await file_watcher.run_rescan()
+            except Exception as e:
+                errors.append(f"Rescan after clear: {str(e)}")
+                logger.warning(f"Rescan after clear failed: {e}")
+
+        message = (
+            f"Database-only clearance completed: {deleted_documents} document records removed, "
+            f"{deleted_collections} user collections cleared. Files were left on disk."
+        )
+        if rescan_result and rescan_result.get("success"):
+            message += " File watcher rescan was run; documents on disk should be re-added."
+        elif rescan and (not rescan_result or not rescan_result.get("success")):
+            message += " Restart the app or trigger a rescan to re-add documents from disk."
+
+        return {
+            "success": True,
+            "message": message,
+            "deleted_documents": deleted_documents,
+            "deleted_collections": deleted_collections,
+            "rescan_run": rescan_result.get("success") if rescan_result else False,
+            "errors": errors[:10] if errors else [],
+            "total_errors": len(errors),
+        }
+    except Exception as e:
+        logger.error(f"Database-only clearance failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/api/admin/clear-neo4j")
 async def clear_neo4j(
     current_user: AuthenticatedUserResponse = Depends(require_admin())
@@ -949,8 +1056,7 @@ async def clear_qdrant(
     try:
         logger.info(f"🗑️ Admin {current_user.username} clearing Qdrant vector database")
         
-        from qdrant_client import QdrantClient
-        from qdrant_client.models import VectorParams, Distance
+        from clients.vector_service_client import get_vector_service_client
         from config import settings
         
         # Initialize counters
@@ -958,35 +1064,41 @@ async def clear_qdrant(
         cleared_global = False
         errors = []
         
-        # Initialize Qdrant client
-        qdrant_client = QdrantClient(url=settings.QDRANT_URL)
+        # Initialize Vector Service client
+        vector_client = await get_vector_service_client(required=False)
         
         # Get all existing collections
         try:
-            collections = qdrant_client.get_collections()
-            collection_names = [col.name for col in collections.collections]
+            collections_result = await vector_client.list_collections()
+            if not collections_result.get("success"):
+                raise Exception(f"Failed to list collections: {collections_result.get('error')}")
+            
+            collection_names = [col["name"] for col in collections_result.get("collections", [])]
             logger.info(f"📋 Found {len(collection_names)} collections in Qdrant")
         except Exception as e:
             logger.error(f"❌ Failed to list Qdrant collections: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to connect to Qdrant: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to connect to Vector Service: {str(e)}")
         
         # Clear global collection (named "documents" per VECTOR_COLLECTION_NAME)
         logger.info(f"🔍 Looking for global collection: {settings.VECTOR_COLLECTION_NAME}")
         if settings.VECTOR_COLLECTION_NAME in collection_names:
             try:
-                # Delete and recreate global collection
+                # Delete and recreate global collection via Vector Service
                 logger.info(f"🗑️ Deleting global collection: {settings.VECTOR_COLLECTION_NAME}")
-                qdrant_client.delete_collection(settings.VECTOR_COLLECTION_NAME)
+                delete_result = await vector_client.delete_collection(settings.VECTOR_COLLECTION_NAME)
+                if not delete_result.get("success"):
+                    raise Exception(f"Delete failed: {delete_result.get('error')}")
                 
                 # Recreate empty global collection
                 logger.info(f"🆕 Recreating global collection: {settings.VECTOR_COLLECTION_NAME}")
-                qdrant_client.create_collection(
+                create_result = await vector_client.create_collection(
                     collection_name=settings.VECTOR_COLLECTION_NAME,
-                    vectors_config=VectorParams(
-                        size=settings.EMBEDDING_DIMENSIONS,
-                        distance=Distance.COSINE
-                    )
+                    vector_size=settings.EMBEDDING_DIMENSIONS,
+                    distance="COSINE"
                 )
+                if not create_result.get("success"):
+                    raise Exception(f"Create failed: {create_result.get('error')}")
+                
                 cleared_global = True
                 cleared_collections += 1
                 logger.info(f"✅ Cleared and recreated global collection: {settings.VECTOR_COLLECTION_NAME}")
@@ -1003,9 +1115,12 @@ async def clear_qdrant(
         
         for collection_name in user_collections:
             try:
-                qdrant_client.delete_collection(collection_name)
-                cleared_collections += 1
-                logger.info(f"🗑️ Deleted user collection: {collection_name}")
+                delete_result = await vector_client.delete_collection(collection_name)
+                if delete_result.get("success"):
+                    cleared_collections += 1
+                    logger.info(f"🗑️ Deleted user collection: {collection_name}")
+                else:
+                    raise Exception(delete_result.get("error", "Unknown error"))
             except Exception as e:
                 error_msg = f"Failed to delete collection {collection_name}: {str(e)}"
                 errors.append(error_msg)
@@ -1017,9 +1132,12 @@ async def clear_qdrant(
         
         for collection_name in team_collections:
             try:
-                qdrant_client.delete_collection(collection_name)
-                cleared_collections += 1
-                logger.info(f"🗑️ Deleted team collection: {collection_name}")
+                delete_result = await vector_client.delete_collection(collection_name)
+                if delete_result.get("success"):
+                    cleared_collections += 1
+                    logger.info(f"🗑️ Deleted team collection: {collection_name}")
+                else:
+                    raise Exception(delete_result.get("error", "Unknown error"))
             except Exception as e:
                 error_msg = f"Failed to delete collection {collection_name}: {str(e)}"
                 errors.append(error_msg)
@@ -1027,9 +1145,12 @@ async def clear_qdrant(
         
         # Get final collection count
         try:
-            final_collections = qdrant_client.get_collections()
-            remaining_count = len(final_collections.collections)
-            logger.info(f"📊 Collections remaining after clear: {remaining_count}")
+            final_result = await vector_client.list_collections()
+            if final_result.get("success"):
+                remaining_count = len(final_result.get("collections", []))
+                logger.info(f"📊 Collections remaining after clear: {remaining_count}")
+            else:
+                remaining_count = "unknown"
         except Exception as e:
             logger.warning(f"⚠️ Could not get final collection count: {e}")
             remaining_count = "unknown"
@@ -2184,132 +2305,44 @@ async def update_document_content(
         except Exception as e:
             logger.warning(f"⚠️ Failed to update file size metadata: {e}")
 
+        # Extract and store document links for file relation graph (text types only)
+        if str(filename).lower().endswith(('.org', '.md', '.txt')):
+            try:
+                from services.link_extraction_service import get_link_extraction_service
+                link_service = await get_link_extraction_service()
+                rls_context = {'user_id': current_user.user_id, 'user_role': current_user.role}
+                await link_service.extract_and_store_links(doc_id, new_content, rls_context)
+            except Exception as link_err:
+                logger.warning("Link extraction failed for %s: %s", doc_id, link_err)
+
         # Check if document is exempt from vectorization BEFORE processing
         is_exempt = await document_service.document_repository.is_document_exempt(doc_id, current_user.user_id)
         if is_exempt:
             logger.info(f"🚫 Document {doc_id} is exempt from vectorization - skipping embedding and entity extraction")
             await document_service.document_repository.update_status(doc_id, ProcessingStatus.COMPLETED)
             return {"status": "success", "message": "Content updated (exempt from vectorization)", "document_id": doc_id}
-        
-        # Re-embed the updated content
+
+        # Queue re-embedding and entity extraction in background so save returns immediately
+        await document_service.document_repository.update_status(doc_id, ProcessingStatus.EMBEDDING)
+        await document_service._emit_document_status_update(doc_id, ProcessingStatus.EMBEDDING.value, current_user.user_id)
         try:
-            await document_service.document_repository.update_status(doc_id, ProcessingStatus.EMBEDDING)
-            
-            # **ROOSEVELT'S COMPLETE CLEANUP!** Delete old vectors AND knowledge graph entities
             await document_service.embedding_manager.delete_document_chunks(doc_id)
-            
-            # Delete old knowledge graph entities
-            if document_service.kg_service:
-                try:
-                    await document_service.kg_service.delete_document_entities(doc_id)
-                    logger.info(f"🗑️  Deleted old knowledge graph entities for {doc_id}")
-                except Exception as e:
-                    logger.warning(f"⚠️  Failed to delete old KG entities for {doc_id}: {e}")
-
-            # **ROOSEVELT FOLDER INHERITANCE**: Apply folder metadata if document is in a folder
-            document_category = None
-            document_tags = None
-            
-            if folder_id:
-                try:
-                    from services.service_container import get_service_container
-                    container = await get_service_container()
-                    folder_service_inst = container.folder_service
-                    folder_metadata = await folder_service_inst.get_folder_metadata(folder_id)
-                    
-                    if folder_metadata.get('inherit_tags', True):
-                        folder_category = folder_metadata.get('category')
-                        folder_tags = folder_metadata.get('tags', [])
-                        
-                        if folder_category or folder_tags:
-                            # Get current document metadata
-                            doc_category_val = getattr(doc_info, 'category', None)
-                            doc_tags_val = getattr(doc_info, 'tags', []) or []
-                            
-                            # If document doesn't have category/tags, use folder's
-                            if not doc_category_val and folder_category:
-                                document_category = folder_category
-                            else:
-                                document_category = doc_category_val.value if doc_category_val else None
-                            
-                            # Merge document tags with folder tags
-                            if folder_tags:
-                                merged_tags = list(set(doc_tags_val + folder_tags))
-                                document_tags = merged_tags
-                            else:
-                                document_tags = doc_tags_val
-                            
-                            logger.info(f"📋 FOLDER INHERITANCE (editor): Applied folder metadata to {doc_id} - category={document_category}, tags={document_tags}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to apply folder metadata inheritance in editor: {e}")
-                    # Continue with whatever document already has
-                    document_category = getattr(doc_info, 'category', None)
-                    document_tags = getattr(doc_info, 'tags', None)
-                    if document_category:
-                        document_category = document_category.value if hasattr(document_category, 'value') else document_category
-            else:
-                # No folder - use document's existing metadata
-                document_category = getattr(doc_info, 'category', None)
-                document_tags = getattr(doc_info, 'tags', None)
-                if document_category:
-                    document_category = document_category.value if hasattr(document_category, 'value') else document_category
-            
-            # Process content into chunks directly to avoid re-reading file
-            chunks = await document_service.document_processor.process_text_content(new_content, doc_id, {
-                "filename": filename,
-                "doc_type": str(getattr(doc_info, 'doc_type', 'txt')),
-            })
-
-            if chunks:
-                # Embed with folder-inherited metadata
-                await document_service.embedding_manager.embed_and_store_chunks(
-                    chunks,
-                    user_id=user_id,
-                    document_category=document_category,
-                    document_tags=document_tags
-                )
-                await document_service.document_repository.update_chunk_count(doc_id, len(chunks))
-            
-            # Extract entities (document is not exempt, so proceed)
-            # **BULLY!** Extract and store NEW entities using PROPER spaCy NER
-            elif document_service.kg_service:
-                try:
-                    # Use DocumentProcessor's sophisticated entity extraction (spaCy + patterns)
-                    entities = await document_service.document_processor._extract_entities(new_content, chunks or [])
-                    if entities:
-                        await document_service.kg_service.store_entities(entities, doc_id)
-                        logger.info(f"🔗 Extracted and stored {len(entities)} NEW entities using spaCy NER for {doc_id}")
-                except Exception as e:
-                    logger.warning(f"⚠️  Failed to extract/store new entities for {doc_id}: {e}")
-                
-                # **BULLY! ENTERTAINMENT KG EXTRACTION!** 🎬
-                # If this is an entertainment document, extract domain-specific relationships
-                try:
-                    from services.entertainment_kg_extractor import get_entertainment_kg_extractor
-                    ent_extractor = get_entertainment_kg_extractor()
-                    
-                    if doc_info and ent_extractor.should_extract_from_document(doc_info):
-                        logger.info(f"🎬 Extracting entertainment entities from {doc_id}")
-                        ent_entities, ent_relationships = ent_extractor.extract_entities_and_relationships(
-                            new_content, doc_info
-                        )
-                        
-                        if ent_entities or ent_relationships:
-                            await document_service.kg_service.store_entertainment_entities_and_relationships(
-                                ent_entities, ent_relationships, doc_id
-                            )
-                            logger.info(f"🎬 Stored entertainment graph: {len(ent_entities)} entities, {len(ent_relationships)} relationships")
-                except Exception as e:
-                    logger.warning(f"⚠️  Failed to extract/store entertainment entities for {doc_id}: {e}")
-            
-            await document_service.document_repository.update_status(doc_id, ProcessingStatus.COMPLETED)
-            logger.info(f"✅ Re-embedded document {doc_id} with {len(chunks) if chunks else 0} chunks")
         except Exception as e:
-            logger.error(f"❌ Re-embedding failed: {e}")
-            await document_service.document_repository.update_status(doc_id, ProcessingStatus.FAILED)
-            raise HTTPException(status_code=500, detail=f"Re-embedding failed: {str(e)}")
+            logger.warning(f"⚠️ Failed to delete old chunks for {doc_id}: {e}")
+        if document_service.kg_service:
+            try:
+                await document_service.kg_service.delete_document_entities(doc_id)
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to delete old KG entities for {doc_id}: {e}")
 
-        return {"status": "success", "message": "Content updated and re-embedded", "document_id": doc_id}
+        from services.celery_tasks.document_tasks import reprocess_document_after_save_task
+        reprocess_document_after_save_task.apply_async(args=[doc_id, current_user.user_id], queue="default")
+        logger.info(f"Content saved for {doc_id}; re-indexing queued in background")
+        return {
+            "status": "success",
+            "message": "Content saved. Re-indexing in background.",
+            "document_id": doc_id,
+        }
 
     except HTTPException:
         raise

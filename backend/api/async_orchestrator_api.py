@@ -82,10 +82,7 @@ async def stream_orchestrator_response(
         else:
             logger.info(f"📝 ACTIVE EDITOR: No active editor in request")
         
-        # Load conversation state from database for continuity
-        from api.grpc_orchestrator_proxy import _load_conversation_state
-        conversation_state = await _load_conversation_state(current_user.user_id, request.conversation_id)
-        
+        # Conversation state is loaded by llm-orchestrator from LangGraph checkpoint
         return StreamingResponse(
             stream_from_grpc_orchestrator(
                 query=request.query,
@@ -93,7 +90,7 @@ async def stream_orchestrator_response(
                 user_id=current_user.user_id,
                 session_id=request.session_id,
                 request_context=request_context if request_context else None,
-                state=conversation_state
+                state=None
             ),
             media_type="text/event-stream",
             headers={

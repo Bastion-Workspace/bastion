@@ -33,7 +33,7 @@ class DocumentRepository:
     async def initialize(self):
         """Initialize database connection pool"""
         try:
-            logger.info("🔧 Initializing Document Repository...")
+            logger.debug("🔧 Initializing Document Repository...")
             
             # Use DatabaseManager for connection management
             from services.database_manager.database_manager_service import get_database_manager
@@ -51,7 +51,7 @@ class DocumentRepository:
     async def initialize_with_pool(self, shared_pool):
         """Initialize with shared database connection pool"""
         try:
-            logger.info("🔧 Initializing Document Repository with shared pool...")
+            logger.debug("🔧 Initializing Document Repository with shared pool...")
             
             # Use provided shared pool
             self.pool = shared_pool
@@ -70,7 +70,7 @@ class DocumentRepository:
         try:
             from services.database_manager.database_helpers import execute
             
-            logger.info(f"🔧 DEBUG: Starting document creation for {doc_info.document_id}")
+            logger.debug(f"🔧 Starting document creation for {doc_info.document_id}")
             
             # Convert quality metrics to JSON if present
             quality_json = None
@@ -81,7 +81,7 @@ class DocumentRepository:
             user_id = getattr(doc_info, 'user_id', None)
             collection_type = getattr(doc_info, 'collection_type', 'user')
             
-            logger.info(f"🔧 DEBUG: Setting RLS context - user_id: {user_id}, collection_type: {collection_type}")
+            logger.debug(f"🔧 Setting RLS context - user_id: {user_id}, collection_type: {collection_type}")
             
             if user_id:
                 # Set user context for user documents
@@ -92,7 +92,7 @@ class DocumentRepository:
                 await execute(
                     "SELECT set_config('app.current_user_role', 'user', false)"
                 )
-                logger.info(f"🔧 DEBUG: Set user context for document creation")
+                logger.debug(f"🔧 Set user context for document creation")
             elif collection_type == "global":
                 # Set admin context for global documents
                 await execute(
@@ -101,9 +101,9 @@ class DocumentRepository:
                 await execute(
                     "SELECT set_config('app.current_user_role', 'admin', false)"
                 )
-                logger.info(f"🔧 DEBUG: Set admin context for document creation")
+                logger.debug(f"🔧 Set admin context for document creation")
                 
-            logger.info(f"🔧 DEBUG: Executing INSERT statement for document {doc_info.document_id}")
+            logger.debug(f"🔧 Executing INSERT statement for document {doc_info.document_id}")
             
             # Documents default to NULL (inherit) so they follow folder settings dynamically
             # Only set explicit exemption if provided in doc_info
@@ -152,7 +152,7 @@ class DocumentRepository:
                 getattr(doc_info, 'page_count', 0),
                 getattr(doc_info, 'chunk_count', 0),
                 getattr(doc_info, 'entity_count', 0),
-                quality_json,
+                None,  # metadata_json: Set to NULL on creation, will be populated by subsequent update call
                 user_id,
                 getattr(doc_info, 'collection_type', 'user'),  # Default to 'user' if not specified
                 folder_id,  # Allow NULL for folder_id
@@ -174,7 +174,7 @@ class DocumentRepository:
             
             # Set RLS context for document creation
             user_id = getattr(doc_info, 'user_id', None)
-            logger.info(f"🔧 DEBUG: Creating document with user_id: {user_id}")
+            logger.debug(f"🔧 Creating document with user_id: {user_id}")
             
             # Extract title from filename (remove extension)
             from pathlib import Path
@@ -264,17 +264,17 @@ class DocumentRepository:
             
             # Use rls_context parameter to set admin context within the same connection
             # This ensures RLS policies allow access to all documents
-            logger.info(f"🔍 DEBUG: Looking for document {document_id} with admin context")
+            logger.debug(f"🔍 Looking for document {document_id} with admin context")
             
             row = await fetch_one("""
                 SELECT * FROM document_metadata WHERE document_id = $1
             """, document_id, rls_context={'user_id': '', 'user_role': 'admin'})
             
             if row:
-                logger.info(f"🔍 DEBUG: Found document {document_id} - user_id: {row.get('user_id')}, collection_type: {row.get('collection_type')}")
+                logger.debug(f"🔍 Found document {document_id} - user_id: {row.get('user_id')}, collection_type: {row.get('collection_type')}")
                 return self._row_to_document_info(row)
             else:
-                logger.warning(f"🔍 DEBUG: Document {document_id} not found with admin context")
+                logger.debug(f"🔍 Document {document_id} not found with admin context")
             return None
             
         except Exception as e:
@@ -477,8 +477,16 @@ class DocumentRepository:
             logger.error(f"❌ Failed to list global documents: {e}")
             return []
     
-    async def filter_documents(self, filter_request: DocumentFilterRequest) -> Tuple[List[DocumentInfo], int]:
-        """Filter documents with advanced criteria"""
+    async def filter_documents(self, filter_request: DocumentFilterRequest, rls_context: Dict[str, str] = None) -> Tuple[List[DocumentInfo], int]:
+        """
+        Filter documents with advanced criteria
+        
+        NOTE: This method uses admin RLS context to allow reading global documents.
+        This is SAFE because:
+        1. This method is READ-ONLY (SELECT queries only)
+        2. Write operations (create/update/delete) have separate RLS checks
+        3. API endpoints validate permissions before calling write methods
+        """
         try:
             # Build dynamic WHERE clause
             where_clauses = []
@@ -584,9 +592,13 @@ class DocumentRepository:
             # Use proper database helpers instead of direct pool access
             from services.database_manager.database_helpers import fetch_all, fetch_value
 
+            # Set RLS context for global documents (images are typically global)
+            # Use admin context to access all documents including global ones
+            rls_context = {'user_id': '', 'user_role': 'admin'}
+
             # Get total count
             count_query = f"SELECT COUNT(*) FROM document_metadata {where_sql}"
-            total_count = await fetch_value(count_query, *values)
+            total_count = await fetch_value(count_query, *values, rls_context=rls_context)
 
             # Get filtered documents
             query = f"""
@@ -596,7 +608,7 @@ class DocumentRepository:
             """
             values.extend([filter_request.limit, filter_request.skip])
 
-            rows = await fetch_all(query, *values)
+            rows = await fetch_all(query, *values, rls_context=rls_context)
             documents = [self._row_to_document_info(row) for row in rows]
 
             return documents, total_count
@@ -630,73 +642,112 @@ class DocumentRepository:
         filename: str, 
         user_id: Optional[str], 
         collection_type: str,
-        folder_id: Optional[str] = None
+        folder_id: Optional[str] = None,
+        case_insensitive: bool = False,
     ) -> Optional[DocumentInfo]:
-        """Find document by filename and user/folder context
-        
-        **ROOSEVELT DUPLICATE DETECTIVE - DATABASE LAYER!** 🔍
-        """
+        """Find document by filename and user/folder context. Use case_insensitive=True for link resolution."""
         try:
             from services.database_manager.database_helpers import fetch_one
-            
-            logger.info(f"🔍 DB QUERY: Searching for filename='{filename}', user_id={user_id}, collection={collection_type}, folder_id={folder_id}")
-            
-            # Build query based on context
+
+            fn_pred = "LOWER(filename) = LOWER($1)" if case_insensitive else "filename = $1"
+            rls_context = {'user_id': user_id, 'user_role': 'user'} if user_id else {'user_id': '', 'user_role': 'admin'}
+
             if user_id:
-                # User document
                 if folder_id:
-                    query = """
-                        SELECT * FROM document_metadata 
-                        WHERE filename = $1 AND user_id = $2 AND collection_type = $3 AND folder_id = $4
+                    query = f"""
+                        SELECT * FROM document_metadata
+                        WHERE {fn_pred} AND user_id = $2 AND collection_type = $3 AND folder_id = $4
                         LIMIT 1
                     """
-                    logger.info(f"🔍 DB QUERY: Using user+folder query with 4 parameters")
-                    rls_context = {'user_id': user_id, 'user_role': 'user'}
                     row = await fetch_one(query, filename, user_id, collection_type, folder_id, rls_context=rls_context)
                 else:
-                    query = """
-                        SELECT * FROM document_metadata 
-                        WHERE filename = $1 AND user_id = $2 AND collection_type = $3 AND folder_id IS NULL
+                    query = f"""
+                        SELECT * FROM document_metadata
+                        WHERE {fn_pred} AND user_id = $2 AND collection_type = $3 AND folder_id IS NULL
                         LIMIT 1
                     """
-                    logger.info(f"🔍 DB QUERY: Using user (no folder) query with 3 parameters")
-                    rls_context = {'user_id': user_id, 'user_role': 'user'}
                     row = await fetch_one(query, filename, user_id, collection_type, rls_context=rls_context)
             else:
-                # Global document
                 if folder_id:
-                    query = """
-                        SELECT * FROM document_metadata 
-                        WHERE filename = $1 AND collection_type = $2 AND folder_id = $3 AND user_id IS NULL
+                    query = f"""
+                        SELECT * FROM document_metadata
+                        WHERE {fn_pred} AND collection_type = $2 AND folder_id = $3 AND user_id IS NULL
                         LIMIT 1
                     """
-                    logger.info(f"🔍 DB QUERY: Using global+folder query with 3 parameters")
-                    rls_context = {'user_id': '', 'user_role': 'admin'}
                     row = await fetch_one(query, filename, collection_type, folder_id, rls_context=rls_context)
                 else:
-                    query = """
-                        SELECT * FROM document_metadata 
-                        WHERE filename = $1 AND collection_type = $2 AND user_id IS NULL AND folder_id IS NULL
+                    query = f"""
+                        SELECT * FROM document_metadata
+                        WHERE {fn_pred} AND collection_type = $2 AND user_id IS NULL AND folder_id IS NULL
                         LIMIT 1
                     """
-                    logger.info(f"🔍 DB QUERY: Using global (no folder) query with 2 parameters")
-                    rls_context = {'user_id': '', 'user_role': 'admin'}
                     row = await fetch_one(query, filename, collection_type, rls_context=rls_context)
             
             if row:
                 doc_info = self._row_to_document_info(row)
-                logger.info(f"✅ DB QUERY: FOUND document_id={doc_info.document_id}")
                 return doc_info
-            else:
-                logger.info(f"❌ DB QUERY: NO MATCH FOUND in database")
-                return None
-            
-        except Exception as e:
-            logger.error(f"❌ Failed to find document by filename and context: {e}")
-            import traceback
-            traceback.print_exc()
             return None
-    
+
+        except Exception as e:
+            logger.error("Failed to find document by filename and context: %s", e)
+            return None
+
+    async def find_by_filename_in_user_collection(
+        self,
+        filename: str,
+        user_id: Optional[str],
+        collection_type: str,
+    ) -> Optional[DocumentInfo]:
+        """Find first document matching filename (case-insensitive) for user/collection, any folder. For link resolution fallback."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+
+            rls_context = {'user_id': user_id or '', 'user_role': 'user'} if user_id else {'user_id': '', 'user_role': 'admin'}
+            if user_id:
+                query = """
+                    SELECT * FROM document_metadata
+                    WHERE LOWER(filename) = LOWER($1) AND user_id = $2 AND collection_type = $3
+                    LIMIT 1
+                """
+                row = await fetch_one(query, filename, user_id, collection_type, rls_context=rls_context)
+            else:
+                query = """
+                    SELECT * FROM document_metadata
+                    WHERE LOWER(filename) = LOWER($1) AND collection_type = $2 AND user_id IS NULL
+                    LIMIT 1
+                """
+                row = await fetch_one(query, filename, collection_type, rls_context=rls_context)
+            if row:
+                return self._row_to_document_info(row)
+            return None
+        except Exception as e:
+            logger.warning("find_by_filename_in_user_collection failed: %s", e)
+            return None
+
+    async def touch_updated_at(self, document_id: str, user_id: str = None) -> bool:
+        """Update only document_metadata.updated_at (e.g. after file content changed on disk)."""
+        try:
+            from services.database_manager.database_helpers import execute
+
+            if user_id:
+                rls_context = {'user_id': user_id, 'user_role': 'user'}
+            else:
+                rls_context = {'user_id': '', 'user_role': 'admin'}
+
+            result = await execute("""
+                UPDATE document_metadata
+                SET updated_at = CURRENT_TIMESTAMP
+                WHERE document_id = $1
+            """, document_id, rls_context=rls_context)
+            rows_updated = int(result.split()[-1])
+            if rows_updated > 0:
+                logger.debug(f"Updated document_metadata.updated_at for {document_id}")
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"Could not touch updated_at for document {document_id}: {e}")
+            return False
+
     async def update_filename(self, document_id: str, new_filename: str) -> bool:
         """Update document filename"""
         try:
@@ -989,11 +1040,17 @@ class DocumentRepository:
     def _row_to_document_info(self, row) -> DocumentInfo:
         """Convert database row to DocumentInfo object"""
         # Parse quality metrics from JSON if present
+        # Only parse if metadata_json contains quality metrics fields (not image metadata)
         quality_metrics = None
         if row["metadata_json"]:
             try:
                 quality_data = json.loads(row["metadata_json"])
-                quality_metrics = QualityMetrics(**quality_data)
+                # Check if this is actually quality metrics (has required fields)
+                # Image metadata sidecars have different fields (type, title, content, etc.)
+                required_fields = ["ocr_confidence", "language_confidence", "vocabulary_score", "pattern_score", "overall_score"]
+                if all(field in quality_data for field in required_fields):
+                    quality_metrics = QualityMetrics(**quality_data)
+                # Otherwise, it's image metadata or other metadata - skip parsing as QualityMetrics
             except Exception as e:
                 logger.warning(f"⚠️ Failed to parse quality metrics: {e}")
         
@@ -1018,6 +1075,7 @@ class DocumentRepository:
             quality_metrics=quality_metrics,
             user_id=row.get("user_id", None),
             folder_id=row.get("folder_id", None),
+            collection_type=row.get("collection_type", "user"),  # CRITICAL: Must include collection_type!
             exempt_from_vectorization=row.get("exempt_from_vectorization", None)
         )
     
@@ -1295,7 +1353,10 @@ class DocumentRepository:
             if user_id:
                 rls_context = {'user_id': user_id, 'user_role': 'user'}
             elif collection_type == 'global':
+                # For global folders, always use admin context
+                # File watcher and other system services run as admin
                 rls_context = {'user_id': '', 'user_role': 'admin'}
+                logger.info(f"🔐 Setting RLS context for global folder: {rls_context}")
             elif collection_type == 'team' and admin_user_id:
                 # For team folders, use creator's user_id for RLS context to check team membership
                 # Get creator's role for proper RLS context
@@ -1759,20 +1820,20 @@ class DocumentRepository:
     async def get_documents_by_folder(self, folder_id: str, user_id: str = None) -> List[Dict[str, Any]]:
         """Get documents in a folder"""
         try:
-            logger.info(f"🔍 Repository: Getting documents for folder {folder_id}")
+            logger.debug(f"🔍 Repository: Getting documents for folder {folder_id}")
             
             from services.database_manager.database_helpers import fetch_all, fetch_one
             
             # Set RLS context based on user_id
             if user_id:
                 rls_context = {'user_id': user_id, 'user_role': 'user'}
-                logger.info(f"🔍 Repository: Using user context for folder query - user_id: {user_id}")
+                logger.debug(f"🔍 Repository: Using user context for folder query - user_id: {user_id}")
             else:
                 rls_context = {'user_id': '', 'user_role': 'admin'}
-                logger.info(f"🔍 Repository: Using admin context for folder query")
+                logger.debug(f"🔍 Repository: Using admin context for folder query")
             
             # Log RLS context being used
-            logger.info(f"🔍 DEBUG: Using RLS context - user_id: {rls_context.get('user_id', '')}, role: {rls_context.get('user_role', '')}")
+            logger.debug(f"🔍 Using RLS context - user_id: {rls_context.get('user_id', '')}, role: {rls_context.get('user_role', '')}")
             
             # **ROOSEVELT FIX:** Handle NULL folder_id (root-level documents)
             # In SQL, folder_id = NULL doesn't work - we need IS NULL
@@ -1801,12 +1862,12 @@ class DocumentRepository:
                     ORDER BY filename
                 """, folder_id, rls_context=rls_context)
             
-            logger.info(f"🔍 DEBUG: Raw query found {len(rows)} documents in folder {folder_id}")
+            logger.debug(f"🔍 Raw query found {len(rows)} documents in folder {folder_id}")
             for row in rows:
-                logger.info(f"🔍 DEBUG: Document {row['document_id']}: title='{row['title']}', user_id={row['user_id']}, collection_type='{row['collection_type']}', status='{row['processing_status']}'")
+                logger.debug(f"🔍 Document {row['document_id']}: title='{row['title']}', user_id={row['user_id']}, collection_type='{row['collection_type']}', status='{row['processing_status']}'")
             
             documents = [self._row_to_document_info(row) for row in rows]
-            logger.info(f"✅ Repository: Found {len(documents)} documents in folder {folder_id}")
+            logger.debug(f"✅ Repository: Found {len(documents)} documents in folder {folder_id}")
             return documents
         except Exception as e:
             logger.error(f"❌ Failed to get documents in folder {folder_id}: {e}")
@@ -1818,17 +1879,19 @@ class DocumentRepository:
         **ROOSEVELT FIX:** Root-level documents need collection_type filter!
         """
         try:
-            logger.info(f"🔍 Repository: Getting root-level documents for collection_type: {collection_type}")
+            logger.debug(f"🔍 Repository: Getting root-level documents for collection_type: {collection_type}")
             
             from services.database_manager.database_helpers import fetch_all
             
             # Set RLS context based on user_id
+            # For global documents, use user context so RLS allows read access (RLS policy allows global docs for all users)
             if user_id:
                 rls_context = {'user_id': user_id, 'user_role': 'user'}
-                logger.info(f"🔍 Repository: Using user context - user_id: {user_id}")
+                logger.debug(f"🔍 Repository: Using user context - user_id: {user_id}, collection_type: {collection_type}")
             else:
+                # Only use admin context if no user_id provided (shouldn't happen for regular users)
                 rls_context = {'user_id': '', 'user_role': 'admin'}
-                logger.info(f"🔍 Repository: Using admin context")
+                logger.debug(f"🔍 Repository: Using admin context (no user_id provided)")
             
             # Query root-level documents for this collection type
             rows = await fetch_all("""
@@ -1842,12 +1905,12 @@ class DocumentRepository:
                 ORDER BY filename
             """, collection_type, rls_context=rls_context)
             
-            logger.info(f"🔍 DEBUG: Raw query found {len(rows)} root-level {collection_type} documents")
+            logger.debug(f"🔍 Raw query found {len(rows)} root-level {collection_type} documents")
             for row in rows:
-                logger.info(f"🔍 DEBUG: Document {row['document_id']}: title='{row['title']}', user_id={row['user_id']}, collection_type='{row['collection_type']}', status='{row['processing_status']}'")
+                logger.debug(f"🔍 Document {row['document_id']}: title='{row['title']}', user_id={row['user_id']}, collection_type='{row['collection_type']}', status='{row['processing_status']}'")
             
             documents = [self._row_to_document_info(row) for row in rows]
-            logger.info(f"✅ Repository: Found {len(documents)} root-level {collection_type} documents")
+            logger.debug(f"✅ Repository: Found {len(documents)} root-level {collection_type} documents")
             return documents
         except Exception as e:
             logger.error(f"❌ Failed to get root-level documents for {collection_type}: {e}")
@@ -2048,8 +2111,12 @@ class DocumentRepository:
         try:
             from services.database_manager.database_helpers import execute, fetch_one
             
-            # Set up RLS context for deletion
-            rls_context = {'user_id': user_id or '', 'user_role': user_role}
+            # Set up RLS context for deletion. When role is admin, use empty user_id so
+            # RLS policy allows deleting global folders (which have user_id NULL).
+            if user_role == 'admin':
+                rls_context = {'user_id': '', 'user_role': 'admin'}
+            else:
+                rls_context = {'user_id': user_id or '', 'user_role': user_role}
             
             # Execute DELETE and check the row count affected
             # PostgreSQL execute returns a string like "DELETE 1" or "DELETE 0"
@@ -2363,7 +2430,7 @@ class DocumentRepository:
                 logger.warning(f"⚠️ DEBUG: Document {document_id} not found in database!")
                 return False
             
-            logger.info(f"🔍 DEBUG: Document {document_id} found for update. User_id: {doc_check['user_id']}, Collection_type: {doc_check['collection_type']}")
+            logger.debug(f"🔍 Document {document_id} found for update. User_id: {doc_check['user_id']}, Collection_type: {doc_check['collection_type']}")
             
             # Check current exemption status and new folder exemption
             # Documents inherit exemption from their folder, so when moved, update accordingly

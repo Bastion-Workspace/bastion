@@ -1,13 +1,15 @@
 # Bastion Workspace
 
 **WORK IN PROGRESS!**
+
 *This application is still being heavily developed and tested*
+
 Data may be *lost*, databases may become *outdated* and things generally are not expected to work 100% just now. I'm not even fully confident in the intent classification system to always take you in the right direction, which bother me. Nevertheless, here is Bastion.
 
-##Bastion##
-A comprehensive personal workspace platform featuring specialized agents for knowledge management, creative writing, data engineering, collaboration, and productivity - all controlled through natural language.
 
 ## Overview
+A comprehensive personal workspace platform featuring specialized agents for knowledge management, creative writing, data engineering, collaboration, and productivity - all controlled through natural language.
+
 
 Bastion is a multi-purpose workspace that combines:
 - **Knowledge Management**: RAG-powered document search with vector similarity and knowledge graphs
@@ -548,7 +550,7 @@ All subgraph nodes preserve critical state keys:
 
 This ensures subgraphs work correctly with user preferences, RLS permissions, and conversation continuity.
 
-See `.cursor/rules/langgraph-best-practices.mdc` for detailed subgraph development guidelines.
+See project documentation in `/docs/` for subgraph development guidelines.
 
 ## Future Plans
 

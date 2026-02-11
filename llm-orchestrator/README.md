@@ -157,7 +157,7 @@ The backend proxy (`backend/api/grpc_orchestrator_proxy.py`) automatically conve
 **Proxy handles:** Converting to valid JSON with proper escaping  
 **Frontend receives:** Valid JSON that JavaScript can parse
 
-See `.cursor/rules/streaming-json-format.mdc` for complete streaming format documentation.
+See project documentation for complete streaming format documentation.
 
 ### 3. Standard Message Types
 

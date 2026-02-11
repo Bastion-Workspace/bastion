@@ -4,6 +4,7 @@ Provides document, RSS, entity, weather, and org-mode data via gRPC
 """
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 import asyncio
 import json
@@ -97,6 +98,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             
             # Perform direct search with optional tag/category filtering
             # Includes hybrid search across user, team, and global collections
+            exclude_ids = list(request.exclude_document_ids) if request.exclude_document_ids else None
             search_result = await search_service.search_documents(
                 query=request.query,
                 limit=request.limit or 10,
@@ -104,7 +106,8 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 user_id=user_id,
                 team_ids=team_ids,
                 tags=tags if tags else None,
-                categories=categories if categories else None
+                categories=categories if categories else None,
+                exclude_document_ids=exclude_ids,
             )
             
             if not search_result.get("success"):
@@ -404,40 +407,57 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 collections_to_search.append(user_collection)
             
             all_chunks = []
+            
+            # Use Vector Service search with filter to get chunks for this document
+            # We'll search with a dummy query vector (all zeros) and rely on the filter
+            # to match document_id, which is more efficient than scrolling
+            dummy_vector = [0.0] * settings.EMBEDDING_DIMENSIONS
+            
             for collection_name in collections_to_search:
                 try:
-                    # Check if collection exists
-                    collections = vector_store.client.get_collections()
-                    collection_names = [col.name for col in collections.collections]
+                    # Search with document_id filter via Vector Service
+                    filter_json = {
+                        "must": [
+                            {
+                                "key": "document_id",
+                                "match": {"value": request.document_id}
+                            }
+                        ]
+                    }
                     
-                    if collection_name not in collection_names:
-                        continue
-                    
-                    # Scroll to get all points matching the filter
-                    loop = asyncio.get_event_loop()
-                    scroll_result = await loop.run_in_executor(
-                        None,
-                        lambda: vector_store.client.scroll(
-                            collection_name=collection_name,
-                            scroll_filter=document_filter,
-                            limit=1000,  # Get up to 1000 chunks per document
-                            with_payload=True,
-                            with_vectors=False
-                        )
+                    search_result = await vector_store.vector_service_client.search_vectors(
+                        collection_name=collection_name,
+                        query_vector=dummy_vector,
+                        limit=1000,  # Get up to 1000 chunks per document
+                        filter_dict=filter_json,
+                        score_threshold=0.0,  # No threshold, we want all matches
+                        with_payload=True,
+                        with_vector=False
                     )
                     
-                    # Extract chunks from scroll result
-                    points, next_page_offset = scroll_result
+                    if not search_result.get("success"):
+                        error_msg = search_result.get('error', 'Unknown error')
+                        # Collection not found is expected for user/team collections
+                        if "doesn't exist" in error_msg or "not found" in error_msg:
+                            logger.debug(f"Collection {collection_name} doesn't exist, skipping")
+                        else:
+                            logger.warning(f"Search failed for {collection_name}: {error_msg}")
+                        continue
+                    
+                    # Extract chunks from search result
+                    points = search_result.get("results", [])
                     for point in points:
-                        payload = point.payload or {}
+                        payload = point.get("payload", {})
                         chunk_data = {
-                            'chunk_id': payload.get('chunk_id', str(point.id)),
+                            'chunk_id': payload.get('chunk_id', point.get('id', '')),
                             'document_id': payload.get('document_id', request.document_id),
                             'content': payload.get('content', ''),
                             'chunk_index': payload.get('chunk_index', 0),
                             'metadata': payload.get('metadata', {})
                         }
                         all_chunks.append(chunk_data)
+                    
+                    logger.debug(f"Found {len(points)} chunks in {collection_name}")
                     
                 except Exception as e:
                     logger.warning(f"Failed to search collection {collection_name}: {e}")
@@ -709,12 +729,11 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         try:
             logger.info(f"AddRSSFeed: user={request.user_id}, url={request.feed_url}, is_global={request.is_global}")
             
-            from services.auth_service import get_auth_service
+            from services.auth_service import auth_service
             from tools_service.models.rss_models import RSSFeedCreate
             from tools_service.services.rss_service import get_rss_service
             
             rss_service = await get_rss_service()
-            auth_service = await get_auth_service()
             
             # Check permissions for global feeds
             if request.is_global:
@@ -763,11 +782,10 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         try:
             logger.info(f"ListRSSFeeds: user={request.user_id}, scope={request.scope}")
             
-            from services.auth_service import get_auth_service
+            from services.auth_service import auth_service
             from tools_service.services.rss_service import get_rss_service
             
             rss_service = await get_rss_service()
-            auth_service = await get_auth_service()
             
             # Determine if user is admin for global feed access
             is_admin = False
@@ -1291,8 +1309,386 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             if not aborted:
                 await context.abort(grpc.StatusCode.INTERNAL, f"Weather data failed: {str(e)}")
     
-    # ===== Image Generation Operations =====
+    # ===== Image Search Operations =====
     
+    async def SearchImages(
+        self,
+        request: tool_service_pb2.ImageSearchRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ImageSearchResponse:
+        """Search for images with metadata sidecars"""
+        try:
+            if request.is_random:
+                logger.info(f"🎲 SearchImages (RANDOM): type={request.image_type}, author={request.author}, series={request.series}, limit={request.limit}")
+            else:
+                logger.info(f"SearchImages: query={request.query[:100]}, type={request.image_type}, date={request.date}, author={request.author}, series={request.series}")
+            
+            # Import image search tool
+            from services.langgraph_tools.image_search_tools import ImageSearchTools
+            
+            image_search = ImageSearchTools()
+            exclude_ids = list(request.exclude_document_ids) if request.exclude_document_ids else None
+            result = await image_search.search_images(
+                query=request.query,
+                image_type=request.image_type if request.image_type else None,
+                date=request.date if request.date else None,
+                author=request.author if request.author else None,
+                series=request.series if request.series else None,
+                limit=request.limit or 10,
+                user_id=request.user_id if request.user_id else None,
+                is_random=request.is_random,
+                exclude_document_ids=exclude_ids,
+            )
+            
+            # Handle structured response (dict) or legacy string response
+            if isinstance(result, dict):
+                images_markdown = result.get("images_markdown", "")
+                metadata_list = result.get("metadata", [])
+                structured_images = result.get("images", [])
+                
+                # Convert metadata list to protobuf format
+                pb_metadata = []
+                for meta in metadata_list:
+                    pb_meta = tool_service_pb2.ImageMetadata(
+                        title=meta.get("title", ""),
+                        date=meta.get("date", ""),
+                        series=meta.get("series", ""),
+                        author=meta.get("author", ""),
+                        content=meta.get("content", ""),
+                        tags=meta.get("tags", []),
+                        image_type=meta.get("image_type", "")
+                    )
+                    pb_metadata.append(pb_meta)
+                
+                response = tool_service_pb2.ImageSearchResponse(
+                    results=images_markdown,
+                    success=True,
+                    metadata=pb_metadata
+                )
+                if structured_images and hasattr(response, "structured_images_json"):
+                    import json
+                    response.structured_images_json = json.dumps(structured_images)
+                return response
+            else:
+                # Legacy string format (backward compatibility)
+                return tool_service_pb2.ImageSearchResponse(
+                    results=result if isinstance(result, str) else str(result),
+                    success=True
+                )
+            
+        except Exception as e:
+            logger.error(f"SearchImages error: {e}")
+            import traceback
+            traceback.print_exc()
+            return tool_service_pb2.ImageSearchResponse(
+                results="",
+                success=False,
+                error=str(e)
+            )
+    
+    # ===== Face Analysis Operations =====
+    
+    async def DetectFaces(
+        self,
+        request: tool_service_pb2.DetectFacesRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.DetectFacesResponse:
+        """Detect faces in an attached image"""
+        try:
+            logger.info(f"🔍 DetectFaces: path={request.attachment_path}, user={request.user_id}")
+            
+            # Lazy import to avoid import errors if proto not generated
+            try:
+                from clients.image_vision_client import get_image_vision_client
+            except ImportError as e:
+                logger.error(f"❌ Failed to import Image Vision client: {e}")
+                return tool_service_pb2.DetectFacesResponse(
+                    success=False,
+                    face_count=0,
+                    error=f"Image Vision client not available: {str(e)}"
+                )
+            
+            from pathlib import Path
+            
+            vision_client = await get_image_vision_client()
+            await vision_client.initialize(required=False)
+            
+            if not vision_client._initialized:
+                logger.warning("⚠️ Image Vision Service unavailable")
+                return tool_service_pb2.DetectFacesResponse(
+                    success=False,
+                    face_count=0,
+                    error="Image Vision Service unavailable"
+                )
+            
+            # Use temporary document_id for attachment processing
+            temp_document_id = f"attachment_{request.user_id}_{Path(request.attachment_path).stem}"
+            detection_result = await vision_client.detect_faces(
+                image_path=request.attachment_path,
+                document_id=temp_document_id
+            )
+            
+            if not detection_result or not detection_result.get("faces"):
+                return tool_service_pb2.DetectFacesResponse(
+                    success=True,
+                    face_count=0,
+                    image_width=detection_result.get("image_width") if detection_result else None,
+                    image_height=detection_result.get("image_height") if detection_result else None
+                )
+            
+            faces = detection_result["faces"]
+            pb_faces = []
+            
+            for face in faces:
+                pb_face = tool_service_pb2.FaceDetection(
+                    face_encoding=face.get("face_encoding", []),
+                    bbox_x=face.get("bbox_x", 0),
+                    bbox_y=face.get("bbox_y", 0),
+                    bbox_width=face.get("bbox_width", 0),
+                    bbox_height=face.get("bbox_height", 0)
+                )
+                pb_faces.append(pb_face)
+            
+            return tool_service_pb2.DetectFacesResponse(
+                success=True,
+                faces=pb_faces,
+                face_count=len(faces),
+                image_width=detection_result.get("image_width"),
+                image_height=detection_result.get("image_height")
+            )
+            
+        except Exception as e:
+            logger.error(f"DetectFaces error: {e}")
+            import traceback
+            traceback.print_exc()
+            return tool_service_pb2.DetectFacesResponse(
+                success=False,
+                face_count=0,
+                error=str(e)
+            )
+    
+    async def IdentifyFaces(
+        self,
+        request: tool_service_pb2.IdentifyFacesRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.IdentifyFacesResponse:
+        """Identify people in an attached image by matching against known identities"""
+        try:
+            confidence_threshold = request.confidence_threshold if request.HasField("confidence_threshold") else 0.82
+            logger.info(f"👤 IdentifyFaces: path={request.attachment_path}, user={request.user_id}, threshold={confidence_threshold}")
+            
+            from services.attachment_processor_service import attachment_processor_service
+            
+            # Process image for face detection and identification
+            result = await attachment_processor_service.process_image_for_search(
+                attachment_path=request.attachment_path,
+                user_id=request.user_id
+            )
+            
+            if result.get("error"):
+                return tool_service_pb2.IdentifyFacesResponse(
+                    success=False,
+                    face_count=0,
+                    identified_count=0,
+                    error=result.get("error")
+                )
+            
+            face_count = result.get("face_count", 0)
+            detected_identities = result.get("detected_identities", [])
+            bounding_boxes = result.get("bounding_boxes", [])
+            
+            # Build identified faces list
+            pb_identified_faces = []
+            
+            # Match bounding boxes with identities
+            # Note: The current implementation returns a list of identity names
+            # We'll associate them with the first N faces found
+            for i, identity_name in enumerate(detected_identities):
+                if i < len(bounding_boxes):
+                    bbox = bounding_boxes[i]
+                    pb_face = tool_service_pb2.IdentifiedFace(
+                        identity_name=identity_name,
+                        confidence=0.85,  # Default confidence from threshold
+                        bbox_x=bbox.get("x", 0),
+                        bbox_y=bbox.get("y", 0),
+                        bbox_width=bbox.get("width", 0),
+                        bbox_height=bbox.get("height", 0)
+                    )
+                    pb_identified_faces.append(pb_face)
+            
+            return tool_service_pb2.IdentifyFacesResponse(
+                success=True,
+                identified_faces=pb_identified_faces,
+                face_count=face_count,
+                identified_count=len(detected_identities)
+            )
+            
+        except Exception as e:
+            logger.error(f"IdentifyFaces error: {e}")
+            import traceback
+            traceback.print_exc()
+            return tool_service_pb2.IdentifyFacesResponse(
+                success=False,
+                face_count=0,
+                identified_count=0,
+                error=str(e)
+            )
+
+    async def DetectObjects(
+        self,
+        request: tool_service_pb2.DetectObjectsRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.DetectObjectsResponse:
+        """Detect objects in an image (YOLO + optional CLIP semantic matching)."""
+        try:
+            try:
+                from clients.image_vision_client import get_image_vision_client
+            except ImportError as e:
+                logger.error(f"Failed to import Image Vision client: {e}")
+                return tool_service_pb2.DetectObjectsResponse(
+                    success=False,
+                    object_count=0,
+                    error=f"Image Vision client not available: {str(e)}"
+                )
+
+            vision_client = await get_image_vision_client()
+            await vision_client.initialize(required=False)
+
+            if not vision_client._initialized:
+                return tool_service_pb2.DetectObjectsResponse(
+                    success=False,
+                    object_count=0,
+                    error="Image Vision Service unavailable"
+                )
+
+            class_filter = list(request.class_filter) if request.class_filter else None
+            semantic_descriptions = list(request.semantic_descriptions) if request.semantic_descriptions else None
+            confidence_threshold = request.confidence_threshold if request.confidence_threshold > 0 else 0.5
+
+            detection_result = await vision_client.detect_objects(
+                image_path=request.attachment_path,
+                document_id=request.document_id or "",
+                class_filter=class_filter,
+                confidence_threshold=confidence_threshold,
+                semantic_descriptions=semantic_descriptions,
+            )
+
+            if not detection_result or not detection_result.get("objects"):
+                return tool_service_pb2.DetectObjectsResponse(
+                    success=True,
+                    object_count=0,
+                    image_width=detection_result.get("image_width") if detection_result else None,
+                    image_height=detection_result.get("image_height") if detection_result else None,
+                    processing_time_seconds=detection_result.get("processing_time_seconds") if detection_result else None,
+                )
+
+            objects = detection_result["objects"]
+            pb_objects = []
+            for obj in objects:
+                pb_objects.append(tool_service_pb2.DetectedObjectProto(
+                    class_name=obj.get("class_name", ""),
+                    class_id=obj.get("class_id", 0),
+                    confidence=obj.get("confidence", 0.0),
+                    bbox_x=obj.get("bbox_x", 0),
+                    bbox_y=obj.get("bbox_y", 0),
+                    bbox_width=obj.get("bbox_width", 0),
+                    bbox_height=obj.get("bbox_height", 0),
+                    detection_method=obj.get("detection_method", "yolo"),
+                    matched_description=obj.get("matched_description", ""),
+                ))
+
+            return tool_service_pb2.DetectObjectsResponse(
+                success=True,
+                objects=pb_objects,
+                object_count=len(objects),
+                image_width=detection_result.get("image_width"),
+                image_height=detection_result.get("image_height"),
+                processing_time_seconds=detection_result.get("processing_time_seconds"),
+            )
+
+        except Exception as e:
+            logger.error(f"DetectObjects error: {e}")
+            import traceback
+            traceback.print_exc()
+            return tool_service_pb2.DetectObjectsResponse(
+                success=False,
+                object_count=0,
+                error=str(e)
+            )
+
+    async def IdentifyObjects(
+        self,
+        request: tool_service_pb2.IdentifyObjectsRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.IdentifyObjectsResponse:
+        """Identify objects in an image (YOLO + user-defined annotation matching)."""
+        try:
+            try:
+                from services.object_detection_service import get_object_detection_service
+            except ImportError as e:
+                logger.error(f"Failed to import Object Detection service: {e}")
+                return tool_service_pb2.IdentifyObjectsResponse(
+                    success=False,
+                    object_count=0,
+                    identified_count=0,
+                    error=f"Object Detection service not available: {str(e)}"
+                )
+
+            obj_service = await get_object_detection_service()
+            result = await obj_service.detect_objects_in_image(
+                document_id=request.document_id or "",
+                image_path=request.attachment_path,
+                user_id=request.user_id,
+                class_filter=list(request.class_filter) if request.class_filter else None,
+                confidence_threshold=request.confidence_threshold if request.confidence_threshold > 0 else 0.5,
+                semantic_descriptions=list(request.semantic_descriptions) if request.semantic_descriptions else None,
+                match_user_annotations=request.match_user_annotations,
+                user_annotation_threshold=request.user_annotation_threshold if request.user_annotation_threshold > 0 else 0.75,
+            )
+
+            if result.get("error"):
+                return tool_service_pb2.IdentifyObjectsResponse(
+                    success=False,
+                    object_count=0,
+                    identified_count=0,
+                    error=result.get("error")
+                )
+
+            objects = result.get("objects", [])
+            pb_objects = []
+            for obj in objects:
+                annotation_id_str = str(obj["annotation_id"]) if obj.get("annotation_id") else None
+                pb_objects.append(tool_service_pb2.IdentifiedObjectProto(
+                    class_name=obj.get("class_name", ""),
+                    confidence=obj.get("confidence", 0.0),
+                    bbox_x=obj.get("bbox_x", 0),
+                    bbox_y=obj.get("bbox_y", 0),
+                    bbox_width=obj.get("bbox_width", 0),
+                    bbox_height=obj.get("bbox_height", 0),
+                    detection_method=obj.get("detection_method", "yolo"),
+                    annotation_id=annotation_id_str,
+                ))
+
+            return tool_service_pb2.IdentifyObjectsResponse(
+                success=True,
+                identified_objects=pb_objects,
+                object_count=len(objects),
+                identified_count=len([o for o in objects if o.get("detection_method") == "user_defined"]),
+            )
+
+        except Exception as e:
+            logger.error(f"IdentifyObjects error: {e}")
+            import traceback
+            traceback.print_exc()
+            return tool_service_pb2.IdentifyObjectsResponse(
+                success=False,
+                object_count=0,
+                identified_count=0,
+                error=str(e)
+            )
+
+    # ===== Image Generation Operations =====
+
     async def GenerateImage(
         self,
         request: tool_service_pb2.ImageGenerationRequest,
@@ -1306,6 +1702,24 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             from services.image_generation_service import get_image_generation_service
             image_service = await get_image_generation_service()
             
+            # Extract model from request (user preference) or use None to fall back to settings
+            model = request.model if request.HasField("model") and request.model else None
+            
+            # Extract reference image parameters
+            reference_image_data = None
+            reference_image_url = None
+            reference_strength = 0.5
+            
+            if request.HasField("reference_image_data") and request.reference_image_data:
+                reference_image_data = request.reference_image_data
+                logger.info("📎 Using reference_image_data for image-to-image generation")
+            elif request.HasField("reference_image_url") and request.reference_image_url:
+                reference_image_url = request.reference_image_url
+                logger.info(f"📎 Using reference_image_url for image-to-image generation: {reference_image_url[:100]}")
+            
+            if request.HasField("reference_strength"):
+                reference_strength = request.reference_strength
+            
             # Call image generation service
             result = await image_service.generate_images(
                 prompt=request.prompt,
@@ -1313,7 +1727,11 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 fmt=request.format if request.format else "png",
                 seed=request.seed if request.HasField("seed") else None,
                 num_images=request.num_images if request.num_images else 1,
-                negative_prompt=request.negative_prompt if request.HasField("negative_prompt") else None
+                negative_prompt=request.negative_prompt if request.HasField("negative_prompt") else None,
+                model=model,
+                reference_image_data=reference_image_data,
+                reference_image_url=reference_image_url,
+                reference_strength=reference_strength
             )
             
             # Convert result to proto response
@@ -1353,6 +1771,97 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             logger.error(f"❌ GenerateImage error: {e}")
             response = tool_service_pb2.ImageGenerationResponse(
                 success=False,
+                error=str(e)
+            )
+            return response
+
+    async def GetReferenceImageForObject(
+        self,
+        request: tool_service_pb2.GetReferenceImageForObjectRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.GetReferenceImageForObjectResponse:
+        """Return image bytes for an object name (from detected/annotated images) for use as reference in image generation."""
+        try:
+            from services.langgraph_tools.object_detection_tools import get_reference_image_bytes_for_object
+            obj_name = (request.object_name or "").strip()
+            user_id = request.user_id or "system"
+            if not obj_name:
+                return tool_service_pb2.GetReferenceImageForObjectResponse(
+                    success=False,
+                    error="object_name required"
+                )
+            result = await get_reference_image_bytes_for_object(object_name=obj_name, user_id=user_id)
+            if not result:
+                return tool_service_pb2.GetReferenceImageForObjectResponse(
+                    success=False,
+                    error="No image found for this object"
+                )
+            img_bytes, document_id = result
+            return tool_service_pb2.GetReferenceImageForObjectResponse(
+                success=True,
+                reference_image_data=img_bytes,
+                document_id=document_id
+            )
+        except Exception as e:
+            logger.error("GetReferenceImageForObject error: %s", e)
+            return tool_service_pb2.GetReferenceImageForObjectResponse(
+                success=False,
+                error=str(e)
+            )
+
+    async def TranscribeAudio(
+        self,
+        request: tool_service_pb2.TranscribeAudioRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.TranscribeAudioResponse:
+        """Transcribe audio file to text (stub - not yet implemented)"""
+        try:
+            logger.info(f"🎤 TranscribeAudio: file_path={request.audio_file_path[:100] if request.audio_file_path else 'None'}...")
+            
+            # Get audio transcription service
+            from services.audio_transcription_service import audio_transcription_service
+            await audio_transcription_service.initialize()
+            
+            # Call transcription service (stub)
+            result = await audio_transcription_service.transcribe_audio(
+                file_path=request.audio_file_path,
+                language=request.language if request.HasField("language") and request.language else None,
+                model=request.model if request.HasField("model") and request.model else None,
+                user_id=request.user_id
+            )
+            
+            # Convert result to proto response
+            response = tool_service_pb2.TranscribeAudioResponse(
+                success=result.get("success", False),
+                transcript=result.get("transcript", ""),
+                language_detected=result.get("language_detected") if result.get("language_detected") else None
+            )
+            
+            # Add segments if available
+            segments = result.get("segments", [])
+            for seg in segments:
+                response.segments.append(
+                    tool_service_pb2.TranscriptSegment(
+                        start_time_ms=seg.get("start_time_ms", 0),
+                        end_time_ms=seg.get("end_time_ms", 0),
+                        text=seg.get("text", ""),
+                        confidence=seg.get("confidence", 1.0)
+                    )
+                )
+            
+            if result.get("error"):
+                response.error = result["error"]
+            
+            if not result.get("success"):
+                logger.warning(f"⚠️ Audio transcription not yet implemented: {result.get('error', 'Unknown error')}")
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"❌ TranscribeAudio error: {e}")
+            response = tool_service_pb2.TranscribeAudioResponse(
+                success=False,
+                transcript="",
                 error=str(e)
             )
             return response
@@ -1471,6 +1980,15 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 
                 result = await org_inbox_append_text(org_entry, request.user_id)
                 line_index = None  # Will determine after listing
+                
+            elif request.kind == "note":
+                # Headline without TODO (plain note)
+                headline = f"* {request.text}"
+                org_entry = f"{headline}\n"
+                result = await org_inbox_append_text(org_entry, request.user_id)
+                listing = await org_inbox_list_items(request.user_id)
+                items = listing.get("items", [])
+                line_index = items[-1].get("line_index") if items else None
                 
             elif request.schedule or request.kind == "event":
                 # Build a proper org-mode entry with schedule
@@ -2404,7 +2922,43 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         except Exception as e:
             logger.error(f"CreateUserFolder error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Folder creation failed: {str(e)}")
-    
+
+    def _flatten_folder_tree(self, roots) -> list:
+        """Flatten hierarchical folder tree into list of FolderInfo for proto."""
+        flat = []
+        for f in roots:
+            flat.append(tool_service_pb2.FolderInfo(
+                folder_id=f.folder_id,
+                name=f.name,
+                parent_folder_id=f.parent_folder_id or "",
+                collection_type=getattr(f, "collection_type", "user") or "user",
+                document_count=getattr(f, "document_count", 0) or 0,
+            ))
+            for child in getattr(f, "children", []) or []:
+                flat.extend(self._flatten_folder_tree([child]))
+        return flat
+
+    async def GetFolderTree(
+        self,
+        request: tool_service_pb2.GetFolderTreeRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetFolderTreeResponse:
+        """Return flat list of folders in the user's document tree."""
+        try:
+            from services.service_container import get_service_container
+
+            container = await get_service_container()
+            folder_service = container.folder_service
+            roots = await folder_service.get_folder_tree(user_id=request.user_id)
+            flat = self._flatten_folder_tree(roots)
+            return tool_service_pb2.GetFolderTreeResponse(
+                folders=flat,
+                total_folders=len(flat),
+            )
+        except Exception as e:
+            logger.error(f"GetFolderTree error: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Folder tree failed: {str(e)}")
+
     async def UpdateDocumentMetadata(
         self,
         request: tool_service_pb2.UpdateDocumentMetadataRequest,
@@ -2798,14 +3352,15 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                         channel_values["conversation_updated_at"] = datetime.now().isoformat()
                         checkpoint_data["channel_values"] = channel_values
                         
+                        checkpoint_json = json.dumps(checkpoint_data)
                         await conn.execute(
                             """
                             UPDATE checkpoints
-                            SET checkpoint = $1
+                            SET checkpoint = $1::jsonb
                             WHERE thread_id = $2
                               AND checkpoint -> 'channel_values' ->> 'user_id' = $3
                             """,
-                            checkpoint_data,
+                            checkpoint_json,
                             thread_id_used,
                             request.user_id,
                         )
@@ -3155,6 +3710,616 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 topology_json="{}",
                 component_count=0,
                 edge_count=0
+            )
+    
+    # ===== Data Workspace Operations =====
+    
+    async def ListDataWorkspaces(
+        self,
+        request: tool_service_pb2.ListDataWorkspacesRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ListDataWorkspacesResponse:
+        """List all data workspaces for a user"""
+        try:
+            logger.info(f"ListDataWorkspaces: user={request.user_id}")
+            
+            from tools_service.services.data_workspace_service import get_data_workspace_service
+            
+            service = await get_data_workspace_service()
+            workspaces = await service.list_workspaces(request.user_id)
+            
+            # Convert to proto response
+            workspace_infos = []
+            for ws in workspaces:
+                workspace_infos.append(tool_service_pb2.DataWorkspaceInfo(
+                    workspace_id=ws.get('workspace_id', ''),
+                    name=ws.get('name', ''),
+                    description=ws.get('description', ''),
+                    icon=ws.get('icon', ''),
+                    color=ws.get('color', ''),
+                    is_pinned=ws.get('is_pinned', False)
+                ))
+            
+            return tool_service_pb2.ListDataWorkspacesResponse(
+                workspaces=workspace_infos,
+                total_count=len(workspace_infos)
+            )
+            
+        except Exception as e:
+            logger.error(f"ListDataWorkspaces failed: {e}")
+            return tool_service_pb2.ListDataWorkspacesResponse(
+                workspaces=[],
+                total_count=0
+            )
+    
+    async def GetWorkspaceSchema(
+        self,
+        request: tool_service_pb2.GetWorkspaceSchemaRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.GetWorkspaceSchemaResponse:
+        """Get complete schema for a workspace (all tables and columns)"""
+        try:
+            logger.info(f"GetWorkspaceSchema: workspace={request.workspace_id}, user={request.user_id}")
+            
+            from tools_service.services.data_workspace_service import get_data_workspace_service
+            
+            service = await get_data_workspace_service()
+            schema_result = await service.get_workspace_schema(
+                workspace_id=request.workspace_id,
+                user_id=request.user_id
+            )
+            
+            # Convert to proto response
+            table_schemas = []
+            for table in schema_result.get('tables', []):
+                columns = []
+                for col in table.get('columns', []):
+                    columns.append(tool_service_pb2.ColumnInfo(
+                        name=col.get('name', ''),
+                        type=col.get('type', 'text'),
+                        is_nullable=col.get('is_nullable', True)
+                    ))
+                
+                table_schemas.append(tool_service_pb2.TableSchema(
+                    table_id=table.get('table_id', ''),
+                    name=table.get('name', ''),
+                    description=table.get('description', ''),
+                    database_id=table.get('database_id', ''),
+                    database_name=table.get('database_name', ''),
+                    columns=columns,
+                    row_count=table.get('row_count', 0)
+                ))
+            
+            return tool_service_pb2.GetWorkspaceSchemaResponse(
+                workspace_id=request.workspace_id,
+                tables=table_schemas,
+                total_tables=len(table_schemas)
+            )
+            
+        except Exception as e:
+            logger.error(f"GetWorkspaceSchema failed: {e}")
+            return tool_service_pb2.GetWorkspaceSchemaResponse(
+                workspace_id=request.workspace_id,
+                tables=[],
+                total_tables=0,
+                error=str(e)
+            )
+    
+    async def QueryDataWorkspace(
+        self,
+        request: tool_service_pb2.QueryDataWorkspaceRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.QueryDataWorkspaceResponse:
+        """Execute a query against a data workspace (SQL or natural language)"""
+        try:
+            logger.info(f"QueryDataWorkspace: workspace={request.workspace_id}, type={request.query_type}, user={request.user_id}")
+            
+            from tools_service.services.data_workspace_service import get_data_workspace_service
+            
+            service = await get_data_workspace_service()
+            result = await service.query_workspace(
+                workspace_id=request.workspace_id,
+                query=request.query,
+                query_type=request.query_type,
+                user_id=request.user_id,
+                limit=request.limit if request.limit > 0 else 100
+            )
+            
+            # Convert results to JSON string if not already
+            results_json = result.get('results', [])
+            if isinstance(results_json, str):
+                results_json_str = results_json
+            else:
+                results_json_str = json.dumps(results_json)
+            
+            response = tool_service_pb2.QueryDataWorkspaceResponse(
+                success=result.get('success', False),
+                column_names=result.get('column_names', []),
+                results_json=results_json_str,
+                result_count=result.get('result_count', 0),
+                execution_time_ms=result.get('execution_time_ms', 0),
+                generated_sql=result.get('generated_sql', '')
+            )
+            
+            if result.get('error_message'):
+                response.error_message = result['error_message']
+            
+            return response
+            
+        except Exception as e:
+            logger.error(f"QueryDataWorkspace failed: {e}")
+            return tool_service_pb2.QueryDataWorkspaceResponse(
+                success=False,
+                column_names=[],
+                results_json="[]",
+                result_count=0,
+                execution_time_ms=0,
+                generated_sql="",
+                error_message=str(e)
+            )
+
+    # ===== Navigation Operations (locations and routes) =====
+
+    async def CreateLocation(
+        self,
+        request: tool_service_pb2.CreateLocationRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.CreateLocationResponse:
+        """Create a saved location (geocodes address if needed)."""
+        try:
+            from tools_service.services.navigation_tools import create_location as nav_create_location
+
+            result = await nav_create_location(
+                user_id=request.user_id,
+                name=request.name,
+                address=request.address,
+                latitude=request.latitude if request.HasField("latitude") else None,
+                longitude=request.longitude if request.HasField("longitude") else None,
+                notes=request.notes if request.notes else None,
+                is_global=request.is_global,
+                metadata=json.loads(request.metadata_json) if request.HasField("metadata_json") and request.metadata_json else None,
+                user_role=request.user_role or "user",
+            )
+            if not result.get("success"):
+                return tool_service_pb2.CreateLocationResponse(success=False, error=result.get("error", "Unknown error"))
+            return tool_service_pb2.CreateLocationResponse(
+                success=True,
+                location_id=result.get("location_id", ""),
+                user_id=result.get("user_id", ""),
+                name=result.get("name", ""),
+                address=result.get("address") or "",
+                latitude=result.get("latitude", 0),
+                longitude=result.get("longitude", 0),
+                notes=result.get("notes") or "",
+                is_global=result.get("is_global", False),
+                created_at=result.get("created_at") or "",
+                updated_at=result.get("updated_at") or "",
+            )
+        except Exception as e:
+            logger.error(f"CreateLocation failed: {e}")
+            return tool_service_pb2.CreateLocationResponse(success=False, error=str(e))
+
+    async def ListLocations(
+        self,
+        request: tool_service_pb2.ListLocationsRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ListLocationsResponse:
+        """List all locations accessible to the user."""
+        try:
+            from tools_service.services.navigation_tools import list_locations
+
+            result = await list_locations(
+                user_id=request.user_id,
+                user_role=request.user_role or "user",
+            )
+            if not result.get("success"):
+                return tool_service_pb2.ListLocationsResponse(success=False, error=result.get("error", "Unknown error"))
+            locations = []
+            for loc in result.get("locations", []):
+                locations.append(tool_service_pb2.LocationProto(
+                    location_id=loc.get("location_id", ""),
+                    user_id=loc.get("user_id", ""),
+                    name=loc.get("name", ""),
+                    address=loc.get("address") or "",
+                    latitude=loc.get("latitude", 0),
+                    longitude=loc.get("longitude", 0),
+                    notes=loc.get("notes") or "",
+                    is_global=loc.get("is_global", False),
+                    created_at=loc.get("created_at") or "",
+                    updated_at=loc.get("updated_at") or "",
+                ))
+            return tool_service_pb2.ListLocationsResponse(success=True, locations=locations, total=result.get("total", 0))
+        except Exception as e:
+            logger.error(f"ListLocations failed: {e}")
+            return tool_service_pb2.ListLocationsResponse(success=False, error=str(e))
+
+    async def DeleteLocation(
+        self,
+        request: tool_service_pb2.DeleteLocationRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.DeleteLocationResponse:
+        """Delete a location by ID."""
+        try:
+            from tools_service.services.navigation_tools import delete_location
+
+            result = await delete_location(
+                user_id=request.user_id,
+                location_id=request.location_id,
+                user_role=request.user_role or "user",
+            )
+            if not result.get("success"):
+                return tool_service_pb2.DeleteLocationResponse(success=False, error=result.get("error", "Unknown error"))
+            return tool_service_pb2.DeleteLocationResponse(success=True, message=result.get("message", "Location deleted"))
+        except Exception as e:
+            logger.error(f"DeleteLocation failed: {e}")
+            return tool_service_pb2.DeleteLocationResponse(success=False, error=str(e))
+
+    async def ComputeRoute(
+        self,
+        request: tool_service_pb2.ComputeRouteRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ComputeRouteResponse:
+        """Compute route between two points (location IDs or coordinates)."""
+        try:
+            from tools_service.services.navigation_tools import compute_route
+
+            result = await compute_route(
+                user_id=request.user_id,
+                from_location_id=request.from_location_id if request.from_location_id else None,
+                to_location_id=request.to_location_id if request.to_location_id else None,
+                coordinates=request.coordinates if request.coordinates else None,
+                profile=request.profile or "driving",
+                user_role=request.user_role or "user",
+            )
+            if not result.get("success"):
+                return tool_service_pb2.ComputeRouteResponse(success=False, error=result.get("error", "Unknown error"))
+            return tool_service_pb2.ComputeRouteResponse(
+                success=True,
+                geometry_json=json.dumps(result.get("geometry", {})),
+                legs_json=json.dumps(result.get("legs", [])),
+                distance=result.get("distance", 0),
+                duration=result.get("duration", 0),
+                waypoints_json=json.dumps(result.get("waypoints", [])),
+            )
+        except Exception as e:
+            logger.error(f"ComputeRoute failed: {e}")
+            return tool_service_pb2.ComputeRouteResponse(success=False, error=str(e))
+
+    async def SaveRoute(
+        self,
+        request: tool_service_pb2.NavSaveRouteRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.NavSaveRouteResponse:
+        """Save a computed route."""
+        try:
+            from tools_service.services.navigation_tools import save_route
+
+            waypoints = json.loads(request.waypoints_json) if request.waypoints_json else []
+            geometry = json.loads(request.geometry_json) if request.geometry_json else {}
+            steps = json.loads(request.steps_json) if request.steps_json else []
+
+            result = await save_route(
+                user_id=request.user_id,
+                name=request.name,
+                waypoints=waypoints,
+                geometry=geometry,
+                steps=steps,
+                distance_meters=request.distance_meters,
+                duration_seconds=request.duration_seconds,
+                profile=request.profile or "driving",
+                user_role=request.user_role or "user",
+            )
+            if not result.get("success"):
+                return tool_service_pb2.NavSaveRouteResponse(success=False, error=result.get("error", "Unknown error"))
+            return tool_service_pb2.NavSaveRouteResponse(
+                success=True,
+                route_id=result.get("route_id", ""),
+                user_id=result.get("user_id", ""),
+                name=result.get("name", ""),
+                waypoints_json=json.dumps(result.get("waypoints", [])),
+                geometry_json=json.dumps(result.get("geometry", {})),
+                steps_json=json.dumps(result.get("steps", [])),
+                distance_meters=result.get("distance_meters", 0),
+                duration_seconds=result.get("duration_seconds", 0),
+                profile=result.get("profile", "driving"),
+                created_at=result.get("created_at") or "",
+                updated_at=result.get("updated_at") or "",
+            )
+        except Exception as e:
+            logger.error(f"SaveRoute failed: {e}")
+            return tool_service_pb2.NavSaveRouteResponse(success=False, error=str(e))
+
+    async def ListSavedRoutes(
+        self,
+        request: tool_service_pb2.ListSavedRoutesRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ListSavedRoutesResponse:
+        """List saved routes for the user."""
+        try:
+            from tools_service.services.navigation_tools import list_saved_routes
+
+            result = await list_saved_routes(
+                user_id=request.user_id,
+                user_role=request.user_role or "user",
+            )
+            if not result.get("success"):
+                return tool_service_pb2.ListSavedRoutesResponse(success=False, error=result.get("error", "Unknown error"))
+            routes = []
+            for r in result.get("routes", []):
+                routes.append(tool_service_pb2.SavedRouteProto(
+                    route_id=r.get("route_id", ""),
+                    user_id=r.get("user_id", ""),
+                    name=r.get("name", ""),
+                    waypoints_json=json.dumps(r.get("waypoints", [])),
+                    geometry_json=json.dumps(r.get("geometry", {})),
+                    steps_json=json.dumps(r.get("steps", [])),
+                    distance_meters=r.get("distance_meters", 0),
+                    duration_seconds=r.get("duration_seconds", 0),
+                    profile=r.get("profile", "driving"),
+                    created_at=r.get("created_at") or "",
+                    updated_at=r.get("updated_at") or "",
+                ))
+            return tool_service_pb2.ListSavedRoutesResponse(success=True, routes=routes, total=result.get("total", 0))
+        except Exception as e:
+            logger.error(f"ListSavedRoutes failed: {e}")
+            return tool_service_pb2.ListSavedRoutesResponse(success=False, error=str(e))
+
+    async def DeleteSavedRoute(
+        self,
+        request: tool_service_pb2.DeleteSavedRouteRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.DeleteSavedRouteResponse:
+        """Delete a saved route."""
+        try:
+            from tools_service.services.navigation_tools import delete_saved_route
+
+            result = await delete_saved_route(
+                user_id=request.user_id,
+                route_id=request.route_id,
+                user_role=request.user_role or "user",
+            )
+            if not result.get("success"):
+                return tool_service_pb2.DeleteSavedRouteResponse(success=False, error=result.get("error", "Unknown error"))
+            return tool_service_pb2.DeleteSavedRouteResponse(success=True, message=result.get("message", "Route deleted"))
+        except Exception as e:
+            logger.error(f"DeleteSavedRoute failed: {e}")
+            return tool_service_pb2.DeleteSavedRouteResponse(success=False, error=str(e))
+
+    async def AnalyzeWebsiteSecurity(
+        self,
+        request: tool_service_pb2.SecurityAnalysisRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.SecurityAnalysisResponse:
+        """Perform passive security analysis of a website."""
+        try:
+            from tools_service.services.security_analysis_service import analyze_website
+
+            result = await analyze_website(
+                url=request.target_url,
+                user_id=request.user_id or "system",
+                scan_depth=request.scan_depth or "comprehensive",
+            )
+            if not result.get("success"):
+                return tool_service_pb2.SecurityAnalysisResponse(
+                    success=False,
+                    target_url=result.get("target_url", request.target_url),
+                    scan_timestamp=result.get("scan_timestamp", ""),
+                    disclaimer=result.get("disclaimer", ""),
+                    error=result.get("error", "Unknown error"),
+                )
+            findings_proto = []
+            for f in result.get("findings", []):
+                findings_proto.append(tool_service_pb2.SecurityFinding(
+                    category=f.get("category", ""),
+                    severity=f.get("severity", ""),
+                    title=f.get("title", ""),
+                    description=f.get("description", ""),
+                    url=f.get("url") or None,
+                    evidence=f.get("evidence") or None,
+                    remediation=f.get("remediation", ""),
+                ))
+            tech_stack = result.get("technology_stack") or {}
+            sec_headers = result.get("security_headers") or {}
+            headers_map = {}
+            if sec_headers.get("present"):
+                headers_map["present"] = ",".join(sec_headers["present"]) if isinstance(sec_headers["present"], list) else str(sec_headers["present"])
+            if sec_headers.get("missing"):
+                headers_map["missing"] = ",".join(sec_headers["missing"]) if isinstance(sec_headers["missing"], list) else str(sec_headers["missing"])
+            return tool_service_pb2.SecurityAnalysisResponse(
+                success=True,
+                target_url=result.get("target_url", ""),
+                scan_timestamp=result.get("scan_timestamp", ""),
+                findings=findings_proto,
+                technology_stack=tech_stack,
+                security_headers=headers_map,
+                risk_score=float(result.get("risk_score", 0.0)),
+                summary=result.get("summary", ""),
+                disclaimer=result.get("disclaimer", ""),
+            )
+        except Exception as e:
+            logger.error(f"AnalyzeWebsiteSecurity failed: {e}")
+            return tool_service_pb2.SecurityAnalysisResponse(
+                success=False,
+                target_url=request.target_url,
+                scan_timestamp=datetime.now(timezone.utc).isoformat(),
+                disclaimer="This security scan performs passive reconnaissance only. Use only on sites you own or have permission to test.",
+                error=str(e),
+            )
+
+    # ===== Email operations (via connections-service / email_tools) =====
+
+    async def GetEmails(
+        self,
+        request: tool_service_pb2.GetEmailsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetEmailsResponse:
+        """Get emails for user (inbox or folder)."""
+        try:
+            from services.langgraph_tools.email_tools import read_recent_emails
+            user_id = request.user_id or "system"
+            result = await read_recent_emails(
+                user_id=user_id,
+                folder=request.folder or "inbox",
+                count=request.top or 10,
+                unread_only=request.unread_only,
+            )
+            return tool_service_pb2.GetEmailsResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("GetEmails failed: %s", e)
+            return tool_service_pb2.GetEmailsResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def SearchEmails(
+        self,
+        request: tool_service_pb2.SearchEmailsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.SearchEmailsResponse:
+        """Search emails for user."""
+        try:
+            from services.langgraph_tools.email_tools import search_emails
+            user_id = request.user_id or "system"
+            result = await search_emails(
+                user_id=user_id,
+                query=request.query,
+                top=request.top or 20,
+                from_address=request.from_address or None,
+            )
+            return tool_service_pb2.SearchEmailsResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("SearchEmails failed: %s", e)
+            return tool_service_pb2.SearchEmailsResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def GetEmailThread(
+        self,
+        request: tool_service_pb2.GetEmailThreadRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetEmailThreadResponse:
+        """Get full email thread by conversation_id."""
+        try:
+            from services.langgraph_tools.email_tools import get_email_thread
+            user_id = request.user_id or "system"
+            result = await get_email_thread(
+                user_id=user_id,
+                conversation_id=request.conversation_id,
+            )
+            return tool_service_pb2.GetEmailThreadResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("GetEmailThread failed: %s", e)
+            return tool_service_pb2.GetEmailThreadResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def SendEmail(
+        self,
+        request: tool_service_pb2.SendEmailRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.SendEmailResponse:
+        """Send email (HITL should be applied by agent before calling)."""
+        try:
+            from services.langgraph_tools.email_tools import send_email
+            user_id = request.user_id or "system"
+            result = await send_email(
+                user_id=user_id,
+                to=list(request.to),
+                subject=request.subject,
+                body=request.body,
+                cc=list(request.cc) if request.cc else None,
+            )
+            return tool_service_pb2.SendEmailResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("SendEmail failed: %s", e)
+            return tool_service_pb2.SendEmailResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def ReplyToEmail(
+        self,
+        request: tool_service_pb2.ReplyToEmailRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ReplyToEmailResponse:
+        """Reply to an email."""
+        try:
+            from services.langgraph_tools.email_tools import reply_to_email
+            user_id = request.user_id or "system"
+            result = await reply_to_email(
+                user_id=user_id,
+                message_id=request.message_id,
+                body=request.body,
+                reply_all=request.reply_all,
+            )
+            return tool_service_pb2.ReplyToEmailResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("ReplyToEmail failed: %s", e)
+            return tool_service_pb2.ReplyToEmailResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def GetEmailFolders(
+        self,
+        request: tool_service_pb2.GetEmailFoldersRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetEmailFoldersResponse:
+        """List email folders for user."""
+        try:
+            from clients.connections_service_client import get_connections_service_client
+            user_id = request.user_id or "system"
+            client = await get_connections_service_client()
+            data = await client.get_folders(user_id=user_id)
+            if data.get("error") and not data.get("folders"):
+                return tool_service_pb2.GetEmailFoldersResponse(
+                    success=False, result="", error=data.get("error", "No connection")
+                )
+            folders = data.get("folders", [])
+            lines = [
+                f"- {f.get('name')} (id={f.get('id')}, unread={f.get('unread_count', 0)})"
+                for f in folders
+            ]
+            result = "\n".join(lines) if lines else "No folders."
+            return tool_service_pb2.GetEmailFoldersResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("GetEmailFolders failed: %s", e)
+            return tool_service_pb2.GetEmailFoldersResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def GetEmailStatistics(
+        self,
+        request: tool_service_pb2.GetEmailStatisticsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetEmailStatisticsResponse:
+        """Get email statistics (inbox total/unread)."""
+        try:
+            from services.langgraph_tools.email_tools import get_email_statistics
+            user_id = request.user_id or "system"
+            result = await get_email_statistics(user_id=user_id)
+            return tool_service_pb2.GetEmailStatisticsResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("GetEmailStatistics failed: %s", e)
+            return tool_service_pb2.GetEmailStatisticsResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def MarkEmailRead(
+        self,
+        request: tool_service_pb2.MarkEmailReadRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.MarkEmailReadResponse:
+        """Mark an email as read."""
+        try:
+            from services.langgraph_tools.email_tools import mark_email_as_read
+            user_id = request.user_id or "system"
+            result = await mark_email_as_read(
+                user_id=user_id,
+                message_id=request.message_id,
+            )
+            return tool_service_pb2.MarkEmailReadResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("MarkEmailRead failed: %s", e)
+            return tool_service_pb2.MarkEmailReadResponse(
+                success=False, result="", error=str(e)
             )
 
 

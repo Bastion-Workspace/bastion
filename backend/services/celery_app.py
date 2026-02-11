@@ -24,7 +24,9 @@ celery_app = Celery(
         "services.celery_tasks.orchestrator_tasks",
         "services.celery_tasks.agent_tasks",
         "services.celery_tasks.rss_tasks",
-        "services.celery_tasks.entertainment_sync_tasks"
+        "services.celery_tasks.entertainment_sync_tasks",
+        "services.celery_tasks.chat_attachment_tasks",
+        "services.celery_tasks.document_tasks",
     ]
 )
 
@@ -108,6 +110,11 @@ celery_app.conf.update(
         'sync-entertainment-content': {
             'task': 'services.celery_tasks.entertainment_sync_tasks.scheduled_entertainment_sync',
             'schedule': 3600.0,  # 1 hour in seconds
+        },
+        # Clean up old chat attachments - run daily
+        'cleanup-old-chat-attachments': {
+            'task': 'services.celery_tasks.chat_attachment_tasks.cleanup_old_chat_attachments_task',
+            'schedule': 86400.0,  # 24 hours in seconds
         },
     },
     # Beat scheduler settings

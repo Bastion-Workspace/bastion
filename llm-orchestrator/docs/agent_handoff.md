@@ -230,12 +230,14 @@ Current implemented handoffs:
 | Source Agent | Target Agent | Handoff Type | Context Passed |
 |-------------|--------------|--------------|----------------|
 | `reference_agent` | `research_agent` | research_delegation | reference_document, analysis_context |
+| `chat_agent` | `research_agent` | quick_lookup | conversation_context |
+
+**Chat → Research (quick_lookup):** LLM-based "should hand off" decision (not keyword heuristics). Option A: Chat returns Research's response (replaces Chat reply). Continuity: `last_agent` and `primary_agent_selected` set to `research_agent` so the next message can stay with Research. Does not hand off for comments, thanks, or non-research follow-ups.
 
 Future planned handoffs:
 
 | Source Agent | Target Agent | Handoff Type | Context Passed |
 |-------------|--------------|--------------|----------------|
-| `chat_agent` | `research_agent` | quick_lookup | conversation_context |
 | `fiction_editing_agent` | `story_analysis_agent` | analysis_request | story_content, analysis_criteria |
 | `general_project_agent` | `electronics_agent` | component_design | project_requirements, constraints |
 

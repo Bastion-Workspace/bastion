@@ -20,7 +20,8 @@ export const CapabilitiesProvider = ({ children }) => {
         const res = await apiService.get(`/api/admin/users/${user.user_id}/capabilities`);
         if (!mounted) return;
         setCaps(res?.capabilities || {});
-      } catch {
+      } catch (error) {
+        console.error('Failed to load capabilities:', error);
         if (mounted) setCaps({});
       }
     };

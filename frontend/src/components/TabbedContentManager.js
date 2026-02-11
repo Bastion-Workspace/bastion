@@ -15,6 +15,7 @@ import OrgAgendaView from './OrgAgendaView';
 import OrgTodosView from './OrgTodosView';
 import OrgContactsView from './OrgContactsView';
 import DataWorkspaceManager from './data_workspace/DataWorkspaceManager';
+import FileRelationGraph from './FileRelationGraph';
 import { documentDiffStore } from '../services/documentDiffStore';
 
 const TabbedContentManager = forwardRef((props, ref) => {
@@ -132,41 +133,43 @@ const TabbedContentManager = forwardRef((props, ref) => {
         ));
     };
 
-    const closeTab = (tabId) => {
-        // Check if tab is a document and has unsaved content
+    const closeTab = (tabId, options = {}) => {
+        const { skipUnsavedCheck = false } = options;
         const tab = tabs.find(t => t.id === tabId);
-        if (tab && tab.type === 'document' && tab.documentId) {
+        if (tab && tab.type === 'document' && tab.documentId && !skipUnsavedCheck) {
             const unsavedKey = `unsaved_content_${tab.documentId}`;
             const hasUnsaved = localStorage.getItem(unsavedKey) !== null;
-            
             if (hasUnsaved) {
                 const confirmed = window.confirm(
                     `"${tab.title}" has unsaved changes. Are you sure you want to close this tab? Your changes will be discarded.`
                 );
-                if (!confirmed) {
-                    return; // Don't close the tab
-                }
-                
-                // BULLY! Explicitly wipe the vault right here!
+                if (!confirmed) return;
                 localStorage.removeItem(unsavedKey);
-                localStorage.removeItem(`discard_unsaved_${tab.documentId}`); // Just in case
+                localStorage.removeItem(`discard_unsaved_${tab.documentId}`);
             }
+        } else if (tab && tab.type === 'document' && tab.documentId && skipUnsavedCheck) {
+            const unsavedKey = `unsaved_content_${tab.documentId}`;
+            localStorage.removeItem(unsavedKey);
+            localStorage.removeItem(`discard_unsaved_${tab.documentId}`);
         }
-        
         setTabs(prevTabs => {
-            const updatedTabs = prevTabs.filter(tab => tab.id !== tabId);
-            
-            // If we're closing the active tab, switch to the next available tab
+            const updatedTabs = prevTabs.filter(t => t.id !== tabId);
             if (activeTabId === tabId) {
-                if (updatedTabs.length > 0) {
-                    setActiveTabId(updatedTabs[updatedTabs.length - 1].id);
-                } else {
-                    setActiveTabId(null);
-                }
+                setActiveTabId(updatedTabs.length > 0 ? updatedTabs[updatedTabs.length - 1].id : null);
             }
-            
             return updatedTabs;
         });
+    };
+
+    const closeDocumentTab = (documentId) => {
+        const docTabs = tabs.filter(t => t.type === 'document' && t.documentId === documentId);
+        docTabs.forEach(t => closeTab(t.id, { skipUnsavedCheck: true }));
+    };
+
+    const updateDocumentTabTitle = (documentId, newTitle) => {
+        setTabs(prevTabs => prevTabs.map(tab =>
+            tab.type === 'document' && tab.documentId === documentId ? { ...tab, title: newTitle } : tab
+        ));
     };
 
     const openRSSFeed = (feedId, feedName) => {
@@ -289,6 +292,21 @@ const TabbedContentManager = forwardRef((props, ref) => {
             title: 'Data Workspace',
             icon: '📊',
             workspaceId: workspaceId
+        });
+    };
+
+    const openFileGraph = (scope = 'all', folderId = null) => {
+        const existingTab = tabs.find(tab => tab.type === 'file-graph');
+        if (existingTab) {
+            setActiveTabId(existingTab.id);
+            return;
+        }
+        addTab({
+            type: 'file-graph',
+            title: 'File Relations',
+            icon: '🔗',
+            scope: scope || 'all',
+            folderId: folderId || null
         });
     };
 
@@ -433,6 +451,14 @@ const TabbedContentManager = forwardRef((props, ref) => {
                         onClose={() => closeTab(tab.id)}
                     />
                 );
+            case 'file-graph':
+                return (
+                    <FileRelationGraph
+                        onOpenDocument={(docId, docName) => openDocument(docId, docName)}
+                        scope={tab.scope}
+                        folderId={tab.folderId}
+                    />
+                );
             default:
                 return (
                     <div style={placeholderStyle}>
@@ -449,7 +475,10 @@ const TabbedContentManager = forwardRef((props, ref) => {
         openDocument,
         openNewsHeadlines,
         openOrgView,
-        openDataWorkspace
+        openDataWorkspace,
+        openFileGraph,
+        closeDocumentTab,
+        updateDocumentTabTitle
     }), [tabs]);
 
     const activeTab = tabs.find(tab => tab.id === activeTabId);

@@ -44,14 +44,26 @@ class ImageGenerationService:
         seed: Optional[int] = None,
         num_images: int = 1,
         negative_prompt: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate images via OpenRouter image models.
 
+        Args:
+            prompt: Image generation prompt
+            size: Image size (e.g., "1024x1024")
+            fmt: Image format (png, jpg, etc.)
+            seed: Optional random seed for reproducibility
+            num_images: Number of images to generate (1-4)
+            negative_prompt: Optional negative prompt
+            model: Optional model override (uses user preference or falls back to settings)
+
         Returns a dict with metadata and list of files saved (relative and absolute URL paths).
         """
         try:
-            model = await settings_service.get_image_generation_model()
+            # Use provided model, or fall back to settings
+            if not model:
+                model = await settings_service.get_image_generation_model()
             if not model:
                 raise ValueError("Image generation model not configured. Set 'image_generation_model' in settings.")
 
@@ -94,10 +106,42 @@ class ImageGenerationService:
 
             # Primary attempt per OpenRouter docs: chat/completions with modalities ["image","text"]
             url_primary = "https://openrouter.ai/api/v1/chat/completions"
+            
+            # Build message content - include reference image if provided
+            message_content = []
+            
+            # Add reference image if provided
+            if reference_image_data:
+                # Decode base64 if needed
+                if isinstance(reference_image_data, str):
+                    ref_image_b64 = reference_image_data
+                else:
+                    ref_image_b64 = base64.b64encode(reference_image_data).decode('utf-8')
+                
+                message_content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/jpeg;base64,{ref_image_b64}"
+                    }
+                })
+            elif reference_image_url:
+                message_content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": reference_image_url
+                    }
+                })
+            
+            # Add text prompt
+            message_content.append({
+                "type": "text",
+                "text": prompt
+            })
+            
             chat_payload = {
                 "model": model,
                 "messages": [
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": message_content}
                 ],
                 "modalities": ["image", "text"],
                 # Some providers accept additional config in vendor params; keep payload minimal per docs
@@ -197,7 +241,8 @@ class ImageGenerationService:
                 abs_path = os.path.join(images_dir, filename)
                 with open(abs_path, "wb") as f:
                     f.write(image_bytes)
-                rel_path = f"/static/images/{filename}"
+                # Use /api/images/ endpoint for proper content-type headers and authentication
+                rel_path = f"/api/images/{filename}"
                 saved.append({
                     "filename": filename,
                     "path": abs_path,

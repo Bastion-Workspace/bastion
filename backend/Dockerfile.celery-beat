@@ -1,8 +1,10 @@
 FROM python:3.11-slim
 
-# Install minimal system dependencies (only postgresql-client for database connection)
+# Install minimal system dependencies (postgresql-client + build tools for compiling Python packages)
 RUN apt-get update && apt-get install -y \
     postgresql-client \
+    build-essential \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

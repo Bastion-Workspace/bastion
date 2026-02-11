@@ -20,7 +20,7 @@ class KnowledgeGraphService:
     
     async def initialize(self):
         """Initialize Neo4j connection"""
-        logger.info("🔧 Initializing Knowledge Graph Service...")
+        logger.debug("🔧 Initializing Knowledge Graph Service...")
         
         try:
             self.driver = AsyncGraphDatabase.driver(
@@ -34,7 +34,7 @@ class KnowledgeGraphService:
             # Create indexes and constraints
             await self._setup_schema()
             
-            logger.info("✅ Knowledge Graph Service initialized")
+            logger.debug("✅ Knowledge Graph Service initialized")
             
         except Exception as e:
             logger.error(f"❌ Failed to initialize Neo4j: {e}")

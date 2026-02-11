@@ -51,7 +51,37 @@ class Settings(BaseSettings):
     DATA_SERVICE_PORT: int = 50054
     CRAWL4AI_SERVICE_HOST: str = os.getenv("CRAWL4AI_SERVICE_HOST", "crawl4ai-service")
     CRAWL4AI_SERVICE_PORT: int = int(os.getenv("CRAWL4AI_SERVICE_PORT", "50055"))
-    
+    IMAGE_VISION_SERVICE_HOST: str = os.getenv("IMAGE_VISION_SERVICE_HOST", "image-vision-service")
+    IMAGE_VISION_SERVICE_PORT: int = int(os.getenv("IMAGE_VISION_SERVICE_PORT", "50056"))
+    CONNECTIONS_SERVICE_HOST: str = os.getenv("CONNECTIONS_SERVICE_HOST", "connections-service")
+    CONNECTIONS_SERVICE_PORT: int = int(os.getenv("CONNECTIONS_SERVICE_PORT", "50057"))
+
+    # Microsoft OAuth (external connections)
+    MICROSOFT_CLIENT_ID: str = os.getenv("MICROSOFT_CLIENT_ID", "")
+    MICROSOFT_CLIENT_SECRET: str = os.getenv("MICROSOFT_CLIENT_SECRET", "")
+    MICROSOFT_TENANT_ID: str = os.getenv("MICROSOFT_TENANT_ID", "common")
+    MICROSOFT_REDIRECT_URI: str = os.getenv("MICROSOFT_REDIRECT_URI", "")
+
+    @property
+    def effective_microsoft_redirect_uri(self) -> str:
+        """Redirect URI for Microsoft OAuth; derived from SITE_URL when not set."""
+        if self.MICROSOFT_REDIRECT_URI:
+            return self.MICROSOFT_REDIRECT_URI
+        return self.SITE_URL.rstrip("/") + "/api/oauth/microsoft/callback"
+
+    # Internal service-to-service auth (connections-service -> backend external-chat)
+    INTERNAL_SERVICE_KEY: str = os.getenv("INTERNAL_SERVICE_KEY", "")
+
+    @property
+    def IMAGE_VISION_SERVICE_URL(self) -> str:
+        """Get Image Vision Service gRPC URL"""
+        return f"{self.IMAGE_VISION_SERVICE_HOST}:{self.IMAGE_VISION_SERVICE_PORT}"
+
+    @property
+    def CONNECTIONS_SERVICE_URL(self) -> str:
+        """Get Connections Service gRPC URL"""
+        return f"{self.CONNECTIONS_SERVICE_HOST}:{self.CONNECTIONS_SERVICE_PORT}"
+
     # WebDAV Configuration for OrgMode mobile sync
     WEBDAV_HOST: str = "0.0.0.0"
     WEBDAV_PORT: int = 8001
@@ -97,7 +127,8 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENROUTER_API_KEY: str = ""
     OPENWEATHERMAP_API_KEY: str = ""
-    
+    OSRM_BASE_URL: str = "http://osrm:5000"
+
     # LLM Configuration
     DEFAULT_MODEL: str = "anthropic/claude-3.5-haiku"  # Default model for general tasks
     FAST_MODEL: str = "anthropic/claude-3.5-haiku"  # Fast model for lightweight ops (query expansion, title generation, intent classification)

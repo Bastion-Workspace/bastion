@@ -4,14 +4,25 @@ Handles general conversation and knowledge queries
 """
 
 import logging
+import re
 from typing import Dict, Any, List, Optional, TypedDict
 from datetime import datetime
 
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
+from pydantic import BaseModel, Field
 from .base_agent import BaseAgent, TaskStatus
+from orchestrator.models.agent_response_contract import AgentResponse
 
 logger = logging.getLogger(__name__)
+
+
+class HandoffDecision(BaseModel):
+    """Structured output for LLM-based handoff-to-research decision"""
+    should_handoff_to_research: bool = Field(
+        description="True only if this is a new factual/research question that requires external research and cannot be answered from local context. False for comments, thanks, acknowledgments, or follow-ups that do not ask for new external information."
+    )
+    reason: Optional[str] = Field(default=None, description="Brief reason for the decision")
 
 
 class ChatState(TypedDict):
@@ -26,10 +37,16 @@ class ChatState(TypedDict):
     needs_calculations: bool
     calculation_result: Optional[Dict[str, Any]]
     local_data_results: Optional[str]  # Vector search results for local data queries
+    image_search_results: Optional[str]  # Base64-encoded images from image search
+    image_result_count: int  # Count of images returned
+    extracted_images: List[str]  # List of base64 image markdown strings to append
+    attached_image_analysis: Optional[Dict[str, Any]]  # Analysis results for attached images
     response: Dict[str, Any]
     task_status: str
     error: str
     shared_memory: Dict[str, Any]  # For storing primary_agent_selected and continuity data
+    should_handoff_to_research: Optional[bool]  # Set by LLM handoff decision node
+    handoff_response: Optional[Dict[str, Any]]  # Research result when handoff was taken
 
 
 class ChatAgent(BaseAgent):
@@ -37,7 +54,7 @@ class ChatAgent(BaseAgent):
     
     def __init__(self):
         super().__init__("chat_agent")
-        logger.info("💬 Chat Agent ready for conversation!")
+        logger.debug("💬 Chat Agent ready for conversation!")
     
     def _build_workflow(self, checkpointer) -> StateGraph:
         """Build LangGraph workflow for chat agent"""
@@ -45,16 +62,43 @@ class ChatAgent(BaseAgent):
         
         # Add nodes
         workflow.add_node("prepare_context", self._prepare_context_node)
+        workflow.add_node("process_attached_images", self._process_attached_images_node)
+        workflow.add_node("fast_time_response", self._fast_time_response_node)
         workflow.add_node("check_local_data", self._check_local_data_node)
         workflow.add_node("detect_calculations", self._detect_calculations_node)
         workflow.add_node("perform_calculations", self._perform_calculations_node)
+        workflow.add_node("call_research_agent", self._call_research_agent_node)
         workflow.add_node("generate_response", self._generate_response_node)
         
         # Entry point
         workflow.set_entry_point("prepare_context")
         
-        # Flow: prepare context -> check local data -> detect calculations -> (conditional) -> generate response
-        workflow.add_edge("prepare_context", "check_local_data")
+        # Route from prepare_context: check for attached images, then fast path or normal flow
+        workflow.add_conditional_edges(
+            "prepare_context",
+            self._route_from_prepare_context,
+            {
+                "process_images": "process_attached_images",
+                "fast_time": "fast_time_response",
+                "normal": "check_local_data"  # Run local retrieval (incl. image/object search) before handoff decision
+            }
+        )
+        
+        # After processing images, route based on intent
+        workflow.add_conditional_edges(
+            "process_attached_images",
+            self._route_from_image_processing,
+            {
+                "image_search": "check_local_data",  # Check local data before generating response
+                "image_generation": "generate_response",  # Will trigger image generation
+                "normal": "check_local_data"
+            }
+        )
+        
+        # Fast time response goes directly to END
+        workflow.add_edge("fast_time_response", END)
+        
+        # After checking local data, always go to detect_calculations (handoff decided by LLM later)
         workflow.add_edge("check_local_data", "detect_calculations")
         
         # Route based on whether calculations are needed
@@ -67,18 +111,230 @@ class ChatAgent(BaseAgent):
             }
         )
         
-        # After calculations, go to response generation
+        # After calculations, go to generate_response (handoff decided inside that node)
         workflow.add_edge("perform_calculations", "generate_response")
-        workflow.add_edge("generate_response", END)
+        
+        # After generate_response: if it requested handoff, call Research; else END
+        workflow.add_conditional_edges(
+            "generate_response",
+            self._route_from_generate_response,
+            {
+                "call_research": "call_research_agent",
+                "end": END
+            }
+        )
+        
+        workflow.add_edge("call_research_agent", END)
         
         # Compile with checkpointer for state persistence
         return workflow.compile(checkpointer=checkpointer)
+    
+    def _route_from_prepare_context(self, state: ChatState) -> str:
+        """Route based on whether there are attached images or if this is a simple time/date query"""
+        # Check for attached images in shared_memory
+        shared_memory = state.get("shared_memory", {})
+        attached_images = shared_memory.get("attached_images", [])
+        
+        if attached_images:
+            logger.info(f"📎 Found {len(attached_images)} attached image(s) - processing for analysis")
+            return "process_images"
+        
+        query = state.get("query", "").lower().strip()
+        
+        # Simple time/date queries that don't need document search
+        simple_time_queries = [
+            "what time is it", "what's the time", "current time", "time now",
+            "what date is it", "what's the date", "current date", "date today",
+            "what day is it", "what day is today", "day of week"
+        ]
+        
+        is_simple_time_query = any(time_query in query for time_query in simple_time_queries)
+        
+        if is_simple_time_query:
+            logger.info(f"🕐 FAST PATH: Simple time/date query detected, skipping document search")
+            return "fast_time"
+        
+        return "normal"
+    
+    def _route_from_image_processing(self, state: ChatState) -> str:
+        """Route based on image analysis results and user query intent"""
+        query = state.get("query", "").lower()
+        analysis = state.get("attached_image_analysis", {})
+        
+        # Check if user wants to modify/edit the image
+        modification_keywords = ["modify", "edit", "change", "add", "remove", "make", "transform", "convert"]
+        if any(kw in query for kw in modification_keywords):
+            logger.info("🎨 Image modification requested - routing to image generation")
+            return "image_generation"
+        
+        # Check if user wants to identify/search for similar
+        identification_keywords = ["who is", "what is", "identify", "find similar", "search for", "who", "what"]
+        if any(kw in query for kw in identification_keywords) or analysis.get("detected_identities"):
+            logger.info("🔍 Image identification/search requested - routing to image search")
+            return "image_search"
+        
+        # Otherwise continue with normal flow
+        return "normal"
     
     def _route_from_calculation_detection(self, state: ChatState) -> str:
         """Route based on whether calculations are needed"""
         if state.get("needs_calculations", False):
             return "calculate"
         return "respond"
+    
+    async def _process_attached_images_node(self, state: ChatState) -> Dict[str, Any]:
+        """Process attached images for face detection and identification"""
+        try:
+            shared_memory = state.get("shared_memory", {})
+            attached_images = shared_memory.get("attached_images", [])
+            user_id = state.get("user_id", "system")
+            metadata = state.get("metadata", {})
+            
+            if not attached_images:
+                return {
+                    "attached_image_analysis": None,
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                }
+            
+            logger.info(f"📎 Processing {len(attached_images)} attached image(s) for analysis")
+            
+            # Process first image (for now, we'll process one at a time)
+            first_image = attached_images[0]
+            attachment_path = first_image.get("storage_path") or first_image.get("file_path")
+            
+            if not attachment_path:
+                logger.warning("⚠️ Attached image missing storage_path")
+                return {
+                    "attached_image_analysis": {"error": "Image path not found"},
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                }
+            
+            # Import and use attachment processor
+            import sys
+            import os
+            # Add backend to path if needed
+            backend_path = os.path.join(os.path.dirname(__file__), "..", "..", "..", "backend")
+            if backend_path not in sys.path:
+                sys.path.insert(0, backend_path)
+            
+            from services.attachment_processor_service import attachment_processor_service
+            
+            # Process image
+            analysis_result = await attachment_processor_service.process_image_for_search(
+                attachment_path=attachment_path,
+                user_id=user_id
+            )
+            
+            logger.info(f"✅ Image analysis complete: {analysis_result.get('face_count', 0)} faces, {len(analysis_result.get('detected_identities', []))} identified")
+            
+            return {
+                "attached_image_analysis": analysis_result,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to process attached images: {e}")
+            return {
+                "attached_image_analysis": {"error": str(e)},
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+            }
+    
+    def _is_simple_conversational_query(self, query: str, query_lower: str, messages: List[Any] = None) -> bool:
+        """Detect if query is a simple conversational response that doesn't need document search"""
+        messages = messages or []
+        
+        # Check if this appears to be a direct response to the agent's previous message
+        # If the last message was from the assistant and this is a short response, likely conversational
+        is_follow_up_response = False
+        if messages and len(messages) >= 2:
+            last_message = messages[-1]
+            # Check if last message was from assistant (AIMessage or has role='assistant')
+            from langchain_core.messages import AIMessage
+            if isinstance(last_message, AIMessage) or getattr(last_message, 'type', '') == 'ai' or getattr(last_message, 'role', '') == 'assistant':
+                is_follow_up_response = True
+        
+        # Very short queries (3 words or less) are likely conversational
+        word_count = len(query.split())
+        if word_count <= 3:
+            # Check if it contains question words or search intent - if so, might need search
+            question_words = ["what", "where", "when", "how", "why", "who", "which", "whose"]
+            search_keywords = ["find", "search", "look", "show", "tell", "explain", "describe", "list"]
+            
+            has_question_word = any(qw in query_lower for qw in question_words)
+            has_search_keyword = any(sk in query_lower for sk in search_keywords)
+            
+            # If it has question words or search keywords, might need search
+            if has_question_word or has_search_keyword:
+                return False
+            
+            # Very short queries without question/search words are likely conversational
+            # Especially if they're responding to the agent's previous message
+            if is_follow_up_response:
+                logger.info(f"💬 Detected follow-up response to agent message - skipping document search")
+            return True
+        
+        # For longer queries, check if it's just an acknowledgment or confirmation
+        # Common patterns: "yes", "no", "thanks", "ok", "got it", "that's it", "exactly", etc.
+        import re
+        acknowledgment_patterns = [
+            r"^(yes|no|ok|okay|sure|yep|nope|thanks|thank you|got it|that's it|exactly|right|correct|perfect|good|great|awesome|nice|cool)$",
+            r"^(that's|that is) (it|the one|right|correct|exactly|perfect)$",
+            r"^(you're|you are) (right|correct)$",
+            r"^(i|I) (think|thought) (so|that|it)$",
+            r"^(sounds|looks|seems) (good|great|right|correct|perfect)$"
+        ]
+        
+        for pattern in acknowledgment_patterns:
+            if re.match(pattern, query_lower):
+                return True
+        
+        # If this is a follow-up response and the query is short-medium length (4-8 words)
+        # and doesn't have question/search keywords, it's likely conversational
+        if is_follow_up_response and 4 <= word_count <= 8:
+            question_words = ["what", "where", "when", "how", "why", "who", "which", "whose"]
+            search_keywords = ["find", "search", "look", "show", "tell", "explain", "describe", "list", "about"]
+            
+            has_question_word = any(qw in query_lower for qw in question_words)
+            has_search_keyword = any(sk in query_lower for sk in search_keywords)
+            
+            # If no question/search intent, likely conversational
+            if not has_question_word and not has_search_keyword:
+                logger.info(f"💬 Detected conversational follow-up ({word_count} words) - skipping document search")
+                return True
+        
+        # Check for simple confirmations like "ARBITRARY IS IT!" or "THAT'S THE WORD!"
+        # Only match all-caps if it's short (3 words or less) to avoid false positives
+        if word_count <= 3:
+            # Check for all-caps confirmations (use original query, not lowercased)
+            if re.match(r"^[A-Z\s!]+$", query):
+                return True
+            
+            # Check for lowercase confirmations
+            confirmation_patterns = [
+                r"^(that|this|it)('s| is) (the|a|an) \w+!?$",  # "that's the word!", "it is arbitrary!"
+            ]
+            
+            for pattern in confirmation_patterns:
+                if re.match(pattern, query_lower):
+                    return True
+        
+        return False
     
     def _build_chat_prompt(self, persona: Optional[Dict[str, Any]] = None, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Build system prompt for chat agent"""
@@ -130,13 +386,15 @@ RESPONSE LENGTH GUIDELINES:
 WHAT YOU HANDLE:
 - Greetings and casual conversation
 - Creative brainstorming and idea generation
-- General knowledge synthesis and explanations
+- General knowledge synthesis and explanations using your training data
 - Opinion requests and strategic advice
 - Hypothetical scenarios and "what if" questions
 - Follow-up questions and clarifications
 - Technical discussions using your training knowledge
 - Mathematical calculations (the system will automatically calculate for you)
-- Questions about local documents and data (the system will search your documents automatically)
+
+WHAT YOU DON'T HANDLE (hand off instead of suggesting):
+- Questions requiring search of the user's local documents or files: do NOT suggest they "use the research agent". Set handoff_to_research to TRUE so we call the Research agent for them (Research does local + web). Only answer from context when we already have strong local results and the user asked a simple follow-up.
 
 VISUALIZATION TOOL:
 You have access to a chart generation tool that can create visual representations of data.
@@ -158,39 +416,273 @@ PROJECT GUIDANCE:
 - If user asks about project-specific work (e.g., "add a component to our system") without a project open:
   * Guide them to create a project first using the same instructions
 
+HANDOFF TO RESEARCH:
+- Set handoff_to_research to TRUE when: (1) the user asks for EXTERNAL research (web, citations) you cannot answer from context, OR (2) the user explicitly asks to research or search their documents (e.g. "research and see if we have X", "see if we have any X", "find any X in my documents"). We will then call the Research agent (it does local + web). Do NOT reply with "use the research agent" — hand off instead.
+- Set handoff_to_research to FALSE for: comments, thanks, acknowledgments, casual conversation, or when you already have strong local results and are giving a direct answer. Do NOT hand off for "find my photos" / "show me my pictures" (local image browse only).
+
 STRUCTURED OUTPUT REQUIREMENT:
 You MUST respond with valid JSON matching this schema:
 {{
-    "message": "Your conversational response",
-    "task_status": "complete"
+    "message": "Your conversational response (empty or brief if handoff_to_research is true)",
+    "task_status": "complete",
+    "handoff_to_research": false
 }}
+
+When handoff_to_research is true, leave message empty or a brief placeholder; we will call Research and replace it.
 
 EXAMPLES:
 
-Simple acknowledgment:
+Simple acknowledgment (no handoff):
 {{
     "message": "You're welcome! Let me know if you need anything else.",
-    "task_status": "complete"
+    "task_status": "complete",
+    "handoff_to_research": false
 }}
 
-Detailed response:
+Detailed response (no handoff):
 {{
     "message": "Here's what I think about that topic...",
-    "task_status": "complete"
+    "task_status": "complete",
+    "handoff_to_research": false
+}}
+
+Needs external research (hand off):
+{{
+    "message": "",
+    "task_status": "complete",
+    "handoff_to_research": true
 }}
 
 CONVERSATION CONTEXT:
 You have access to conversation history for context. Use this to understand follow-up questions and maintain conversational flow.
 
-LOCAL DATA SEARCH:
-If the system provides "RELEVANT LOCAL INFORMATION" in the context, use that information to answer the user's question accurately. The local information takes precedence over general knowledge when answering questions about specific documents, files, or data in the user's knowledge base."""
+IMAGES:
+**CRITICAL RULE**: Do NOT create markdown image links (like ![alt](filename.gif) or ![alt](url)) in your response. The system automatically includes relevant images after your text response. 
+
+**IMPORTANT**: When images are found, you will see a note saying "X images found and will be included". ONLY describe or mention those EXACT X images in your response text. If 2 images are included, mention only 2 items. If 3 images are included, mention all 3. Never mention more images than will be displayed. Just write your conversational reply - images will appear automatically below your message."""
 
         return base_prompt
+    
+    def _route_from_generate_response(self, state: ChatState) -> str:
+        """Route based on main response LLM handoff decision: call Research or END"""
+        if state.get("should_handoff_to_research") is True:
+            logger.info("💬 HANDOFF: Main response LLM requested handoff to research_agent")
+            return "call_research"
+        return "end"
+    
+    async def _assess_handoff_need_node(self, state: ChatState) -> Dict[str, Any]:
+        """LLM-based assessment: should Chat hand off to Research for this query?"""
+        try:
+            query = state.get("query", "")
+            local_data_results = state.get("local_data_results") or ""
+            messages = state.get("messages", [])
+            shared_memory = state.get("shared_memory", {})
+            
+            # Build context for LLM: query, local data summary, last turn
+            local_summary = "none"
+            if local_data_results and str(local_data_results).strip():
+                local_summary = str(local_data_results)[:500] + ("..." if len(str(local_data_results)) > 500 else "")
+            
+            last_turn = ""
+            for m in reversed(messages[-4:]):
+                if hasattr(m, "content") and getattr(m, "type", None) != "human":
+                    role = getattr(m, "type", "") or (getattr(m, "name", "") and "human" or "assistant")
+                    if role == "human":
+                        last_turn = f"User: {m.content[:200]}" + ("..." if len(str(m.content)) > 200 else "") + "\n" + last_turn
+                    else:
+                        last_turn = f"Assistant: {str(m.content)[:200]}..." + "\n" + last_turn
+                elif hasattr(m, "content"):
+                    last_turn = str(m.content)[:300] + "\n" + last_turn
+            if not last_turn:
+                last_turn = "(no prior messages)"
+            
+            # Do NOT hand off when user is asking for their own photos/images (local search, not web research)
+            # BUT: Allow handoff if user explicitly requests research/search
+            image_search_results = state.get("image_search_results") or ""
+            has_local_images = bool(image_search_results and str(image_search_results).strip())
+            
+            # Detect explicit research requests (these override local-only detection)
+            query_lower_handoff = query.lower()
+            research_keywords = ["research", "search for", "look up", "find out", "investigate"]
+            explicit_research_request = any(kw in query_lower_handoff for kw in research_keywords)
+            
+            # Detect local-only photo queries (only if NOT an explicit research request)
+            find_my_photos_patterns = [
+                "find me photos", "find me some photos", "show me photos", "show me pictures", "get me photos",
+                "my photos", "my pictures", "my images"
+            ]
+            is_find_my_photos = (
+                not explicit_research_request and
+                any(p in query_lower_handoff for p in find_my_photos_patterns)
+            )
+
+            prompt = f"""You are deciding whether the Chat agent should hand off to the Research agent (external web search and citations).
+
+CURRENT USER QUERY: {query}
+
+LOCAL DATA AVAILABLE (from user's documents): {local_summary}
+
+RECENT CONVERSATION (last turn): {last_turn}
+
+RULES:
+- Set should_handoff_to_research to TRUE only if: the user is asking a NEW factual or research question that requires EXTERNAL information (web, citations) and you cannot answer it from the local data above.
+- Set should_handoff_to_research to FALSE for: comments, thanks, acknowledgments ("ok", "thanks", "that's helpful"), or follow-ups that do NOT ask for new external research (e.g. "what about X?" when X is a clarification, not a new research question).
+- Set should_handoff_to_research to FALSE for: queries asking to find the user's OWN photos or images (e.g. "find me photos with X", "photos with X in them", "my photos of X", "show me pictures with Y"). Those are LOCAL photo search; the system already checked local data — do NOT hand off to Research for web search.
+- Do NOT hand off for casual conversation or when local data already answers the question.
+
+Return valid JSON only: {{ "should_handoff_to_research": true or false, "reason": "brief reason or null" }}"""
+            
+            llm = self._get_llm(temperature=0.0, state=state)
+            try:
+                structured_llm = llm.with_structured_output(HandoffDecision)
+                decision = await structured_llm.ainvoke([HumanMessage(content=prompt)])
+            except Exception:
+                response = await llm.ainvoke([HumanMessage(content=prompt)])
+                content = response.content if hasattr(response, "content") else str(response)
+                parsed = self._parse_json_response(content) or {}
+                decision = HandoffDecision(
+                    should_handoff_to_research=bool(parsed.get("should_handoff_to_research", False)),
+                    reason=parsed.get("reason")
+                )
+            
+            should_handoff = decision.should_handoff_to_research
+            # Override: never hand off for "find my photos" queries (local search) or when we already have local image results
+            # BUT: Explicit research requests always allow handoff
+            if explicit_research_request and should_handoff:
+                logger.info("💬 HANDOFF ALLOWED: Explicit research request detected — allowing handoff to Research")
+            elif has_local_images:
+                should_handoff = False
+                logger.info("💬 HANDOFF OVERRIDE: Local image results present — not handing off to Research")
+            elif is_find_my_photos:
+                should_handoff = False
+                logger.info("💬 HANDOFF OVERRIDE: Query is find-my-photos (local search) — not handing off to Research")
+            else:
+                logger.info(f"💬 HANDOFF DECISION: should_handoff_to_research={should_handoff}, reason={decision.reason}")
+
+            return {
+                "should_handoff_to_research": should_handoff,
+                "shared_memory": shared_memory,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "messages": messages,
+                "query": query,
+                "local_data_results": state.get("local_data_results"),
+                "image_search_results": state.get("image_search_results"),
+                "image_result_count": state.get("image_result_count", 0),
+                "calculation_result": state.get("calculation_result"),
+                "persona": state.get("persona"),
+                "system_prompt": state.get("system_prompt"),
+                "llm_messages": state.get("llm_messages"),
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Handoff assessment failed: {e}")
+            return {
+                "should_handoff_to_research": False,
+                "shared_memory": state.get("shared_memory", {}),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "local_data_results": state.get("local_data_results"),
+                "image_search_results": state.get("image_search_results"),
+                "image_result_count": state.get("image_result_count", 0),
+            }
+    
+    async def _call_research_agent_node(self, state: ChatState) -> Dict[str, Any]:
+        """Call Research agent and return its response. Same as being routed to Research: Research runs (local + web if permitted)."""
+        try:
+            shared_memory = state.get("shared_memory", {})
+            from orchestrator.agents import get_full_research_agent
+
+            research_agent = get_full_research_agent()
+            query = state.get("query", "")
+            metadata = state.get("metadata", {})
+            messages = state.get("messages", [])
+
+            # Pass full shared_memory so Research sees web_search_permission and behaves like direct routing
+            handoff_shared_memory = {
+                "user_chat_model": metadata.get("user_chat_model"),
+                "handoff_context": {
+                    "source_agent": "chat_agent",
+                    "handoff_type": "quick_lookup",
+                    "conversation_context": "User asked a question Chat could not answer from local context; Research is providing cited answer.",
+                },
+            }
+            research_shared_memory = {**shared_memory, **handoff_shared_memory}
+            research_metadata = {
+                "user_id": state.get("user_id"),
+                "conversation_id": metadata.get("conversation_id"),
+                "persona": metadata.get("persona"),
+                "user_chat_model": metadata.get("user_chat_model"),
+                "shared_memory": research_shared_memory,
+            }
+
+            logger.info(f"💬 HANDOFF: Calling research_agent for: {query[:80]}... (same as direct Research routing)")
+            research_result = await research_agent.process(
+                query=query,
+                metadata=research_metadata,
+                messages=messages,
+            )
+            
+            shared_memory["primary_agent_selected"] = "research_agent"
+            shared_memory["last_agent"] = "research_agent"
+            
+            return {
+                "response": research_result if isinstance(research_result, dict) else research_result.dict(exclude_none=True) if hasattr(research_result, "dict") else {"response": str(research_result), "agent_type": "research_agent", "task_status": "complete", "timestamp": datetime.now().isoformat()},
+                "handoff_response": research_result if isinstance(research_result, dict) else research_result.dict(exclude_none=True) if hasattr(research_result, "dict") else None,
+                "shared_memory": shared_memory,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Research handoff failed: {e}")
+            shared_memory = state.get("shared_memory", {})
+            error_response = AgentResponse(
+                response=f"Research handoff failed: {str(e)}. You can try asking: \"Do some research and [your query]\".",
+                task_status="error",
+                agent_type="chat_agent",
+                timestamp=datetime.now().isoformat(),
+                error=str(e),
+            )
+            return {
+                "response": error_response.dict(exclude_none=True),
+                "handoff_response": None,
+                "shared_memory": shared_memory,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+            }
     
     async def _check_local_data_node(self, state: ChatState) -> Dict[str, Any]:
         """Check local documents for relevant information using intelligent retrieval subgraph"""
         try:
             query = state.get("query", "")
+            query_lower = query.lower().strip()
+            messages = state.get("messages", [])
+            
+            # Skip document retrieval for simple conversational responses
+            # These are typically short acknowledgments, confirmations, or brief responses
+            # that don't need document search
+            is_simple_conversational = self._is_simple_conversational_query(query, query_lower, messages)
+            
+            if is_simple_conversational:
+                logger.info(f"💬 SKIPPING document retrieval: Simple conversational response detected")
+                return {
+                    "local_data_results": None,
+                    # ✅ CRITICAL: Preserve state for subsequent nodes
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "image_search_results": state.get("image_search_results"),
+                    "image_result_count": state.get("image_result_count", 0)
+                }
             
             # Extract user_id from metadata, shared_memory, or state
             metadata = state.get("metadata", {})
@@ -205,13 +697,31 @@ If the system provides "RELEVANT LOCAL INFORMATION" in the context, use that inf
                 user_id=user_id,
                 mode="fast",  # Quick retrieval for chat agent
                 max_results=3,
-                small_doc_threshold=10000  # Increased to handle medium-sized docs
+                small_doc_threshold=10000,  # Increased to handle medium-sized docs
+                metadata=metadata,  # Pass metadata for model selection
+                messages=state.get("messages", []),  # Pass conversation messages for context-aware detection
+                shared_memory=shared_memory  # Pass shared memory for conversation context
             )
+            
+            logger.info(f"💬 Document retrieval result keys: {list(result.keys()) if result else 'None'}")
+            logger.info(f"💬 result.get('success'): {result.get('success') if result else 'N/A'}")
+            logger.info(f"💬 result.get('formatted_context') length: {len(result.get('formatted_context', '')) if result and result.get('formatted_context') else 0}")
             
             if result.get("success") and result.get("formatted_context"):
                 logger.info(f"💬 Found relevant local documents via intelligent retrieval")
+                formatted_context = result.get("formatted_context")
+                image_search_results = result.get("image_search_results")  # Base64 images markdown
+                retrieval_metadata = result.get("metadata", {})  # Contains total_results count
+                total_image_results = retrieval_metadata.get("total_results", 0)
+                logger.info(f"💬 formatted_context length: {len(formatted_context)} chars")
+                logger.info(f"💬 formatted_context preview (first 200 chars): {formatted_context[:200]}")
+                if image_search_results:
+                    logger.info(f"💬 image_search_results present: {len(image_search_results)} chars (base64 images)")
+                    logger.info(f"💬 Total image results from metadata: {total_image_results}")
                 return {
-                    "local_data_results": result.get("formatted_context"),
+                    "local_data_results": formatted_context,
+                    "image_search_results": image_search_results,  # Store base64 images for later appending
+                    "image_result_count": total_image_results,  # Store count to ensure we only show matching images
                     # ✅ CRITICAL: Preserve state for subsequent nodes
                     "metadata": state.get("metadata", {}),
                     "user_id": state.get("user_id", "system"),
@@ -227,7 +737,9 @@ If the system provides "RELEVANT LOCAL INFORMATION" in the context, use that inf
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
                 "messages": state.get("messages", []),
-                "query": state.get("query", "")
+                "query": state.get("query", ""),
+                "image_search_results": state.get("image_search_results"),  # ✅ Preserve base64 images
+                "image_result_count": state.get("image_result_count", 0)  # ✅ Preserve count
             }
             
         except Exception as e:
@@ -239,7 +751,9 @@ If the system provides "RELEVANT LOCAL INFORMATION" in the context, use that inf
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
                 "messages": state.get("messages", []),
-                "query": state.get("query", "")
+                "query": state.get("query", ""),
+                "image_search_results": state.get("image_search_results"),  # ✅ Preserve base64 images
+                "image_result_count": state.get("image_result_count", 0)  # ✅ Preserve count
             }
     
     async def _prepare_context_node(self, state: ChatState) -> Dict[str, Any]:
@@ -272,7 +786,10 @@ If the system provides "RELEVANT LOCAL INFORMATION" in the context, use that inf
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
                 "messages": state.get("messages", []),
-                "query": state.get("query", "")
+                "query": state.get("query", ""),
+                "local_data_results": state.get("local_data_results"),  # ✅ Preserve for LLM context
+                "image_search_results": state.get("image_search_results"),  # ✅ Preserve base64 images
+                "image_result_count": state.get("image_result_count", 0)  # ✅ Preserve count to limit images
             }
             
         except Exception as e:
@@ -280,6 +797,97 @@ If the system provides "RELEVANT LOCAL INFORMATION" in the context, use that inf
             return {
                 "error": str(e),
                 "task_status": "error",
+                # ✅ CRITICAL: Preserve state even on error
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "query": state.get("query", ""),
+                "local_data_results": state.get("local_data_results")  # ✅ Preserve for LLM context
+            }
+    
+    async def _fast_time_response_node(self, state: ChatState) -> Dict[str, Any]:
+        """Fast path for simple time/date queries - skip document search, use datetime context directly"""
+        try:
+            query = state.get("query", "")
+            logger.info(f"🕐 FAST TIME RESPONSE: Answering time/date query directly")
+            
+            # Get datetime context with user's timezone
+            datetime_context = self._get_datetime_context(state)
+            
+            # Build a focused prompt for time/date queries
+            metadata = state.get("metadata", {})
+            persona = metadata.get("persona")
+            ai_name = persona.get("ai_name", "Alex") if persona else "Alex"
+            
+            system_prompt = f"""You are {ai_name}, a helpful assistant. Answer the user's time/date question directly and concisely.
+
+{datetime_context}
+
+**CRITICAL**: The time shown above is in YOUR LOCAL TIMEZONE (not UTC). When answering, use this local time directly. Do NOT convert to UTC or mention UTC unless the user specifically asks for UTC time.
+
+Answer the user's question about time or date using the information provided above."""
+            
+            user_prompt = query
+            
+            # Use LLM to generate response
+            llm = self._get_llm(temperature=0.3, state=state)
+            
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt)
+            ]
+            
+            response = await llm.ainvoke(messages)
+            response_text = response.content if hasattr(response, 'content') else str(response)
+            
+            # Parse structured output if present, otherwise use raw response
+            try:
+                import json
+                if "```json" in response_text:
+                    match = re.search(r'```json\s*\n(.*?)\n```', response_text, re.DOTALL)
+                    if match:
+                        response_text = match.group(1).strip()
+                parsed = json.loads(response_text)
+                final_message = parsed.get("message", response_text)
+            except:
+                final_message = response_text.strip()
+            
+            # Add assistant response to messages for checkpoint persistence
+            state = self._add_assistant_response_to_messages(state, final_message)
+            
+            # Store primary_agent_selected in shared_memory for conversation continuity
+            shared_memory = state.get("shared_memory", {})
+            shared_memory["primary_agent_selected"] = "chat_agent"
+            shared_memory["last_agent"] = "chat_agent"
+            state["shared_memory"] = shared_memory
+            
+            # Build result matching _generate_response_node format
+            return {
+                "response": {
+                    "response": final_message,  # Use "response" key to match _generate_response_node format
+                    "task_status": "complete",
+                    "agent_type": "chat_agent"
+                },
+                "task_status": "complete",
+                "messages": state.get("messages", []),
+                "shared_memory": shared_memory,
+                # ✅ CRITICAL: Preserve state
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "query": state.get("query", "")
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Fast time response failed: {e}")
+            return {
+                "response": {
+                    "response": f"I apologize, but I encountered an error while getting the time.",
+                    "task_status": "error",
+                    "agent_type": "chat_agent"
+                },
+                "task_status": "error",
+                "error": str(e),
                 # ✅ CRITICAL: Preserve state even on error
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
@@ -320,7 +928,10 @@ If the system provides "RELEVANT LOCAL INFORMATION" in the context, use that inf
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
                 "messages": state.get("messages", []),
-                "query": state.get("query", "")
+                "query": state.get("query", ""),
+                "local_data_results": state.get("local_data_results"),  # ✅ Preserve for LLM context
+                "image_search_results": state.get("image_search_results"),  # ✅ Preserve base64 images
+                "image_result_count": state.get("image_result_count", 0)  # ✅ Preserve count to limit images
             }
             
         except Exception as e:
@@ -332,7 +943,10 @@ If the system provides "RELEVANT LOCAL INFORMATION" in the context, use that inf
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
                 "messages": state.get("messages", []),
-                "query": state.get("query", "")
+                "query": state.get("query", ""),
+                "local_data_results": state.get("local_data_results"),  # ✅ Preserve for LLM context
+                "image_search_results": state.get("image_search_results"),  # ✅ Preserve base64 images
+                "image_result_count": state.get("image_result_count", 0)  # ✅ Preserve count to limit images
             }
     
     async def _perform_calculations_node(self, state: ChatState) -> Dict[str, Any]:
@@ -386,7 +1000,10 @@ If the system provides "RELEVANT LOCAL INFORMATION" in the context, use that inf
                         "user_id": state.get("user_id", "system"),
                         "shared_memory": state.get("shared_memory", {}),
                         "messages": state.get("messages", []),
-                        "query": state.get("query", "")
+                        "query": state.get("query", ""),
+                        "local_data_results": state.get("local_data_results"),  # ✅ Preserve for LLM context
+                        "image_search_results": state.get("image_search_results"),  # ✅ Preserve base64 images
+                        "image_result_count": state.get("image_result_count", 0)  # ✅ Preserve count to limit images
                     }
                 else:
                     logger.warning(f"⚠️ Calculation failed: {result.get('error')}")
@@ -398,7 +1015,10 @@ If the system provides "RELEVANT LOCAL INFORMATION" in the context, use that inf
                         "user_id": state.get("user_id", "system"),
                         "shared_memory": state.get("shared_memory", {}),
                         "messages": state.get("messages", []),
-                        "query": state.get("query", "")
+                        "query": state.get("query", ""),
+                        "local_data_results": state.get("local_data_results"),  # ✅ Preserve for LLM context
+                        "image_search_results": state.get("image_search_results"),  # ✅ Preserve base64 images
+                        "image_result_count": state.get("image_result_count", 0)  # ✅ Preserve count to limit images
                     }
             else:
                 # Try to extract expression using LLM
@@ -459,7 +1079,10 @@ Return ONLY valid JSON:
                             "user_id": state.get("user_id", "system"),
                             "shared_memory": state.get("shared_memory", {}),
                             "messages": state.get("messages", []),
-                            "query": state.get("query", "")
+                            "query": state.get("query", ""),
+                            "local_data_results": state.get("local_data_results"),  # ✅ Preserve for LLM context
+                            "image_search_results": state.get("image_search_results"),  # ✅ Preserve base64 images
+                            "image_result_count": state.get("image_result_count", 0)  # ✅ Preserve count to limit images
                         }
             
             # No calculation could be extracted
@@ -471,7 +1094,10 @@ Return ONLY valid JSON:
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
                 "messages": state.get("messages", []),
-                "query": state.get("query", "")
+                "query": state.get("query", ""),
+                "local_data_results": state.get("local_data_results"),  # ✅ Preserve for LLM context
+                "image_search_results": state.get("image_search_results"),  # ✅ Preserve base64 images
+                "image_result_count": state.get("image_result_count", 0)  # ✅ Preserve count to limit images
             }
             
         except Exception as e:
@@ -482,10 +1108,13 @@ Return ONLY valid JSON:
                 "error": str(e),
                 # ✅ CRITICAL: Preserve state even on error
                 "metadata": state.get("metadata", {}),
+                "image_search_results": state.get("image_search_results"),  # ✅ Preserve base64 images
+                "image_result_count": state.get("image_result_count", 0),  # ✅ Preserve count to limit images
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
                 "messages": state.get("messages", []),
-                "query": state.get("query", "")
+                "query": state.get("query", ""),
+                "local_data_results": state.get("local_data_results")  # ✅ Preserve for LLM context
             }
     
     async def _generate_response_node(self, state: ChatState) -> Dict[str, Any]:
@@ -495,10 +1124,17 @@ Return ONLY valid JSON:
             
             llm_messages = state.get("llm_messages", [])
             if not llm_messages:
+                logger.error(f"❌ CHAT GENERATE: No LLM messages prepared")
+                error_response = AgentResponse(
+                    response="No LLM messages prepared for chat response",
+                    task_status="error",
+                    agent_type="chat_agent",
+                    timestamp=datetime.now().isoformat(),
+                    error="No LLM messages prepared"
+                )
                 return {
-                    "error": "No LLM messages prepared",
+                    "response": error_response.dict(exclude_none=True),
                     "task_status": "error",
-                    "response": {},
                     # ✅ CRITICAL: Preserve state even on error
                     "metadata": state.get("metadata", {}),
                     "user_id": state.get("user_id", "system"),
@@ -507,49 +1143,88 @@ Return ONLY valid JSON:
                     "query": state.get("query", "")
                 }
             
-            # Include local data results in the prompt if available
-            local_data_results = state.get("local_data_results")
-            if local_data_results:
-                # Add local data context to the last user message
-                # Find the last HumanMessage and append the local data context
-                if llm_messages and len(llm_messages) > 0:
-                    last_message = llm_messages[-1]
-                    if isinstance(last_message, HumanMessage):
-                        # Append local data to the query
-                        enhanced_content = f"{last_message.content}\n\n{local_data_results}"
-                        llm_messages[-1] = HumanMessage(content=enhanced_content)
-                        logger.info("💬 Enhanced prompt with local data context")
+            # Chat agent answers from its knowledge - no document retrieval
+            # If user needs document search, they should use research agent
             
             # Call LLM - pass state to access user's model selection from metadata
             start_time = datetime.now()
             llm = self._get_llm(temperature=0.7, state=state)
-            response = await llm.ainvoke(llm_messages)
-            processing_time = (datetime.now() - start_time).total_seconds()
             
             # Check if we have calculation results to include
             calculation_result = state.get("calculation_result")
-            calc_value = None
-            calc_expression = None
-            
             if calculation_result:
                 calc_value = calculation_result.get("result")
                 calc_expression = calculation_result.get("expression", "")
                 logger.info(f"💬 Including calculation result in response: {calc_expression} = {calc_value}")
             
-            # Call LLM
+            # Call LLM (single call)
             response = await llm.ainvoke(llm_messages)
+            processing_time = (datetime.now() - start_time).total_seconds()
             
-            # Parse structured response
+            # Parse structured response (message + optional handoff_to_research)
             response_content = response.content if hasattr(response, 'content') else str(response)
-            structured_response = self._parse_json_response(response_content)
-            
-            # Extract message
+            structured_response = self._parse_json_response(response_content) or {}
             final_message = structured_response.get("message", response_content)
+            handoff_to_research = bool(structured_response.get("handoff_to_research", False))
+
+            # Overrides: never hand off for local-only cases; force handoff for explicit research/document-lookup phrasing
+            query_lower = (state.get("query") or "").lower()
+            has_local_images = bool(state.get("image_search_results") and str(state.get("image_search_results", "")).strip())
+            find_my_photos = any(p in query_lower for p in ["find me photos", "find me some photos", "show me photos", "my photos", "my pictures", "my images"])
+            explicit_research = any(kw in query_lower for kw in ["research", "search for", "look up", "find out", "investigate"])
+            document_lookup_phrases = ["research and ", "see if we have", "check if we have", "do we have any", "find any "]
+            explicit_document_lookup = any(p in query_lower for p in document_lookup_phrases)
+            if explicit_document_lookup and not find_my_photos:
+                handoff_to_research = True
+                logger.info("💬 HANDOFF: Explicit document-lookup phrasing — forcing handoff to Research (do not suggest user switch)")
+            elif explicit_research and handoff_to_research:
+                logger.info("💬 HANDOFF: Explicit research request — allowing handoff to Research")
+            elif has_local_images:
+                handoff_to_research = False
+                logger.info("💬 HANDOFF OVERRIDE: Local image results present — not handing off")
+            elif find_my_photos and not explicit_research:
+                handoff_to_research = False
+                logger.info("💬 HANDOFF OVERRIDE: Find-my-photos (local search) — not handing off")
+            elif handoff_to_research:
+                logger.info("💬 HANDOFF: Main response LLM requested handoff to Research")
+
+            if handoff_to_research:
+                shared_memory = state.get("shared_memory", {})
+                return {
+                    "should_handoff_to_research": True,
+                    "shared_memory": shared_memory,
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "local_data_results": state.get("local_data_results"),
+                    "image_search_results": state.get("image_search_results"),
+                    "image_result_count": state.get("image_result_count", 0),
+                    "calculation_result": state.get("calculation_result"),
+                    "persona": state.get("persona"),
+                    "system_prompt": state.get("system_prompt"),
+                    "llm_messages": state.get("llm_messages"),
+                }
             
             # If calculation was performed, prepend the result
             if calculation_result and calc_value is not None:
                 # Prepend calculation result for clarity
                 final_message = f"{calc_expression} = {calc_value}\n\n{final_message}"
+            
+            # Append extracted base64 images to final message (these were excluded from LLM prompt)
+            extracted_images = state.get("extracted_images", [])
+            logger.info(f"💬 DEBUG: extracted_images in state: {len(extracted_images) if extracted_images else 0}")
+            logger.info(f"💬 DEBUG: extracted_images type: {type(extracted_images)}")
+            if extracted_images:
+                logger.info(f"💬 DEBUG: First image preview (first 100 chars): {extracted_images[0][:100] if extracted_images else 'empty'}")
+                # Append base64 images directly (each image already has trailing newline)
+                images_text = "\n".join(extracted_images)
+                final_message = final_message + images_text
+                logger.info(f"💬 Appended {len(extracted_images)} base64 image(s) to response (excluded from LLM prompt)")
+            else:
+                logger.warning(f"💬 WARNING: No extracted_images found in state to append!")
+            
+            # Chat agent doesn't do document search, so no images from local_data_results
             
             # Add assistant response to messages for checkpoint persistence
             state = self._add_assistant_response_to_messages(state, final_message)
@@ -565,16 +1240,28 @@ Return ONLY valid JSON:
             state = self._clear_request_scoped_data(state)
             shared_memory = state.get("shared_memory", {})
             
-            # Build result
-            result = {
-                "response": {
-                "response": final_message,
-                "task_status": structured_response.get("task_status", "complete"),
-                "agent_type": "chat_agent",
-                "processing_time": processing_time,
-                "timestamp": datetime.now().isoformat()
-                },
-                "task_status": structured_response.get("task_status", "complete"),
+            # Build standard response using AgentResponse contract
+            task_status = structured_response.get("task_status", "complete")
+            # Normalize task_status to valid enum value
+            if task_status not in ["complete", "incomplete", "permission_required", "error"]:
+                logger.warning(f"⚠️ CHAT GENERATE: Invalid task_status '{task_status}', normalizing to 'complete'")
+                task_status = "complete"
+            
+            logger.info(f"📊 CHAT GENERATE: Creating AgentResponse with task_status='{task_status}'")
+            standard_response = AgentResponse(
+                response=final_message,
+                task_status=task_status,
+                agent_type="chat_agent",
+                timestamp=datetime.now().isoformat()
+            )
+            
+            logger.info(f"✅ Chat response generated in {processing_time:.2f}s")
+            logger.info(f"📊 CHAT GENERATE: Response text length: {len(final_message)} chars")
+            logger.info(f"📊 CHAT GENERATE: Extracted images: {len(extracted_images) if extracted_images else 0} image(s)")
+            
+            return {
+                "response": standard_response.dict(exclude_none=True),
+                "task_status": task_status,
                 "messages": state.get("messages", []),
                 "shared_memory": shared_memory,
                 # ✅ CRITICAL: Preserve critical state keys
@@ -583,15 +1270,21 @@ Return ONLY valid JSON:
                 "query": state.get("query", "")
             }
             
-            logger.info(f"✅ Chat response generated in {processing_time:.2f}s")
-            return result
-            
         except Exception as e:
-            logger.error(f"❌ Response generation failed: {e}")
+            logger.error(f"❌ CHAT GENERATE: Response generation failed: {e}")
+            import traceback
+            logger.error(f"❌ CHAT GENERATE: Traceback: {traceback.format_exc()}")
+            # Return standard error response
+            error_response = AgentResponse(
+                response=f"Chat response generation failed: {str(e)}",
+                task_status="error",
+                agent_type="chat_agent",
+                timestamp=datetime.now().isoformat(),
+                error=str(e)
+            )
             return {
-                "error": str(e),
+                "response": error_response.dict(exclude_none=True),
                 "task_status": "error",
-                "response": self._create_error_response(str(e)),
                 # ✅ CRITICAL: Preserve critical state keys even on error
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
@@ -603,13 +1296,16 @@ Return ONLY valid JSON:
     async def process(self, query: str, metadata: Dict[str, Any] = None, messages: List[Any] = None) -> Dict[str, Any]:
         """Process chat query using LangGraph workflow"""
         try:
-            logger.info(f"💬 Chat agent processing: {query[:100]}...")
+            metadata = metadata or {}
+            messages = messages or []
+            
+            query_preview = query[:100] + "..." if len(query) > 100 else query
+            logger.info(f"📥 CHAT PROCESS: Starting chat agent - query: {query_preview}")
             
             # Get workflow (lazy initialization with checkpointer)
             workflow = await self._get_workflow()
             
             # Extract user_id from metadata
-            metadata = metadata or {}
             user_id = metadata.get("user_id", "system")
             
             # Get checkpoint config (handles thread_id from conversation_id/user_id)
@@ -629,9 +1325,11 @@ Return ONLY valid JSON:
             if checkpoint_state and checkpoint_state.values:
                 existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
             
-            # Merge with any shared_memory from metadata
+            # Merge shared_memory: NEW data from metadata overwrites OLD checkpoint data
+            # This ensures fresh active_editor content overwrites stale cached content
             shared_memory = metadata.get("shared_memory", {}) or {}
-            shared_memory.update(existing_shared_memory)
+            shared_memory_merged = existing_shared_memory.copy()
+            shared_memory_merged.update(shared_memory)
             
             # Initialize state for LangGraph workflow
             initial_state: ChatState = {
@@ -646,29 +1344,92 @@ Return ONLY valid JSON:
                 "calculation_result": None,
                 "local_data_results": None,
                 "response": {},
-                "task_status": "",
+                "task_status": "complete",  # Initialize with valid enum value
                 "error": "",
-                "shared_memory": shared_memory
+                "shared_memory": shared_memory_merged,
+                "should_handoff_to_research": None,
+                "handoff_response": None,
             }
             
             # Run LangGraph workflow with checkpointing
+            logger.info(f"🔄 CHAT PROCESS: Invoking LangGraph workflow")
             result_state = await workflow.ainvoke(initial_state, config=config)
+            logger.info(f"✅ CHAT PROCESS: Workflow completed - extracting response from state")
             
             # Extract final response
             response = result_state.get("response", {})
             task_status = result_state.get("task_status", "complete")
+            result_shared_memory = result_state.get("shared_memory", {})
             
-            if task_status == "error":
-                error_msg = result_state.get("error", "Unknown error")
-                logger.error(f"❌ Chat agent failed: {error_msg}")
-                return self._create_error_response(error_msg)
+            # Handoff path: Research was called; return Research response with continuity so last_agent = research_agent
+            is_handoff = (
+                isinstance(response, dict)
+                and response.get("agent_type") == "research_agent"
+            ) or result_state.get("handoff_response") is not None
+            if is_handoff and isinstance(response, dict) and response.get("agent_type") == "research_agent":
+                logger.info(f"📤 CHAT PROCESS: Returning Research handoff response (continuity: research_agent)")
+                return {
+                    **response,
+                    "shared_memory": {
+                        **result_shared_memory,
+                        "primary_agent_selected": "research_agent",
+                        "last_agent": "research_agent",
+                    },
+                }
             
-            logger.info(f"✅ Chat agent completed: {task_status}")
-            return response
+            # Normalize task_status to valid enum value
+            if task_status not in ["complete", "incomplete", "permission_required", "error"]:
+                logger.warning(f"⚠️ CHAT PROCESS: Invalid task_status '{task_status}', normalizing to 'complete'")
+                task_status = "complete"
+            
+            logger.info(f"📊 CHAT PROCESS: Extracted response from state - type: {type(response)}, is_dict: {isinstance(response, dict)}")
+            
+            # Check if response is already in standard AgentResponse format
+            # Standard format has: response, task_status, agent_type, timestamp
+            if isinstance(response, dict) and all(key in response for key in ["response", "task_status", "agent_type", "timestamp"]):
+                logger.info(f"📊 CHAT PROCESS: Response is already in standard format")
+                logger.info(f"📊 CHAT PROCESS: Response dict keys: {list(response.keys())}")
+                logger.info(f"📊 CHAT PROCESS: Response dict has 'response' key: {'response' in response}")
+                logger.info(f"📤 CHAT PROCESS: Returning full AgentResponse dict (standard format)")
+                return response
+            
+            # Legacy format - extract and reconstruct
+            logger.warning(f"⚠️ CHAT PROCESS: Response is in legacy format, extracting...")
+            if isinstance(response, dict):
+                # Handle nested response structure
+                nested_response = response.get("response", {})
+                if isinstance(nested_response, dict):
+                    response_text = nested_response.get("response", "No response generated")
+                else:
+                    response_text = str(nested_response) if nested_response else "No response generated"
+            else:
+                response_text = str(response) if response else "No response generated"
+            
+            logger.info(f"📊 CHAT PROCESS: Extracted response text length: {len(response_text)} chars")
+            
+            # Build standard response
+            standard_response = AgentResponse(
+                response=response_text,
+                task_status=task_status,
+                agent_type="chat_agent",
+                timestamp=datetime.now().isoformat()
+            )
+            
+            logger.info(f"📤 CHAT PROCESS: Returning standard AgentResponse dict (reconstructed from legacy)")
+            return standard_response.dict(exclude_none=True)
             
         except Exception as e:
-            logger.error(f"❌ Chat agent failed: {e}")
+            logger.error(f"❌ CHAT PROCESS: Exception in process method: {e}")
             import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return self._create_error_response(str(e))
+            logger.error(f"❌ CHAT PROCESS: Traceback: {traceback.format_exc()}")
+            # Return standard error response
+            error_response = AgentResponse(
+                response=f"Chat processing failed: {str(e)}",
+                task_status="error",
+                agent_type="chat_agent",
+                timestamp=datetime.now().isoformat(),
+                error=str(e)
+            )
+            logger.info(f"📤 CHAT PROCESS: Returning error response (standard format) after exception")
+            return error_response.dict(exclude_none=True)
 

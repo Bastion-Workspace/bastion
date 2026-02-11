@@ -41,10 +41,10 @@ class EmbeddingServiceWrapper:
         
         # Initialize vector store for storage operations
         self.vector_store = await get_vector_store()
-        logger.info("Vector Store Service initialized")
+        logger.debug("Vector Store Service initialized")
         
         # Initialize Vector Service for embedding generation (non-blocking)
-        logger.info("Initializing Vector Service client for embeddings")
+        logger.debug("Initializing Vector Service client for embeddings")
         self.vector_service_client = await get_vector_service_client(required=False)
         logger.info("Vector Service client initialized (may retry connection later)")
         
@@ -199,6 +199,21 @@ class EmbeddingServiceWrapper:
             document_id=document_id,
             user_id=user_id
         )
+    
+    async def get_collection_stats(self, collection_name: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get statistics about vector collections
+        
+        Args:
+            collection_name: Optional specific collection to get stats for
+            
+        Returns:
+            Dictionary with collection statistics
+        """
+        if not self._initialized:
+            await self.initialize()
+        
+        return await self.vector_store.get_collection_stats(collection_name)
     
     async def _store_embeddings_with_metadata(
         self,

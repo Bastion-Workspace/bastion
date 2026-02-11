@@ -2,21 +2,22 @@
 Vector Store Service - Manages vector database operations (Qdrant)
 
 Handles all vector storage, retrieval, and collection management operations.
-Separated from embedding generation for clean architecture and multi-backend support.
+Routes all operations through Vector Service gRPC for centralized Qdrant access.
 """
 
 import asyncio
 import logging
+import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
-from qdrant_client import QdrantClient
 from qdrant_client.models import (
     PointStruct, Distance, VectorParams, Filter,
     FieldCondition, MatchValue, ScrollRequest
 )
 
 from config import settings
+from clients.vector_service_client import get_vector_service_client
 
 logger = logging.getLogger(__name__)
 
@@ -34,26 +35,25 @@ class VectorStoreService:
     """
     
     def __init__(self):
-        self.client: Optional[QdrantClient] = None
+        self.vector_service_client = None
         self._initialized = False
     
     async def initialize(self):
-        """Initialize vector database client"""
+        """Initialize Vector Service client"""
         if self._initialized:
             return
             
-        logger.info("Initializing Vector Store Service...")
+        logger.info("Initializing Vector Store Service (via Vector Service)...")
         
-        if not settings.QDRANT_URL:
-            raise ValueError("QDRANT_URL is not configured")
+        self.vector_service_client = await get_vector_service_client(required=False)
         
-        self.client = QdrantClient(url=settings.QDRANT_URL)
+        # Mark as initialized before ensuring collection to prevent recursion
+        self._initialized = True
         
         # Ensure default collection exists
         await self.ensure_collection_exists(settings.VECTOR_COLLECTION_NAME)
         
-        self._initialized = True
-        logger.info("Vector Store Service initialized")
+        logger.debug("Vector Store Service initialized (routing through Vector Service)")
     
     def _get_user_collection_name(self, user_id: str) -> str:
         """Generate collection name for a specific user"""
@@ -66,20 +66,43 @@ class VectorStoreService:
     async def ensure_collection_exists(self, collection_name: str) -> bool:
         """Ensure a collection exists, create if it doesn't"""
         try:
-            collections = self.client.get_collections()
-            collection_names = [col.name for col in collections.collections]
+            # Ensure client is available (but don't call initialize() if already initialized to avoid recursion)
+            if not self.vector_service_client:
+                if not self._initialized:
+                    # Only initialize if truly not initialized
+                    await self.initialize()
+                    # After initialize(), _initialized is True, so we won't recurse
+                else:
+                    # If initialized but client is None, get it directly
+                    self.vector_service_client = await get_vector_service_client(required=False)
+            
+            if not self.vector_service_client:
+                raise RuntimeError("Vector Service client not available")
+            
+            # Check if collection exists
+            collections_result = await self.vector_service_client.list_collections()
+            if not collections_result.get("success"):
+                logger.warning(f"Failed to list collections: {collections_result.get('error')}")
+                return False
+            
+            collection_names = [col["name"] for col in collections_result.get("collections", [])]
             
             if collection_name not in collection_names:
-                self.client.create_collection(
+                # Create collection via Vector Service
+                create_result = await self.vector_service_client.create_collection(
                     collection_name=collection_name,
-                    vectors_config=VectorParams(
-                        size=settings.EMBEDDING_DIMENSIONS,
-                        distance=Distance.COSINE
-                    )
+                    vector_size=settings.EMBEDDING_DIMENSIONS,
+                    distance="COSINE"
                 )
-                logger.info(f"Created vector collection: {collection_name}")
-                return True
-            return False
+                if create_result.get("success"):
+                    logger.info(f"Created vector collection: {collection_name}")
+                    return True
+                else:
+                    error = create_result.get("error", "Unknown error")
+                    logger.error(f"Failed to create collection {collection_name}: {error}")
+                    return False
+            # Collection already exists
+            return True
         except Exception as e:
             logger.error(f"Failed to ensure collection exists: {e}")
             raise
@@ -111,53 +134,79 @@ class VectorStoreService:
         Returns:
             True if successful, False otherwise
         """
+        if not self._initialized:
+            await self.initialize()
+        
         if not collection_name:
             collection_name = settings.VECTOR_COLLECTION_NAME
+        
+        if not self._initialized:
+            await self.initialize()
         
         if not points:
             logger.warning("No points provided for insertion")
             return False
         
+        # Convert PointStruct to dict format for Vector Service
+        points_dict = []
+        for point in points:
+            # Convert payload to dict (handle any complex types)
+            payload_dict = {}
+            for key, value in point.payload.items():
+                payload_dict[key] = value
+            
+            points_dict.append({
+                "id": point.id,
+                "vector": point.vector,
+                "payload": payload_dict
+            })
+        
         # Batch insertion for large point sets
         batch_size = 100
-        total_points = len(points)
+        total_points = len(points_dict)
         
         for attempt in range(max_retries):
             try:
                 if total_points <= batch_size:
                     # Single batch
-                    await self._insert_batch_sync(points, collection_name)
-                    logger.info(f"Inserted {total_points} points into {collection_name}")
+                    result = await self.vector_service_client.upsert_vectors(
+                        collection_name=collection_name,
+                        points=points_dict
+                    )
+                    if result.get("success"):
+                        logger.info(f"Inserted {total_points} points into {collection_name}")
+                        return True
+                    else:
+                        error = result.get("error", "Unknown error")
+                        raise Exception(f"Vector Service upsert failed: {error}")
                 else:
                     # Multiple batches
                     for i in range(0, total_points, batch_size):
-                        batch = points[i:i + batch_size]
-                        await self._insert_batch_sync(batch, collection_name)
+                        batch = points_dict[i:i + batch_size]
+                        result = await self.vector_service_client.upsert_vectors(
+                            collection_name=collection_name,
+                            points=batch
+                        )
+                        if not result.get("success"):
+                            error = result.get("error", "Unknown error")
+                            raise Exception(f"Vector Service upsert failed for batch {i//batch_size + 1}: {error}")
                         logger.info(f"Inserted batch {i//batch_size + 1}: {len(batch)} points")
                 
                 return True
                 
             except Exception as e:
-                logger.error(f"Insert attempt {attempt + 1} failed: {e}")
+                logger.error(f"Insert attempt {attempt + 1}/{max_retries} failed: {e}")
                 if attempt < max_retries - 1:
-                    await asyncio.sleep(2 ** attempt)
+                    wait_time = 2 ** attempt
+                    logger.warning(
+                        f"Will retry in {wait_time}s (attempt {attempt + 2}/{max_retries})"
+                    )
+                    await asyncio.sleep(wait_time)
                 else:
                     logger.error(f"Failed to insert points after {max_retries} attempts")
                     return False
         
         return False
-    
-    async def _insert_batch_sync(self, batch_points: List[PointStruct], collection_name: str):
-        """Insert a single batch synchronously with proper async handling"""
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: self.client.upsert(
-                collection_name=collection_name,
-                points=batch_points,
-                wait=True
-            )
-        )
     
     async def search_similar(
         self,
@@ -218,72 +267,79 @@ class VectorStoreService:
         filter_category: Optional[str] = None,
         filter_tags: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
-        """Search a specific collection"""
+        """Search a specific collection via Vector Service"""
         try:
-            # Check if collection exists
-            collections = self.client.get_collections()
-            collection_names = [col.name for col in collections.collections]
-            if collection_name not in collection_names:
-                logger.warning(f"Collection {collection_name} does not exist")
-                return []
+            if not self._initialized:
+                await self.initialize()
             
-            # Build filter if category or tags specified
-            search_filter = None
-            if filter_category or filter_tags:
-                conditions = []
-                if filter_category:
-                    conditions.append(
-                        FieldCondition(
-                            key="document_category",
-                            match=MatchValue(value=filter_category)
-                        )
-                    )
-                if filter_tags:
-                    for tag in filter_tags:
-                        conditions.append(
-                            FieldCondition(
-                                key="document_tags",
-                                match=MatchValue(value=tag)
-                            )
-                        )
-                if conditions:
-                    search_filter = Filter(must=conditions)
+            # Build filters for Vector Service
+            filters = []
+            if filter_category:
+                filters.append({
+                    "field": "document_category",
+                    "value": filter_category,
+                    "operator": "equals"
+                })
+            if filter_tags:
+                for tag in filter_tags:
+                    filters.append({
+                        "field": "document_tags",
+                        "value": tag,
+                        "operator": "equals"
+                    })
+            
+            # Execute search via Vector Service
+            search_results = await self.vector_service_client.search_vectors(
+                collection_name=collection_name,
+                query_vector=query_embedding,
+                limit=limit,
+                score_threshold=score_threshold,
+                filters=filters if filters else None
+            )
             
             # Get collection info for diagnostics
             try:
-                collection_info = self.client.get_collection(collection_name)
-                logger.info(f"Collection {collection_name}: {collection_info.points_count} points, vector size: {collection_info.config.params.vectors.size}")
+                col_info = await self.vector_service_client.get_collection_info(collection_name)
+                if col_info.get("success") and col_info.get("collection"):
+                    col = col_info["collection"]
+                    logger.info(f"Collection {collection_name}: {col.get('points_count', 0)} points, vector size: {col.get('vector_size', 0)}")
             except Exception as e:
                 logger.warning(f"Could not get collection info: {e}")
             
-            # Execute search
-            loop = asyncio.get_event_loop()
-            search_results = await loop.run_in_executor(
-                None,
-                lambda: self.client.search(
-                    collection_name=collection_name,
-                    query_vector=query_embedding,
-                    limit=limit,
-                    score_threshold=score_threshold,
-                    query_filter=search_filter,
-                    with_payload=True
-                )
-            )
-            
-            # Log raw result count for diagnostics
-            logger.info(f"Qdrant returned {len(search_results)} results with threshold {score_threshold}")
-            
-            # Format results
+            # Format results to match expected format
             results = []
             for hit in search_results:
+                payload = hit.get("payload", {})
+                # Handle content - ensure it's always a string (may be dict from JSON parsing)
+                content_raw = payload.get('content', '')
+                if isinstance(content_raw, dict):
+                    # If content is a dict, try to extract text or convert to string
+                    content = content_raw.get("text", content_raw.get("content", str(content_raw)))
+                elif isinstance(content_raw, str):
+                    content = content_raw
+                else:
+                    content = str(content_raw) if content_raw else ""
+                
+                # Merge top-level payload into metadata so consumers (e.g. image search)
+                # that expect result["metadata"]["document_id"] and result["metadata"]["title"] get them
+                chunk_metadata = payload.get('metadata', {}) or {}
+                merged_metadata = dict(chunk_metadata)
+                if payload.get('document_id') is not None:
+                    merged_metadata['document_id'] = payload.get('document_id')
+                if payload.get('document_title') is not None:
+                    merged_metadata['title'] = payload.get('document_title')
+                if payload.get('document_author') is not None:
+                    merged_metadata['author'] = payload.get('document_author')
+                if payload.get('document_category') is not None:
+                    merged_metadata['document_category'] = payload.get('document_category')
                 result = {
-                    'id': hit.id,
-                    'score': hit.score,
-                    'chunk_id': hit.payload.get('chunk_id'),
-                    'document_id': hit.payload.get('document_id'),
-                    'content': hit.payload.get('content', ''),
-                    'chunk_index': hit.payload.get('chunk_index', 0),
-                    'metadata': hit.payload.get('metadata', {}),
+                    'id': hit.get("id"),
+                    'score': hit.get("score", 0.0),
+                    'chunk_id': payload.get('chunk_id'),
+                    'document_id': payload.get('document_id'),
+                    'content': content,
+                    'chunk_index': payload.get('chunk_index', 0),
+                    'metadata': merged_metadata,
                     'collection': collection_name
                 }
                 results.append(result)
@@ -424,7 +480,7 @@ class VectorStoreService:
         collection_name: Optional[str] = None
     ) -> bool:
         """
-        Delete all points for a document
+        Delete all points for a document via Vector Service
         
         Args:
             document_id: Document ID to delete
@@ -435,6 +491,9 @@ class VectorStoreService:
             True if successful
         """
         try:
+            if not self._initialized:
+                await self.initialize()
+            
             if collection_name:
                 target_collection = collection_name
             elif user_id:
@@ -442,55 +501,48 @@ class VectorStoreService:
             else:
                 target_collection = settings.VECTOR_COLLECTION_NAME
             
-            # Check if collection exists
-            collections = self.client.get_collections()
-            collection_names = [col.name for col in collections.collections]
-            if target_collection not in collection_names:
-                logger.warning(f"Collection {target_collection} does not exist")
-                return False
+            # Delete points matching document_id via Vector Service
+            filters = [{
+                "field": "document_id",
+                "value": document_id,
+                "operator": "equals"
+            }]
             
-            # Delete points matching document_id
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: self.client.delete(
-                    collection_name=target_collection,
-                    points_selector=Filter(
-                        must=[
-                            FieldCondition(
-                                key="document_id",
-                                match=MatchValue(value=document_id)
-                            )
-                        ]
-                    )
-                )
+            logger.info(f"Deleting vectors for document {document_id} from {target_collection}")
+            
+            result = await self.vector_service_client.delete_vectors(
+                collection_name=target_collection,
+                filters=filters
             )
             
-            logger.info(f"Deleted points for document {document_id} from {target_collection}")
-            return True
+            if result.get("success"):
+                points_deleted = result.get("points_deleted", 0)
+                logger.info(f"✅ Deleted {points_deleted} point(s) for document {document_id} from {target_collection}")
+                return True
+            else:
+                error = result.get("error", "Unknown error")
+                logger.error(f"❌ Failed to delete points for document {document_id}: {error}")
+                return False
             
         except Exception as e:
-            logger.error(f"Failed to delete points for document {document_id}: {e}")
+            logger.error(f"❌ Failed to delete points for document {document_id}: {e}")
             return False
     
     async def delete_collection(self, collection_name: str) -> bool:
-        """Delete an entire collection"""
+        """Delete an entire collection via Vector Service"""
         try:
-            collections = self.client.get_collections()
-            collection_names = [col.name for col in collections.collections]
+            if not self._initialized:
+                await self.initialize()
             
-            if collection_name not in collection_names:
-                logger.warning(f"Collection {collection_name} does not exist")
+            result = await self.vector_service_client.delete_collection(collection_name)
+            
+            if result.get("success"):
+                logger.info(f"Deleted collection: {collection_name}")
+                return True
+            else:
+                error = result.get("error", "Unknown error")
+                logger.warning(f"Failed to delete collection {collection_name}: {error}")
                 return False
-            
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: self.client.delete_collection(collection_name=collection_name)
-            )
-            
-            logger.info(f"Deleted collection: {collection_name}")
-            return True
             
         except Exception as e:
             logger.error(f"Failed to delete collection {collection_name}: {e}")
@@ -502,33 +554,31 @@ class VectorStoreService:
         return await self.delete_collection(collection_name)
     
     async def get_collection_stats(self, collection_name: Optional[str] = None) -> Dict[str, Any]:
-        """Get statistics about a collection"""
+        """Get statistics about a collection via Vector Service"""
+        if not self._initialized:
+            await self.initialize()
+        
         if not collection_name:
             collection_name = settings.VECTOR_COLLECTION_NAME
         
         try:
-            collections = self.client.get_collections()
-            collection_names = [col.name for col in collections.collections]
+            result = await self.vector_service_client.get_collection_info(collection_name)
             
-            if collection_name not in collection_names:
+            if not result.get("success") or not result.get("collection"):
                 return {
                     "exists": False,
-                    "collection_name": collection_name
+                    "collection_name": collection_name,
+                    "error": result.get("error", "Collection not found")
                 }
             
-            loop = asyncio.get_event_loop()
-            collection_info = await loop.run_in_executor(
-                None,
-                lambda: self.client.get_collection(collection_name=collection_name)
-            )
-            
+            col = result["collection"]
             return {
                 "exists": True,
                 "collection_name": collection_name,
-                "points_count": collection_info.points_count,
-                "vectors_count": collection_info.vectors_count,
-                "indexed_vectors_count": collection_info.indexed_vectors_count,
-                "status": collection_info.status
+                "points_count": col.get("points_count", 0),
+                "vectors_count": col.get("points_count", 0),  # Same as points_count
+                "indexed_vectors_count": col.get("points_count", 0),  # Qdrant doesn't expose this separately
+                "status": col.get("status", "unknown")
             }
             
         except Exception as e:
@@ -545,15 +595,22 @@ class VectorStoreService:
         return await self.get_collection_stats(collection_name)
     
     async def list_all_collections(self) -> List[Dict[str, Any]]:
-        """List all collections with basic info"""
+        """List all collections with basic info via Vector Service"""
         try:
-            collections = self.client.get_collections()
+            if not self._initialized:
+                await self.initialize()
+            
+            result = await self.vector_service_client.list_collections()
+            
+            if not result.get("success"):
+                logger.error(f"Failed to list collections: {result.get('error')}")
+                return []
             
             collection_list = []
-            for col in collections.collections:
+            for col in result.get("collections", []):
                 collection_list.append({
-                    "name": col.name,
-                    "is_user_collection": col.name.startswith("user_")
+                    "name": col.get("name", ""),
+                    "is_user_collection": col.get("name", "").startswith("user_")
                 })
             
             return collection_list

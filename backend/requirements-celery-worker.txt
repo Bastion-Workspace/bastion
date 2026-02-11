@@ -4,6 +4,9 @@
 # Core Celery
 celery==5.5.3
 redis==6.4.0
+
+# FastAPI (required for service container: WebSocketManager, ParallelDocumentService use it)
+fastapi==0.115.6
 # kombu is installed automatically by celery (celery 5.5.3 requires kombu>=5.5.2,<5.6)
 
 # PostgreSQL database (for RSS tasks, entertainment sync, state persistence)

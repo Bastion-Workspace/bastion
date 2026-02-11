@@ -1,4 +1,6 @@
+import io
 import logging
+import zipfile
 import asyncio
 from typing import List, Dict, Any, Optional
 from uuid import uuid4
@@ -124,6 +126,23 @@ class FolderService:
             
         except Exception as e:
             logger.error(f"❌ Failed to get physical path for folder {folder_id}: {e}")
+            return None
+    
+    async def get_folder_id_by_physical_path(self, path: Path, user_id: str) -> Optional[str]:
+        """Resolve a physical directory path to folder_id for a user. Returns None if path is user root or no match."""
+        try:
+            path_resolved = path.resolve()
+            folders_data = await self.document_repository.get_folders_by_user(user_id, "user")
+            for folder_data in folders_data:
+                folder_id = folder_data.get("folder_id")
+                if not folder_id:
+                    continue
+                phys = await self.get_folder_physical_path(folder_id, user_id=user_id)
+                if phys and phys.resolve() == path_resolved:
+                    return folder_id
+            return None
+        except Exception as e:
+            logger.debug(f"Could not resolve path to folder_id: {e}")
             return None
     
     async def _create_physical_directory(self, folder_path: Path) -> bool:
@@ -417,13 +436,13 @@ class FolderService:
             for folder in user_folders_data:
                 logger.info(f"📁 User folder: {folder.get('name')} (ID: {folder.get('folder_id')}, parent: {folder.get('parent_folder_id')})")
             
-            # Get global folders (for admins or if specifically requested)
+            # Get global folders (always include for all users - read-only access)
             global_folders_data = []
             is_admin = await self._is_admin(user_id) if user_id else False
             
-            if collection_type == "global" or is_admin:
-                global_folders_data = await self.document_repository.get_folders_by_user(None, "global")
-                logger.debug(f"📁 Found {len(global_folders_data)} global folders")
+            # Always fetch global folders for all users (read-only access)
+            global_folders_data = await self.document_repository.get_folders_by_user(None, "global")
+            logger.debug(f"📁 Found {len(global_folders_data)} global folders")
             
             # Get team folders for user's teams
             team_folders_data = []
@@ -446,9 +465,10 @@ class FolderService:
             # Add counts for each folder with RLS context
             for folder_data in all_folders_data:
                 # Determine RLS context based on folder's collection type
+                # For global folders, use user context so RLS allows read access (RLS policy allows global docs for all users)
                 if folder_data.get('collection_type') == 'global':
-                    count_user_id = None
-                    count_role = 'admin'
+                    count_user_id = user_id  # Use user_id so RLS allows access to global docs
+                    count_role = 'user'  # Use 'user' role - RLS policy allows global docs for all users
                 else:
                     count_user_id = user_id
                     count_role = 'user'
@@ -523,14 +543,17 @@ class FolderService:
             virtual_roots.append(my_documents_root)
             logger.info(f"✅ Created My Documents virtual root with {len(all_my_documents_children)} children (including virtual sources)")
             
-            # Create "Global Documents" root node with virtual sources (for admins)
+            # Create "Global Documents" root node with virtual sources (for all users - read-only access)
             global_root_folders = [f for f in root_folders if f.collection_type == "global"]
             logger.info(f"🔍 Found {len(global_root_folders)} global root folders")
             
             logger.info(f"🔍 User {user_id} admin status: {is_admin}")
             
+            # Always create Global Documents root for all users (read-only access)
+            # Only admins get virtual sources like RSS Feeds for global collection
+            global_virtual_sources = []
             if is_admin:
-                # Add virtual sources for Global Documents (only RSS Feeds, no Web Sources)
+                # Add virtual sources for Global Documents (only RSS Feeds, no Web Sources) - admin only
                 global_virtual_sources = [
                     DocumentFolder(
                         folder_id="global_rss_feeds_virtual",
@@ -546,26 +569,24 @@ class FolderService:
                         is_virtual_source=True
                     )
                 ]
-                
-                # Combine global folders with virtual sources
-                all_global_children = global_root_folders + global_virtual_sources
-                
-                global_documents_root = DocumentFolder(
-                    folder_id="global_documents_root",
-                    name="Global Documents",
-                    parent_folder_id=None,
-                    user_id=None,
-                    collection_type="global",
-                    created_at=datetime.utcnow(),
-                    updated_at=datetime.utcnow(),
-                    document_count=0,
-                    subfolder_count=len(all_global_children),
-                    children=all_global_children
-                )
-                virtual_roots.append(global_documents_root)
-                logger.info(f"✅ Created Global Documents virtual root with {len(all_global_children)} children (including virtual sources)")
-            else:
-                logger.info(f"⚠️ User {user_id} is not admin - Global Documents not created")
+            
+            # Combine global folders with virtual sources (if admin)
+            all_global_children = global_root_folders + global_virtual_sources
+            
+            global_documents_root = DocumentFolder(
+                folder_id="global_documents_root",
+                name="Global Documents",
+                parent_folder_id=None,
+                user_id=None,
+                collection_type="global",
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+                document_count=0,
+                subfolder_count=len(all_global_children),
+                children=all_global_children
+            )
+            virtual_roots.append(global_documents_root)
+            logger.info(f"✅ Created Global Documents virtual root with {len(all_global_children)} children (read-only access for all users)")
             
             # Add team folders as virtual roots
             team_root_folders = [f for f in root_folders if f.collection_type == "team"]
@@ -591,7 +612,7 @@ class FolderService:
     async def get_folder_contents(self, folder_id: str, user_id: str = None) -> Optional[FolderContentsResponse]:
         """Get contents of a specific folder"""
         try:
-            logger.info(f"📁 Getting contents for folder {folder_id} (user: {user_id})")
+            logger.debug(f"📁 Getting contents for folder {folder_id} (user: {user_id})")
             
             # Handle virtual RSS feed folders
             if folder_id in ["rss_feeds_virtual", "global_rss_feeds_virtual"]:
@@ -618,25 +639,22 @@ class FolderService:
             query_user_id = None if folder.collection_type == "global" else user_id
             
             # Add debug logging for folder query
-            logger.info(f"🔍 DEBUG: Folder {folder_id} collection_type: {folder.collection_type}, query_user_id: {query_user_id}")
+            logger.debug(f"🔍 Folder {folder_id} collection_type: {folder.collection_type}, query_user_id: {query_user_id}")
             
             documents = await self.document_repository.get_documents_by_folder(folder_id, query_user_id)
-            logger.info(f"📄 Found {len(documents)} documents in folder {folder_id} (collection_type: {folder.collection_type})")
+            logger.debug(f"📄 Found {len(documents)} documents in folder {folder_id} (collection_type: {folder.collection_type})")
             
-            # **ROOSEVELT DEBUG:** Log what we got back
+            # Only log warnings for zero documents (potential issues)
             if len(documents) == 0:
                 logger.warning(f"⚠️ ZERO DOCUMENTS returned for folder {folder_id}!")
                 logger.warning(f"⚠️ Query context: folder_id={folder_id}, query_user_id={query_user_id}, collection_type={folder.collection_type}")
-            else:
-                for doc in documents[:5]:  # Log first 5 docs
-                    logger.info(f"📄 Document in response: {doc.document_id} - {doc.filename}")
             
             # Get subfolders with RLS context
             # Use 'user' role for normal folder access, 'admin' for global folders
             user_role = 'admin' if folder.collection_type == 'global' else 'user'
             subfolders_data = await self.document_repository.get_subfolders(folder_id, query_user_id, user_role)
             subfolders = [DocumentFolder(**subfolder_data) for subfolder_data in subfolders_data]
-            logger.info(f"📁 Found {len(subfolders)} subfolders in folder {folder_id}")
+            logger.debug(f"📁 Found {len(subfolders)} subfolders in folder {folder_id}")
             
             result = FolderContentsResponse(
                 folder=folder,
@@ -646,7 +664,7 @@ class FolderService:
                 total_subfolders=len(subfolders)
             )
             
-            logger.info(f"✅ Folder contents for {folder_id}: {len(documents)} docs, {len(subfolders)} subfolders")
+            logger.debug(f"✅ Folder contents for {folder_id}: {len(documents)} docs, {len(subfolders)} subfolders")
             return result
             
         except Exception as e:
@@ -672,7 +690,8 @@ class FolderService:
             else:  # global_documents_root
                 collection_type = "global"
                 folder_name = "Global Documents"
-                query_user_id = None
+                # Use user_id for RLS context - RLS policy allows global docs for all users
+                query_user_id = user_id
             
             # Create virtual folder object
             virtual_folder = DocumentFolder(
@@ -690,12 +709,18 @@ class FolderService:
             
             # **BULLY!** Get documents at root level (folder_id IS NULL)
             # Need to query with collection_type filter
-            logger.info(f"🔍 Querying root-level documents for {collection_type} collection")
-            documents = await self.document_repository.get_root_documents_by_collection(collection_type, query_user_id)
+            # For global documents, use user_id for RLS context (RLS allows global docs for all users)
+            # For user documents, use user_id
+            document_query_user_id = user_id  # Always use user_id for documents so RLS allows access
+            logger.info(f"🔍 Querying root-level documents for {collection_type} collection (user_id: {document_query_user_id})")
+            documents = await self.document_repository.get_root_documents_by_collection(collection_type, document_query_user_id)
             logger.info(f"📄 Found {len(documents)} root-level {collection_type} documents")
             
             # Get top-level real folders (parent_folder_id IS NULL)
-            folders_data = await self.document_repository.get_folders_by_user(query_user_id, collection_type)
+            # For global folders, use None to get all global folders
+            # For user folders, use user_id
+            folder_query_user_id = None if collection_type == "global" else user_id
+            folders_data = await self.document_repository.get_folders_by_user(folder_query_user_id, collection_type)
             # Filter to only root-level folders
             root_folders_data = [f for f in folders_data if f.get('parent_folder_id') is None]
             subfolders = [DocumentFolder(**folder_data) for folder_data in root_folders_data]
@@ -1435,4 +1460,109 @@ class FolderService:
             
         except Exception as e:
             logger.error(f"❌ Error deleting folder contents: {e}")
-            raise 
+            raise
+
+    async def _resolve_document_path(
+        self,
+        filename: str,
+        document_id: str,
+        folder_id: Optional[str],
+        user_id: str,
+        collection_type: str = "user",
+    ) -> Optional[Path]:
+        """Resolve physical path for a document; tries filename then document_id_filename."""
+        try:
+            path = await self.get_document_file_path(
+                filename=filename,
+                folder_id=folder_id,
+                user_id=user_id,
+                collection_type=collection_type,
+            )
+            path = Path(path)
+            if path.exists():
+                return path
+            if folder_id:
+                folder_path = await self.get_folder_physical_path(folder_id, user_id=user_id)
+                if folder_path:
+                    alt = folder_path / f"{document_id}_{filename}"
+                    if alt.exists():
+                        return alt
+            base = self.get_user_base_path(user_id, await self._get_username(user_id))
+            alt = base / f"{document_id}_{filename}"
+            if alt.exists():
+                return alt
+            return None
+        except Exception as e:
+            logger.debug(f"Could not resolve path for document {document_id}: {e}")
+            return None
+
+    def _safe_zip_name(self, path_prefix: str, filename: str) -> str:
+        """Build a safe zip entry name (forward slashes, no leading slash)."""
+        name = (path_prefix + filename).replace("\\", "/").strip("/")
+        return name if name else filename
+
+    async def _add_folder_to_zip(
+        self,
+        zf: zipfile.ZipFile,
+        folder_id: str,
+        path_prefix: str,
+        user_id: str,
+    ) -> None:
+        """Recursively add folder contents (documents and subfolders) to the zip."""
+        contents = await self.get_folder_contents(folder_id, user_id)
+        if not contents:
+            return
+        for doc in contents.documents:
+            filename = getattr(doc, "filename", None) or getattr(doc, "title", "document")
+            document_id = getattr(doc, "document_id", "")
+            folder_id_val = getattr(doc, "folder_id", folder_id)
+            phys = await self._resolve_document_path(
+                filename=filename,
+                document_id=document_id,
+                folder_id=folder_id_val,
+                user_id=user_id,
+                collection_type="user",
+            )
+            if phys and phys.exists():
+                try:
+                    zip_name = self._safe_zip_name(path_prefix, filename)
+                    zf.write(phys, zip_name)
+                except Exception as e:
+                    logger.warning(f"Skip adding {filename} to library zip: {e}")
+        for sub in contents.subfolders:
+            if getattr(sub, "is_virtual_source", False):
+                continue
+            sub_prefix = path_prefix + getattr(sub, "name", "folder") + "/"
+            await self._add_folder_to_zip(zf, sub.folder_id, sub_prefix, user_id)
+
+    async def build_library_zip(self, user_id: str) -> bytes:
+        """Build a zip of the user's library (My Documents folder structure and files)."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            contents = await self.get_folder_contents("my_documents_root", user_id)
+            if not contents:
+                return buf.getvalue()
+            for doc in contents.documents:
+                filename = getattr(doc, "filename", None) or getattr(doc, "title", "document")
+                document_id = getattr(doc, "document_id", "")
+                folder_id_val = getattr(doc, "folder_id", None)
+                phys = await self._resolve_document_path(
+                    filename=filename,
+                    document_id=document_id,
+                    folder_id=folder_id_val,
+                    user_id=user_id,
+                    collection_type="user",
+                )
+                if phys and phys.exists():
+                    try:
+                        zip_name = self._safe_zip_name("", filename)
+                        zf.write(phys, zip_name)
+                    except Exception as e:
+                        logger.warning(f"Skip adding root document {filename} to library zip: {e}")
+            for sub in contents.subfolders:
+                if getattr(sub, "is_virtual_source", False):
+                    continue
+                path_prefix = getattr(sub, "name", "folder") + "/"
+                await self._add_folder_to_zip(zf, sub.folder_id, path_prefix, user_id)
+        buf.seek(0)
+        return buf.getvalue()

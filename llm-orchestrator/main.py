@@ -37,6 +37,13 @@ logging.basicConfig(
     handlers=[console_handler],
     force=True  # Override any existing configuration
 )
+
+# Set specific log levels for noisy libraries
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("openai._base_client").setLevel(logging.WARNING)
+logging.getLogger("grpc._cython.cygrpc").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
@@ -54,15 +61,15 @@ class GracefulShutdown:
             return
         
         self.is_shutting_down = True
-        logger.info(f"Received shutdown signal {signum}, gracefully shutting down...")
+        logger.debug(f"Received shutdown signal {signum}, gracefully shutting down...")
         # Signal the async shutdown to proceed
         self.shutdown_event.set()
     
     async def shutdown(self):
         """Shutdown server gracefully - called from async context"""
-        logger.info("Stopping server...")
+        logger.debug("Stopping server...")
         await self.server.stop(grace=10)
-        logger.info("Server shutdown complete")
+        logger.debug("Server shutdown complete")
 
 
 async def serve():
@@ -76,10 +83,10 @@ async def serve():
         logger.info(f"Starting {settings.SERVICE_NAME} on port {settings.GRPC_PORT}...")
         
         # Initialize backend tool client connection
-        logger.info("Initializing backend tool client...")
+        logger.debug("Initializing backend tool client...")
         try:
             await get_backend_tool_client()
-            logger.info("✅ Backend tool client connected")
+            logger.debug("✅ Backend tool client connected")
         except Exception as e:
             logger.warning(f"⚠️  Backend tool client initialization failed (will retry on demand): {e}")
         

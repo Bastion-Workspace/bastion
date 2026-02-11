@@ -102,6 +102,19 @@ class SettingsService extends ApiServiceBase {
   setUserAiContext = async (aiContextData) => {
     return this.put('/api/settings/user/ai-context', aiContextData);
   }
+
+  // Vision features methods
+  getVisionFeaturesEnabled = async () => {
+    return this.get('/api/settings/user/vision-features');
+  }
+
+  setVisionFeaturesEnabled = async (enabled) => {
+    return this.put('/api/settings/user/vision-features', { enabled });
+  }
+
+  getVisionServiceStatus = async () => {
+    return this.get('/api/vision/service-status');
+  }
 }
 
 export default new SettingsService();

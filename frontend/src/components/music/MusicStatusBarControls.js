@@ -172,14 +172,14 @@ const MusicStatusBarControls = () => {
         </IconButton>
       </Tooltip>
 
-      {/* Track Info */}
+      {/* Track Info - fixed width so prev/play/next buttons stay static when title length varies */}
       <Box
         ref={containerRef}
         sx={{
-          minWidth: 0,
-          flexShrink: 1,
+          width: { xs: 100, sm: 170, md: 220 },
+          minWidth: { xs: 100, sm: 170, md: 220 },
+          flexShrink: 0,
           overflow: 'hidden',
-          maxWidth: { xs: '80px', sm: '150px', md: '200px' },
           position: 'relative',
         }}
       >

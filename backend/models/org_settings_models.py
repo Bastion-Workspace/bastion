@@ -6,6 +6,7 @@ Pydantic models for org-mode configuration and preferences
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
+from enum import Enum
 
 
 class TodoStateSequence(BaseModel):
@@ -100,6 +101,7 @@ class DisplayPreferences(BaseModel):
     show_tags_inline: bool = Field(default=True, description="Show tags inline with headings")
     highlight_current_line: bool = Field(default=True, description="Highlight current line in editor")
     indent_subheadings: bool = Field(default=True, description="Indent subheadings visually")
+    indent_content_to_heading: bool = Field(default=False, description="Visually indent body content to match heading level (display-only)")
 
     class Config:
         json_schema_extra = {
@@ -112,7 +114,71 @@ class DisplayPreferences(BaseModel):
                 "show_properties": True,
                 "show_tags_inline": True,
                 "highlight_current_line": True,
-                "indent_subheadings": True
+                "indent_subheadings": True,
+                "indent_content_to_heading": False
+            }
+        }
+
+
+class JournalOrganizationMode(str, Enum):
+    """Journal file organization strategies"""
+    MONOLITHIC = "monolithic"  # Single journal.org
+    YEARLY = "yearly"          # YYYY - Journal.org files
+    MONTHLY = "monthly"        # YYYY-MM - Journal.org files
+    DAILY = "daily"            # YYYY-MM-DD - Journal.org files
+
+
+class JournalPreferences(BaseModel):
+    """Journal configuration"""
+    enabled: bool = Field(default=False, description="Enable journal functionality")
+    journal_location: Optional[str] = Field(
+        default=None,
+        description="Folder path relative to user directory (e.g., 'Journal' or 'Notes/Journal')"
+    )
+    organization_mode: JournalOrganizationMode = Field(
+        default=JournalOrganizationMode.MONOLITHIC,
+        description="How to organize journal files"
+    )
+    include_timestamps: bool = Field(default=True, description="Include timestamps in entries")
+    default_tags: List[str] = Field(default=["journal"], description="Default tags for journal entries")
+    prompt_for_title: bool = Field(default=True, description="Prompt user for entry title")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "enabled": True,
+                "journal_location": "Journal",
+                "organization_mode": "yearly",
+                "include_timestamps": True,
+                "default_tags": ["journal", "personal"],
+                "prompt_for_title": True
+            }
+        }
+
+
+class ArchivePreferences(BaseModel):
+    """
+    Preferences for archiving org-mode entries
+    
+    Supports format specifiers:
+    - %s = source filename without extension
+    - %s_archive = source filename with _archive suffix
+    - Custom paths like 'OrgMode/archive.org' = single central archive
+    """
+    default_archive_location: Optional[str] = Field(
+        default=None,
+        description="Default archive file path. Use %s for source filename. Examples: '%s_archive' (same dir), 'OrgMode/archives/%s_archive' (central folder), 'OrgMode/archive.org' (single file)"
+    )
+    archive_to_heading: Optional[str] = Field(
+        default=None,
+        description="Optional heading within archive file (e.g., '* Archived Tasks'). Only used if archive_location points to a file."
+    )
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "default_archive_location": "%s_archive",
+                "archive_to_heading": None
             }
         }
 
@@ -149,6 +215,14 @@ class OrgModeSettings(BaseModel):
     display_preferences: DisplayPreferences = Field(
         default_factory=DisplayPreferences,
         description="Display preferences"
+    )
+    journal_preferences: JournalPreferences = Field(
+        default_factory=JournalPreferences,
+        description="Journal preferences"
+    )
+    archive_preferences: ArchivePreferences = Field(
+        default_factory=ArchivePreferences,
+        description="Archive preferences"
     )
     created_at: Optional[datetime] = Field(None, description="When settings were created")
     updated_at: Optional[datetime] = Field(None, description="When settings were last updated")
@@ -195,6 +269,8 @@ class OrgModeSettingsUpdate(BaseModel):
     tags: Optional[List[TagDefinition]] = Field(None, description="Predefined tags")
     agenda_preferences: Optional[AgendaPreferences] = Field(None, description="Agenda preferences")
     display_preferences: Optional[DisplayPreferences] = Field(None, description="Display preferences")
+    journal_preferences: Optional[JournalPreferences] = Field(None, description="Journal preferences")
+    archive_preferences: Optional[ArchivePreferences] = Field(None, description="Archive preferences")
     
     class Config:
         json_schema_extra = {

@@ -55,7 +55,9 @@ RUN python -m grpc_tools.protoc \
     /app/protos/orchestrator.proto \
     /app/protos/vector_service.proto \
     /app/protos/data_service.proto \
-    /app/protos/crawl_service.proto
+    /app/protos/crawl_service.proto \
+    /app/protos/image_vision.proto \
+    /app/protos/connections_service.proto
 
 # Make startup script executable
 RUN chmod +x docker-entrypoint.sh

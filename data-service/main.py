@@ -32,13 +32,26 @@ class GracefulShutdown:
     
     def __init__(self, server):
         self.server = server
-        signal.signal(signal.SIGINT, self.shutdown)
-        signal.signal(signal.SIGTERM, self.shutdown)
+        self.shutdown_event = asyncio.Event()
+        self.is_shutting_down = False
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
     
-    def shutdown(self, signum, frame):
+    def signal_handler(self, signum, frame):
+        """Handle shutdown signal - sets event for async shutdown"""
+        if self.is_shutting_down:
+            return
+        
+        self.is_shutting_down = True
         logger.info(f"Received signal {signum}, initiating graceful shutdown...")
-        self.server.stop(grace=5)
-        asyncio.create_task(close_db_manager())
+        # Signal the async shutdown to proceed
+        self.shutdown_event.set()
+    
+    async def shutdown(self):
+        """Shutdown server gracefully - called from async context"""
+        logger.info("Stopping server...")
+        await self.server.stop(grace=5)
+        await close_db_manager()
         logger.info("Server shutdown complete")
 
 
@@ -93,8 +106,11 @@ async def serve():
         await server.start()
         logger.info(f"{settings.SERVICE_NAME} started successfully on port {settings.GRPC_PORT}")
         
-        # Wait for termination
-        await server.wait_for_termination()
+        # Wait for shutdown signal
+        await shutdown_handler.shutdown_event.wait()
+        
+        # Perform graceful shutdown
+        await shutdown_handler.shutdown()
         
     except Exception as e:
         logger.error(f"Failed to start server: {e}")

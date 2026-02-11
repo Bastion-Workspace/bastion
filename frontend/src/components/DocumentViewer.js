@@ -30,13 +30,18 @@ import {
   FileDownload,
   Schedule,
   Fullscreen,
-  FullscreenExit
+  FullscreenExit,
+  InfoOutlined,
+  Subject
 } from '@mui/icons-material';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
 import apiService from '../services/apiService';
 import exportService from '../services/exportService';
-import { Dialog, DialogTitle, DialogContent, DialogActions, FormGroup, FormControlLabel, Checkbox, Button, Stack } from '@mui/material';
+import settingsService from '../services/settings/SettingsService';
+import { Dialog, DialogTitle, DialogContent, DialogActions, FormGroup, FormControlLabel, Checkbox, Button, Stack, Switch, Popover } from '@mui/material';
 import OrgRenderer from './OrgRenderer';
 import OrgCMEditor from './OrgCMEditor';
 import MarkdownCMEditor from './MarkdownCMEditor';
@@ -50,13 +55,42 @@ import EMLViewer from './EMLViewer';
 import { useEditor } from '../contexts/EditorContext';
 import { parseFrontmatter } from '../utils/frontmatterUtils';
 import { useTheme } from '../contexts/ThemeContext';
+// Correct import path for documentDiffStore
 import { documentDiffStore } from '../services/documentDiffStore';
+import { useImageLightbox } from './common/ImageLightbox';
+import FaceTagSuggestions from './images/FaceTagSuggestions';
+import ImageMetadataModal from './images/ImageMetadataModal';
+import { useAuth } from '../contexts/AuthContext';
+
+// Normalize bbox from face or object (supports bbox_x/bbox_y/bbox_width/bbox_height or left/top/right/bottom)
+const getBbox = (item) => {
+  const x = item.bbox_x ?? item.left ?? item.x ?? 0;
+  const y = item.bbox_y ?? item.top ?? item.y ?? 0;
+  const w = item.bbox_width ?? (item.right != null && item.left != null ? item.right - item.left : 0) ?? item.width ?? 0;
+  const h = item.bbox_height ?? (item.bottom != null && item.top != null ? item.bottom - item.top : 0) ?? item.height ?? 0;
+  return { x, y, w, h };
+};
 
 // Image viewer component with authentication
 const ImageViewer = ({ documentId, filename, title, onDownload }) => {
   const [imageData, setImageData] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState(null);
+  const [showMetadataModal, setShowMetadataModal] = React.useState(false);
+  const [visionEnabled, setVisionEnabled] = React.useState(false);
+  const [visionServiceAvailable, setVisionServiceAvailable] = React.useState(false);
+  const [visionStatusChecked, setVisionStatusChecked] = React.useState(false);
+  const [showBoundingBoxes, setShowBoundingBoxes] = React.useState(false);
+  const [boxesData, setBoxesData] = React.useState({ faces: [], objects: [] });
+  const [boxesLoading, setBoxesLoading] = React.useState(false);
+  const [imageDisplaySize, setImageDisplaySize] = React.useState({ w: 0, h: 0 });
+  const imageRef = React.useRef(null);
+  const [descriptionAnchorEl, setDescriptionAnchorEl] = React.useState(null);
+  const [descriptionContent, setDescriptionContent] = React.useState(null);
+  const [descriptionLoading, setDescriptionLoading] = React.useState(false);
+  const { openLightbox } = useImageLightbox();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
 
   // Fetch image with authentication
   React.useEffect(() => {
@@ -103,6 +137,113 @@ const ImageViewer = ({ documentId, filename, title, onDownload }) => {
     };
   }, [imageData]);
 
+  // Check vision features enabled and service availability
+  React.useEffect(() => {
+    const checkVisionStatus = async () => {
+      try {
+        // Check if user has vision features enabled
+        const visionEnabledResponse = await settingsService.getVisionFeaturesEnabled();
+        const enabled = visionEnabledResponse?.enabled === true;
+        console.log('Vision features enabled:', enabled, visionEnabledResponse);
+        setVisionEnabled(enabled);
+
+        // Check if vision service is available
+        const serviceStatusResponse = await settingsService.getVisionServiceStatus();
+        const available = serviceStatusResponse?.available === true;
+        console.log('Vision service available:', available, serviceStatusResponse);
+        setVisionServiceAvailable(available);
+        setVisionStatusChecked(true);
+        
+        console.log('Button visibility check:', {
+          visionServiceAvailable: available,
+          isAdmin,
+          visionEnabled: enabled,
+          willShow: available && (isAdmin || enabled)
+        });
+      } catch (err) {
+        console.error('Failed to check vision status:', err);
+        // Default to false on error, but mark as checked
+        setVisionEnabled(false);
+        setVisionServiceAvailable(false);
+        setVisionStatusChecked(true);
+      }
+    };
+
+    checkVisionStatus();
+  }, [documentId, isAdmin]);
+
+  // Load metadata (faces + objects) when "Show bounding boxes" is toggled on.
+  // Fetch objects from /objects (detected_objects table) and fallback to image-metadata.objects so viewer matches Overlay.
+  React.useEffect(() => {
+    if (!showBoundingBoxes || !documentId) {
+      setBoxesData({ faces: [], objects: [] });
+      return;
+    }
+    let cancelled = false;
+    setBoxesLoading(true);
+    const load = async () => {
+      try {
+        const [metaRes, facesRes, objectsRes] = await Promise.all([
+          apiService.get(`/api/documents/${documentId}/image-metadata`).catch(() => ({ exists: false })),
+          apiService.get(`/api/documents/${documentId}/faces`).catch(() => ({ success: false })),
+          apiService.getDetectedObjects(documentId).catch(() => ({ success: false }))
+        ]);
+        if (cancelled) return;
+        const faces = (facesRes?.success && Array.isArray(facesRes.faces) && facesRes.faces.length > 0)
+          ? facesRes.faces
+          : (metaRes?.exists && metaRes?.metadata?.faces && Array.isArray(metaRes.metadata.faces))
+            ? metaRes.metadata.faces
+            : [];
+        const objects = (objectsRes?.success && Array.isArray(objectsRes.objects) && objectsRes.objects.length > 0)
+          ? objectsRes.objects
+          : (metaRes?.exists && metaRes?.metadata?.objects && Array.isArray(metaRes.metadata.objects))
+            ? metaRes.metadata.objects
+            : [];
+        setBoxesData({ faces, objects });
+      } catch {
+        if (!cancelled) setBoxesData({ faces: [], objects: [] });
+      } finally {
+        if (!cancelled) setBoxesLoading(false);
+      }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [showBoundingBoxes, documentId]);
+
+  const hasBoxes = boxesData.faces.length > 0 || boxesData.objects.length > 0;
+
+  const measureImage = React.useCallback(() => {
+    if (imageRef.current) {
+      const rect = imageRef.current.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        setImageDisplaySize({ w: rect.width, h: rect.height });
+      }
+    }
+  }, []);
+
+  React.useEffect(() => {
+    if (showBoundingBoxes && hasBoxes) measureImage();
+  }, [showBoundingBoxes, hasBoxes, boxesData.faces.length, boxesData.objects.length, measureImage]);
+
+  const handleDescriptionClick = React.useCallback(async (e) => {
+    setDescriptionAnchorEl(e.currentTarget);
+    setDescriptionLoading(true);
+    setDescriptionContent(null);
+    try {
+      const res = await apiService.get(`/api/documents/${documentId}/image-metadata`);
+      const content = res?.exists && res?.metadata?.content ? res.metadata.content : null;
+      setDescriptionContent(content);
+    } catch {
+      setDescriptionContent(null);
+    } finally {
+      setDescriptionLoading(false);
+    }
+  }, [documentId]);
+
+  const handleDescriptionClose = React.useCallback(() => {
+    setDescriptionAnchorEl(null);
+  }, []);
+
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
@@ -112,7 +253,37 @@ const ImageViewer = ({ documentId, filename, title, onDownload }) => {
             <Typography variant="body2" color="text.secondary">{title}</Typography>
           )}
         </Box>
-        <Box>
+        <Box display="flex" gap={1}>
+          {/* Edit metadata: opens unified ImageMetadataModal */}
+          {((isAdmin) || (visionStatusChecked && visionServiceAvailable && visionEnabled)) && (
+            <Tooltip title={visionServiceAvailable || isAdmin ? "Edit metadata" : "Checking vision service..."}>
+              <IconButton 
+                size="small" 
+                onClick={() => setShowMetadataModal(true)}
+              >
+                <InfoOutlined fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          )}
+          {imageData && !loading && !error && (
+            <FormControlLabel
+              control={
+                <Switch
+                  size="small"
+                  checked={showBoundingBoxes}
+                  onChange={(e) => setShowBoundingBoxes(e.target.checked)}
+                />
+              }
+              label="Show bounding boxes"
+            />
+          )}
+          {imageData && !loading && !error && (
+            <Tooltip title="Show description from metadata">
+              <IconButton size="small" onClick={handleDescriptionClick}>
+                <Subject fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          )}
           <Tooltip title="Download">
             <IconButton size="small" onClick={onDownload}>
               <Download fontSize="small" />
@@ -128,26 +299,169 @@ const ImageViewer = ({ documentId, filename, title, onDownload }) => {
           <Alert severity="error">{error}</Alert>
         )}
         {imageData && !loading && !error && (
-          <Box 
-            component="img"
-            src={imageData}
-            alt={filename}
-            sx={{ 
-              maxWidth: '100%', 
-              maxHeight: '100%', 
-              objectFit: 'contain',
-              boxShadow: 3,
-              borderRadius: 1,
-              bgcolor: 'white' // Better contrast for transparent SVGs
+          <Box
+            sx={{
+              position: 'relative',
+              display: 'inline-block',
+              maxWidth: '100%',
+              maxHeight: '100%'
             }}
-          />
+          >
+            <Box
+              ref={imageRef}
+              component="img"
+              src={imageData}
+              alt={filename}
+              onClick={() => openLightbox(imageData, { filename, alt: title, documentId })}
+              onLoad={measureImage}
+              sx={{
+                display: 'block',
+                maxWidth: '100%',
+                maxHeight: '100%',
+                objectFit: 'contain',
+                boxShadow: 3,
+                borderRadius: 1,
+                bgcolor: 'white',
+                cursor: 'pointer'
+              }}
+            />
+            {showBoundingBoxes && hasBoxes && imageDisplaySize.w > 0 && imageRef.current && (
+              <svg
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  top: 0,
+                  width: imageDisplaySize.w,
+                  height: imageDisplaySize.h,
+                  pointerEvents: 'none'
+                }}
+                width={imageDisplaySize.w}
+                height={imageDisplaySize.h}
+                viewBox={`0 0 ${imageDisplaySize.w} ${imageDisplaySize.h}`}
+              >
+                <>
+                  {boxesData.faces.map((face, idx) => {
+                      const nw = imageRef.current?.naturalWidth || 1;
+                      const nh = imageRef.current?.naturalHeight || 1;
+                      const sx = imageDisplaySize.w / nw;
+                      const sy = imageDisplaySize.h / nh;
+                      const { x, y, w, h } = getBbox(face);
+                      const rx = x * sx;
+                      const ry = y * sy;
+                      const rw = w * sx;
+                      const rh = h * sy;
+                      const label = face.identity_name || face.suggested_identity || null;
+                      return (
+                        <g key={face.id ?? `face-${idx}`}>
+                          <rect
+                            x={rx}
+                            y={ry}
+                            width={rw}
+                            height={rh}
+                            fill="none"
+                            stroke="lime"
+                            strokeWidth={2}
+                          />
+                          {label && (
+                            <text
+                              x={rx}
+                              y={Math.max(ry - 4, 12)}
+                              fill="white"
+                              fontSize={12}
+                              fontWeight="bold"
+                              style={{ paintOrder: 'stroke', stroke: 'black', strokeWidth: 2 }}
+                            >
+                              {face.identity_name ? label : `${label}?`}
+                            </text>
+                          )}
+                        </g>
+                      );
+                    })}
+                    {boxesData.objects.map((obj, idx) => {
+                      const nw = imageRef.current?.naturalWidth || 1;
+                      const nh = imageRef.current?.naturalHeight || 1;
+                      const sx = imageDisplaySize.w / nw;
+                      const sy = imageDisplaySize.h / nh;
+                      const { x, y, w, h } = getBbox(obj);
+                      const rx = x * sx;
+                      const ry = y * sy;
+                      const rw = w * sx;
+                      const rh = h * sy;
+                      const label = obj.user_tag ?? obj.matched_description ?? obj.class_name ?? obj.label ?? obj.name ?? null;
+                      const strokeColor = obj.detection_method === 'user_defined' ? '#9333ea' : '#f97316';
+                      return (
+                        <g key={obj.id ?? `obj-${idx}`}>
+                          <rect
+                            x={rx}
+                            y={ry}
+                            width={rw}
+                            height={rh}
+                            fill="none"
+                            stroke={strokeColor}
+                            strokeWidth={2}
+                          />
+                          {label && (
+                            <text
+                              x={rx}
+                              y={Math.max(ry - 4, 12)}
+                              fill="white"
+                              fontSize={12}
+                              fontWeight="bold"
+                              style={{ paintOrder: 'stroke', stroke: 'black', strokeWidth: 2 }}
+                            >
+                              {label}
+                            </text>
+                          )}
+                        </g>
+                      );
+                    })}
+                </>
+              </svg>
+            )}
+          </Box>
         )}
       </Box>
+      <Popover
+        open={Boolean(descriptionAnchorEl)}
+        anchorEl={descriptionAnchorEl}
+        onClose={handleDescriptionClose}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+        transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+      >
+        <Box sx={{ p: 2, maxWidth: 420, maxHeight: 360, overflow: 'auto', minWidth: 200 }}>
+          {descriptionLoading ? (
+            <CircularProgress size={24} />
+          ) : (
+            <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
+              {descriptionContent || 'No description in metadata.'}
+            </Typography>
+          )}
+        </Box>
+      </Popover>
+      <Box sx={{ p: 2 }}>
+        <FaceTagSuggestions
+          documentId={documentId}
+          onOpenFaceTagger={() => setShowMetadataModal(true)}
+        />
+      </Box>
+      <ImageMetadataModal
+        open={showMetadataModal}
+        onClose={(success) => {
+          setShowMetadataModal(false);
+          if (success) setImageData((prev) => prev);
+        }}
+        documentId={documentId}
+        filename={filename}
+        imageUrl={imageData}
+      />
     </Box>
   );
 };
 
-const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHeading = null, initialScrollPosition = 0, onScrollChange }) => {
+// Memoize DocumentViewer to prevent re-renders from parent context updates
+const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, scrollToHeading = null, initialScrollPosition = 0, onScrollChange }) => {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [document, setDocument] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -159,6 +473,8 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   const editContentRef = React.useRef('');
   // Ref to track if the component is unmounting
   const isUnmountingRef = React.useRef(false);
+  // Track if user manually entered edit mode (vs auto-entered)
+  const manuallyEditingRef = React.useRef(false);
   const [saving, setSaving] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const { setEditorState } = useEditor();
@@ -203,6 +519,7 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   const [downloadMenuAnchor, setDownloadMenuAnchor] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const fullscreenContainerRef = React.useRef(null);
+  const [currentSection, setCurrentSection] = useState(null);
 
   // Helper functions for unsaved content persistence
   const getUnsavedContentKey = (docId) => `unsaved_content_${docId}`;
@@ -216,6 +533,46 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
       console.error('Failed to get unsaved content:', e);
       return null;
     }
+  };
+
+  // Helper functions for edit mode preference
+  const getEditModePreferenceKey = () => `prefer_edit_mode`;
+  
+  const getEditModePreference = () => {
+    try {
+      const saved = localStorage.getItem(getEditModePreferenceKey());
+      return saved === 'true';
+    } catch (e) {
+      return true; // Default to true - always prefer edit mode
+    }
+  };
+  
+  const setEditModePreference = (preferEdit) => {
+    try {
+      localStorage.setItem(getEditModePreferenceKey(), preferEdit ? 'true' : 'false');
+    } catch (e) {
+      console.error('Failed to save edit mode preference:', e);
+    }
+  };
+
+  // Check if user can edit this document
+  const canUserEditDocument = (docData) => {
+    if (!docData) return false;
+    const fname = (docData.filename || '').toLowerCase();
+    const isEditableType = fname.endsWith('.md') || fname.endsWith('.txt') || fname.endsWith('.org');
+    if (!isEditableType) return false;
+    
+    const collectionType = docData.collection_type || 'user';
+    const docUserId = docData.user_id;
+    const currentUserId = user?.user_id;
+    
+    // Admin can edit global documents
+    if (isAdmin && collectionType === 'global') return true;
+    
+    // Users can edit their own documents
+    if (collectionType === 'user' && docUserId === currentUserId) return true;
+    
+    return false;
   };
   
   const saveUnsavedContent = (docId, content) => {
@@ -262,15 +619,25 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
           // Store the actual server content separately
           setServerContent(response.content || '');
           
-          // Auto-enter edit mode if applicable (or preserve if already editing)
-          const fname = (docData.filename || '').toLowerCase();
-          const isUserOwned = !!docData.user_id || docData.collection_type === 'user';
+          // Determine if we should enter edit mode (for unsaved content path)
+          const canEdit = canUserEditDocument(docData);
+          
           if (preserveEditMode && isEditing) {
             // Preserve current edit mode
             setIsEditing(true);
-          } else if (isUserOwned && (fname.endsWith('.md') || fname.endsWith('.org'))) {
+          } else if (manuallyEditingRef.current && isEditing) {
+            // User manually entered edit mode - preserve it
+            setIsEditing(true);
+          } else if (canEdit) {
+            // User can edit - always open in edit mode
             setIsEditing(true);
             setShowPreview(false);
+            manuallyEditingRef.current = false;
+            setEditModePreference(true); // Remember preference
+          } else {
+            // User cannot edit - preview mode
+            setIsEditing(false);
+            manuallyEditingRef.current = false;
           }
           
           setLoading(false);
@@ -296,32 +663,29 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
         clearUnsavedContent(documentId);
       }
       
-      // Auto-enter edit mode for user-created MD/ORG documents (or preserve if already editing)
-      const fname = (docData.filename || '').toLowerCase();
-      const isUserOwned = !!docData.user_id || docData.collection_type === 'user';
+      // Determine if we should enter edit mode
+      const canEdit = canUserEditDocument(docData);
       
       if (preserveEditMode && isEditing) {
         // Preserve current edit mode when force refreshing (don't change isEditing state)
         console.log('🔄 Preserving edit mode during force refresh');
         // isEditing state will remain unchanged
+      } else if (manuallyEditingRef.current && isEditing) {
+        // User manually entered edit mode - preserve it
+        console.log('🔄 Preserving manually entered edit mode');
+        // isEditing state will remain unchanged
+      } else if (canEdit) {
+        // User can edit - always open in edit mode
+        console.log('✅ Opening document in edit mode (user has permission)');
+        setIsEditing(true);
+        setShowPreview(false);
+        manuallyEditingRef.current = false; // Auto-entered
+        setEditModePreference(true); // Remember preference
       } else {
-        // Normal auto-enter logic
-        console.log('🎯 ROOSEVELT EDIT MODE DEBUG:', {
-          filename: docData.filename,
-          fname,
-          user_id: docData.user_id,
-          collection_type: docData.collection_type,
-          isUserOwned,
-          shouldEdit: isUserOwned && (fname.endsWith('.md') || fname.endsWith('.org'))
-        });
-        if (isUserOwned && (fname.endsWith('.md') || fname.endsWith('.org'))) {
-          console.log('🎯 ROOSEVELT: ENTERING EDIT MODE!');
-          setIsEditing(true);
-          setShowPreview(false);
-        } else if (!preserveEditMode) {
-          // If not a user-owned editable file and not preserving, exit edit mode
-          setIsEditing(false);
-        }
+        // User cannot edit this document - always preview mode
+        console.log('📖 Opening document in preview mode (user cannot edit)');
+        setIsEditing(false);
+        manuallyEditingRef.current = false;
       }
       
     } catch (err) {
@@ -335,8 +699,20 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
   // Initial document load
   useEffect(() => {
     if (documentId) {
+      manuallyEditingRef.current = false; // Reset manual edit flag when switching documents
       fetchDocument(false);
     }
+  }, [documentId, fetchDocument]);
+
+  // Refresh when journal quick capture adds an entry (so open journal tab shows new content)
+  useEffect(() => {
+    const handler = () => {
+      if (documentId) {
+        fetchDocument(true, true);
+      }
+    };
+    window.addEventListener('journalDocumentUpdated', handler);
+    return () => window.removeEventListener('journalDocumentUpdated', handler);
   }, [documentId, fetchDocument]);
 
   // Save unsaved content whenever editContent changes (debounced)
@@ -642,6 +1018,69 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
       }
     }
   };
+
+  // Find current section based on cursor position
+  const findCurrentSection = React.useCallback((content, cursorOffset, filename) => {
+    if (!content || cursorOffset === null || cursorOffset === undefined || !filename) {
+      return null;
+    }
+
+    const fnameLower = filename.toLowerCase();
+    const lines = content.split('\n');
+    
+    // Find the line number where cursor is
+    let currentLine = 1;
+    let charCount = 0;
+    for (let i = 0; i < lines.length; i++) {
+      const lineLength = lines[i].length + 1; // +1 for newline
+      if (charCount + lineLength > cursorOffset) {
+        currentLine = i + 1;
+        break;
+      }
+      charCount += lineLength;
+    }
+
+    // Search backwards from current line to find the most recent heading
+    let foundHeading = null;
+    for (let i = currentLine - 1; i >= 0; i--) {
+      const line = lines[i];
+      
+      if (fnameLower.endsWith('.md')) {
+        // Markdown headers: #, ##, ###
+        const match = line.match(/^(#{1,3})\s+(.+)$/);
+        if (match) {
+          foundHeading = match[2].trim();
+          break;
+        }
+      } else if (fnameLower.endsWith('.org')) {
+        // Org headers: *, **, ***
+        const match = line.match(/^(\*{1,3})\s+(TODO|NEXT|STARTED|WAITING|HOLD|DONE|CANCELED|CANCELLED)?\s*(.+)$/i);
+        if (match) {
+          foundHeading = match[3]?.trim() || match[2]?.trim() || line.trim();
+          break;
+        }
+      }
+    }
+
+    return foundHeading;
+  }, []);
+
+  // Callback to update current section from editors
+  const handleCurrentSectionChange = React.useCallback((content, cursorOffset) => {
+    if (!document?.filename || !isEditing) {
+      setCurrentSection(null);
+      return;
+    }
+    const section = findCurrentSection(content, cursorOffset, document.filename);
+    setCurrentSection(section);
+  }, [document?.filename, isEditing, findCurrentSection]);
+
+  // Reset current section when switching documents or exiting edit mode
+  useEffect(() => {
+    if (!isEditing || !document?.filename) {
+      setCurrentSection(null);
+    }
+  }, [isEditing, document?.filename]);
 
   // Handle scrolling to specific line or heading
   useEffect(() => {
@@ -990,11 +1429,6 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
       // This ensures frontmatter is correct even if MarkdownCMEditor hasn't mounted yet
       try {
         localStorage.setItem('editor_ctx_cache', JSON.stringify(editorStatePayload));
-        console.log('📝 DocumentViewer: Updated editor_ctx_cache:', {
-          filename: editorStatePayload.filename,
-          frontmatterType: mergedFrontmatter?.type,
-          documentId: editorStatePayload.documentId
-        });
       } catch (e) {
         console.error('Failed to update editor_ctx_cache from DocumentViewer:', e);
       }
@@ -1115,10 +1549,9 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
 
     try {
       setUpdatingMetadata(true);
-      await apiService.renameDocument(documentId, editedFilename.trim());
-      console.log('Renamed document file');
-      
-      // Refresh document to get updated data
+      const resp = await apiService.renameDocument(documentId, editedFilename.trim());
+      const displayName = resp?.new_filename ?? editedFilename.trim();
+      window.tabbedContentManagerRef?.updateDocumentTabTitle?.(documentId, displayName);
       await fetchDocument();
       setEditingFilename(false);
     } catch (err) {
@@ -1155,9 +1588,11 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
     setDownloadMenuAnchor(null);
   };
 
-  // Download document handler
+  // Download document handler (use window['document'] - state variable 'document' shadows global)
   const handleDownload = async () => {
     handleDownloadMenuClose();
+    const doc = typeof window !== 'undefined' ? window['document'] : null;
+    if (!doc) return;
     try {
       const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
       const fnameLower = (document?.filename || '').toLowerCase();
@@ -1174,12 +1609,12 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
         
         const blob = await response.blob();
         const blobUrl = URL.createObjectURL(blob);
-        const link = document.createElement('a');
+        const link = doc.createElement('a');
         link.href = blobUrl;
         link.download = document.filename || 'document.pdf';
-        document.body.appendChild(link);
+        doc.body.appendChild(link);
         link.click();
-        document.body.removeChild(link);
+        doc.body.removeChild(link);
         URL.revokeObjectURL(blobUrl);
       } else {
         // For other files, try the file endpoint first
@@ -1192,22 +1627,22 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
           const content = isEditing ? editContent : (document.content || '');
           const blob = new Blob([content], { type: 'text/plain' });
           const blobUrl = URL.createObjectURL(blob);
-          const link = document.createElement('a');
+          const link = doc.createElement('a');
           link.href = blobUrl;
           link.download = document.filename || 'document';
-          document.body.appendChild(link);
+          doc.body.appendChild(link);
           link.click();
-          document.body.removeChild(link);
+          doc.body.removeChild(link);
           URL.revokeObjectURL(blobUrl);
         } else {
           const blob = await response.blob();
           const blobUrl = URL.createObjectURL(blob);
-          const link = document.createElement('a');
+          const link = doc.createElement('a');
           link.href = blobUrl;
           link.download = document.filename || 'document';
-          document.body.appendChild(link);
+          doc.body.appendChild(link);
           link.click();
-          document.body.removeChild(link);
+          doc.body.removeChild(link);
           URL.revokeObjectURL(blobUrl);
         }
       }
@@ -1489,26 +1924,43 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
               />
             ) : (
               <>
-                <Typography 
-                  variant="caption" 
-                  color="text.secondary" 
-                  onClick={handleFilenameClick}
-                  sx={{ 
-                    whiteSpace: 'nowrap', 
-                    overflow: 'hidden', 
-                    textOverflow: 'ellipsis',
-                    cursor: 'pointer',
-                    fontWeight: 500,
-                    '&:hover': {
-                      backgroundColor: 'action.hover',
-                      borderRadius: 1,
-                      px: 0.5
-                    }
-                  }}
-                  title="Click to rename file"
-                >
-                  {document.filename}
-                </Typography>
+                {isEditing && currentSection ? (
+                  <Typography 
+                    variant="caption" 
+                    color="text.secondary" 
+                    sx={{ 
+                      whiteSpace: 'nowrap', 
+                      overflow: 'hidden', 
+                      textOverflow: 'ellipsis',
+                      fontWeight: 500,
+                      fontStyle: 'italic'
+                    }}
+                    title={`Current section: ${currentSection}`}
+                  >
+                    {currentSection}
+                  </Typography>
+                ) : (
+                  <Typography 
+                    variant="caption" 
+                    color="text.secondary" 
+                    onClick={handleFilenameClick}
+                    sx={{ 
+                      whiteSpace: 'nowrap', 
+                      overflow: 'hidden', 
+                      textOverflow: 'ellipsis',
+                      cursor: 'pointer',
+                      fontWeight: 500,
+                      '&:hover': {
+                        backgroundColor: 'action.hover',
+                        borderRadius: 1,
+                        px: 0.5
+                      }
+                    }}
+                    title="Click to rename file"
+                  >
+                    {document.filename}
+                  </Typography>
+                )}
                 
                 {/* Header Navigation Dropdown */}
                 {isEditing && headers.length > 0 && (
@@ -1667,11 +2119,13 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
           )}
 
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0 }}>
-            {(document.filename && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org'))) && (
+            {(document.filename && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org'))) && canUserEditDocument(document) && (
               !isEditing ? (
                 <Tooltip title="Edit">
                   <IconButton size="small" onClick={() => {
+                    manuallyEditingRef.current = true; // Mark as manually entered edit mode
                     setIsEditing(true);
+                    setEditModePreference(true); // Remember user prefers edit mode
                     const fname = (document.filename || '').toLowerCase();
                     if (fname.endsWith('.md') || fname.endsWith('.org')) {
                       setShowPreview(false);
@@ -1847,6 +2301,12 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                           scrollToHeading={scrollToHeading}
                           initialScrollPosition={initialScrollPosition}
                           onScrollChange={onScrollChange}
+                          canonicalPath={document?.canonical_path}
+                          filename={document?.filename}
+                          documentId={document?.document_id}
+                          folderId={document?.folder_id}
+                          onCurrentSectionChange={handleCurrentSectionChange}
+                          darkMode={darkMode}
                         />
                       </Box>
                     </Box>
@@ -1880,19 +2340,111 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                     scrollToHeading={scrollToHeading}
                     initialScrollPosition={initialScrollPosition}
                     onScrollChange={onScrollChange}
+                    canonicalPath={document?.canonical_path}
+                    filename={document?.filename}
+                    documentId={document?.document_id}
+                    folderId={document?.folder_id}
+                    onCurrentSectionChange={handleCurrentSectionChange}
+                    darkMode={darkMode}
                   />
                 )
               ) : fnameLower.endsWith('.md') ? (
-                <MarkdownCMEditor 
-                  ref={markdownEditorRef}
-                  value={editContent} 
-                  onChange={setEditContent} 
-                  filename={document.filename}
-                  canonicalPath={document.canonical_path}
-                  documentId={document.document_id} 
-                  initialScrollPosition={initialScrollPosition}
-                  onScrollChange={onScrollChange}
-                />
+                showPreview ? (
+                  // Split view for Markdown: Editor + Preview
+                  <Box sx={{ display: 'flex', gap: 2, height: '70vh' }}>
+                    <Box sx={{ flex: 1, border: '1px solid #e0e0e0', borderRadius: 1 }}>
+                      <Typography variant="subtitle2" sx={{ p: 1, backgroundColor: 'grey.100', borderBottom: '1px solid #e0e0e0', fontWeight: 'bold' }}>
+                        Edit Mode
+                      </Typography>
+                      <Box sx={{ p: 1, height: 'calc(100% - 40px)', overflow: 'auto' }}>
+                        <MarkdownCMEditor 
+                          ref={markdownEditorRef}
+                          value={editContent} 
+                          onChange={setEditContent} 
+                          filename={document.filename}
+                          canonicalPath={document.canonical_path}
+                          documentId={document.document_id} 
+                          initialScrollPosition={initialScrollPosition}
+                          onScrollChange={onScrollChange}
+                          onCurrentSectionChange={handleCurrentSectionChange}
+                        />
+                      </Box>
+                    </Box>
+                    <Box sx={{ flex: 1, border: '1px solid #e0e0e0', borderRadius: 1 }}>
+                      <Typography variant="subtitle2" sx={{ p: 1, backgroundColor: 'grey.100', borderBottom: '1px solid #e0e0e0', fontWeight: 'bold' }}>
+                        Preview
+                      </Typography>
+                      <Box sx={{ 
+                        p: 2, 
+                        height: 'calc(100% - 40px)', 
+                        overflow: 'auto',
+                        '& h1, & h2, & h3, & h4, & h5, & h6': { mt: 2, mb: 1, fontWeight: 'bold' },
+                        '& p': { mb: 1.5, lineHeight: 1.6 },
+                        '& img': { maxWidth: '100%', height: 'auto', borderRadius: 1, my: 2 },
+                        '& a': { color: 'primary.main', textDecoration: 'none', '&:hover': { textDecoration: 'underline' } },
+                        '& blockquote': { borderLeft: 3, borderColor: 'primary.main', pl: 2, ml: 0, my: 2, backgroundColor: 'grey.100', py: 1, pr: 2 },
+                        '& code': { backgroundColor: 'grey.200', px: 0.5, py: 0.25, borderRadius: 0.5, fontFamily: 'monospace', fontSize: '0.875em' },
+                        '& pre': { backgroundColor: 'grey.200', p: 2, borderRadius: 1, overflow: 'auto', '& code': { backgroundColor: 'transparent', p: 0 } },
+                        '& ul, & ol': { pl: 3, mb: 1.5 },
+                        '& li': { mb: 0.5 },
+                        '& strong': { fontWeight: 'bold' },
+                        '& em': { fontStyle: 'italic' },
+                        '& details': { mb: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1 },
+                        '& summary': { cursor: 'pointer', fontWeight: 'medium', py: 1, '&:hover': { opacity: 0.8 } }
+                      }}>
+                        <ReactMarkdown 
+                          remarkPlugins={[remarkGfm]}
+                          rehypePlugins={[
+                            rehypeRaw,
+                            [
+                              rehypeSanitize,
+                              {
+                                tagNames: [
+                                  'details', 'summary', 'div', 'span',
+                                  'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                                  'p', 'br', 'strong', 'em', 'b', 'i', 'u', 's',
+                                  'ul', 'ol', 'li',
+                                  'blockquote', 'pre', 'code',
+                                  'table', 'thead', 'tbody', 'tr', 'th', 'td',
+                                  'a', 'img',
+                                  'hr'
+                                ],
+                                attributes: {
+                                  '*': ['class', 'id'],
+                                  'a': ['href', 'title'],
+                                  'img': ['src', 'alt', 'title', 'width', 'height'],
+                                  'div': ['style'],
+                                  'span': ['style'],
+                                  'details': ['open'],
+                                  'summary': []
+                                },
+                                protocols: {
+                                  href: ['http', 'https', 'mailto'],
+                                  src: ['http', 'https']
+                                }
+                              }
+                            ]
+                          ]}
+                        >
+                          {editContent}
+                        </ReactMarkdown>
+                      </Box>
+                    </Box>
+                  </Box>
+                ) : (
+                  // Editor only for Markdown
+                  <MarkdownCMEditor 
+                    ref={markdownEditorRef}
+                    value={editContent} 
+                    onChange={setEditContent} 
+                    filename={document.filename}
+                    canonicalPath={document.canonical_path}
+                    documentId={document.document_id} 
+                    initialScrollPosition={initialScrollPosition}
+                    onScrollChange={onScrollChange}
+                    onCurrentSectionChange={handleCurrentSectionChange}
+                  />
+                )
               ) : (
                 <TextField
                   multiline
@@ -1922,9 +2474,43 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
                 '& ul, & ol': { pl: 3, mb: 1.5 },
                 '& li': { mb: 0.5 },
                 '& strong': { fontWeight: 'bold' },
-                '& em': { fontStyle: 'italic' }
+                '& em': { fontStyle: 'italic' },
+                '& details': { mb: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1 },
+                '& summary': { cursor: 'pointer', fontWeight: 'medium', py: 1, '&:hover': { opacity: 0.8 } }
               }}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}
+                <ReactMarkdown 
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[
+                    rehypeRaw,
+                    [
+                      rehypeSanitize,
+                      {
+                        tagNames: [
+                          'details', 'summary', 'div', 'span',
+                          'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                          'p', 'br', 'strong', 'em', 'b', 'i', 'u', 's',
+                          'ul', 'ol', 'li',
+                          'blockquote', 'pre', 'code',
+                          'table', 'thead', 'tbody', 'tr', 'th', 'td',
+                          'a', 'img',
+                          'hr'
+                        ],
+                        attributes: {
+                          '*': ['class', 'id'],
+                          'a': ['href', 'title'],
+                          'img': ['src', 'alt', 'title', 'width', 'height'],
+                          'div': ['style'],
+                          'span': ['style'],
+                          'details': ['open'],
+                          'summary': []
+                        },
+                        protocols: {
+                          href: ['http', 'https', 'mailto'],
+                          src: ['http', 'https']
+                        }
+                      }
+                    ]
+                  ]}
                 >
                   {document.content}
                 </ReactMarkdown>
@@ -2167,6 +2753,15 @@ const DocumentViewer = ({ documentId, onClose, scrollToLine = null, scrollToHead
       />
     </Box>
   );
-};
+}, (prevProps, nextProps) => {
+  // Custom comparison: only re-render if these specific props change
+  return (
+    prevProps.documentId === nextProps.documentId &&
+    prevProps.scrollToLine === nextProps.scrollToLine &&
+    prevProps.scrollToHeading === nextProps.scrollToHeading &&
+    prevProps.initialScrollPosition === nextProps.initialScrollPosition
+  );
+  // Note: onClose and onScrollChange are callback functions - we assume they're stable
+});
 
 export default DocumentViewer;

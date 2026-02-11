@@ -117,9 +117,13 @@ class ServiceContainer:
         """Initialize shared resources that will be reused across services"""
         logger.info("🔧 Phase 2: Initializing shared resources...")
         
-        # Single WebSocket manager instance
-        from utils.websocket_manager import WebSocketManager
-        self.websocket_manager = WebSocketManager()
+        # Single WebSocket manager instance (optional: not available in Celery worker - no FastAPI)
+        try:
+            from utils.websocket_manager import WebSocketManager
+            self.websocket_manager = WebSocketManager()
+        except ImportError:
+            self.websocket_manager = None
+            logger.debug("WebSocket manager unavailable (e.g. Celery worker); real-time updates disabled")
         
         # Single document repository with shared connection pool
         self.document_repository = DocumentRepository()

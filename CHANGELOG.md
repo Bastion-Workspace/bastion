@@ -13,6 +13,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Feature: 'Cover' frontmatter type support in Fiction documents
 
 ## [Unreleased]
+- Update: Electronics agent suggests new reference files (suggested_files in response) instead of auto-creating them; content routing and save nodes no longer create files
+- Fix: Capture-to-inbox uses org_capture only (no research) unless user explicitly asks for research first; inbox is for short idea capture
+- Fix: org_capture skill uses prior_step_*_response from shared_memory when run as step 2 in a compound plan so the researched content is captured, not the user's short phrase
+- Feature: org_capture converts research and prior-step content to org-mode syntax (headings, bold/italic, tables, lists) for neat inbox entries
+- Fix: File relation graph restricted to current user's My Documents only; RLS role forced to user and all queries filter by user_id so nodes/links never leak across users
+- Feature: "Craft the next chapter" / "Write next chapter" — resolves target from cursor position (e.g. cursor in Ch1 → generate Ch2)
+- Fix: Honor explicit "craft/generate Chapter N" over cursor position when that chapter does not exist yet (e.g. "Craft Chapter 2" with only Chapter 1 in manuscript)
+- Feature: Obsidian-style file relation cloud (link graph) with RLS-secured document_links, tab and fullscreen UI, backfill endpoint
+- Feature: Download my Library button zips and downloads My Documents folder/file structure
+- Update: Overhauled fiction generation prompting — Style Guide elevated as primary creative authority, outline reframed as story ingredients not a recipe, added scene-thinking instructions to prevent beat-by-beat expansion
+- Fix: Improved skill routing for editor-context queries to prevent compound plan false positives
+- Fix: Enhanced fiction_editing skill description to include analyze/review capabilities
+- Fix: Narrowed story_analysis skill to writing theory/concepts (not manuscript review)
+- Fix: Added editor-context-takes-precedence-over-continuity guidance to skill selection
+- Update: Skills architecture design — add Phase 7 (Compound Query Planner), Phase 8 (Tool Packs), Phase 9 (Hierarchical Selection), new tools/skills roadmap, OpenClaw comparison
+- Fix: Skill dispatch (unified_dispatch) routes electronics, general_project, podcast_script to dedicated agents instead of Writing Assistant; Writing Assistant only when active_editor present
+- Fix: Skill selection prefers research for how-to questions when no editor; research skill description/keywords include how do I, how to, how can I
+- Refactor: Fiction only via Writing Assistant; remove standalone fiction_editing_agent workflow and dispatch; remove build_context_preparation_subgraph and build_resolution_subgraph; fiction_editing_subgraph unchanged
+- Refactor: Remove standalone agents (outline, character, rules, style, article); routing and labels use Writing Assistant only; subgraphs unchanged
+- Refactor: Disable technical hyperspace agent; /hyperspace and cached technical_hyperspace route to chat (implementation plan kept in dev-notes)
+- Fix: Include structured images in research complete chunk when using skill dispatch (unified_dispatch)
+- Fix: Route local collection queries (e.g. Dilbert comics, photos of X) to research skill instead of entertainment
+- Fix: Org content agent now correctly routes via AUTOMATION skill instead of CONVERSATIONAL (prefer editor with org file open now works)
+- Fix: Fiction chapter generation state flow — return validated_operations from generation subgraph merge node for resolution subgraph, fix duplicate system_prompt key overwriting in build_generation_prompt_node
+- Fix: Fiction chapter generation – normalize single-operation LLM response in validate_generated_output_node, preserve manuscript/context in _detect_request_type_node early return, always return editor_operations/manuscript_edit from fiction format_response for Writing Assistant
+- Refactor: LLM-primary skill routing — filter_eligible (hard gates) + llm_select_skill (descriptions); remove keyword scoring and domain detection
+- Refactor: Remove standalone proofreading_agent; proofreading remains as subgraph in fiction_editing, article_writing, podcast_script
+- Refactor: Remove standalone rules_editing_agent; rules editing handled by Writing Assistant → rules_editing_subgraph only
+- Fix: Faster new AI chat creation (prime cache, skip checkpoint for new conversations, skip redundant refetch)
+- Fix: Clarified structured image pattern - frontend uses EITHER structured images OR markdown, not both (prevents duplicate display)
+- Feature: Migration 040 adds external_connections, connection_sync_state, connection_data_cache, system_settings for existing DBs (OAuth / email / chat bots)
+- Feature: Passive security analysis agent (exposed files, headers, info disclosure) via Tools Service and LLM Orchestrator
+- Feature: URL in AI chat sidebar extracts single linked page by default; full-site crawl only when user says crawl/capture/ingest/scrape
+- Feature: Route fiction documents through Writing Assistant Agent via unified fiction_editing_subgraph; intent classifier routes type: fiction to writing_assistant_agent
+- Refactor: Remove standalone article_writing_agent and character_development_agent; article/character flows use Writing Assistant subgraphs only
+- Documentation: Added Technical Hyperspace Implementation Plan for multi-domain simulation system
+- Documentation: Added comprehensive Data Workspace Analytics Enhancements planning document covering 4 phases of advanced pattern detection, correlation discovery, and real-time analytics
+- Feature: Image search runs hybrid (user + global) when user_id is set; regular users see their images and Global
+- Feature: Collection search results show Why it matches and full description in a modal (Read more)
+- Fix: Duplicate date removed from collection result captions (title already contains date)
+- Fix: Folder delete from disk (file watcher) now uses explicit admin RLS context for global folders
+- Fix: Images now display from local document searches via structured metadata transmission
+- Fix: PostgreSQL full-text search fallback with automatic stemming (handles brain/brains, dog/dogs plurals)
+- Fix: Text search fallback now allows documents with empty type field (database sync issue workaround)
+- Fix: Document repository no longer overwrites metadata_json with quality_metrics during INSERT
+- Fix: Image metadata now stores both 'type' and 'image_type' keys for reliable search filtering
+- Fix: ImageSidecarService now uses correct fetch_one() import, preventing duplicate document creation
+- Fix: ImageSidecarService now uses correct column name 'processing_status' instead of 'status'
+- Debug: Enhanced vector search logging to diagnose embedding/retrieval issues
+- Fix: Vector deletion timeouts when deleting multiple files - added semaphore to limit concurrent deletions to 5, retry logic with exponential backoff for CANCELLED errors, and increased timeout to 120s
+- Fix: gRPC keepalive configuration prevents connection drops during bulk vector operations
+- Feature: LLM-powered query classification for research agent (collection_search, factual_query, exploratory_search) with fast paths
+- Feature: Collection search subgraph with rich metadata descriptions (title, date, series, author, content, tags)
+- Feature: Improved image search with canonical content_type handling (comics->comic, photos->photo)
+- **BREAKING**: Image search now uses `/api/documents/{id}/file` endpoint instead of hardcoded paths (images served from actual document location)
+- Fix: Image search exact match fallback now only triggers with explicit date filter (prevents random results)
+- Fix: Image search returns "no results" when concept doesn't match, instead of random comics from series
+- Fix: Removed hardcoded directory structure assumptions - images use document folder structure
+- Fix: Changed image-vision-service host port from 50056 to 50057 to avoid port conflict
+- Feature: Research agent fast path now returns rich item details (title/filename, content preview) and standardized image emission
+- Update: Fast path builds structured_images from image documents when image search returns none; response includes markdown images for Chat Sidebar
+- Update: Chat Sidebar image URL handling supports /api/documents/{id}/file for research result images
+- Feature: Research agent three-tier routing (fast/standard/web) for simple existence queries
+- Update: Fast path skips query expansion, sufficiency check, visualization, and full doc analysis
+- Update: Query expansion skipped for simple queries (<=5 words)
+- Update: Image query analyzer skipped for simple existence queries and cached for parallel searches
+- Update: Visualization skipped for simple queries (short query and short response)
+- Fix: Fast path returns structured_images and image_search_results for display
+- Feature: Benchmark tests for research tier routing (test_research_tier_routing.py)
+- Feature: Extended image metadata schema with type-specific fields (location, event, medium, body_part, modality, map_type, coordinates, application, platform)
+- Update: Enhanced Edit Image Metadata UI to show type-specific fields based on image type selection
+- Update: Image metadata sidecars now support richer searchability for photos, artwork, medical images, maps, and screenshots
+- Fix: CRITICAL - Character development subgraph conversation history fallback was too aggressive (triggered at <200 chars), causing recreation of entire profiles instead of adding to existing content
+- Fix: Changed character subgraph conversation history threshold from <200 chars to ==0 (completely empty files only)
+- Fix: Added comprehensive debug logging to character development subgraph for content tracking
+- Fix: CRITICAL - Changed guidance from "replace ENTIRE bullet list" to "replace ONLY THE LAST BULLET" for surgical precision
+- Fix: CRITICAL - Updated all subgraphs (rules, style, character, outline) with surgical bullet addition guidance (1-2 bullets max in original_text)
+- Fix: CRITICAL - Added validation warnings for overly broad replace_range operations (5+ bullets, 500+ chars) to prevent deleting headings/unrelated content
+- Fix: CRITICAL - Enhanced _validate_operation_for_bullet_lists() to detect both insert_after violations AND overly broad replacements
+- Fix: CRITICAL - Updated decision trees, examples, and guidance to emphasize surgical approach: "Only include what you need to modify"
+- Fix: CRITICAL - Added programmatic enforcement in rules_editing_subgraph to REJECT insert_after operations with bullet content
+- Fix: CRITICAL - Created _validate_operation_for_bullet_lists() function that detects and blocks forbidden insert_after+bullet combinations before resolution
+- Fix: CRITICAL - Prohibited insert_after for bullet list additions across all writing subgraphs (rules, style, outline, character)
+- Fix: Enhanced editor operation prompts with decision tree showing correct approach: replace entire bullet list with expanded version using replace_range
+- Fix: Updated 4 subgraphs (rules, style, outline, character) to enforce replace_range for bullet additions - eliminates middle-insertion issue at source
+- Fix: Added comprehensive visual examples showing WHY insert_after fails for bullets (picks wrong anchor → splits list) vs WHY replace_range succeeds (clean expansion)
+- Fix: CRITICAL - Implemented programmatic section boundary detection in rules_editing_subgraph to prevent insertions in the middle of sections
+- Feature: Rules subgraph now automatically corrects anchor_text to use the actual last bullet in the target section before resolution
+- Fix: Added _find_section_bounds, _find_last_bullet_in_section, and _correct_anchor_for_section functions for robust section detection
+- Refactor: Added domain-specific editor guidance for Rules, Style, and Outline documents with semantic section mapping and automatic placement logic
+- Refactor: Migrated style_editing_subgraph and outline_editing_subgraph to use centralized editor operation instructions from shared utilities
+- Feature: Rules documents now have semantic section mapping (bride hierarchy → Institutions & Power Dynamics, magic → Magic Systems, etc.)
+- Feature: Style documents now have section relationship awareness (POV guidelines affect both Point of View and Narrative Voice sections)
+- Feature: Outline documents now have chapter structure templates, 70-beat limit enforcement, and beat placement strategy guidance
+- Fix: CRITICAL - Enhanced MISTAKE #7 with multi-line bullet example showing how using "last line of middle bullet" still splits lists
+- Fix: Added 4 verification checks for bullet lists including "scan ENTIRE section" and "verify next content is header, not another bullet"
+- Fix: Strengthened operation type guidance for insert_after to require "LAST LINE of LAST BULLET" with explicit scan requirement
+- Fix: Added explicit warning "Using last line of middle bullet splits the list" to prevent using end of any bullet as anchor
+- Fix: CRITICAL - Added MISTAKE #7 "Using middle bullet as anchor" with visual example showing how insert_after splits lists when not using LAST bullet
+- Fix: Added explicit guidance "FOR BULLET LISTS" in 3 locations: safety rules, operation types, and verification checklist
+- Fix: Enhanced insert_after operation type to warn "Using middle bullet splits the list - new bullets inserted between existing ones!"
+- Fix: Added 2 verification checks specifically for bullet list additions (anchor must be LAST bullet, verify no bullets after anchor)
+- Fix: CRITICAL - Added explicit START/END markers around file content to prevent LLM from using anchor text from wrong sections (fixes operations defaulting to beginning of document)
+- Fix: Added MISTAKE #6 for "anchor text from wrong section" with visual example (prevents using text from style guides/outlines instead of actual file)
+- Fix: Enhanced verification checklist to check anchor text EXISTS "between START/END markers" (not from reference docs)
+- Fix: Rules subgraph now wraps file content with "=== START OF RULES CONTENT ===" markers for clear text source boundaries
+- Fix: CRITICAL - Incorporated fiction agent's battle-tested editor operation guidance into standardized utilities for rock-solid in-editor diffs
+- Fix: Added "USE MINIMAL MATCHES" guidance with concrete word-level examples (prevent over-broad original_text that loses adjacent content)
+- Fix: Added "WHAT IS VALID ANCHOR TEXT" section with explicit ✅ CORRECT / ❌ WRONG patterns
+- Fix: Enhanced verification checklist with "mental Ctrl+F" check and 15 specific validation points
+- Fix: Expanded common mistakes to 5 concrete failure scenarios with visual BAD vs GOOD examples
+- Fix: Strengthened language from "unreliable" to "will FAIL" to emphasize criticality of text anchors
+- Fix: Added "REPLACEMENT TEXT IS COMPLETE" warning with concrete example showing how partial text gets lost
+- Fix: CRITICAL - Added explicit "TEXT ANCHORS MANDATORY" guidance to prevent LLMs from generating index-only operations that stomp wrong content
+- Refactor: Created centralized editor operation instruction utilities in writing_subgraph_utilities.py with reusable prompt components
+- Refactor: Migrated rules_editing_subgraph to use standardized editor operation instructions from shared utilities
+- Fix: Enhanced rules agent prompts with explicit "PREFER GRANULAR EDITS" guidance to prevent over-broad replace_range operations that delete unrelated content
+- Fix: Added operation validation logging in rules agent to warn when original_text is too large (>300 chars), contains multiple bullet points, or includes section headers
+- Fix: Added comprehensive verification checklist and common mistake examples to rules agent prompts
+- Feature: Standardized agent response contract with AgentResponse model for consistent response structure across all agents
+- Feature: Unified response extraction helpers in grpc_service supporting both legacy and standard formats during migration
+- Feature: Rule documenting agent response contract with examples and migration guidelines
+- Feature: Added `images` field to AgentResponse contract for structured image data (supports text + image responses)
+- Refactor: Migrated reference_agent, fiction_editing_agent, outline_editing_agent, and image_generation_agent to use standard AgentResponse contract
+- Fix: Reference agent now formats pattern analysis and insights data into readable lists in chat responses instead of only showing summaries
+- Fix: Increased outline agent max_tokens to 250K to allow unlimited operations without truncation
+- Fix: Added truncation detection with helpful error messages and detailed logging for incomplete LLM responses
+- Fix: Removed artificial operation limits to allow large multi-chapter edits in single request
+- Fix: Critical bug in editor operation resolver where undefined variable caused operations to be placed at beginning of file
+- Fix: Editor operation resolver now handles None values in start/end positions to prevent type comparison errors
+- Fix: Outline agent now correctly inserts subsections (### Status, ### Pacing) immediately after chapter headings instead of at end of chapter
+- Fix: Added detailed debug logging to editor operation resolver to diagnose chapter boundary detection issues
+- Fix: Improved outline agent error handling for empty LLM responses with better diagnostics
+- Fix: Removed spurious frontmatter parsing warnings for simple file path fields
+- Documentation: Added comprehensive future email integration guide covering Gmail and Office 365 OAuth implementation
+- Fix: Resolved OrgMode editor decoration and folding issues by implementing proper CodeMirror 6 fold/unfold effects with Ctrl+Shift+H keybinding
 - Fix: Intent classifier now respects action intent changes (analysis → modification) to prevent routing revisions back to story_analysis_agent
 - Fix: Updated btu_hvac formula to handle rooms list and calculate total BTU for multi-room reference documents
 - Fix: Updated llm-orchestrator Dockerfile to generate all required gRPC protos including vector_service
@@ -163,4 +299,6 @@ A comprehensive AI-powered personal workspace platform featuring 25+ specialized
 - Databases: PostgreSQL (main + data workspaces), Qdrant (vectors), Neo4j (knowledge graph)
 - Infrastructure: Docker Compose, microservices architecture
 - AI: OpenRouter/OpenAI integration with structured Pydantic outputs
+
+
 

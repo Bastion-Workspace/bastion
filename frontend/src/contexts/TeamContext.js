@@ -387,13 +387,13 @@ export const TeamProvider = ({ children }) => {
     }
   }, [isAuthenticated, loadUserTeams, loadPendingInvitations, loadUnreadCounts]);
 
-  // Refresh unread counts periodically
+  // Refresh unread counts periodically (reduced frequency to minimize re-renders)
   useEffect(() => {
     if (!isAuthenticated) return;
     
     const interval = setInterval(() => {
       loadUnreadCounts();
-    }, 30000); // Every 30 seconds
+    }, 300000); // Every 5 minutes (reduced from 30s to prevent editor lag)
     
     return () => clearInterval(interval);
   }, [isAuthenticated, loadUnreadCounts]);

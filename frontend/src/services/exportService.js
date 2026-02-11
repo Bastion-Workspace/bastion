@@ -112,9 +112,9 @@ class ExportService {
         const fontSize = element.level === 1 ? 16 : element.level === 2 ? 14 : 12;
         pdf.setFontSize(fontSize);
 
-        // Render heading with inline formatting
+        // Render heading with inline formatting (minimal space after; user can add blank line in markdown)
         yPosition = this._renderTextWithFormatting(pdf, element.text, margin, yPosition, pageWidth, 'heading');
-        yPosition += 4; // Extra space after headings
+        yPosition += 2;
       }
 
       else if (element.type === 'codeblock') {
@@ -242,7 +242,11 @@ class ExportService {
       const trimmed = line.trim();
 
       if (!trimmed) {
-        // Empty line for spacing
+        // Skip spacer when the previous element was a heading (no extra line after headers)
+        const prev = elements[elements.length - 1];
+        if (prev && prev.type === 'heading') {
+          continue;
+        }
         elements.push({ type: 'spacer', text: '' });
         continue;
       }
@@ -338,22 +342,25 @@ class ExportService {
 
   /**
    * Parse inline markdown formatting (bold, italic, code, links)
+   * Maintains proper text ordering by processing sequentially
    */
   _parseInlineFormatting = (text) => {
     // First handle emojis in the entire text
     const processedText = this._containsEmoji(text) ? this._replaceEmojis(text) : text;
 
     const segments = [];
-    let remaining = processedText;
 
     // Process inline formatting in order of specificity
     // Links first (most specific)
     const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
     let linkMatch;
     let lastIndex = 0;
+    let hasLinks = false;
 
     while ((linkMatch = linkRegex.exec(processedText)) !== null) {
-      // Add text before the link
+      hasLinks = true;
+      
+      // Add text before the link (with other inline formatting)
       if (linkMatch.index > lastIndex) {
         const beforeText = processedText.substring(lastIndex, linkMatch.index);
         if (beforeText) {
@@ -371,10 +378,15 @@ class ExportService {
       lastIndex = linkMatch.index + linkMatch[0].length;
     }
 
-    // Add remaining text after last link
-    if (lastIndex < processedText.length) {
+    // Add remaining text after last link (or entire text if no links)
+    if (hasLinks && lastIndex < processedText.length) {
       const remainingText = processedText.substring(lastIndex);
-      segments.push(...this._parseSimpleFormatting(remainingText));
+      if (remainingText) {
+        segments.push(...this._parseSimpleFormatting(remainingText));
+      }
+    } else if (!hasLinks) {
+      // No links found, parse the entire text for other formatting
+      segments.push(...this._parseSimpleFormatting(processedText));
     }
 
     return segments.length > 0 ? segments : [{ text: processedText, type: 'text' }];
@@ -382,55 +394,73 @@ class ExportService {
 
   /**
    * Parse simple inline formatting (bold, italic, code)
+   * FIXED: Maintains proper text ordering by processing sequentially
+   * Supports both single (`) and triple (```) backticks for inline code
    */
   _parseSimpleFormatting = (text) => {
     const segments = [];
-    let remaining = text;
-
-    // Bold-italic (**_text_** or ___text___)
-    const boldItalicRegex = /(\*\*\*(.*?)\*\*\*|___(.*?)___)/g;
-    remaining = remaining.replace(boldItalicRegex, (match, full, text1, text2) => {
-      const content = text1 || text2;
-      segments.push({ text: content, type: 'bolditalic' });
-      return '';
-    });
-
-    // Bold (**text** or __text__)
-    const boldRegex = /(\*\*(.*?)\*\*|__(.*?)__)/g;
-    remaining = remaining.replace(boldRegex, (match, full, text1, text2) => {
-      const content = text1 || text2;
-      segments.push({ text: content, type: 'bold' });
-      return '';
-    });
-
-    // Italic (*text* or _text_)
-    const italicRegex = /(\*(.*?)\*|_(.*?)_)/g;
-    remaining = remaining.replace(italicRegex, (match, full, text1, text2) => {
-      const content = text1 || text2;
-      segments.push({ text: content, type: 'italic' });
-      return '';
-    });
-
-    // Inline code
-    const codeRegex = /`([^`]+)`/g;
-    remaining = remaining.replace(codeRegex, (match, code) => {
-      segments.push({ text: code, type: 'inline-code' });
-      return '';
-    });
-
-    // Strikethrough
-    const strikeRegex = /~~(.*?)~~/g;
-    remaining = remaining.replace(strikeRegex, (match, content) => {
-      segments.push({ text: content, type: 'strikethrough' });
-      return '';
-    });
-
-    // Add remaining plain text
-    if (remaining.trim()) {
-      segments.push({ text: remaining, type: 'text' });
+    
+    // Combined regex to match all inline formatting in order
+    // Added support for triple backticks (```) as inline code (common non-standard usage)
+    const combinedRegex = /(\*\*\*(.+?)\*\*\*|___(.+?)___|~~(.+?)~~|\*\*(.+?)\*\*|__(.+?)__|```([^`]+?)```|`([^`]+)`|\*([^*]+?)\*|_([^_]+?)_)/g;
+    
+    let lastIndex = 0;
+    let match;
+    
+    while ((match = combinedRegex.exec(text)) !== null) {
+      // Add any plain text before this match
+      if (match.index > lastIndex) {
+        const plainText = text.substring(lastIndex, match.index);
+        if (plainText) {
+          segments.push({ text: plainText, type: 'text' });
+        }
+      }
+      
+      // Determine the type and content of this match
+      let content, type;
+      
+      if (match[1] && (match[2] || match[3])) {
+        // Bold-italic (*** or ___)
+        content = match[2] || match[3];
+        type = 'bolditalic';
+      } else if (match[4]) {
+        // Strikethrough (~~)
+        content = match[4];
+        type = 'strikethrough';
+      } else if (match[5] || match[6]) {
+        // Bold (** or __)
+        content = match[5] || match[6];
+        type = 'bold';
+      } else if (match[7]) {
+        // Inline code with triple backticks (```)
+        content = match[7];
+        type = 'inline-code';
+      } else if (match[8]) {
+        // Inline code with single backtick (`)
+        content = match[8];
+        type = 'inline-code';
+      } else if (match[9] || match[10]) {
+        // Italic (* or _)
+        content = match[9] || match[10];
+        type = 'italic';
+      }
+      
+      if (content) {
+        segments.push({ text: content, type });
+      }
+      
+      lastIndex = match.index + match[0].length;
     }
-
-    return segments;
+    
+    // Add any remaining plain text
+    if (lastIndex < text.length) {
+      const remainingText = text.substring(lastIndex);
+      if (remainingText) {
+        segments.push({ text: remainingText, type: 'text' });
+      }
+    }
+    
+    return segments.length > 0 ? segments : [{ text, type: 'text' }];
   };
 
   /**
@@ -482,6 +512,7 @@ class ExportService {
 
   /**
    * Render text with inline formatting segments
+   * FIXED: Keeps inline code and formatted text together, moves to next line if needed
    */
   _renderTextWithFormatting = (pdf, segments, x, y, maxWidth, defaultType = 'text') => {
     let currentX = x;
@@ -499,9 +530,16 @@ class ExportService {
       text: this._containsEmoji(segment.text) ? this._replaceEmojis(segment.text) : segment.text
     }));
 
+    let lastSegmentText = '';
     for (const segment of processedSegments) {
-      const text = segment.text || '';
+      let text = segment.text || '';
       const type = segment.type || defaultType;
+
+      // Ensure space before inline code when previous segment didn't end with whitespace
+      if (type === 'inline-code' && currentX > x && lastSegmentText.length > 0 && !/\s$/.test(lastSegmentText)) {
+        text = ' ' + text;
+      }
+      lastSegmentText = segment.text || '';
 
       // Set font based on formatting type
       switch (type) {
@@ -530,24 +568,37 @@ class ExportService {
           pdf.setTextColor(0, 0, 0); // Black for normal text
       }
 
-      // Split text to fit width
+      // For inline code and links, try to keep them together on one line
       const availableWidth = maxWidth - (currentX - x);
-      const lines = pdf.splitTextToSize(text, availableWidth);
+      const textWidth = pdf.getTextWidth(text);
+      
+      if ((type === 'inline-code' || type === 'link') && textWidth > availableWidth && currentX > x) {
+        // Move to next line to keep inline code/link together
+        currentX = x;
+        currentY += lineHeight;
+      }
+
+      // Now split text to fit (use full maxWidth if we just moved to new line)
+      const widthToUse = (currentX === x) ? maxWidth : availableWidth;
+      const lines = pdf.splitTextToSize(text, widthToUse);
 
       // Render the text
-      pdf.text(lines, currentX, currentY);
-
-      // For links, we could add annotations here if needed
-      // pdf.link(currentX, currentY - 4, pdf.getTextWidth(lines[0]), 6, { url: segment.url });
-
-      // Update position
-      const lastLineWidth = pdf.getTextWidth(lines[lines.length - 1] || '');
-      currentX += lastLineWidth;
-
-      // If we have multiple lines, reset X and update Y
-      if (lines.length > 1) {
-        currentX = x;
-        currentY += (lines.length - 1) * lineHeight;
+      for (let i = 0; i < lines.length; i++) {
+        pdf.text(lines[i], currentX, currentY);
+        
+        if (i < lines.length - 1) {
+          // Move to next line
+          currentX = x;
+          currentY += lineHeight;
+        } else {
+          // Last line - update X position
+          currentX += pdf.getTextWidth(lines[i]);
+          // jsPDF can under-measure trailing spaces; ensure we advance past them so next segment doesn't overwrite
+          const trailingSpaces = (lines[i].match(/\s+$/) || [''])[0].length;
+          if (trailingSpaces > 0) {
+            currentX += pdf.getTextWidth(' ') * trailingSpaces;
+          }
+        }
       }
 
       // Reset text color
@@ -2184,7 +2235,7 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
           }
           
           yPosition = this._renderTextWithFormattingImproved(pdf, element.text, margin, yPosition, pageWidth, margin, pageHeight, fontSize);
-          yPosition += 6;
+          yPosition += 2; // Minimal space after header; user can add blank line in markdown
           pdf.setFontSize(12);
           pdf.setFont('helvetica', 'normal');
         }
@@ -2333,6 +2384,7 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
 
   /**
    * Improved version of _renderTextWithFormatting that handles page breaks
+   * FIXED: Keeps inline code and formatted text together, moves to next line if needed
    */
   _renderTextWithFormattingImproved = (pdf, segments, x, y, maxWidth, margin, pageHeight, fontSize = 12) => {
     let currentX = x;
@@ -2348,9 +2400,16 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
       text: this._containsEmoji(segment.text) ? this._replaceEmojis(segment.text) : segment.text
     }));
 
+    let lastSegmentText = '';
     for (const segment of processedSegments) {
-      const text = segment.text || '';
+      let text = segment.text || '';
       const type = segment.type || 'text';
+
+      // Ensure space before inline code when previous segment didn't end with whitespace
+      if (type === 'inline-code' && currentX > x && lastSegmentText.length > 0 && !/\s$/.test(lastSegmentText)) {
+        text = ' ' + text;
+      }
+      lastSegmentText = segment.text || '';
 
       switch (type) {
         case 'bold': pdf.setFont('helvetica', 'bold'); break;
@@ -2361,54 +2420,45 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
         default: pdf.setFont('helvetica', 'normal'); break;
       }
 
+      // For inline code and links, try to keep them together on one line
       const availableWidth = maxWidth - (currentX - x);
-      const lines = pdf.splitTextToSize(text, maxWidth); // Always use maxWidth for full width wrapping
+      const textWidth = pdf.getTextWidth(text);
       
-      // If we are starting mid-line, handle the first part specifically
-      if (currentX > x) {
-        const firstPartLines = pdf.splitTextToSize(text, availableWidth);
-        pdf.text(firstPartLines[0], currentX, currentY);
+      if ((type === 'inline-code' || type === 'link') && textWidth > availableWidth && currentX > x) {
+        // Move to next line to keep inline code/link together
+        currentX = x;
+        currentY += lineHeight;
         
-        if (firstPartLines.length > 1) {
+        if (currentY > pageHeight) {
+          pdf.addPage();
+          currentY = margin;
+        }
+      }
+
+      // Now split text to fit (use full maxWidth if we just moved to new line)
+      const widthToUse = (currentX === x) ? maxWidth : (maxWidth - (currentX - x));
+      const lines = pdf.splitTextToSize(text, widthToUse);
+      
+      // Render each line
+      for (let l = 0; l < lines.length; l++) {
+        if (currentY > pageHeight) {
+          pdf.addPage();
+          currentY = margin;
+        }
+        
+        pdf.text(lines[l], currentX, currentY);
+        
+        if (l < lines.length - 1) {
           // Move to next line
           currentX = x;
           currentY += lineHeight;
-          
-          if (currentY > pageHeight) {
-            pdf.addPage();
-            currentY = margin;
-          }
-          
-          // Process remaining text
-          const remainingText = text.substring(firstPartLines[0].length);
-          const remainingLines = pdf.splitTextToSize(remainingText, maxWidth);
-          for (let l = 0; l < remainingLines.length; l++) {
-            if (currentY > pageHeight) {
-              pdf.addPage();
-              currentY = margin;
-            }
-            pdf.text(remainingLines[l], currentX, currentY);
-            if (l < remainingLines.length - 1) {
-              currentY += lineHeight;
-            } else {
-              currentX += pdf.getTextWidth(remainingLines[l]);
-            }
-          }
         } else {
-          currentX += pdf.getTextWidth(firstPartLines[0]);
-        }
-      } else {
-        // Start from beginning of line
-        for (let l = 0; l < lines.length; l++) {
-          if (currentY > pageHeight) {
-            pdf.addPage();
-            currentY = margin;
-          }
-          pdf.text(lines[l], currentX, currentY);
-          if (l < lines.length - 1) {
-            currentY += lineHeight;
-          } else {
-            currentX += pdf.getTextWidth(lines[l]);
+          // Last line - update X position
+          currentX += pdf.getTextWidth(lines[l]);
+          // jsPDF can under-measure trailing spaces; ensure we advance past them so next segment doesn't overwrite
+          const trailingSpaces = (lines[l].match(/\s+$/) || [''])[0].length;
+          if (trailingSpaces > 0) {
+            currentX += pdf.getTextWidth(' ') * trailingSpaces;
           }
         }
       }

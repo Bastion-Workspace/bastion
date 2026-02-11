@@ -41,7 +41,7 @@ class OrgArchiveService:
             user_id: User ID for file access
             source_file: Relative path to source file (e.g., "OrgMode/tasks.org")
             line_number: Line number of entry to archive (1-based)
-            archive_location: Optional custom archive location (defaults to {source}_archive.org)
+            archive_location: Optional custom archive location (defaults to user's settings or {source}_archive.org)
         
         Returns:
             Dict with success status and details
@@ -60,10 +60,11 @@ class OrgArchiveService:
             
             # Determine archive file path
             if archive_location:
-                archive_path = await self._resolve_file_path(user_id, archive_location, folder_service)
+                # Resolve relative to source file's directory if it's a relative path
+                archive_path = await self._resolve_file_path(user_id, archive_location, folder_service, base_path=source_path)
             else:
-                # Default: {filename}_archive.org in same directory
-                archive_path = source_path.parent / f"{source_path.stem}{self.archive_suffix}"
+                # Check user's settings for default archive location
+                archive_path = await self._get_archive_path(user_id, source_file, source_path)
             
             logger.info(f"📦 Archive source: {source_path}")
             logger.info(f"📦 Archive target: {archive_path}")
@@ -84,6 +85,9 @@ class OrgArchiveService:
             
             # Add archive metadata
             archived_entry = self._add_archive_metadata(entry_lines, source_file)
+            
+            # Ensure archive directory exists
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
             
             # Read or create archive file
             if archive_path.exists():
@@ -176,9 +180,14 @@ class OrgArchiveService:
             
             # Determine archive file path
             if archive_location:
-                archive_path = await self._resolve_file_path(user_id, archive_location, folder_service)
+                # Resolve relative to source file's directory if it's a relative path
+                archive_path = await self._resolve_file_path(user_id, archive_location, folder_service, base_path=source_path)
             else:
-                archive_path = source_path.parent / f"{source_path.stem}{self.archive_suffix}"
+                # Check user's settings for default archive location
+                archive_path = await self._get_archive_path(user_id, source_file, source_path)
+            
+            # Ensure archive directory exists
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
             
             # Read or create archive file
             if archive_path.exists():
@@ -230,17 +239,135 @@ class OrgArchiveService:
             logger.error(f"❌ Bulk archive failed: {e}", exc_info=True)
             raise
     
+    def _parse_file_archive_directive(self, content: str) -> Optional[str]:
+        """
+        Parse #+ARCHIVE: directive from org file header
+        
+        Format: #+ARCHIVE: path/to/archive.org:: or #+ARCHIVE: path/to/archive.org::* Heading
+        
+        Returns the archive location string (without the :: and heading part)
+        """
+        if not content:
+            return None
+        
+        lines = content.split('\n')
+        # Look for #+ARCHIVE: in the header (before first heading)
+        for line in lines:
+            # Stop at first heading
+            if re.match(r'^\*+\s+', line):
+                break
+            
+            # Match #+ARCHIVE: directive
+            match = re.match(r'^#\+ARCHIVE:\s+(.+?)(?:::|$)', line, re.IGNORECASE)
+            if match:
+                archive_location = match.group(1).strip()
+                logger.info(f"📦 Found file-level #+ARCHIVE: directive: {archive_location}")
+                return archive_location
+        
+        return None
+    
+    async def _get_archive_path(
+        self,
+        user_id: str,
+        source_file: str,
+        source_path: Path
+    ) -> Path:
+        """
+        Get archive path with priority: file-level #+ARCHIVE: > settings > default
+        
+        Supports format specifiers:
+        - %s = source filename without extension
+        - %s_archive = source filename with _archive suffix
+        """
+        # Priority 1: Check file-level #+ARCHIVE: directive
+        try:
+            if source_path.exists():
+                with open(source_path, 'r', encoding='utf-8') as f:
+                    file_content = f.read()
+                
+                file_archive = self._parse_file_archive_directive(file_content)
+                if file_archive:
+                    # Replace format specifiers
+                    source_stem = source_path.stem
+                    archive_location = file_archive.replace('%s', source_stem)
+                    
+                    # Resolve the archive path (relative to source file's directory if it's a relative path)
+                    from services.folder_service import FolderService
+                    folder_service = FolderService()
+                    archive_path = await self._resolve_file_path(user_id, archive_location, folder_service, base_path=source_path)
+                    
+                    logger.info(f"📦 Using file-level #+ARCHIVE: directive: {archive_location}")
+                    return archive_path
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to parse file-level archive directive: {e}")
+        
+        # Priority 2: Check user's settings
+        try:
+            from services.org_settings_service import OrgSettingsService
+            
+            settings_service = OrgSettingsService()
+            org_settings = await settings_service.get_settings(user_id)
+            
+            # Check if user has archive preferences configured
+            if (org_settings.archive_preferences and 
+                org_settings.archive_preferences.default_archive_location):
+                
+                archive_location = org_settings.archive_preferences.default_archive_location
+                
+                # Replace format specifiers
+                source_stem = source_path.stem  # filename without extension
+                archive_location = archive_location.replace('%s', source_stem)
+                
+                # Resolve the archive path (relative to source file's directory if it's a relative path)
+                from services.folder_service import FolderService
+                folder_service = FolderService()
+                archive_path = await self._resolve_file_path(user_id, archive_location, folder_service, base_path=source_path)
+                
+                logger.info(f"📦 Using archive location from settings: {archive_location}")
+                return archive_path
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to get archive settings, using default: {e}")
+        
+        # Priority 3: Default: {filename}_archive.org in same directory
+        return source_path.parent / f"{source_path.stem}{self.archive_suffix}"
+    
     async def _resolve_file_path(
         self,
         user_id: str,
         relative_path: str,
-        folder_service
+        folder_service,
+        base_path: Optional[Path] = None
     ) -> Path:
-        """Resolve relative org file path to absolute path"""
-        from backend.config import settings
+        """
+        Resolve org file path to absolute path
+        
+        If base_path is provided and relative_path starts with ./ or ../ or is just a filename,
+        resolve relative to base_path. Otherwise, resolve relative to user's base directory.
+        
+        Args:
+            user_id: User ID
+            relative_path: Path to resolve (e.g., "./archive.org", "../archive.org", "OrgMode/tasks.org")
+            folder_service: Folder service instance
+            base_path: Optional base path for relative resolution (typically source file's directory)
+        """
+        from config import settings
         from services.database_manager.database_helpers import fetch_one
         
-        # Get username
+        # Check if this is a relative path (starts with ./ or ../ or is just a filename without any /)
+        # Paths like "OrgMode/archive.org" are relative to user's base directory, not source file
+        is_relative = (
+            relative_path.startswith('./') or 
+            relative_path.startswith('../') or
+            ('/' not in relative_path and not relative_path.startswith('/'))
+        )
+        
+        if is_relative and base_path:
+            # Resolve relative to source file's directory
+            resolved_path = (base_path.parent / relative_path).resolve()
+            logger.info(f"📦 Resolved relative path '{relative_path}' relative to {base_path.parent} -> {resolved_path}")
+            return resolved_path
+        
+        # Otherwise, resolve relative to user's base directory
         row = await fetch_one("SELECT username FROM users WHERE user_id = $1", user_id)
         username = row['username'] if row else user_id
         
@@ -248,7 +375,7 @@ class OrgArchiveService:
         upload_dir = Path(settings.UPLOAD_DIR)
         user_base_dir = upload_dir / "Users" / username
         
-        # Handle relative paths (e.g., "OrgMode/tasks.org" or "tasks.org")
+        # Handle paths relative to user directory (e.g., "OrgMode/tasks.org" or "tasks.org")
         file_path = user_base_dir / relative_path
         
         return file_path

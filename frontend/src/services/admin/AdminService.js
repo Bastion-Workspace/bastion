@@ -14,6 +14,16 @@ class AdminService extends ApiServiceBase {
     return this.post('/api/admin/clear-documents');
   }
 
+  clearDocumentsDatabaseOnly = async (rescan = true) => {
+    return this.post('/api/admin/clear-documents-database-only', null, {
+      params: { rescan: rescan !== false }
+    });
+  }
+
+  rebuildAllLinks = async () => {
+    return this.post('/api/admin/rebuild-all-links');
+  }
+
   // User management methods
   getUsers = async () => {
     return this.get('/api/admin/users');

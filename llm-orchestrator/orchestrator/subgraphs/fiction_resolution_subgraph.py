@@ -726,49 +726,5 @@ async def finalize_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
-# ============================================
-# Subgraph Builder
-# ============================================
-
-def build_resolution_subgraph(checkpointer):
-    """
-    Build the resolution subgraph for fiction editing.
-    
-    Args:
-        checkpointer: LangGraph checkpointer for state persistence
-    
-    Returns:
-        Compiled StateGraph subgraph
-    """
-    workflow = StateGraph(FictionResolutionState)
-    
-    # Add nodes
-    workflow.add_node("prepare_context", prepare_resolution_context_node)
-    workflow.add_node("resolve_operations", resolve_individual_operations_node)
-    workflow.add_node("validate_operations", validate_resolved_operations_node)
-    workflow.add_node("finalize_operations", finalize_operations_node)
-    
-    # Set entry point
-    workflow.set_entry_point("prepare_context")
-    
-    # Define edges with conditional routing
-    def route_after_prepare(state: Dict[str, Any]) -> str:
-        if state.get("resolution_complete", False):
-            return "finalize_operations"
-        return "resolve_operations"
-    
-    workflow.add_conditional_edges(
-        "prepare_context",
-        route_after_prepare,
-        {
-            "finalize_operations": "finalize_operations",
-            "resolve_operations": "resolve_operations"
-        }
-    )
-    
-    workflow.add_edge("resolve_operations", "validate_operations")
-    workflow.add_edge("validate_operations", "finalize_operations")
-    workflow.add_edge("finalize_operations", END)
-    
-    return workflow.compile(checkpointer=checkpointer)
+# build_resolution_subgraph removed; fiction only via Writing Assistant → fiction_editing_subgraph (flat nodes from this module)
 

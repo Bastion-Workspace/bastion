@@ -3250,6 +3250,757 @@ COMMENT ON TABLE entertainment_sync_config IS 'User configurations for Radarr/So
 COMMENT ON TABLE entertainment_sync_items IS 'Tracked items synced from Radarr/Sonarr for change detection';
 
 -- ========================================
+-- USER LOCATIONS TABLE
+-- Map feature: Store user location points (private and global)
+-- ========================================
+
+CREATE TABLE IF NOT EXISTS user_locations (
+    location_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    address TEXT,
+    latitude DECIMAL(10, 8) NOT NULL,
+    longitude DECIMAL(11, 8) NOT NULL,
+    notes TEXT,
+    is_global BOOLEAN DEFAULT FALSE,
+    metadata JSONB,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_locations_user_id ON user_locations(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_locations_is_global ON user_locations(is_global);
+CREATE INDEX IF NOT EXISTS idx_user_locations_name ON user_locations(name);
+
+GRANT ALL PRIVILEGES ON user_locations TO bastion_user;
+
+-- Enable RLS
+ALTER TABLE user_locations ENABLE ROW LEVEL SECURITY;
+
+-- Users see their own private locations + all global locations
+CREATE POLICY locations_select_policy ON user_locations
+    FOR SELECT USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR is_global = true
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+-- Users can only insert their own private locations, admins can create global
+CREATE POLICY locations_insert_policy ON user_locations
+    FOR INSERT WITH CHECK (
+        (user_id = current_setting('app.current_user_id', true)::varchar AND is_global = false)
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+-- Users can only update/delete their own locations, admins can modify global
+CREATE POLICY locations_update_policy ON user_locations
+    FOR UPDATE USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+CREATE POLICY locations_delete_policy ON user_locations
+    FOR DELETE USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+-- Trigger for updated_at
+CREATE TRIGGER update_user_locations_updated_at
+    BEFORE UPDATE ON user_locations
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+COMMENT ON TABLE user_locations IS 'Stores user location points for map visualization. Supports both private (per-user) and global (shared) locations.';
+COMMENT ON COLUMN user_locations.is_global IS 'If true, location is visible to all users with map access. Only admins can create global locations.';
+
+-- ========================================
+-- SAVED ROUTES TABLE
+-- Map feature: Store user-saved road routes (OSRM geometry, steps, waypoints)
+-- ========================================
+
+CREATE TABLE IF NOT EXISTS saved_routes (
+    route_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    waypoints JSONB NOT NULL DEFAULT '[]',
+    geometry JSONB NOT NULL,
+    steps JSONB NOT NULL DEFAULT '[]',
+    distance_meters NUMERIC(12, 2) NOT NULL,
+    duration_seconds NUMERIC(12, 2) NOT NULL,
+    profile VARCHAR(64) DEFAULT 'driving',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_saved_routes_user_id ON saved_routes(user_id);
+CREATE INDEX IF NOT EXISTS idx_saved_routes_created_at ON saved_routes(created_at DESC);
+
+GRANT ALL PRIVILEGES ON saved_routes TO bastion_user;
+
+ALTER TABLE saved_routes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY saved_routes_select_policy ON saved_routes
+    FOR SELECT USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+CREATE POLICY saved_routes_insert_policy ON saved_routes
+    FOR INSERT WITH CHECK (
+        user_id = current_setting('app.current_user_id', true)::varchar
+    );
+
+CREATE POLICY saved_routes_update_policy ON saved_routes
+    FOR UPDATE USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+CREATE POLICY saved_routes_delete_policy ON saved_routes
+    FOR DELETE USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+CREATE TRIGGER update_saved_routes_updated_at
+    BEFORE UPDATE ON saved_routes
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+COMMENT ON TABLE saved_routes IS 'Stores user-saved road routes from OSRM (geometry, turn-by-turn steps, waypoints).';
+
+-- ========================================
+-- FACE DETECTION TABLES
+-- Image vision service: Store detected faces and known identities
+-- ========================================
+
+-- Store detected faces with encodings
+CREATE TABLE IF NOT EXISTS detected_faces (
+    id SERIAL PRIMARY KEY,
+    document_id VARCHAR(255) NOT NULL REFERENCES document_metadata(document_id) ON DELETE CASCADE,
+    bbox_x INTEGER NOT NULL,
+    bbox_y INTEGER NOT NULL,
+    bbox_width INTEGER NOT NULL,
+    bbox_height INTEGER NOT NULL,
+    face_encoding FLOAT[] NOT NULL,  -- 128-dimensional vector
+    identity_name VARCHAR(255),
+    identity_confirmed BOOLEAN DEFAULT FALSE,
+    confidence FLOAT DEFAULT 1.0,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    tagged_by VARCHAR(255),
+    tagged_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_detected_faces_document_id ON detected_faces(document_id);
+CREATE INDEX IF NOT EXISTS idx_detected_faces_identity ON detected_faces(identity_name);
+CREATE INDEX IF NOT EXISTS idx_detected_faces_confirmed ON detected_faces(identity_confirmed);
+
+-- Store known identities metadata
+-- NOTE: Face encoding vectors stored in Qdrant collection "face_encodings"
+-- Multiple encodings per identity for robust matching across angles/lighting/expressions
+CREATE TABLE IF NOT EXISTS known_identities (
+    id SERIAL PRIMARY KEY,
+    identity_name VARCHAR(255) UNIQUE NOT NULL,
+    face_encoding FLOAT[],  -- DEPRECATED: Kept for backward compatibility, use Qdrant instead
+    sample_count INTEGER DEFAULT 1,  -- Number of face encodings stored in Qdrant
+    created_by VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_known_identities_name ON known_identities(identity_name);
+
+-- Add comments explaining the architecture
+COMMENT ON TABLE known_identities IS 'Metadata for known face identities. Face encoding vectors stored in Qdrant collection "face_encodings" for efficient vector similarity search. More samples = better matching!';
+COMMENT ON COLUMN known_identities.face_encoding IS 'DEPRECATED: Face encodings now stored in Qdrant for vector similarity search. This column kept for backward compatibility but should be empty array for new identities.';
+
+-- Function to auto-cleanup orphaned identities when all faces deleted
+CREATE OR REPLACE FUNCTION cleanup_orphaned_identities()
+RETURNS TRIGGER AS $$
+DECLARE
+    identity_to_check VARCHAR(255);
+    remaining_count INTEGER;
+BEGIN
+    -- Get the identity_name from the deleted face (if it was tagged)
+    identity_to_check := OLD.identity_name;
+    
+    -- Only proceed if the face was actually tagged
+    IF identity_to_check IS NOT NULL THEN
+        -- Count remaining faces with this identity
+        SELECT COUNT(*) INTO remaining_count
+        FROM detected_faces
+        WHERE identity_name = identity_to_check;
+        
+        -- If no more faces exist for this identity, delete it from PostgreSQL
+        IF remaining_count = 0 THEN
+            DELETE FROM known_identities WHERE identity_name = identity_to_check;
+            RAISE NOTICE 'Auto-deleted orphaned identity: % (no remaining faces)', identity_to_check;
+            -- Note: Qdrant vectors cleaned up separately via /api/vision/cleanup-orphaned-vectors
+        END IF;
+    END IF;
+    
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to run after face deletion
+DROP TRIGGER IF EXISTS trigger_cleanup_orphaned_identities ON detected_faces;
+CREATE TRIGGER trigger_cleanup_orphaned_identities
+    AFTER DELETE ON detected_faces
+    FOR EACH ROW
+    EXECUTE FUNCTION cleanup_orphaned_identities();
+
+COMMENT ON FUNCTION cleanup_orphaned_identities() IS 'Automatically removes known_identities from PostgreSQL when all detected_faces for that identity are deleted. Qdrant vector cleanup handled by backend API endpoint /api/vision/cleanup-orphaned-vectors.';
+
+-- Grant permissions
+GRANT ALL PRIVILEGES ON detected_faces TO bastion_user;
+GRANT ALL PRIVILEGES ON known_identities TO bastion_user;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bastion_user;
+
+-- Enable RLS
+ALTER TABLE detected_faces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE known_identities ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies for detected_faces
+-- Users can see faces in their own documents + global documents
+CREATE POLICY detected_faces_select_policy ON detected_faces
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM document_metadata dm
+            WHERE dm.document_id = detected_faces.document_id
+            AND (
+                dm.user_id = current_setting('app.current_user_id', true)::varchar
+                OR dm.collection_type = 'global'
+                OR current_setting('app.current_user_role', true) = 'admin'
+            )
+        )
+    );
+
+-- Users can insert faces for their own documents, admins for global
+CREATE POLICY detected_faces_insert_policy ON detected_faces
+    FOR INSERT WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM document_metadata dm
+            WHERE dm.document_id = detected_faces.document_id
+            AND (
+                (dm.user_id = current_setting('app.current_user_id', true)::varchar AND dm.collection_type = 'user')
+                OR (dm.collection_type = 'global' AND current_setting('app.current_user_role', true) = 'admin')
+            )
+        )
+    );
+
+-- Users can update faces in their own documents, admins for global
+CREATE POLICY detected_faces_update_policy ON detected_faces
+    FOR UPDATE USING (
+        EXISTS (
+            SELECT 1 FROM document_metadata dm
+            WHERE dm.document_id = detected_faces.document_id
+            AND (
+                dm.user_id = current_setting('app.current_user_id', true)::varchar
+                OR (dm.collection_type = 'global' AND current_setting('app.current_user_role', true) = 'admin')
+            )
+        )
+    );
+
+-- Users can delete faces in their own documents, admins for global
+CREATE POLICY detected_faces_delete_policy ON detected_faces
+    FOR DELETE USING (
+        EXISTS (
+            SELECT 1 FROM document_metadata dm
+            WHERE dm.document_id = detected_faces.document_id
+            AND (
+                dm.user_id = current_setting('app.current_user_id', true)::varchar
+                OR (dm.collection_type = 'global' AND current_setting('app.current_user_role', true) = 'admin')
+            )
+        )
+    );
+
+-- RLS Policies for known_identities
+-- Users can see all known identities (for search suggestions)
+CREATE POLICY known_identities_select_policy ON known_identities
+    FOR SELECT USING (true);
+
+-- Users can create identities, but names must be unique
+CREATE POLICY known_identities_insert_policy ON known_identities
+    FOR INSERT WITH CHECK (true);
+
+-- Users can update identities they created, admins can update any
+CREATE POLICY known_identities_update_policy ON known_identities
+    FOR UPDATE USING (
+        created_by = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+-- Users can delete identities they created, admins can delete any
+CREATE POLICY known_identities_delete_policy ON known_identities
+    FOR DELETE USING (
+        created_by = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+-- Trigger for updated_at on known_identities
+CREATE TRIGGER update_known_identities_updated_at
+    BEFORE UPDATE ON known_identities
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+COMMENT ON TABLE detected_faces IS 'Stores detected faces with bounding boxes and 128-dimensional encodings for similarity matching';
+-- Known identities comment already added above with Qdrant architecture explanation
+
+-- ========================================
+-- OBJECT DETECTION (YOLO + CLIP + user annotations)
+-- user_object_annotations, object_annotation_examples, detected_objects
+-- ========================================
+
+CREATE TABLE IF NOT EXISTS user_object_annotations (
+    id SERIAL PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL,
+    object_name VARCHAR(255) NOT NULL,
+    description TEXT,
+    source_document_id VARCHAR(255) NOT NULL REFERENCES document_metadata(document_id) ON DELETE CASCADE,
+    bbox_x INTEGER NOT NULL,
+    bbox_y INTEGER NOT NULL,
+    bbox_width INTEGER NOT NULL,
+    bbox_height INTEGER NOT NULL,
+    visual_embedding_id TEXT,
+    semantic_embedding_id TEXT,
+    combined_embedding_id TEXT,
+    example_count INTEGER DEFAULT 1,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, object_name)
+);
+
+CREATE INDEX IF NOT EXISTS idx_user_object_annotations_user_id ON user_object_annotations(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_object_annotations_source_doc ON user_object_annotations(source_document_id);
+
+CREATE TABLE IF NOT EXISTS object_annotation_examples (
+    id SERIAL PRIMARY KEY,
+    annotation_id INTEGER NOT NULL REFERENCES user_object_annotations(id) ON DELETE CASCADE,
+    source_document_id VARCHAR(255) NOT NULL REFERENCES document_metadata(document_id) ON DELETE CASCADE,
+    bbox_x INTEGER NOT NULL,
+    bbox_y INTEGER NOT NULL,
+    bbox_width INTEGER NOT NULL,
+    bbox_height INTEGER NOT NULL,
+    combined_embedding_id TEXT NOT NULL,
+    added_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_object_annotation_examples_annotation_id ON object_annotation_examples(annotation_id);
+
+CREATE TABLE IF NOT EXISTS detected_objects (
+    id SERIAL PRIMARY KEY,
+    document_id VARCHAR(255) NOT NULL REFERENCES document_metadata(document_id) ON DELETE CASCADE,
+    class_name VARCHAR(255) NOT NULL,
+    original_class_name TEXT,
+    detection_method VARCHAR(50) NOT NULL,
+    confidence FLOAT NOT NULL,
+    bbox_x INTEGER NOT NULL,
+    bbox_y INTEGER NOT NULL,
+    bbox_width INTEGER NOT NULL,
+    bbox_height INTEGER NOT NULL,
+    annotation_id INTEGER REFERENCES user_object_annotations(id) ON DELETE SET NULL,
+    confirmed BOOLEAN DEFAULT NULL,
+    rejected BOOLEAN DEFAULT NULL,
+    user_tag TEXT,
+    detected_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    confirmed_by VARCHAR(255),
+    confirmed_at TIMESTAMP WITH TIME ZONE
+);
+
+CREATE INDEX IF NOT EXISTS idx_detected_objects_document_id ON detected_objects(document_id);
+CREATE INDEX IF NOT EXISTS idx_detected_objects_annotation_id ON detected_objects(annotation_id);
+CREATE INDEX IF NOT EXISTS idx_detected_objects_class_name ON detected_objects(class_name);
+
+GRANT ALL PRIVILEGES ON user_object_annotations TO bastion_user;
+GRANT ALL PRIVILEGES ON object_annotation_examples TO bastion_user;
+GRANT ALL PRIVILEGES ON detected_objects TO bastion_user;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bastion_user;
+
+ALTER TABLE user_object_annotations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE object_annotation_examples ENABLE ROW LEVEL SECURITY;
+ALTER TABLE detected_objects ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY user_object_annotations_select_policy ON user_object_annotations
+    FOR SELECT USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+CREATE POLICY user_object_annotations_insert_policy ON user_object_annotations
+    FOR INSERT WITH CHECK (user_id = current_setting('app.current_user_id', true)::varchar);
+
+CREATE POLICY user_object_annotations_update_policy ON user_object_annotations
+    FOR UPDATE USING (user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin');
+
+CREATE POLICY user_object_annotations_delete_policy ON user_object_annotations
+    FOR DELETE USING (user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin');
+
+CREATE POLICY object_annotation_examples_select_policy ON object_annotation_examples
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM user_object_annotations uoa
+            WHERE uoa.id = object_annotation_examples.annotation_id
+            AND (uoa.user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin')
+        )
+    );
+
+CREATE POLICY object_annotation_examples_insert_policy ON object_annotation_examples
+    FOR INSERT WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM user_object_annotations uoa
+            WHERE uoa.id = object_annotation_examples.annotation_id
+            AND uoa.user_id = current_setting('app.current_user_id', true)::varchar
+        )
+    );
+
+CREATE POLICY object_annotation_examples_update_policy ON object_annotation_examples
+    FOR UPDATE USING (
+        EXISTS (
+            SELECT 1 FROM user_object_annotations uoa
+            WHERE uoa.id = object_annotation_examples.annotation_id
+            AND (uoa.user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin')
+        )
+    );
+
+CREATE POLICY object_annotation_examples_delete_policy ON object_annotation_examples
+    FOR DELETE USING (
+        EXISTS (
+            SELECT 1 FROM user_object_annotations uoa
+            WHERE uoa.id = object_annotation_examples.annotation_id
+            AND (uoa.user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin')
+        )
+    );
+
+CREATE POLICY detected_objects_select_policy ON detected_objects
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM document_metadata dm
+            WHERE dm.document_id = detected_objects.document_id
+            AND (
+                dm.user_id = current_setting('app.current_user_id', true)::varchar
+                OR dm.collection_type = 'global'
+                OR current_setting('app.current_user_role', true) = 'admin'
+            )
+        )
+    );
+
+CREATE POLICY detected_objects_insert_policy ON detected_objects
+    FOR INSERT WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM document_metadata dm
+            WHERE dm.document_id = detected_objects.document_id
+            AND (
+                (dm.user_id = current_setting('app.current_user_id', true)::varchar AND dm.collection_type = 'user')
+                OR (dm.collection_type = 'global' AND current_setting('app.current_user_role', true) = 'admin')
+            )
+        )
+    );
+
+CREATE POLICY detected_objects_update_policy ON detected_objects
+    FOR UPDATE USING (
+        EXISTS (
+            SELECT 1 FROM document_metadata dm
+            WHERE dm.document_id = detected_objects.document_id
+            AND (
+                dm.user_id = current_setting('app.current_user_id', true)::varchar
+                OR (dm.collection_type = 'global' AND current_setting('app.current_user_role', true) = 'admin')
+            )
+        )
+    );
+
+CREATE POLICY detected_objects_delete_policy ON detected_objects
+    FOR DELETE USING (
+        EXISTS (
+            SELECT 1 FROM document_metadata dm
+            WHERE dm.document_id = detected_objects.document_id
+            AND (
+                dm.user_id = current_setting('app.current_user_id', true)::varchar
+                OR (dm.collection_type = 'global' AND current_setting('app.current_user_role', true) = 'admin')
+            )
+        )
+    );
+
+CREATE TRIGGER update_user_object_annotations_updated_at
+    BEFORE UPDATE ON user_object_annotations
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+COMMENT ON TABLE user_object_annotations IS 'User-defined object annotations with CLIP embeddings for similarity search';
+COMMENT ON TABLE object_annotation_examples IS 'Additional examples per annotation for robust matching';
+COMMENT ON TABLE detected_objects IS 'Detected objects (YOLO, CLIP semantic, or user-defined) per image';
+COMMENT ON COLUMN detected_objects.user_tag IS 'User-refined label for search/display (e.g. YOLO class_name "car" -> "BMW i3")';
+COMMENT ON COLUMN detected_objects.original_class_name IS 'Original detection label (YOLO/CLIP) before user correction; not vectorized';
+
+-- ========================================
+-- EXTERNAL CONNECTIONS (OAuth / Email / Calendar / etc.)
+-- ========================================
+
+CREATE TABLE IF NOT EXISTS external_connections (
+    id BIGSERIAL PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    provider VARCHAR(50) NOT NULL,
+    connection_type VARCHAR(50) NOT NULL,
+    account_identifier VARCHAR(255) NOT NULL,
+    display_name VARCHAR(255),
+    encrypted_access_token TEXT NOT NULL,
+    encrypted_refresh_token TEXT NOT NULL,
+    token_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    scopes TEXT[] NOT NULL,
+    provider_metadata JSONB,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    last_sync_at TIMESTAMP WITH TIME ZONE,
+    is_active BOOLEAN DEFAULT true,
+    connection_status VARCHAR(50) DEFAULT 'active',
+    UNIQUE(user_id, provider, connection_type, account_identifier)
+);
+
+CREATE INDEX IF NOT EXISTS idx_external_connections_user ON external_connections(user_id);
+CREATE INDEX IF NOT EXISTS idx_external_connections_active ON external_connections(user_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_external_connections_type ON external_connections(provider, connection_type);
+
+CREATE TABLE IF NOT EXISTS connection_sync_state (
+    id BIGSERIAL PRIMARY KEY,
+    connection_id BIGINT NOT NULL REFERENCES external_connections(id) ON DELETE CASCADE,
+    resource_type VARCHAR(100) NOT NULL,
+    resource_id VARCHAR(255) NOT NULL,
+    resource_name VARCHAR(255),
+    last_sync_timestamp TIMESTAMP WITH TIME ZONE,
+    delta_token TEXT,
+    sync_status VARCHAR(50) DEFAULT 'pending',
+    last_error TEXT,
+    metadata JSONB,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(connection_id, resource_type, resource_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_sync_state_connection ON connection_sync_state(connection_id);
+
+CREATE TABLE IF NOT EXISTS connection_data_cache (
+    id BIGSERIAL PRIMARY KEY,
+    connection_id BIGINT NOT NULL REFERENCES external_connections(id) ON DELETE CASCADE,
+    data_type VARCHAR(100) NOT NULL,
+    external_id VARCHAR(500) NOT NULL,
+    data JSONB NOT NULL,
+    metadata JSONB,
+    cached_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    UNIQUE(connection_id, data_type, external_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_data_cache_connection ON connection_data_cache(connection_id);
+CREATE INDEX IF NOT EXISTS idx_data_cache_type ON connection_data_cache(connection_id, data_type);
+CREATE INDEX IF NOT EXISTS idx_data_cache_metadata ON connection_data_cache USING gin(metadata);
+
+GRANT ALL PRIVILEGES ON external_connections TO bastion_user;
+GRANT ALL PRIVILEGES ON connection_sync_state TO bastion_user;
+GRANT ALL PRIVILEGES ON connection_data_cache TO bastion_user;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bastion_user;
+
+ALTER TABLE external_connections ENABLE ROW LEVEL SECURITY;
+ALTER TABLE connection_sync_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE connection_data_cache ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY external_connections_select_policy ON external_connections
+    FOR SELECT USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR current_setting('app.current_user_role', true) = 'admin'
+    );
+
+CREATE POLICY external_connections_insert_policy ON external_connections
+    FOR INSERT WITH CHECK (user_id = current_setting('app.current_user_id', true)::varchar);
+
+CREATE POLICY external_connections_update_policy ON external_connections
+    FOR UPDATE USING (user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin');
+
+CREATE POLICY external_connections_delete_policy ON external_connections
+    FOR DELETE USING (user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin');
+
+CREATE POLICY connection_sync_state_select_policy ON connection_sync_state
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM external_connections ec
+            WHERE ec.id = connection_sync_state.connection_id
+            AND (ec.user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin')
+        )
+    );
+
+CREATE POLICY connection_sync_state_insert_policy ON connection_sync_state
+    FOR INSERT WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM external_connections ec
+            WHERE ec.id = connection_sync_state.connection_id
+            AND ec.user_id = current_setting('app.current_user_id', true)::varchar
+        )
+    );
+
+CREATE POLICY connection_sync_state_update_policy ON connection_sync_state
+    FOR UPDATE USING (
+        EXISTS (
+            SELECT 1 FROM external_connections ec
+            WHERE ec.id = connection_sync_state.connection_id
+            AND (ec.user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin')
+        )
+    );
+
+CREATE POLICY connection_sync_state_delete_policy ON connection_sync_state
+    FOR DELETE USING (
+        EXISTS (
+            SELECT 1 FROM external_connections ec
+            WHERE ec.id = connection_sync_state.connection_id
+            AND (ec.user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin')
+        )
+    );
+
+CREATE POLICY connection_data_cache_select_policy ON connection_data_cache
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM external_connections ec
+            WHERE ec.id = connection_data_cache.connection_id
+            AND (ec.user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin')
+        )
+    );
+
+CREATE POLICY connection_data_cache_insert_policy ON connection_data_cache
+    FOR INSERT WITH CHECK (
+        EXISTS (
+            SELECT 1 FROM external_connections ec
+            WHERE ec.id = connection_data_cache.connection_id
+            AND ec.user_id = current_setting('app.current_user_id', true)::varchar
+        )
+    );
+
+CREATE POLICY connection_data_cache_update_policy ON connection_data_cache
+    FOR UPDATE USING (
+        EXISTS (
+            SELECT 1 FROM external_connections ec
+            WHERE ec.id = connection_data_cache.connection_id
+            AND (ec.user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin')
+        )
+    );
+
+CREATE POLICY connection_data_cache_delete_policy ON connection_data_cache
+    FOR DELETE USING (
+        EXISTS (
+            SELECT 1 FROM external_connections ec
+            WHERE ec.id = connection_data_cache.connection_id
+            AND (ec.user_id = current_setting('app.current_user_id', true)::varchar OR current_setting('app.current_user_role', true) = 'admin')
+        )
+    );
+
+-- ========================================
+-- SYSTEM SETTINGS (admin-only key-value)
+-- ========================================
+CREATE TABLE IF NOT EXISTS system_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+
+GRANT ALL PRIVILEGES ON system_settings TO bastion_user;
+
+ALTER TABLE system_settings ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY system_settings_select_policy ON system_settings
+    FOR SELECT USING (current_setting('app.current_user_role', true) = 'admin');
+
+CREATE POLICY system_settings_insert_policy ON system_settings
+    FOR INSERT WITH CHECK (current_setting('app.current_user_role', true) = 'admin');
+
+CREATE POLICY system_settings_update_policy ON system_settings
+    FOR UPDATE USING (current_setting('app.current_user_role', true) = 'admin');
+
+CREATE POLICY system_settings_delete_policy ON system_settings
+    FOR DELETE USING (current_setting('app.current_user_role', true) = 'admin');
+
+-- ========================================
+-- DOCUMENT LINKS (file relation graph)
+-- ========================================
+CREATE TABLE IF NOT EXISTS document_links (
+    id SERIAL PRIMARY KEY,
+    source_document_id VARCHAR(255) NOT NULL REFERENCES document_metadata(document_id) ON DELETE CASCADE,
+    target_document_id VARCHAR(255) REFERENCES document_metadata(document_id) ON DELETE SET NULL,
+    target_raw_path TEXT NOT NULL,
+    link_type VARCHAR(50) NOT NULL,
+    description TEXT,
+    line_number INTEGER,
+    user_id VARCHAR(255),
+    collection_type VARCHAR(20),
+    team_id UUID REFERENCES teams(team_id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_document_id, target_raw_path, line_number)
+);
+
+CREATE INDEX IF NOT EXISTS idx_document_links_source ON document_links(source_document_id);
+CREATE INDEX IF NOT EXISTS idx_document_links_target ON document_links(target_document_id);
+CREATE INDEX IF NOT EXISTS idx_document_links_user_id ON document_links(user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_document_links_team_id ON document_links(team_id) WHERE team_id IS NOT NULL;
+
+ALTER TABLE document_links ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS document_links_select_policy ON document_links;
+DROP POLICY IF EXISTS document_links_update_policy ON document_links;
+DROP POLICY IF EXISTS document_links_delete_policy ON document_links;
+DROP POLICY IF EXISTS document_links_insert_policy ON document_links;
+
+CREATE POLICY document_links_select_policy ON document_links
+    FOR SELECT USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR collection_type = 'global'
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+        ))
+        OR (user_id IS NOT NULL AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    );
+
+CREATE POLICY document_links_update_policy ON document_links
+    FOR UPDATE
+    USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+            AND role = 'admin'
+        ))
+        OR (team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    )
+    WITH CHECK (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+            AND role = 'admin'
+        ))
+        OR (team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    );
+
+CREATE POLICY document_links_delete_policy ON document_links
+    FOR DELETE USING (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+            AND role = 'admin'
+        ))
+        OR (user_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    );
+
+CREATE POLICY document_links_insert_policy ON document_links
+    FOR INSERT WITH CHECK (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+        OR collection_type = 'global'
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+        ))
+    );
+
+-- ========================================
 -- DATABASE INITIALIZATION COMPLETE
 -- Roosevelt's Square Deal for Data!
 -- ========================================

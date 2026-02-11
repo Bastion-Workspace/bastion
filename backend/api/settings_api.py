@@ -56,6 +56,10 @@ class AiContextRequest(BaseModel):
     ai_context: str
 
 
+class VisionFeaturesRequest(BaseModel):
+    enabled: bool
+
+
 class PromptSettingsRequest(BaseModel):
     """Request model for updating prompt settings"""
     ai_name: str = Field("Alex", description="Name for the AI assistant")
@@ -555,6 +559,74 @@ async def set_user_ai_context(
     except Exception as e:
         logger.error(f"❌ Failed to set AI context for user {current_user.username}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e)) 
+
+
+@router.get("/api/vision/service-status")
+async def get_vision_service_status(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Check if vision service is available"""
+    try:
+        from services.capabilities_service import capabilities_service
+        available = await capabilities_service.is_vision_service_available()
+        return {
+            "available": available,
+            "status": "healthy" if available else "unavailable"
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to check vision service status: {str(e)}")
+        return {
+            "available": False,
+            "status": "unavailable"
+        }
+
+
+@router.get("/api/settings/user/vision-features")
+async def get_vision_features_enabled(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get user's vision features opt-in status"""
+    try:
+        logger.info(f"👁️ Getting vision features status for user: {current_user.username}")
+        enabled = await settings_service.get_vision_features_enabled(current_user.user_id)
+        return {
+            "success": True,
+            "enabled": enabled,
+            "user_id": current_user.user_id
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to get vision features status: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/settings/user/vision-features")
+async def set_vision_features_enabled(
+    request: VisionFeaturesRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Set user's vision features opt-in"""
+    try:
+        logger.info(f"👁️ Setting vision features for user {current_user.username} to: {request.enabled}")
+        success = await settings_service.set_vision_features_enabled(
+            current_user.user_id,
+            request.enabled
+        )
+        
+        if success:
+            return {
+                "success": True,
+                "enabled": request.enabled,
+                "message": "Vision features setting updated successfully",
+                "user_id": current_user.user_id
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Failed to update vision features setting"
+            }
+    except Exception as e:
+        logger.error(f"❌ Failed to set vision features: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/api/settings/{category}")

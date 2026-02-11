@@ -132,6 +132,33 @@ class WebSocketNotifier:
             logger.error(f"❌ Failed to send file deletion notification: {e}")
             return False
     
+    async def notify_folder_updated(
+        self,
+        folder_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        collection_type: Optional[str] = None
+    ) -> bool:
+        """Send notification that a folder/collection changed (e.g. after sidecar processing)."""
+        try:
+            if not self.websocket_manager:
+                logger.debug("WebSocket manager not available for folder update notification")
+                return False
+            message = {
+                "type": "folder_update",
+                "action": "folder_updated",
+                "folder_id": folder_id,
+                "collection_type": collection_type or "user",
+                "timestamp": datetime.now().isoformat()
+            }
+            if user_id:
+                await self.websocket_manager.send_to_session(message, user_id)
+            else:
+                await self.websocket_manager.broadcast(message)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to send folder update notification: {e}")
+            return False
+
     async def notify_folder_event(self, event_type: str, folder_data: dict, user_id: Optional[str] = None):
         """Send a single folder event notification with rich data"""
         try:

@@ -218,15 +218,13 @@ class DatabaseManager:
                         user_id = rls_context.get('user_id', '')
                         user_role = rls_context.get('user_role', 'admin')
                         
-                        # Handle None values properly for RLS context
-                        if user_id is None:
-                            # Set to NULL for global/admin operations
-                            await conn.execute("SELECT set_config('app.current_user_id', NULL, false)")
-                        else:
-                            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", str(user_id))
+                        # set_config() requires a string value, not NULL
+                        # For global/admin operations, use empty string
+                        user_id_str = '' if user_id is None else str(user_id)
                         
+                        await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id_str)
                         await conn.execute("SELECT set_config('app.current_user_role', $1, false)", user_role)
-                        logger.info(f"🔍 Set RLS context on connection {id(conn)}: user_id={user_id}, role={user_role}")
+                        logger.debug(f"🔍 Set RLS context on connection {id(conn)}: user_id={user_id_str}, role={user_role}")
                     else:
                         logger.debug(f"🔍 No RLS context provided for query on connection {id(conn)}")
                     

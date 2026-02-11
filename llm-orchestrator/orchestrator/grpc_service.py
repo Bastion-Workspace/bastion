@@ -10,35 +10,12 @@ from typing import AsyncIterator, Optional, Dict, Any, List
 
 import grpc
 from protos import orchestrator_pb2, orchestrator_pb2_grpc
-from orchestrator.agents import (
-    get_full_research_agent,
-    ChatAgent,
-    DictionaryAgent,
-    get_weather_agent,
-    get_image_generation_agent,
-    # FactCheckingAgent removed - not actively used
-    get_rss_agent,
-    get_org_agent,
-    get_article_writing_agent,
-    get_podcast_script_agent,
-    get_entertainment_agent,
-    get_electronics_agent,
-    get_character_development_agent,
-    get_content_analysis_agent,
-    get_fiction_editing_agent,
-    get_outline_editing_agent,
-    get_story_analysis_agent,
-    get_site_crawl_agent,
-    get_rules_editing_agent,
-    get_series_editing_agent,
-    get_style_editing_agent,
-    get_general_project_agent,
-    get_reference_agent,
-    get_knowledge_builder_agent,
-    get_technical_hyperspace_agent
-)
-from orchestrator.services import get_intent_classifier
 from langchain_core.messages import HumanMessage, AIMessage
+
+try:
+    from config.settings import settings
+except ImportError:
+    settings = None
 
 logger = logging.getLogger(__name__)
 
@@ -58,146 +35,8 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
     
     def __init__(self):
         self.is_initialized = False
-        self.research_agent = None
-        self.chat_agent = None
-        self.dictionary_agent = None
-        self.help_agent = None
-        self.weather_agent = None
-        self.image_generation_agent = None
-        # FactCheckingAgent removed - not actively used
-        self.rss_agent = None
-        self.org_agent = None
-        self.article_writing_agent = None
-        self.podcast_script_agent = None
-        self.entertainment_agent = None
-        self.electronics_agent = None
-        self.character_development_agent = None
-        self.content_analysis_agent = None
-        self.fiction_editing_agent = None
-        self.outline_editing_agent = None
-        self.story_analysis_agent = None
-        self.site_crawl_agent = None
-        self.rules_editing_agent = None
-        self.style_editing_agent = None
-        self.series_editing_agent = None
-        self.general_project_agent = None
-        self.reference_agent = None
-        self.knowledge_builder_agent = None
-        self.technical_hyperspace_agent = None
         logger.info("Initializing OrchestratorGRPCService...")
-    
-    def _ensure_agents_loaded(self):
-        """Lazy load agents"""
-        agents_loaded = 0
-        total_agents = 27  # Total number of agents to load
-        
-        if self.research_agent is None:
-            self.research_agent = get_full_research_agent()
-            agents_loaded += 1
-        
-        if self.chat_agent is None:
-            self.chat_agent = ChatAgent()
-            agents_loaded += 1
-        
-        if self.dictionary_agent is None:
-            self.dictionary_agent = DictionaryAgent()
-            agents_loaded += 1
-        
-        if self.help_agent is None:
-            from orchestrator.agents import HelpAgent
-            self.help_agent = HelpAgent()
-            agents_loaded += 1
-        
-        if self.weather_agent is None:
-            self.weather_agent = get_weather_agent()
-            agents_loaded += 1
-        
-        if self.image_generation_agent is None:
-            self.image_generation_agent = get_image_generation_agent()
-            agents_loaded += 1
-        
-        # FactCheckingAgent removed - not actively used
-        
-        if self.rss_agent is None:
-            self.rss_agent = get_rss_agent()
-            agents_loaded += 1
-        
-        if self.org_agent is None:
-            self.org_agent = get_org_agent()
-            agents_loaded += 1
-        
-        if self.article_writing_agent is None:
-            self.article_writing_agent = get_article_writing_agent()
-            agents_loaded += 1
-        
-        if self.podcast_script_agent is None:
-            self.podcast_script_agent = get_podcast_script_agent()
-            agents_loaded += 1
-        
-        if self.entertainment_agent is None:
-            self.entertainment_agent = get_entertainment_agent()
-            agents_loaded += 1
 
-        if self.electronics_agent is None:
-            self.electronics_agent = get_electronics_agent()
-            agents_loaded += 1
-        
-        if self.character_development_agent is None:
-            self.character_development_agent = get_character_development_agent()
-            agents_loaded += 1
-        
-        if self.content_analysis_agent is None:
-            self.content_analysis_agent = get_content_analysis_agent()
-            agents_loaded += 1
-        
-        if self.fiction_editing_agent is None:
-            self.fiction_editing_agent = get_fiction_editing_agent()
-            agents_loaded += 1
-        
-        if self.outline_editing_agent is None:
-            self.outline_editing_agent = get_outline_editing_agent()
-            agents_loaded += 1
-        
-        if self.story_analysis_agent is None:
-            self.story_analysis_agent = get_story_analysis_agent()
-            agents_loaded += 1
-        
-        if self.site_crawl_agent is None:
-            self.site_crawl_agent = get_site_crawl_agent()
-            agents_loaded += 1
-        
-        if self.rules_editing_agent is None:
-            self.rules_editing_agent = get_rules_editing_agent()
-            agents_loaded += 1
-        
-        if self.series_editing_agent is None:
-            self.series_editing_agent = get_series_editing_agent()
-            agents_loaded += 1
-        
-        if self.style_editing_agent is None:
-            self.style_editing_agent = get_style_editing_agent()
-            agents_loaded += 1
-        
-        
-        if self.general_project_agent is None:
-            self.general_project_agent = get_general_project_agent()
-            agents_loaded += 1
-        
-        if self.reference_agent is None:
-            self.reference_agent = get_reference_agent()
-            agents_loaded += 1
-        
-        if self.knowledge_builder_agent is None:
-            self.knowledge_builder_agent = get_knowledge_builder_agent()
-            agents_loaded += 1
-        
-        if self.technical_hyperspace_agent is None:
-            self.technical_hyperspace_agent = get_technical_hyperspace_agent()
-            agents_loaded += 1
-        
-        if agents_loaded > 0:
-            logger.info(f"✅ Loaded {agents_loaded}/{total_agents} agents")
-    
     def _extract_shared_memory(self, request: orchestrator_pb2.ChatRequest, existing_shared_memory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Extract shared_memory from proto request (active_editor, permissions, pipeline context, etc.)
@@ -243,8 +82,10 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 
                 # Try to parse stringified lists (Python repr format or JSON)
                 if isinstance(value, str):
+                    value_stripped = value.strip()
+                    
                     # Try Python list format: "['./file1.md', './file2.md']"
-                    if value.strip().startswith('[') and value.strip().endswith(']'):
+                    if value_stripped.startswith('[') and value_stripped.endswith(']'):
                         try:
                             import ast
                             parsed = ast.literal_eval(value)
@@ -254,18 +95,19 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                                 continue
                         except (ValueError, SyntaxError) as e:
                             logger.debug(f"⚠️ Failed to parse {key} as Python list: {e}")
-                    # Try JSON format: '["file1.md", "file2.md"]'
-                    try:
-                        import json
-                        parsed = json.loads(value)
-                        if isinstance(parsed, list):
-                            frontmatter_custom[key] = parsed
-                            logger.info(f"✅ PARSED {key} as JSON list: {len(parsed)} items")
-                            continue
-                    except (ValueError, json.JSONDecodeError) as e:
-                        logger.debug(f"⚠️ Failed to parse {key} as JSON: {e}")
+                        # Try JSON parsing as fallback for list-like strings
+                        try:
+                            import json
+                            parsed = json.loads(value)
+                            if isinstance(parsed, list):
+                                frontmatter_custom[key] = parsed
+                                logger.info(f"✅ PARSED {key} as JSON list: {len(parsed)} items")
+                                continue
+                        except (ValueError, json.JSONDecodeError):
+                            pass  # Fall through to keep as string
+                    
                     # Try YAML list format (newline-separated): "- ./file1.md\n- ./file2.md"
-                    if '\n' in value and value.strip().startswith('-'):
+                    elif '\n' in value and value_stripped.startswith('-'):
                         try:
                             import yaml
                             parsed = yaml.safe_load(value)
@@ -275,6 +117,9 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                                 continue
                         except (yaml.YAMLError, ValueError) as e:
                             logger.debug(f"⚠️ Failed to parse {key} as YAML: {e}")
+                    
+                    # For plain strings (like "../Characters/Nick.md"), don't try to parse as JSON
+                    # This avoids unnecessary error logs for simple file paths
                 
                 # If not a list, keep as string
                 frontmatter_custom[key] = value
@@ -376,6 +221,41 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             if "user_image_model" in request.metadata:
                 shared_memory["user_image_model"] = request.metadata["user_image_model"]
                 logger.debug(f"🎯 EXTRACTED user_image_model from metadata: {request.metadata['user_image_model']}")
+            if "user_timezone" in request.metadata:
+                shared_memory["user_timezone"] = request.metadata["user_timezone"]
+                logger.info(f"🌍 EXTRACTED user_timezone from metadata: {request.metadata['user_timezone']}")
+            
+            # Extract attachments from metadata
+            if "attachments" in request.metadata:
+                try:
+                    import json
+                    attachments_json = request.metadata["attachments"]
+                    if isinstance(attachments_json, str):
+                        attachments = json.loads(attachments_json)
+                    else:
+                        attachments = attachments_json
+                    
+                    # Separate attachments by type
+                    shared_memory["attached_images"] = [
+                        att for att in attachments 
+                        if att.get("content_type", "").startswith("image/")
+                    ]
+                    shared_memory["attached_documents"] = [
+                        att for att in attachments 
+                        if att.get("content_type") in ["application/pdf", "text/plain", "text/markdown"]
+                    ]
+                    shared_memory["attached_audio"] = [
+                        att for att in attachments 
+                        if att.get("content_type", "").startswith("audio/")
+                    ]
+                    
+                    if shared_memory.get("attached_images") or shared_memory.get("attached_documents") or shared_memory.get("attached_audio"):
+                        logger.info(f"📎 SHARED MEMORY: Added {len(shared_memory.get('attached_images', []))} image(s), {len(shared_memory.get('attached_documents', []))} document(s), {len(shared_memory.get('attached_audio', []))} audio file(s)")
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to parse attachments from metadata: {e}")
+            if "image_base64" in request.metadata:
+                shared_memory["image_base64"] = request.metadata["image_base64"]
+                logger.debug("📎 SHARED MEMORY: Added image_base64 for image description routing")
         
         return shared_memory
     
@@ -497,6 +377,175 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         # Fallback
         return "Response generated"
     
+    def _is_standard_format(self, result: Any) -> bool:
+        """
+        Check if result is in standard AgentResponse format
+        
+        Args:
+            result: Agent result to check
+            
+        Returns:
+            True if result matches standard format, False otherwise
+        """
+        if not isinstance(result, dict):
+            return False
+        
+        # Check for required fields
+        required_fields = ["response", "task_status", "agent_type", "timestamp"]
+        return all(field in result for field in required_fields)
+    
+    def _extract_editor_operations_unified(self, result: Any) -> Optional[List[Dict[str, Any]]]:
+        """
+        Extract editor_operations from agent result (unified fallback chain)
+        
+        Checks all known locations where agents might place editor_operations.
+        Supports both legacy and standard formats.
+        
+        Args:
+            result: Agent result dictionary
+            
+        Returns:
+            List of editor operations or None if not found
+        """
+        if not isinstance(result, dict):
+            logger.warning(f"🔍 EXTRACT EDITOR OPS: result is not a dict (type: {type(result)})")
+            return None
+        
+        # DEBUG: Log what we're checking
+        logger.info(f"🔍 EXTRACT EDITOR OPS: result keys: {list(result.keys())}")
+        logger.info(f"🔍 EXTRACT EDITOR OPS: result.get('editor_operations') = {result.get('editor_operations')}")
+        logger.info(f"🔍 EXTRACT EDITOR OPS: type = {type(result.get('editor_operations'))}")
+        if result.get("editor_operations"):
+            logger.info(f"🔍 EXTRACT EDITOR OPS: length = {len(result.get('editor_operations'))}")
+        
+        # Check all known locations in priority order
+        # CRITICAL: Use 'is not None' instead of 'or' to handle empty lists correctly
+        ops = result.get("editor_operations")
+        if ops is not None:
+            logger.info(f"✅ EXTRACT EDITOR OPS: Found at result level ({len(ops)} ops)")
+            return ops
+        
+        ops = result.get("agent_results", {}).get("editor_operations")
+        if ops is not None:
+            logger.info(f"✅ EXTRACT EDITOR OPS: Found at agent_results level ({len(ops)} ops)")
+            return ops
+        
+        if isinstance(result.get("response"), dict):
+            ops = result.get("response", {}).get("editor_operations")
+            if ops is not None:
+                logger.info(f"✅ EXTRACT EDITOR OPS: Found at response level ({len(ops)} ops)")
+                return ops
+        
+        logger.warning(f"⚠️ EXTRACT EDITOR OPS: Not found in any location")
+        return None
+    
+    def _extract_manuscript_edit_unified(self, result: Any) -> Optional[Dict[str, Any]]:
+        """
+        Extract manuscript_edit from agent result (unified fallback chain)
+        
+        Checks all known locations where agents might place manuscript_edit.
+        Supports both legacy and standard formats.
+        
+        Args:
+            result: Agent result dictionary
+            
+        Returns:
+            Manuscript edit metadata dict or None if not found
+        """
+        if not isinstance(result, dict):
+            logger.warning(f"🔍 EXTRACT MANUSCRIPT EDIT: result is not a dict (type: {type(result)})")
+            return None
+        
+        # DEBUG: Log what we're checking
+        logger.info(f"🔍 EXTRACT MANUSCRIPT EDIT: result keys: {list(result.keys())}")
+        logger.info(f"🔍 EXTRACT MANUSCRIPT EDIT: result.get('manuscript_edit') = {result.get('manuscript_edit')}")
+        
+        # Check all known locations in priority order
+        # CRITICAL: Use 'is not None' instead of 'or' to handle empty dicts correctly
+        edit = result.get("manuscript_edit")
+        if edit is not None:
+            logger.info(f"✅ EXTRACT MANUSCRIPT EDIT: Found at result level")
+            return edit
+        
+        edit = result.get("agent_results", {}).get("manuscript_edit")
+        if edit is not None:
+            logger.info(f"✅ EXTRACT MANUSCRIPT EDIT: Found at agent_results level")
+            return edit
+        
+        if isinstance(result.get("response"), dict):
+            edit = result.get("response", {}).get("manuscript_edit")
+            if edit is not None:
+                logger.info(f"✅ EXTRACT MANUSCRIPT EDIT: Found at response level")
+                return edit
+        
+        logger.warning(f"⚠️ EXTRACT MANUSCRIPT EDIT: Not found in any location")
+        return None
+    
+    def _extract_response_unified(self, result: Any, agent_type: str = "unknown") -> Dict[str, Any]:
+        """
+        Unified response extraction supporting both old and new formats
+        
+        This method normalizes agent responses into a standard structure.
+        It first checks if the result is already in standard format, then
+        falls back to legacy extraction patterns.
+        
+        Args:
+            result: Agent result (dict, string, or other)
+            agent_type: Agent identifier (for fallback when not in result)
+            
+        Returns:
+            Normalized response dictionary with standard fields
+        """
+        from orchestrator.models.agent_response_contract import AgentResponse
+        
+        # If result is already in standard format, use it directly
+        if self._is_standard_format(result):
+            return result
+        
+        # Try to create AgentResponse from legacy format
+        if isinstance(result, dict):
+            try:
+                # Use the from_legacy_format helper
+                standard_response = AgentResponse.from_legacy_format(result, agent_type)
+                return standard_response.dict(exclude_none=True)
+            except Exception as e:
+                logger.warning(f"Failed to normalize response to standard format: {e}")
+        
+        # Fallback: Manual extraction for edge cases
+        response_text = self._extract_response_text(result)
+        
+        # Extract task_status
+        task_status = result.get("task_status", "complete") if isinstance(result, dict) else "complete"
+        
+        # Extract agent_type
+        extracted_agent_type = (
+            result.get("agent_type") or
+            result.get("agent_results", {}).get("agent_type") if isinstance(result, dict) else
+            agent_type
+        )
+        
+        # Extract timestamp
+        from datetime import datetime
+        timestamp = (
+            result.get("timestamp") or
+            datetime.now().isoformat()
+        )
+        
+        # Extract optional fields
+        editor_operations = self._extract_editor_operations_unified(result) if isinstance(result, dict) else None
+        manuscript_edit = self._extract_manuscript_edit_unified(result) if isinstance(result, dict) else None
+        
+        return {
+            "response": response_text,
+            "task_status": task_status,
+            "agent_type": extracted_agent_type,
+            "timestamp": timestamp,
+            "editor_operations": editor_operations,
+            "manuscript_edit": manuscript_edit,
+            # Preserve any other fields from original result
+            **(result if isinstance(result, dict) else {})
+        }
+    
     async def _process_agent_with_cancellation(
         self,
         agent,
@@ -579,21 +628,13 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             Dict with shared_memory from checkpoint, or empty dict if not found
         """
         try:
-            # Ensure chat_agent is loaded (it has the workflow we need)
-            self._ensure_agents_loaded()
-            
-            if not self.chat_agent:
+            from orchestrator.engines.unified_dispatch import get_unified_dispatcher
+            chat_agent = get_unified_dispatcher()._get_conversational_engine()._get_agent()
+            if not chat_agent:
                 return {}
-            
-            # Get checkpoint config
-            config = self.chat_agent._get_checkpoint_config(metadata)
-            
-            # Get workflow (will initialize if needed)
-            workflow = await self.chat_agent._get_workflow()
-            
-            # Load shared_memory from checkpoint
-            shared_memory = await self.chat_agent._load_checkpoint_shared_memory(workflow, config)
-            
+            config = chat_agent._get_checkpoint_config(metadata)
+            workflow = await chat_agent._get_workflow()
+            shared_memory = await chat_agent._load_checkpoint_shared_memory(workflow, config)
             return shared_memory
             
         except Exception as e:
@@ -614,7 +655,10 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         try:
             if not conversation_id:
                 return
-            
+            if not isinstance(agent_result, dict):
+                logger.debug(f"Skipping agent identity cache: agent_result is not a dict (type={type(agent_result).__name__})")
+                return
+
             # Extract primary_agent_selected from agent's result
             result_shared_memory = agent_result.get("shared_memory", {})
             primary_agent = result_shared_memory.get("primary_agent_selected")
@@ -693,14 +737,11 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         
         try:
             query_preview = request.query[:100] if len(request.query) > 100 else request.query
-            logger.info(f"📨 StreamChat request from user {request.user_id}: {query_preview}")
-            
-            # Load agents
-            self._ensure_agents_loaded()
-            
+            logger.debug(f"StreamChat request from user {request.user_id}: {query_preview}")
+
             # Parse metadata into dictionary
             metadata = dict(request.metadata) if request.metadata else {}
-            logger.info(f"🔍 RECEIVED METADATA: user_chat_model = {metadata.get('user_chat_model')}")
+            logger.debug(f"🔍 RECEIVED METADATA: user_chat_model = {metadata.get('user_chat_model')}")
 
             # Check for model configuration warning
             model_warning = metadata.get("models_not_configured_warning")
@@ -727,7 +768,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     "timezone": request.persona.timezone if request.persona.timezone else "UTC"
                 }
                 metadata["persona"] = persona_dict
-                logger.info(f"✅ PERSONA: Extracted persona for agents (ai_name={persona_dict['ai_name']}, style={persona_dict['persona_style']})")
+                logger.debug(f"✅ PERSONA: Extracted persona for agents (ai_name={persona_dict['ai_name']}, style={persona_dict['persona_style']})")
             else:
                 # Default persona if not provided
                 metadata["persona"] = {
@@ -750,7 +791,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     checkpoint_shared_memory = {}
                 checkpoint_shared_memory["primary_agent_selected"] = cached_agent_identity.get("primary_agent_selected")
                 checkpoint_shared_memory["last_agent"] = cached_agent_identity.get("last_agent")
-                logger.info(f"📚 Merged cache into checkpoint: primary_agent={cached_agent_identity.get('primary_agent_selected')}")
+                logger.debug(f"📚 Merged cache into checkpoint: primary_agent={cached_agent_identity.get('primary_agent_selected')}")
             
             # Build conversation context from proto fields for intent classification
             conversation_context = self._extract_conversation_context(request)
@@ -762,7 +803,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             # This locked document ID prevents race conditions during tab switches
             if "target_document_id" in request_shared_memory:
                 metadata["target_document_id"] = request_shared_memory["target_document_id"]
-                logger.info(f"🔒 Added target_document_id to metadata: {metadata['target_document_id']}")
+                logger.debug(f"🔒 Added target_document_id to metadata: {metadata['target_document_id']}")
             
             # Merge checkpoint shared_memory into context for intent classifier
             # Note: active_editor should NOT be in checkpoint (cleared by agents before save)
@@ -787,30 +828,35 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 primary_agent = checkpoint_shared_memory.get("primary_agent_selected")
                 last_agent = checkpoint_shared_memory.get("last_agent")
                 if primary_agent or last_agent:
-                    logger.info(f"📚 Loaded agent continuity from checkpoint: primary_agent={primary_agent}, last_agent={last_agent}")
+                    logger.debug(f"📚 Loaded agent continuity from checkpoint: primary_agent={primary_agent}, last_agent={last_agent}")
                 else:
-                    logger.info(f"📚 Merged checkpoint shared_memory (no agent continuity): {list(checkpoint_shared_memory.keys())}")
+                    logger.debug(f"📚 Merged checkpoint shared_memory (no agent continuity): {list(checkpoint_shared_memory.keys())}")
             
             # Log editor_preference before merge
             request_editor_pref = request_shared_memory.get("editor_preference", "not_set")
-            logger.info(f"📝 EDITOR PREFERENCE: From request = '{request_editor_pref}'")
+            logger.debug(f"📝 EDITOR PREFERENCE: From request = '{request_editor_pref}'")
             
             # Merge request shared_memory (current editor_preference takes precedence)
             conversation_context["shared_memory"].update(request_shared_memory)
             
             # Log final editor_preference after merge
             final_editor_pref = conversation_context["shared_memory"].get("editor_preference", "not_set")
-            logger.info(f"📝 EDITOR PREFERENCE: Final (after merge) = '{final_editor_pref}'")
+            logger.debug(f"📝 EDITOR PREFERENCE: Final (after merge) = '{final_editor_pref}'")
             
-            # Determine which agent to use via intent classification
+            # Determine which agent to use via skill discovery (or intent classification fallback when disabled)
             primary_agent_name = None
-            agent_type = None  # Initialize to None - will be set by routing logic or intent classification
-            
+            agent_type = None  # Initialize to None - will be set by routing logic or skill discovery
+            discovered_skill = None  # Set by short-circuit routes or skill discovery
+            from orchestrator.skills import get_skill_registry, load_all_skills
+            load_all_skills()
+            registry = get_skill_registry()
+
             # SHORT-CIRCUIT ROUTING: Check for "/help" prefix for instant help routing
             query_lower = request.query.lower().strip()
             if query_lower.startswith("/help"):
-                agent_type = "help_agent"
-                primary_agent_name = agent_type
+                agent_type = "help"
+                discovered_skill = registry.get("help")
+                primary_agent_name = "help_agent"
                 # Strip "/help" prefix from query (with optional space after)
                 # Handle both "/help" and "/help " (with space)
                 cleaned_query = request.query[5:].strip()  # Remove "/help" (5 chars)
@@ -819,7 +865,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     cleaned_query = ""
                 # Update request.query for agent processing
                 request.query = cleaned_query
-                logger.info(f"❓ SHORT-CIRCUIT ROUTING: Help agent (query starts with '/help', cleaned: '{cleaned_query[:50]}...' if cleaned_query else 'empty')")
+                logger.debug(f"❓ SHORT-CIRCUIT ROUTING: Help agent (query starts with '/help', cleaned: '{cleaned_query[:50]}...' if cleaned_query else 'empty')")
                 
                 # Ensure shared_memory is in metadata and conversation_context
                 if "shared_memory" not in metadata:
@@ -840,8 +886,9 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 logger.info(f"📋 SET primary_agent_selected: {agent_type} (and merged {len(request_shared_memory)} shared_memory keys)")
             # SHORT-CIRCUIT ROUTING: Check for "/define" prefix for instant dictionary routing
             elif query_lower.startswith("/define"):
-                agent_type = "dictionary_agent"
-                primary_agent_name = agent_type
+                agent_type = "dictionary"
+                discovered_skill = registry.get("dictionary")
+                primary_agent_name = "dictionary_agent"
                 # Strip "/define" prefix from query (with optional space after)
                 # Handle both "/define" and "/define " (with space)
                 cleaned_query = request.query[7:].strip()  # Remove "/define" (7 chars)
@@ -869,97 +916,144 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     checkpoint_shared_memory["primary_agent_selected"] = agent_type
                 
                 logger.info(f"📋 SET primary_agent_selected: {agent_type} (and merged {len(request_shared_memory)} shared_memory keys)")
-            # SHORT-CIRCUIT ROUTING: Check for "/hyperspace" prefix for Technical Hyperspace access
-            # ALWAYS routes to technical_hyperspace_agent regardless of editor preference or context
-            # The agent itself will handle missing editor cases with user-friendly error messages
-            elif query_lower.startswith("/hyperspace"):
-                agent_type = "technical_hyperspace_agent"
-                primary_agent_name = agent_type
-                # Strip "/hyperspace" prefix from query (with optional space after)
-                cleaned_query = request.query[11:].strip()  # Remove "/hyperspace" (11 chars)
-                # If no query after "/hyperspace", use empty string (agent will handle it)
-                if not cleaned_query:
-                    cleaned_query = ""
-                # Update request.query for agent processing
-                request.query = cleaned_query
-                logger.info(f"🚀 SHORT-CIRCUIT ROUTING: Technical Hyperspace (query starts with '/hyperspace', cleaned: '{cleaned_query[:50]}...' if cleaned_query else 'empty')")
-                
-                # Ensure shared_memory is in metadata and conversation_context
-                if "shared_memory" not in metadata:
-                    metadata["shared_memory"] = {}
-                
-                # Merge the extracted request shared_memory (including active_editor!)
-                metadata["shared_memory"].update(request_shared_memory)
-                metadata["shared_memory"]["primary_agent_selected"] = agent_type
-                
-                if "shared_memory" not in conversation_context:
-                    conversation_context["shared_memory"] = {}
-                conversation_context["shared_memory"].update(request_shared_memory)
-                conversation_context["shared_memory"]["primary_agent_selected"] = agent_type
-                
-                if checkpoint_shared_memory:
-                    checkpoint_shared_memory["primary_agent_selected"] = agent_type
-                
-                logger.info(f"📋 SET primary_agent_selected: {agent_type} (and merged {len(request_shared_memory)} shared_memory keys)")
             elif request.agent_type and request.agent_type != "auto":
                 # Explicit agent routing provided by backend
                 agent_type = request.agent_type
-                primary_agent_name = agent_type  # Store for next intent classification
-                logger.info(f"🎯 EXPLICIT ROUTING: {agent_type} (reason: {request.routing_reason or 'not specified'})")
+                primary_agent_name = agent_type
+                discovered_skill = registry.get(agent_type)  # registry.get() accepts "help_agent" -> help skill
+                logger.info(f"EXPLICIT ROUTING: {agent_type} (reason: {request.routing_reason or 'not specified'})")
             
-            # If agent_type is still None, use intent classification
+            # If agent_type is still None, run skill discovery (compound-aware)
+            compound_plan = None
             if agent_type is None:
-                # Run intent classification to determine agent
-                logger.info(f"🎯 INTENT CLASSIFICATION: Running for query: {query_preview}")
-                intent_classifier = get_intent_classifier()
-                intent_result = await intent_classifier.classify_intent(
-                    user_message=request.query,
-                    conversation_context=conversation_context
+                from orchestrator.skills.skill_llm_selector import llm_select_skill, llm_select_skill_or_plan
+                active_editor = (request_shared_memory or {}).get("active_editor") or conversation_context.get("shared_memory", {}).get("active_editor")
+                editor_context = None
+                if active_editor:
+                    fm = (active_editor.get("frontmatter") or {})
+                    editor_context = {
+                        "type": (fm.get("type") or "").strip().lower() or None,
+                        "filename": active_editor.get("filename"),
+                        "language": active_editor.get("language"),
+                    }
+                    if not editor_context["type"] and (editor_context.get("filename") or "").lower().endswith(".org"):
+                        editor_context["type"] = "org"
+                shared = conversation_context.get("shared_memory") or {}
+                has_image = bool(shared.get("attached_images") or shared.get("image_base64"))
+                eligible, instant_route = registry.filter_eligible(
+                    query=request.query,
+                    editor_context=editor_context,
+                    conversation_context=conversation_context,
+                    editor_preference=shared.get("editor_preference", "prefer"),
+                    has_image_context=has_image,
                 )
-                agent_type = intent_result.target_agent
-                primary_agent_name = agent_type  # Store for next intent classification
-                logger.info(f"✅ INTENT CLASSIFICATION: → {agent_type} (action: {intent_result.action_intent}, confidence: {intent_result.confidence})")
-                if intent_result.reasoning:
-                    logger.info(f"💡 REASONING: {intent_result.reasoning}")
-                
-                # IMPORTANT: We set primary_agent_selected TENTATIVELY here based on routing
-                # But we'll update it AFTER the agent completes with the actual agent's value
-                # This ensures the agent's own identity takes precedence
+                # When user has a document open and editor_preference is "prefer", pin to the
+                # single editor skill dedicated to that document type so we skip compound plans
+                # (e.g. outline open -> outline_editing only, not story_analysis + outline_editing).
+                # Exception: for fiction, if the query explicitly asks for story analysis (e.g.
+                # "Analyze the story"), do not pin to fiction_editing so skill discovery can
+                # route to the story_analysis conversational skill.
+                if instant_route is None and eligible and editor_context and shared.get("editor_preference") == "prefer":
+                    from orchestrator.skills.skill_schema import EngineType
+                    editor_type = (editor_context.get("type") or "").strip().lower()
+                    if editor_type:
+                        skip_editor_pin = False
+                        route_to_story_analysis = False
+                        if editor_type == "fiction":
+                            query_lower = (request.query or "").strip().lower()
+                            explicit_analysis_keywords = [
+                                "analyze", "critique", "review", "assess", "evaluate", "examine", "study"
+                            ]
+                            if any(kw in query_lower for kw in explicit_analysis_keywords):
+                                skip_editor_pin = True
+                                route_to_story_analysis = any(
+                                    s.name == "story_analysis" for s in eligible
+                                )
+                                if route_to_story_analysis:
+                                    instant_route = "story_analysis"
+                                    logger.info(
+                                        "Skill discovery: routing to story_analysis (explicit analysis query with fiction open)"
+                                    )
+                                else:
+                                    logger.info(
+                                        "Skill discovery: skipping editor-type pin (fiction) for explicit analysis query"
+                                    )
+                        if not skip_editor_pin and not route_to_story_analysis:
+                            dedicated = [
+                                s for s in eligible
+                                if s.engine == EngineType.EDITOR and (s.editor_types or []) == [editor_type]
+                            ]
+                            if len(dedicated) == 1:
+                                instant_route = dedicated[0].name
+                                logger.info(
+                                    "Skill discovery: %s (editor-type pin: type=%s)",
+                                    instant_route,
+                                    editor_type,
+                                )
+                if instant_route:
+                    agent_type = instant_route
+                    discovered_skill = registry.get(agent_type)
+                    primary_agent_name = f"{agent_type}_agent" if not agent_type.endswith("_agent") else agent_type
+                    logger.info("Skill discovery: %s (instant)", agent_type)
+                elif eligible:
+                    plan = await llm_select_skill_or_plan(
+                        eligible,
+                        request.query,
+                        editor_context=editor_context,
+                        conversation_context=conversation_context,
+                        metadata=metadata,
+                    )
+                    if plan is None:
+                        selected_name = await llm_select_skill(
+                            eligible,
+                            request.query,
+                            editor_context=editor_context,
+                            conversation_context=conversation_context,
+                            metadata=metadata,
+                        )
+                        agent_type = selected_name or "chat"
+                        discovered_skill = registry.get(agent_type)
+                        primary_agent_name = f"{agent_type}_agent" if not agent_type.endswith("_agent") else agent_type
+                        logger.info("Skill discovery: %s (fallback)", agent_type)
+                    elif plan.is_compound and len(plan.steps) > 1:
+                        compound_plan = plan
+                        agent_type = "compound"
+                        primary_agent_name = "compound_agent"
+                        discovered_skill = None
+                        step_skills = [s.skill_name for s in plan.steps]
+                        logger.info(
+                            "Skill discovery: compound plan (%d steps): %s",
+                            len(plan.steps),
+                            ", ".join(step_skills),
+                        )
+                        if plan.reasoning:
+                            logger.info("Compound plan reasoning: %s", plan.reasoning.strip())
+                        for s in plan.steps:
+                            logger.info(
+                                "  step %s: skill=%s | sub_query=%s",
+                                s.step_id,
+                                s.skill_name,
+                                (s.sub_query or "").strip() or "(none)",
+                            )
+                    else:
+                        agent_type = (plan.skill or "chat")
+                        discovered_skill = registry.get(agent_type)
+                        primary_agent_name = f"{agent_type}_agent" if not agent_type.endswith("_agent") else agent_type
+                        logger.info("Skill discovery: %s", agent_type)
+                else:
+                    agent_type = "chat"
+                    discovered_skill = registry.get("chat")
+                    primary_agent_name = "chat_agent"
+                    logger.info("Skill discovery: no eligible skills, fallback to chat")
                 if "shared_memory" not in metadata:
                     metadata["shared_memory"] = {}
-                # Set tentatively for this request (agent may override)
-                metadata["shared_memory"]["primary_agent_selected"] = agent_type
-                conversation_context["shared_memory"]["primary_agent_selected"] = agent_type
-                logger.info(f"📋 TENTATIVE primary_agent_selected: {agent_type} (agent may override)")
-                
-                # Handle conversation title from intent classification (for new conversations)
-                if intent_result.conversation_title:
-                    logger.info(f"🔤 INTENT CLASSIFICATION generated title: {intent_result.conversation_title}")
-                    
-                    # Send title immediately via stream so frontend can update UI right away
-                    yield orchestrator_pb2.ChatChunk(
-                        type="title",
-                        message=intent_result.conversation_title,
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="intent_classifier"
-                    )
-                    
-                    # Update conversation title asynchronously (non-blocking)
-                    try:
-                        from orchestrator.backend_tool_client import get_backend_tool_client
-                        backend_client = await get_backend_tool_client()
-                        # Run in background - don't await to avoid blocking response
-                        asyncio.create_task(
-                            backend_client.update_conversation_title(
-                                conversation_id=request.conversation_id,
-                                title=intent_result.conversation_title,
-                                user_id=request.user_id
-                            )
-                        )
-                        logger.info(f"🔤 Queued title update: {intent_result.conversation_title}")
-                    except Exception as e:
-                        logger.warning(f"⚠️ Failed to queue title update: {e}")
-            
+                metadata["shared_memory"]["primary_agent_selected"] = primary_agent_name or agent_type
+                conversation_context["shared_memory"]["primary_agent_selected"] = primary_agent_name or agent_type
+
+            if not discovered_skill:
+                discovered_skill = registry.get("chat")
+                primary_agent_name = "chat_agent"
+
             # Parse conversation history for agent
             messages = []
             for msg in request.conversation_history:
@@ -967,1943 +1061,90 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     messages.append(HumanMessage(content=msg.content))
                 elif msg.role == "assistant":
                     messages.append(AIMessage(content=msg.content))
-            
-            # Handle short-circuit routes FIRST (before normalization) - these bypass normalization
-            # This ensures /hyperspace always goes to technical_hyperspace_agent and /define goes to dictionary_agent
-            if agent_type == "dictionary_agent":
-                # Route directly to dictionary agent (short-circuit route)
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Dictionary agent looking up word definition...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="dictionary_agent"
-                )
-                
-                # Build metadata with shared_memory
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                dictionary_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                result = await self._process_agent_with_cancellation(
-                    agent=self.dictionary_agent,
-                    query=request.query,
-                    metadata=dictionary_metadata,
-                    messages=messages,
-                    cancellation_token=cancellation_token
-                )
-                
-                response_text = self._extract_response_text(result)
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="dictionary_agent"
-                )
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=f"Dictionary lookup complete (word found: {result.get('response', {}).get('found', False) if isinstance(result.get('response'), dict) else False})",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-                
-                return  # Exit early - short-circuit route handled
-            
-            elif agent_type == "technical_hyperspace_agent":
-                # Route directly to systems engineering agent (short-circuit route)
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="🚀 Technical Hyperspace: Analyzing system topology and failure modes...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="technical_hyperspace_agent"
-                )
-                
-                # Build metadata with shared_memory
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                se_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                result = await self._process_agent_with_cancellation(
-                    agent=self.technical_hyperspace_agent,
-                    query=request.query,
-                    metadata=se_metadata,
-                    messages=messages,
-                    cancellation_token=cancellation_token
-                )
-                
-                # Extract response
-                response_obj = result.get("response", {})
-                if isinstance(response_obj, dict):
-                    response_text = response_obj.get("response", "System modeling complete")
-                    simulation_results = response_obj.get("simulation_results")
-                    diagram_result = response_obj.get("diagram_result")
-                    chart_result = response_obj.get("chart_result")
-                    pending_questions = response_obj.get("pending_questions", [])
-                else:
-                    response_text = str(response_obj) if response_obj else "System modeling complete"
-                    simulation_results = None
-                    diagram_result = None
-                    chart_result = None
-                    pending_questions = []
-                
-                # Send diagram if available
-                if diagram_result and diagram_result.get("success"):
-                    import json
-                    yield orchestrator_pb2.ChatChunk(
-                        type="diagram",
-                        message=json.dumps(diagram_result),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="technical_hyperspace_agent"
-                    )
-                
-                # Send chart if available
-                if chart_result and chart_result.get("success"):
-                    import json
-                    yield orchestrator_pb2.ChatChunk(
-                        type="chart",
-                        message=json.dumps(chart_result),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="technical_hyperspace_agent"
-                    )
-                
-                # Send main response
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="technical_hyperspace_agent"
-                )
-                
-                # Determine completion status
-                task_status = result.get("task_status", "complete")
-                if pending_questions:
-                    status_msg = f"Technical Hyperspace: {len(pending_questions)} questions require your input"
-                elif simulation_results and simulation_results.get("success"):
-                    health = simulation_results.get("health_metrics", {})
-                    status_msg = f"System simulation complete: {health.get('operational_components', 0)}/{health.get('total_components', 0)} components operational"
-                else:
-                    status_msg = "Technical Hyperspace analysis complete"
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=status_msg,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-                
-                return  # Exit early - short-circuit route handled
-            
-            # Convert agent name from intent classifier format to routing format
-            # Intent classifier returns names like "research_agent", routing uses "research"
-            def normalize_agent_name(agent_name: str) -> str:
-                """Convert agent name from intent classifier format to routing format"""
-                # Handle special cases first
-                special_cases = {
-                    "combined_proofread_and_analyze": "chat",  # Not implemented, fallback to chat
-                    "pipeline_agent": "chat",  # Pipeline functionality not implemented, fallback to chat
-                    "website_crawler_agent": "site_crawl",  # Different naming convention
-                    "dictionary_agent": "dictionary",  # Short-circuit dictionary agent
-                }
-                
-                if agent_name in special_cases:
-                    return special_cases[agent_name]
-                
-                # Standard conversion: remove "_agent" suffix
-                if agent_name.endswith("_agent"):
-                    return agent_name[:-6]  # Remove "_agent" (6 characters)
-                
-                # Already in short format, return as-is
-                return agent_name
-            
-            # Normalize agent name for routing
-            original_agent_type = agent_type
-            agent_type = normalize_agent_name(agent_type)
-            
-            # Log if conversion occurred (for debugging, but no "not migrated" message)
-            if original_agent_type != agent_type:
-                logger.debug(f"🔄 Agent name normalized: {original_agent_type} → {agent_type}")
-            
-            # Route to appropriate agent
-            if agent_type == "chat":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Chat agent processing your message...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="chat_agent"
-                )
-                
-                # Build metadata with shared_memory (STANDARD PATTERN)
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                chat_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                # Check for cancellation before processing
-                if cancellation_token.is_set():
-                    raise asyncio.CancelledError("Operation cancelled")
-                
-                result = await self._process_agent_with_cancellation(
-                    agent=self.chat_agent,
-                    query=request.query,
-                    metadata=chat_metadata,
-                    messages=messages,
-                    cancellation_token=cancellation_token
-                )
-                
-                response_text = result.get("response", "No response generated")
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="chat_agent"
-                )
-                
-                # Title generation is now handled by intent classifier (parallel, faster)
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=f"Chat complete (status: {result.get('task_status', 'complete')})",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-                
-            elif agent_type == "help":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Help agent loading documentation...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="help_agent"
-                )
-                
-                # Build metadata with shared_memory (STANDARD PATTERN)
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                help_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                if cancellation_token.is_set():
-                    raise asyncio.CancelledError("Operation cancelled")
-                
-                result = await self._process_agent_with_cancellation(
-                    agent=self.help_agent,
-                    query=request.query,
-                    metadata=help_metadata,
-                    messages=messages,
-                    cancellation_token=cancellation_token
-                )
-                
-                response_text = self._extract_response_text(result)
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="help_agent"
-                )
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=f"Help complete (status: {result.get('task_status', 'complete')})",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-            
-            elif agent_type == "weather":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Weather agent checking meteorological conditions...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="weather_agent"
-                )
-                
-                # Build metadata with shared_memory (STANDARD PATTERN)
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                weather_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                if cancellation_token.is_set():
-                    raise asyncio.CancelledError("Operation cancelled")
-                
-                result = await self._process_agent_with_cancellation(
-                    agent=self.weather_agent,
-                    query=request.query,
-                    metadata=weather_metadata,
-                    messages=messages,
-                    cancellation_token=cancellation_token
-                )
-                
-                # Extract response from result (matches BaseAgent response format)
-                response_messages = result.get("messages", [])
-                if response_messages:
-                    response_text = response_messages[-1].content if hasattr(response_messages[-1], 'content') else str(response_messages[-1])
-                else:
-                    # Fallback to response text if no messages
-                    response_text = result.get("response", {}).get("message", "No weather data available") if isinstance(result.get("response"), dict) else result.get("response", "No weather data available")
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="weather_agent"
-                )
-                
-                # Generate title asynchronously if this is the first message
-                # Title generation is now handled by intent classifier (parallel, faster)
-                
-                is_complete = result.get("is_complete", True)
-                status_msg = "Weather check complete" if is_complete else "Weather data incomplete"
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=status_msg,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-            
-            elif agent_type == "image_generation":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Image generation agent creating your images...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="image_generation_agent"
-                )
-                
-                # Build metadata for image generation agent
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                image_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,  # Extracted, not empty
-                    "persona": request.persona if request.HasField("persona") else None,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
-                }
-                
-                result = await self.image_generation_agent.process(
-                    query=request.query,
-                    metadata=image_metadata,
-                    messages=messages
-                )
-                
-                # Extract response from result
-                response_messages = result.get("messages", [])
-                response_text = response_messages[-1].content if response_messages else result.get("response", "No images generated")
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="image_generation_agent"
-                )
-                
-                is_complete = result.get("is_complete", True)
-                status_msg = "Image generation complete" if is_complete else "Image generation incomplete"
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=status_msg,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-            
-            # FactCheckingAgent removed - not actively used
-            
-            elif agent_type == "rss":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="RSS agent managing feeds...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="rss_agent"
-                )
-                
-                # Build metadata for RSS agent
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                rss_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory  # Extracted, not empty
-                }
-                
-                result = await self.rss_agent.process(
-                    query=request.query,
-                    metadata=rss_metadata,
-                    messages=messages
-                )
-                
-                # Extract response from result
-                response_messages = result.get("messages", [])
-                response_text = response_messages[-1].content if response_messages else result.get("response", "No RSS results available")
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="rss_agent"
-                )
-                
-                is_complete = result.get("is_complete", True)
-                agent_results = result.get("agent_results", {})
-                rss_operations = agent_results.get("rss_operations", [])
-                feeds_processed = len(rss_operations)
-                
-                status_msg = f"RSS operation complete: {feeds_processed} operations processed"
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=status_msg,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-            
-            elif agent_type == "entertainment":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="🎬 Entertainment agent searching movies and TV shows...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="entertainment_agent"
-                )
-                
-                # Build metadata with user_id and shared_memory
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                entertainment_metadata = {
-                    "user_id": request.user_id,
-                    "shared_memory": shared_memory,  # Extracted properly
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                result = await self.entertainment_agent.process(
-                    query=request.query,
-                    metadata=entertainment_metadata,
-                    messages=messages
-                )
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=result.get("response", "No entertainment content found"),
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="entertainment_agent"
-                )
-                
-                # Include content type and confidence in complete message
-                content_type = result.get("content_type", "mixed")
-                confidence = result.get("confidence", 0.0)
-                items_count = len(result.get("items_found", []))
-                
-                status_msg = f"Entertainment search complete: {items_count} items found (type: {content_type}, confidence: {confidence:.2f})"
 
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=status_msg,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-
-            elif agent_type == "electronics":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="🔌 Electronics agent designing circuits and generating code...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="electronics_agent"
-                )
-
-                # Build metadata with user_id and shared_memory (using centralized extraction)
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                # Log shared_memory contents for debugging
-                logger.info(f"🔍 ELECTRONICS AGENT STATE: shared_memory keys={list(shared_memory.keys())}")
-                if "active_editor" in shared_memory:
-                    ae = shared_memory["active_editor"]
-                    logger.info(f"✅ ACTIVE EDITOR IN STATE: filename={ae.get('filename')}, type={ae.get('frontmatter', {}).get('type')}, content_length={len(ae.get('content', ''))}")
-                else:
-                    logger.info(f"⚠️ NO ACTIVE EDITOR IN SHARED_MEMORY")
-                
-                electronics_metadata = {
-                    "user_id": request.user_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
-                }
-
-                if cancellation_token.is_set():
-                    raise asyncio.CancelledError("Operation cancelled")
-                
-                result = await self._process_agent_with_cancellation(
-                    agent=self.electronics_agent,
-                    query=request.query,
-                    metadata=electronics_metadata,
-                    messages=messages,
-                    cancellation_token=cancellation_token
-                )
-
-                # Extract response text - handle various response structures
-                response_text = None
-                if isinstance(result, dict):
-                    response_text = result.get("response")
-                    # If response is still a dict, try to extract text from it
-                    if isinstance(response_text, dict):
-                        response_text = response_text.get("response") or str(response_text)
-                    # Ensure we have a string
-                    if not isinstance(response_text, str):
-                        response_text = str(response_text) if response_text else None
-                elif isinstance(result, str):
-                    response_text = result
-                else:
-                    response_text = str(result)
-                
-                # Fallback if we still don't have text
-                if not response_text or response_text.strip() == "":
-                    response_text = "Electronics design assistance complete"
-                
-                # Check for editor operations (editing mode)
-                editor_operations = result.get("editor_operations") or result.get("response", {}).get("editor_operations") if isinstance(result.get("response"), dict) else None
-                manuscript_edit = result.get("manuscript_edit") or result.get("response", {}).get("manuscript_edit") if isinstance(result.get("response"), dict) else None
-                
-                if editor_operations:
-                    # Send editor operations as separate chunk
-                    import json
-                    # 🔒 Use locked target_document_id to prevent race conditions during tab switches
-                    document_id = (
-                        electronics_metadata.get("target_document_id") or 
-                        shared_memory.get("active_editor", {}).get("document_id")
-                    )
-                    filename = shared_memory.get("active_editor", {}).get("filename")
-                    
-                    # Defensive logging: warn if document_id differs from active_editor
-                    active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
-                    if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
-                        logger.warning(f"⚠️ RACE CONDITION DETECTED (electronics): target={document_id}, active_editor={active_editor_doc_id}")
-                    
-                    editor_ops_data = {
-                        "operations": editor_operations,
-                        "manuscript_edit": manuscript_edit,
-                        "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
-                        "filename": filename
-                    }
-                    yield orchestrator_pb2.ChatChunk(
-                        type="editor_operations",
-                        message=json.dumps(editor_ops_data),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="electronics_agent"
-                    )
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=response_text,
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="electronics_agent"
-                    )
-                else:
-                    # Generation mode: send content normally
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=response_text,
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="electronics_agent"
-                    )
-
-                # Include design type and confidence in complete message
-                design_type = result.get("design_type", "general")
-                confidence = result.get("confidence", 0.0)
-                components_count = len(result.get("components", []))
-                code_snippets_count = len(result.get("code_snippets", []))
-
-                status_msg = f"Electronics design complete: {design_type} (components: {components_count}, code: {code_snippets_count}, confidence: {confidence:.2f})"
-
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=status_msg,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-
-            elif agent_type == "general_project":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="General project agent planning and managing your project...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="general_project_agent"
-                )
-
-                # Build metadata with user_id and shared_memory
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                logger.info(f"General project agent state: shared_memory keys={list(shared_memory.keys())}")
-                if "active_editor" in shared_memory:
-                    ae = shared_memory["active_editor"]
-                    logger.info(f"Active editor in state: filename={ae.get('filename')}, type={ae.get('frontmatter', {}).get('type')}, content_length={len(ae.get('content', ''))}")
-                else:
-                    logger.info(f"No active editor in shared_memory")
-                
-                general_project_metadata = {
-                    "user_id": request.user_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-
-                if cancellation_token.is_set():
-                    raise asyncio.CancelledError("Operation cancelled")
-                
-                result = await self._process_agent_with_cancellation(
-                    agent=self.general_project_agent,
-                    query=request.query,
-                    metadata=general_project_metadata,
-                    messages=messages,
-                    cancellation_token=cancellation_token
-                )
-
-                # Extract response text - handle various response structures
-                response_text = None
-                if isinstance(result, dict):
-                    response_text = result.get("response")
-                    # If response is still a dict, try to extract text from it
-                    if isinstance(response_text, dict):
-                        response_text = response_text.get("response") or str(response_text)
-                    # Ensure we have a string
-                    if not isinstance(response_text, str):
-                        response_text = str(response_text) if response_text else None
-                elif isinstance(result, str):
-                    response_text = result
-                else:
-                    response_text = str(result)
-                
-                # Fallback if we still don't have text
-                if not response_text or response_text.strip() == "":
-                    response_text = "General project assistance complete"
-                
-                # Check for editor operations (editing mode)
-                editor_operations = result.get("editor_operations") or result.get("response", {}).get("editor_operations") if isinstance(result.get("response"), dict) else None
-                manuscript_edit = result.get("manuscript_edit") or result.get("response", {}).get("manuscript_edit") if isinstance(result.get("response"), dict) else None
-                
-                if editor_operations:
-                    # Send editor operations as separate chunk
-                    import json
-                    # 🔒 Use locked target_document_id to prevent race conditions during tab switches
-                    document_id = (
-                        general_project_metadata.get("target_document_id") or 
-                        shared_memory.get("active_editor", {}).get("document_id")
-                    )
-                    filename = shared_memory.get("active_editor", {}).get("filename")
-                    
-                    # Defensive logging: warn if document_id differs from active_editor
-                    active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
-                    if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
-                        logger.warning(f"⚠️ RACE CONDITION DETECTED (general_project): target={document_id}, active_editor={active_editor_doc_id}")
-                    
-                    editor_ops_data = {
-                        "operations": editor_operations,
-                        "manuscript_edit": manuscript_edit,
-                        "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
-                        "filename": filename
-                    }
-                    yield orchestrator_pb2.ChatChunk(
-                        type="editor_operations",
-                        message=json.dumps(editor_ops_data),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="general_project_agent"
-                    )
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=response_text,
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="general_project_agent"
-                    )
-                else:
-                    # Generation mode: send content normally
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=response_text,
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="general_project_agent"
-                    )
-
-                query_type = result.get("query_type", "general") if isinstance(result, dict) else "general"
-                confidence = result.get("confidence", 0.0) if isinstance(result, dict) else 0.0
-
-                status_msg = f"General project complete: {query_type} (confidence: {confidence:.2f})"
-
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=status_msg,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-
-            elif agent_type == "reference":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="📚 Reference agent analyzing your document...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="reference_agent"
-                )
-
-                # Build metadata with user_id and shared_memory
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                logger.info(f"Reference agent state: shared_memory keys={list(shared_memory.keys())}")
-                if "active_editor" in shared_memory:
-                    ae = shared_memory["active_editor"]
-                    logger.info(f"Active editor in state: filename={ae.get('filename')}, type={ae.get('frontmatter', {}).get('type')}, content_length={len(ae.get('content', ''))}")
-                else:
-                    logger.info(f"No active editor in shared_memory")
-                
-                reference_metadata = {
-                    "user_id": request.user_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-
-                if cancellation_token.is_set():
-                    raise asyncio.CancelledError("Operation cancelled")
-                
-                result = await self._process_agent_with_cancellation(
-                    agent=self.reference_agent,
-                    query=request.query,
-                    metadata=reference_metadata,
-                    messages=messages,
-                    cancellation_token=cancellation_token
-                )
-
-                # Extract response text - handle various response structures
-                response_text = None
-                if isinstance(result, dict):
-                    response_text = result.get("response")
-                    # If response is still a dict, try to extract text from it
-                    if isinstance(response_text, dict):
-                        response_text = response_text.get("response") or str(response_text)
-                    # Ensure we have a string
-                    if not isinstance(response_text, str):
-                        response_text = str(response_text) if response_text else None
-                elif isinstance(result, str):
-                    response_text = result
-                else:
-                    response_text = str(result)
-                
-                # Fallback if we still don't have text
-                if not response_text or response_text.strip() == "":
-                    response_text = "Reference analysis complete"
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="reference_agent"
-                )
-
-                complexity_level = result.get("complexity_level", "simple_qa") if isinstance(result, dict) else "simple_qa"
-                confidence = result.get("confidence", 0.0) if isinstance(result, dict) else 0.0
-                research_used = result.get("research_used", False) if isinstance(result, dict) else False
-
-                status_msg = f"Reference analysis complete: {complexity_level} (confidence: {confidence:.2f}, research: {research_used})"
-
-                # Capture visualization metadata for static images/SVGs
-                chunk_metadata = {}
-                if isinstance(result, dict):
-                    if result.get("static_visualization_data"):
-                        chunk_metadata["static_visualization_data"] = result["static_visualization_data"]
-                    if result.get("static_format"):
-                        chunk_metadata["static_format"] = result["static_format"]
-
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=status_msg,
-                    timestamp=datetime.now().isoformat(),
-                    metadata=chunk_metadata,
-                    agent_name="system"
-                )
-
-            elif agent_type == "character_development":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Character development agent processing character edits...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="character_development_agent"
-                )
-                
-                # Build metadata with user_id and shared_memory
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                character_metadata = {
-                    "user_id": request.user_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
-                }
-                
-                result = await self.character_development_agent.process(
-                    query=request.query,
-                    metadata=character_metadata,
-                    messages=messages
-                )
-                
-                # Extract response from result
-                if isinstance(result, dict):
-                    agent_messages = result.get("messages", [])
-                    if agent_messages:
-                        for msg in agent_messages:
-                            if hasattr(msg, 'content'):
-                                yield orchestrator_pb2.ChatChunk(
-                                    type="content",
-                                    message=msg.content,
-                                    timestamp=datetime.now().isoformat(),
-                                    agent_name="character_development_agent"
+            # Skill dispatch: compound plan or unified dispatcher
+            if compound_plan:
+                if not request.conversation_history:
+                    title = (request.query or "New conversation").strip()[:50]
+                    if title:
+                        yield orchestrator_pb2.ChatChunk(
+                            type="title",
+                            message=title,
+                            timestamp=datetime.now().isoformat(),
+                            agent_name="system",
+                        )
+                        try:
+                            from orchestrator.backend_tool_client import get_backend_tool_client
+                            backend_client = await get_backend_tool_client()
+                            asyncio.create_task(
+                                backend_client.update_conversation_title(
+                                    conversation_id=request.conversation_id,
+                                    title=title,
+                                    user_id=request.user_id
                                 )
-                    else:
-                        response_text = result.get("response", "Character development complete")
-                        yield orchestrator_pb2.ChatChunk(
-                            type="content",
-                            message=response_text,
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="character_development_agent"
-                        )
-                    
-                    # Include editor operations in metadata if available
-                    agent_results = result.get("agent_results", {})
-                    editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
-                    manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
-                    
-                    logger.info(f"📥 GRPC SERVICE (character_development_agent): Received result keys: {list(result.keys())}")
-                    logger.info(f"📥 GRPC SERVICE: editor_operations from top level: {len(result.get('editor_operations', []))}, from agent_results: {len(agent_results.get('editor_operations', []))}, final: {len(editor_operations) if editor_operations else 0}")
-                    
-                    if editor_operations:
-                        logger.info(f"✅ GRPC SERVICE: Sending {len(editor_operations)} editor operation(s) to frontend")
-                        # Send editor operations as separate chunk
-                        import json
-                        # 🔒 Use locked target_document_id to prevent race conditions during tab switches
-                        document_id = (
-                            character_metadata.get("target_document_id") or 
-                            shared_memory.get("active_editor", {}).get("document_id")
-                        )
-                        filename = shared_memory.get("active_editor", {}).get("filename")
-                        
-                        # Defensive logging: warn if document_id differs from active_editor
-                        active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
-                        if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
-                            logger.warning(f"⚠️ RACE CONDITION DETECTED (character): target={document_id}, active_editor={active_editor_doc_id}")
-                        
-                        editor_ops_data = {
-                            "operations": editor_operations,
-                            "manuscript_edit": manuscript_edit,
-                            "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
-                            "filename": filename
-                        }
-                        logger.info(f"✅ Sending {len(editor_operations)} editor_operations to frontend (first op: {editor_operations[0] if editor_operations else None})")
-                        logger.info(f"🔍 Editor operations data structure: operations_count={len(editor_operations)}, has_manuscript_edit={bool(manuscript_edit)}, document_id={document_id}, filename={filename}")
-                        if editor_operations:
-                            logger.info(f"🔍 First operation details: op_type={editor_operations[0].get('op_type') if editor_operations else 'none'}, start={editor_operations[0].get('start') if editor_operations else 'none'}, end={editor_operations[0].get('end') if editor_operations else 'none'}, has_text={bool(editor_operations[0].get('text')) if editor_operations else False}, text_preview={editor_operations[0].get('text', '')[:100] if editor_operations and editor_operations[0].get('text') else 'N/A'}")
-                        yield orchestrator_pb2.ChatChunk(
-                            type="editor_operations",
-                            message=json.dumps(editor_ops_data),
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="character_development_agent"
-                        )
-                        logger.info(f"✅ Sent editor_operations chunk to frontend (type='editor_operations', message_length={len(json.dumps(editor_ops_data))})")
-                        yield orchestrator_pb2.ChatChunk(
-                            type="complete",
-                            message="Character edit plan ready",
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system"
-                        )
-                    else:
-                        logger.warning(f"⚠️ GRPC SERVICE: No editor_operations found in result (result keys: {list(result.keys())}, agent_results keys: {list(agent_results.keys())})")
-                        yield orchestrator_pb2.ChatChunk(
-                            type="complete",
-                            message="Character development complete",
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system"
-                        )
-                else:
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=str(result),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="character_development_agent"
-                    )
-                    yield orchestrator_pb2.ChatChunk(
-                        type="complete",
-                        message="Character development complete",
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="system"
-                    )
-
-            elif agent_type == "content_analysis":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Content analysis agent analyzing documents...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="content_analysis_agent"
-                )
-                
-                # Build metadata with shared_memory
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to queue title update: %s", e)
                 shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                content_analysis_metadata = {
+                dispatch_metadata = {
                     "user_id": request.user_id,
                     "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,  # Extracted properly
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                result = await self.content_analysis_agent.process(
-                    query=request.query,
-                    metadata=content_analysis_metadata,
-                    messages=messages
-                )
-                
-                # Extract response text from nested structure
-                response_obj = result.get("response", {})
-                if isinstance(response_obj, dict):
-                    response_text = response_obj.get("response", "Content analysis complete")
-                else:
-                    response_text = str(response_obj) if response_obj else "Content analysis complete"
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="content_analysis_agent"
-                )
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=f"Content analysis complete (status: {result.get('task_status', 'complete')})",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-
-            elif agent_type == "fiction_editing":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Fiction editing agent processing manuscript edits...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="fiction_editing_agent"
-                )
-                
-                # Build metadata with user_id and shared_memory
-                # Ensure primary_agent_selected is included from metadata
-                base_shared_memory = metadata.get("shared_memory", {})
-                shared_memory = self._extract_shared_memory(request, base_shared_memory)
-                # Ensure primary_agent_selected is preserved (set by intent classification)
-                if "primary_agent_selected" in base_shared_memory:
-                    shared_memory["primary_agent_selected"] = base_shared_memory["primary_agent_selected"]
-                
-                # Ensure user_chat_model is in metadata (not just shared_memory) for agent model selection
-                if "user_chat_model" in shared_memory and "user_chat_model" not in metadata:
-                    metadata["user_chat_model"] = shared_memory["user_chat_model"]
-                    logger.info(f"🎯 FICTION METADATA: Added user_chat_model to metadata: {shared_memory['user_chat_model']}")
-                
-                fiction_metadata = {
-                    "user_id": request.user_id,
                     "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
+                    **{k: v for k, v in metadata.items() if k != "shared_memory"},
                 }
-                
-                result = await self.fiction_editing_agent.process(
-                    query=request.query,
-                    metadata=fiction_metadata,
-                    messages=messages
+                from orchestrator.engines.plan_engine import PlanEngine
+                plan_engine = PlanEngine()
+                async for chunk in plan_engine.execute_plan(
+                    compound_plan, request.query, dispatch_metadata, messages, cancellation_token
+                ):
+                    yield chunk
+                self._save_agent_identity_to_cache(
+                    {"shared_memory": {"primary_agent_selected": "compound_agent", "last_agent": "compound_agent"}},
+                    request.conversation_id,
                 )
-                
-                # Extract response from result
-                if isinstance(result, dict):
-                    # Include editor operations in metadata if available
-                    agent_results = result.get("agent_results", {})
-                    editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
-                    manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
-                    
-                    # Debug logging for editor operations
-                    logger.info(f"🔍 Fiction editing agent result structure: has_editor_ops={bool(result.get('editor_operations'))}, agent_results_ops={bool(agent_results.get('editor_operations'))}, final_ops={bool(editor_operations)}, ops_count={len(editor_operations) if editor_operations else 0}")
-                    
-                    # Always send content chunk first (for chat sidebar)
-                    agent_messages = result.get("messages", [])
-                    response_text = None
-                    
-                    if agent_messages:
-                        for msg in agent_messages:
-                            if hasattr(msg, 'content'):
-                                response_text = msg.content
-                                yield orchestrator_pb2.ChatChunk(
-                                    type="content",
-                                    message=response_text,
-                                    timestamp=datetime.now().isoformat(),
-                                    agent_name="fiction_editing_agent"
+                return
+            if discovered_skill:
+                if not request.conversation_history:
+                    title = (request.query or "New conversation").strip()[:50]
+                    if title:
+                        yield orchestrator_pb2.ChatChunk(
+                            type="title",
+                            message=title,
+                            timestamp=datetime.now().isoformat(),
+                            agent_name="system",
+                        )
+                        try:
+                            from orchestrator.backend_tool_client import get_backend_tool_client
+                            backend_client = await get_backend_tool_client()
+                            asyncio.create_task(
+                                backend_client.update_conversation_title(
+                                    conversation_id=request.conversation_id,
+                                    title=title,
+                                    user_id=request.user_id
                                 )
-                    else:
-                        # Extract response text from result
-                        response_data = result.get("response", {})
-                        logger.info(f"🔍 Response extraction: response_data type={type(response_data)}, is_dict={isinstance(response_data, dict)}, keys={list(response_data.keys()) if isinstance(response_data, dict) else 'N/A'}")
-                        # Handle both string and dict responses
-                        if isinstance(response_data, str):
-                            response_text = response_data
-                            logger.info(f"🔍 Response extraction: response_data is string, length={len(response_text)}")
-                        elif isinstance(response_data, dict):
-                            response_text = response_data.get("response", "")
-                            logger.info(f"🔍 Response extraction: extracted from dict, response_text length={len(response_text)}, preview={response_text[:100] if response_text else 'EMPTY'}")
-                            # Fallback: if response key is empty, use summary from manuscript_edit
-                            if not response_text and manuscript_edit:
-                                response_text = manuscript_edit.get("summary", "")
-                                logger.info(f"🔍 Response extraction: used summary from manuscript_edit, length={len(response_text)}")
-                        else:
-                            response_text = ""
-                            logger.warning(f"🔍 Response extraction: response_data is neither string nor dict: {type(response_data)}")
-                        
-                        # Fallback: if still no response text, use summary from manuscript_edit
-                        if not response_text and manuscript_edit:
-                            response_text = manuscript_edit.get("summary", "")
-                        
-                        # Final fallback: generic message
-                        if not response_text:
-                            op_count = len(editor_operations) if editor_operations else 0
-                            if op_count > 0:
-                                response_text = f"Generated {op_count} edit(s) to the manuscript."
-                            else:
-                                response_text = "Fiction editing complete"
-                        
-                        # Always send content chunk (even if editor_operations exist)
-                        yield orchestrator_pb2.ChatChunk(
-                            type="content",
-                            message=response_text,
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="fiction_editing_agent"
-                        )
-                        logger.info(f"✅ Sent content chunk to frontend (response_text length: {len(response_text)})")
-                    
-                    # Then send editor operations if available
-                    if editor_operations:
-                        # Send editor operations as separate chunk
-                        import json
-                        # 🔒 Use locked target_document_id to prevent race conditions during tab switches
-                        document_id = (
-                            fiction_metadata.get("target_document_id") or 
-                            shared_memory.get("active_editor", {}).get("document_id")
-                        )
-                        filename = shared_memory.get("active_editor", {}).get("filename")
-                        
-                        # Defensive logging: warn if document_id differs from active_editor
-                        active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
-                        if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
-                            logger.warning(f"⚠️ RACE CONDITION DETECTED (fiction): target={document_id}, active_editor={active_editor_doc_id}")
-                        
-                        editor_ops_data = {
-                            "operations": editor_operations,
-                            "manuscript_edit": manuscript_edit,
-                            "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
-                            "filename": filename
-                        }
-                        logger.info(f"✅ Sending {len(editor_operations)} editor_operations to frontend (first op: {editor_operations[0] if editor_operations else None})")
-                        logger.info(f"🔍 Editor operations data structure: operations_count={len(editor_operations)}, has_manuscript_edit={bool(manuscript_edit)}, document_id={document_id}, filename={filename}")
-                        logger.info(f"🔍 First operation details: op_type={editor_operations[0].get('op_type') if editor_operations else 'none'}, start={editor_operations[0].get('start') if editor_operations else 'none'}, end={editor_operations[0].get('end') if editor_operations else 'none'}, has_text={bool(editor_operations[0].get('text')) if editor_operations else False}")
-                        yield orchestrator_pb2.ChatChunk(
-                            type="editor_operations",
-                            message=json.dumps(editor_ops_data),
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="fiction_editing_agent"
-                        )
-                        logger.info(f"✅ Sent editor_operations chunk to frontend (type='editor_operations', message_length={len(json.dumps(editor_ops_data))})")
-                    else:
-                        logger.warning(f"⚠️ No editor_operations to send (result keys: {list(result.keys()) if isinstance(result, dict) else 'not a dict'})")
-                    
-                        yield orchestrator_pb2.ChatChunk(
-                            type="complete",
-                            message="Fiction edit plan ready",
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system"
-                        )
-                else:
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=str(result),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="fiction_editing_agent"
-                    )
-                    yield orchestrator_pb2.ChatChunk(
-                        type="complete",
-                        message="Fiction editing complete",
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="system"
-                    )
-
-            elif agent_type == "outline_editing":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Outline editing agent processing outline edits...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="outline_editing_agent"
-                )
-                
-                # Build metadata with user_id and shared_memory
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to queue title update: %s", e)
                 shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                outline_metadata = {
-                    "user_id": request.user_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
-                }
-                logger.info(f"🔍 OUTLINE METADATA: user_chat_model = {outline_metadata.get('user_chat_model')}, shared_memory keys = {list(shared_memory.keys())}")
-                
-                result = await self.outline_editing_agent.process(
-                    query=request.query,
-                    metadata=outline_metadata,
-                    messages=messages
-                )
-                
-                # Extract response text for title generation (handles both dict and string results)
-                response_text = self._extract_response_text(result)
-                
-                # Extract response from result and yield chunks
-                # Check for editor operations first (regardless of message structure)
-                editor_operations = result.get("editor_operations")
-                manuscript_edit = result.get("manuscript_edit")
-                
-                # Debug logging for editor operations extraction
-                logger.info(f"🔍 Outline agent result structure: top_level_ops={bool(editor_operations)}, result_keys={list(result.keys()) if isinstance(result, dict) else 'not a dict'}")
-                
-                # Also check agent_results and response dict
-                if not editor_operations:
-                    agent_results = result.get("agent_results", {})
-                    editor_operations = agent_results.get("editor_operations")
-                    manuscript_edit = manuscript_edit or agent_results.get("manuscript_edit")
-                    logger.info(f"🔍 Checked agent_results: ops={bool(editor_operations)}")
-                
-                if not editor_operations:
-                    response_obj = result.get("response", {})
-                    if isinstance(response_obj, dict):
-                        editor_operations = response_obj.get("editor_operations")
-                        manuscript_edit = manuscript_edit or response_obj.get("manuscript_edit")
-                        logger.info(f"🔍 Checked response dict: ops={bool(editor_operations)}, response_keys={list(response_obj.keys()) if isinstance(response_obj, dict) else 'not a dict'}")
-                
-                # Final check - log what we found
-                if editor_operations:
-                    logger.info(f"✅ Found {len(editor_operations)} editor operations to send")
-                else:
-                    logger.warning(f"⚠️ No editor_operations found in result structure")
-                
-                if isinstance(result, dict):
-                    agent_messages = result.get("messages", [])
-                    if agent_messages:
-                        # Stream messages as they come
-                        for msg in agent_messages:
-                            if hasattr(msg, 'content'):
-                                yield orchestrator_pb2.ChatChunk(
-                                    type="content",
-                                    message=msg.content,
-                                    timestamp=datetime.now().isoformat(),
-                                    agent_name="outline_editing_agent"
-                                )
-                        # Update response_text from last message if we have messages
-                        if agent_messages:
-                            last_msg = agent_messages[-1]
-                            if hasattr(last_msg, 'content'):
-                                response_text = last_msg.content
-                            else:
-                                response_text = str(last_msg)
-                    else:
-                        # No messages, extract from response field
-                        response_obj = result.get("response", "")
-                        if isinstance(response_obj, dict):
-                            response_text = response_obj.get("response", "Outline editing complete")
-                        elif isinstance(response_obj, str):
-                            response_text = response_obj
-                        else:
-                            response_text = "Outline editing complete"
-                        
-                        # Send content (editor operations sent separately below if present)
-                        yield orchestrator_pb2.ChatChunk(
-                            type="content",
-                            message=response_text,
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="outline_editing_agent"
-                        )
-                
-                else:
-                    # Result is a string or other non-dict type
-                    response_text = str(result)
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=response_text,
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="outline_editing_agent"
-                    )
-                
-                # Send editor operations if present (after content, regardless of message structure)
-                if editor_operations and len(editor_operations) > 0:
-                    import json
-                    # 🔒 Use locked target_document_id to prevent race conditions during tab switches
-                    document_id = (
-                        outline_metadata.get("target_document_id") or 
-                        shared_memory.get("active_editor", {}).get("document_id")
-                    )
-                    filename = shared_memory.get("active_editor", {}).get("filename")
-                    
-                    # Defensive logging: warn if document_id differs from active_editor
-                    active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
-                    if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
-                        logger.warning(f"⚠️ RACE CONDITION DETECTED (outline): target={document_id}, active_editor={active_editor_doc_id}")
-                    
-                    editor_ops_data = {
-                        "operations": editor_operations,
-                        "manuscript_edit": manuscript_edit,
-                        "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
-                        "filename": filename
-                    }
-                    logger.info(f"✅ Sending {len(editor_operations)} editor operations to frontend (document_id={document_id}, filename={filename})")
-                    yield orchestrator_pb2.ChatChunk(
-                        type="editor_operations",
-                        message=json.dumps(editor_ops_data),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="outline_editing_agent"
-                    )
-                elif editor_operations is not None:
-                    logger.warning(f"⚠️ editor_operations is empty list (length={len(editor_operations)})")
-                else:
-                    logger.warning(f"⚠️ editor_operations is None - not sending operations chunk")
-                
-                # Generate title asynchronously if this is the first message
-                # Title generation is now handled by intent classifier (parallel, faster)
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message="Outline editing complete",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-
-            elif agent_type == "rules_editing":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Rules editing agent processing rules edits...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="rules_editing_agent"
-                )
-                
-                # Build metadata with user_id and shared_memory
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                rules_metadata = {
-                    "user_id": request.user_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
-                }
-                
-                result = await self.rules_editing_agent.process(
-                    query=request.query,
-                    metadata=rules_metadata,
-                    messages=messages
-                )
-                
-                # Extract response from result
-                if isinstance(result, dict):
-                    agent_messages = result.get("messages", [])
-                    if agent_messages:
-                        for msg in agent_messages:
-                            if hasattr(msg, 'content'):
-                                yield orchestrator_pb2.ChatChunk(
-                                    type="content",
-                                    message=msg.content,
-                                    timestamp=datetime.now().isoformat(),
-                                    agent_name="rules_editing_agent"
-                                )
-                    else:
-                        response_data = result.get("response", "Rules editing complete")
-                        # Handle both string and dict responses
-                        if isinstance(response_data, str):
-                            response_text = response_data
-                        elif isinstance(response_data, dict):
-                            response_text = response_data.get("response", "Rules editing complete")
-                        else:
-                            response_text = "Rules editing complete"
-                        yield orchestrator_pb2.ChatChunk(
-                            type="content",
-                            message=response_text,
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="rules_editing_agent"
-                        )
-                    
-                    # Include editor operations in metadata if available
-                    agent_results = result.get("agent_results", {})
-                    editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
-                    manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
-                    
-                    if editor_operations:
-                        # Send editor operations as separate chunk
-                        import json
-                        # 🔒 Use locked target_document_id to prevent race conditions during tab switches
-                        document_id = (
-                            rules_metadata.get("target_document_id") or 
-                            shared_memory.get("active_editor", {}).get("document_id")
-                        )
-                        filename = shared_memory.get("active_editor", {}).get("filename")
-                        
-                        # Defensive logging: warn if document_id differs from active_editor
-                        active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
-                        if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
-                            logger.warning(f"⚠️ RACE CONDITION DETECTED (rules): target={document_id}, active_editor={active_editor_doc_id}")
-                        
-                        editor_ops_data = {
-                            "operations": editor_operations,
-                            "manuscript_edit": manuscript_edit,
-                            "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
-                            "filename": filename
-                        }
-                        logger.info(f"✅ RULES AGENT: Sending {len(editor_operations)} editor operations with document_id={document_id}, filename={filename}")
-                        yield orchestrator_pb2.ChatChunk(
-                            type="editor_operations",
-                            message=json.dumps(editor_ops_data),
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="rules_editing_agent"
-                        )
-                        yield orchestrator_pb2.ChatChunk(
-                            type="complete",
-                            message="Rules edit plan ready",
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system"
-                        )
-                    else:
-                        yield orchestrator_pb2.ChatChunk(
-                            type="complete",
-                            message="Rules editing complete",
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system"
-                        )
-                else:
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=str(result),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="rules_editing_agent"
-                    )
-                    yield orchestrator_pb2.ChatChunk(
-                        type="complete",
-                        message="Rules editing complete",
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="system"
-                    )
-
-            elif agent_type == "style_editing":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Style editing agent processing style guide edits...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="style_editing_agent"
-                )
-                
-                # Build metadata with user_id and shared_memory
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                style_metadata = {
-                    "user_id": request.user_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}  # Merge other metadata fields
-                }
-                
-                result = await self.style_editing_agent.process(
-                    query=request.query,
-                    metadata=style_metadata,
-                    messages=messages
-                )
-                
-                # Extract response from result
-                if isinstance(result, dict):
-                    agent_messages = result.get("messages", [])
-                    if agent_messages:
-                        for msg in agent_messages:
-                            if hasattr(msg, 'content'):
-                                yield orchestrator_pb2.ChatChunk(
-                                    type="content",
-                                    message=msg.content,
-                                    timestamp=datetime.now().isoformat(),
-                                    agent_name="style_editing_agent"
-                                )
-                    else:
-                        response_data = result.get("response", "Style editing complete")
-                        # Handle both string and dict responses
-                        if isinstance(response_data, str):
-                            response_text = response_data
-                        elif isinstance(response_data, dict):
-                            response_text = response_data.get("response", "Style editing complete")
-                        else:
-                            response_text = "Style editing complete"
-                        yield orchestrator_pb2.ChatChunk(
-                            type="content",
-                            message=response_text,
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="style_editing_agent"
-                        )
-                    
-                    # Include editor operations in metadata if available
-                    agent_results = result.get("agent_results", {})
-                    editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
-                    manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
-                    
-                    if editor_operations:
-                        # Send editor operations as separate chunk
-                        import json
-                        # 🔒 Use locked target_document_id to prevent race conditions during tab switches
-                        document_id = (
-                            style_metadata.get("target_document_id") or 
-                            shared_memory.get("active_editor", {}).get("document_id")
-                        )
-                        filename = shared_memory.get("active_editor", {}).get("filename")
-                        
-                        # Defensive logging: warn if document_id differs from active_editor
-                        active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
-                        if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
-                            logger.warning(f"⚠️ RACE CONDITION DETECTED (style): target={document_id}, active_editor={active_editor_doc_id}")
-                        
-                        editor_ops_data = {
-                            "operations": editor_operations,
-                            "manuscript_edit": manuscript_edit,
-                            "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
-                            "filename": filename
-                        }
-                        logger.info(f"✅ STYLE AGENT: Sending {len(editor_operations)} editor operations with document_id={document_id}, filename={filename}")
-                        yield orchestrator_pb2.ChatChunk(
-                            type="editor_operations",
-                            message=json.dumps(editor_ops_data),
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="style_editing_agent"
-                        )
-                        yield orchestrator_pb2.ChatChunk(
-                            type="complete",
-                            message="Style edit plan ready",
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system"
-                        )
-                    else:
-                        yield orchestrator_pb2.ChatChunk(
-                            type="complete",
-                            message="Style editing complete",
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system"
-                        )
-                else:
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=str(result),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="style_editing_agent"
-                    )
-                    yield orchestrator_pb2.ChatChunk(
-                        type="complete",
-                        message="Style editing complete",
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="system"
-                    )
-
-            elif agent_type == "story_analysis":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Story analysis agent analyzing manuscript...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="story_analysis_agent"
-                )
-                
-                # Build metadata with shared_memory (STANDARD PATTERN)
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                story_analysis_metadata = {
+                dispatch_metadata = {
                     "user_id": request.user_id,
                     "conversation_id": request.conversation_id,
                     "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
+                    **{k: v for k, v in metadata.items() if k != "shared_memory"},
                 }
-                
-                result = await self.story_analysis_agent.process(
-                    query=request.query,
-                    metadata=story_analysis_metadata,
-                    messages=messages
+                from orchestrator.engines.unified_dispatch import get_unified_dispatcher
+                dispatcher = get_unified_dispatcher()
+                async for chunk in dispatcher.dispatch(
+                    discovered_skill.name, request.query, dispatch_metadata, messages, cancellation_token
+                ):
+                    yield chunk
+                agent_name = primary_agent_name or discovered_skill.name
+                self._save_agent_identity_to_cache(
+                    {"shared_memory": {"primary_agent_selected": agent_name, "last_agent": agent_name}},
+                    request.conversation_id,
                 )
-                
-                # Extract response text from nested structure
-                # result is the response dict from process() which contains {"task_status": ..., "response": analysis_text, ...}
-                logger.info(f"🔍 Story analysis result structure: type={type(result)}, is_dict={isinstance(result, dict)}, keys={list(result.keys()) if isinstance(result, dict) else 'N/A'}")
-                
-                if isinstance(result, dict):
-                    # The result dict has a "response" key containing the actual analysis text
-                    response_text = result.get("response", "")
-                    if isinstance(response_text, dict):
-                        # If response is nested, extract the actual text
-                        response_text = response_text.get("response", "Story analysis complete")
-                    elif not response_text:
-                        # Fallback to structured_response if available
-                        structured = result.get("structured_response", {})
-                        response_text = structured.get("analysis_text", "Story analysis complete")
-                    
-                    logger.info(f"🔍 Story analysis response extraction: response_text length={len(response_text) if response_text else 0}, preview={response_text[:200] if response_text else 'EMPTY'}")
-                else:
-                    response_text = str(result) if result else "Story analysis complete"
-                    logger.warning(f"🔍 Story analysis result is not a dict: {type(result)}")
-                
-                if not response_text or response_text == "Story analysis complete":
-                    logger.warning(f"⚠️ Story analysis response is empty or default - result keys: {list(result.keys()) if isinstance(result, dict) else 'not a dict'}")
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="story_analysis_agent"
-                )
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=f"Story analysis complete (status: {result.get('task_status', 'complete')})",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
+                return
 
-            elif agent_type == "site_crawl":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Site crawl agent crawling website...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="site_crawl_agent"
-                )
-                
-                # Build metadata with shared_memory (STANDARD PATTERN)
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                site_crawl_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                result = await self.site_crawl_agent.process(
-                    query=request.query,
-                    metadata=site_crawl_metadata,
-                    messages=messages
-                )
-                
-                # Extract response text from nested structure
-                response_obj = result.get("response", {})
-                if isinstance(response_obj, dict):
-                    response_text = response_obj.get("response", "Site crawl complete")
-                else:
-                    response_text = str(response_obj) if response_obj else "Site crawl complete"
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="site_crawl_agent"
-                )
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=f"Site crawl complete (status: {result.get('task_status', 'complete')})",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-
-            elif agent_type == "org" or agent_type == "org_inbox" or agent_type == "org_project":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Org agent processing request...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="org_agent"
-                )
-                
-                # Build metadata for org agent (STANDARD PATTERN)
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                # Check if there's pending project capture in conversation intelligence
-                if request.pending_operations:
-                    for op in request.pending_operations:
-                        if op.type == "project_capture":
-                            # Restore pending project state
-                            import json
-                            try:
-                                pending_data = json.loads(op.metadata.get("data", "{}")) if op.metadata else {}
-                                shared_memory["pending_project_capture"] = pending_data
-                            except:
-                                pass
-                
-                org_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                result = await self.org_agent.process(
-                    query=request.query,
-                    metadata=org_metadata,
-                    messages=messages
-                )
-                
-                # Extract response from result
-                response_messages = result.get("messages", [])
-                response_text = response_messages[-1].content if response_messages else result.get("response", "No org results available")
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="org_agent"
-                )
-                
-                is_complete = result.get("is_complete", True)
-                agent_results = result.get("agent_results", {})
-                org_result = agent_results.get("org_inbox", {}) or agent_results.get("org_agent", {})
-                action = org_result.get("action", "unknown")
-                
-                status_msg = f"Org operation complete: {action}"
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=status_msg,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-            
-            elif agent_type in ["substack", "article_writing"]:  # Support both for backward compatibility
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Article writing agent generating article...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="article_writing_agent"
-                )
-                
-                # Build metadata with shared_memory (STANDARD PATTERN)
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                article_writing_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                result = await self.article_writing_agent.process(
-                    query=request.query,
-                    metadata=article_writing_metadata,
-                    messages=messages
-                )
-                
-                # Extract response
-                response_messages = result.get("messages", [])
-                response_text = response_messages[-1].content if response_messages else result.get("response", "No article generated")
-                agent_results = result.get("agent_results", {})
-                
-                # Check for editor operations (editing mode)
-                editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
-                manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
-                
-                if editor_operations:
-                    # Send editor operations as separate chunk
-                    import json
-                    # 🔒 Use locked target_document_id to prevent race conditions during tab switches
-                    document_id = (
-                        article_writing_metadata.get("target_document_id") or 
-                        shared_memory.get("active_editor", {}).get("document_id")
-                    )
-                    filename = shared_memory.get("active_editor", {}).get("filename")
-                    
-                    # Defensive logging: warn if document_id differs from active_editor
-                    active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
-                    if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
-                        logger.warning(f"⚠️ RACE CONDITION DETECTED (article): target={document_id}, active_editor={active_editor_doc_id}")
-                    
-                    editor_ops_data = {
-                        "operations": editor_operations,
-                        "manuscript_edit": manuscript_edit,
-                        "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
-                        "filename": filename
-                    }
-                    logger.info(f"✅ ARTICLE AGENT: Sending {len(editor_operations)} editor operations with document_id={document_id}, filename={filename}")
-                    yield orchestrator_pb2.ChatChunk(
-                        type="editor_operations",
-                        message=json.dumps(editor_ops_data),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="article_writing_agent"
-                    )
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=response_text,
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="article_writing_agent"
-                    )
-                else:
-                    # Generation mode: send content normally
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=response_text,
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="article_writing_agent"
-                    )
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message="Article generation complete",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-            
-            elif agent_type == "podcast_script":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Podcast script agent generating script...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="podcast_script_agent"
-                )
-                
-                # Build metadata with shared_memory (STANDARD PATTERN)
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                podcast_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                result = await self.podcast_script_agent.process(
-                    query=request.query,
-                    metadata=podcast_metadata,
-                    messages=messages
-                )
-                
-                # Extract response
-                response_messages = result.get("messages", [])
-                response_text = response_messages[-1].content if response_messages else result.get("response", "No script generated")
-                agent_results = result.get("agent_results", {})
-                
-                # Check for editor operations (editing mode)
-                editor_operations = result.get("editor_operations") or agent_results.get("editor_operations")
-                manuscript_edit = result.get("manuscript_edit") or agent_results.get("manuscript_edit")
-                
-                if editor_operations:
-                    # Send editor operations as separate chunk
-                    import json
-                    # 🔒 Use locked target_document_id to prevent race conditions during tab switches
-                    document_id = (
-                        podcast_metadata.get("target_document_id") or 
-                        shared_memory.get("active_editor", {}).get("document_id")
-                    )
-                    filename = shared_memory.get("active_editor", {}).get("filename")
-                    
-                    # Defensive logging: warn if document_id differs from active_editor
-                    active_editor_doc_id = shared_memory.get("active_editor", {}).get("document_id")
-                    if document_id and active_editor_doc_id and document_id != active_editor_doc_id:
-                        logger.warning(f"⚠️ RACE CONDITION DETECTED (podcast): target={document_id}, active_editor={active_editor_doc_id}")
-                    
-                    editor_ops_data = {
-                        "operations": editor_operations,
-                        "manuscript_edit": manuscript_edit,
-                        "document_id": document_id,  # CRITICAL: Frontend needs this to route operations to correct document
-                        "filename": filename
-                    }
-                    logger.info(f"✅ PODCAST AGENT: Sending {len(editor_operations)} editor operations with document_id={document_id}, filename={filename}")
-                    yield orchestrator_pb2.ChatChunk(
-                        type="editor_operations",
-                        message=json.dumps(editor_ops_data),
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="podcast_script_agent"
-                    )
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=response_text,
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="podcast_script_agent"
-                    )
-                else:
-                    # Generation mode: send content normally
-                    yield orchestrator_pb2.ChatChunk(
-                        type="content",
-                        message=response_text,
-                        timestamp=datetime.now().isoformat(),
-                        agent_name="podcast_script_agent"
-                    )
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message="Podcast script generation complete",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-            
-                agent_results = result.get("agent_results", {})
-                task_status = agent_results.get("task_status", "complete")
-                
-                if task_status in ["permission_required", "incomplete"]:
-                    status_msg = "Project preview ready for confirmation" if task_status == "permission_required" else "Additional details needed"
-                else:
-                    status_msg = "Project capture complete"
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message=status_msg,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-                
-            elif agent_type == "knowledge_builder_agent":
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Knowledge Builder: Investigating truth and compiling findings...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="knowledge_builder_agent"
-                )
-                
-                # Build metadata with shared_memory
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                
-                kb_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                result = await self._process_agent_with_cancellation(
-                    agent=self.knowledge_builder_agent,
-                    query=request.query,
-                    metadata=kb_metadata,
-                    messages=messages,
-                    cancellation_token=cancellation_token
-                )
-                
-                # Extract response
-                response_obj = result.get("response", {})
-                if isinstance(response_obj, dict):
-                    response_text = response_obj.get("response", "Knowledge document created")
-                else:
-                    response_text = str(response_obj) if response_obj else "Knowledge document created"
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=response_text,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="knowledge_builder_agent"
-                )
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message="Knowledge document saved successfully",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system"
-                )
-            
-            else:  # Default to research
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message="Starting sophisticated multi-round research...",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="research_agent"
-                )
-                
-                if cancellation_token.is_set():
-                    raise asyncio.CancelledError("Operation cancelled")
-                
-                # Build metadata with shared_memory for research agent
-                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
-                logger.info(f"🔍 RESEARCH AGENT: shared_memory keys={list(shared_memory.keys())}, user_chat_model={shared_memory.get('user_chat_model')}")
-                
-                # Prepare research agent metadata with shared_memory (includes user_chat_model)
-                research_metadata = {
-                    "user_id": request.user_id,
-                    "conversation_id": request.conversation_id,
-                    "shared_memory": shared_memory,  # Includes user_chat_model
-                    **{k: v for k, v in metadata.items() if k != "shared_memory"}
-                }
-                
-                # Research agent uses .process() method (not .research()) to load checkpoint messages
-                # This ensures conversation history is available for context
-                research_task = asyncio.create_task(
-                    self._process_agent_with_cancellation(
-                        agent=self.research_agent,
-                        query=request.query,
-                        metadata=research_metadata,
-                        messages=messages,
-                        cancellation_token=cancellation_token
-                    )
-                )
-                
-                # Wait for either completion or cancellation
-                done, pending = await asyncio.wait(
-                    [research_task, asyncio.create_task(cancellation_token.wait())],
-                    return_when=asyncio.FIRST_COMPLETED
-                )
-                
-                # Cancel pending tasks
-                for task in pending:
-                    task.cancel()
-                
-                # Check if cancellation was requested
-                if cancellation_token.is_set():
-                    research_task.cancel()
-                    try:
-                        await research_task
-                    except asyncio.CancelledError:
-                        pass
-                    raise asyncio.CancelledError("Operation cancelled")
-                
-                result = await research_task
-                
-                # Extract response from process() result format
-                # process() returns: {"response": response_text, "task_status": ..., "agent_type": ..., "sources_used": ...}
-                response_obj = result.get("response", {})
-                if isinstance(response_obj, dict):
-                    final_response = response_obj.get("response", "Research complete")
-                else:
-                    final_response = str(response_obj) if response_obj else "Research complete"
-                
-                sources_used = result.get("sources_used", [])
-                sources_msg = f" - used sources: {', '.join(sources_used)}" if sources_used else ""
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="status",
-                    message=f"Research complete{sources_msg}",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="research_agent"
-                )
-                
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=final_response,
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="research_agent"
-                )
-                
-                # Capture visualization metadata for static images/SVGs
-                chunk_metadata = {}
-                if isinstance(result, dict):
-                    if result.get("static_visualization_data"):
-                        chunk_metadata["static_visualization_data"] = result["static_visualization_data"]
-                    if result.get("static_format"):
-                        chunk_metadata["static_format"] = result["static_format"]
-
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message="Research complete",
-                    timestamp=datetime.now().isoformat(),
-                    metadata=chunk_metadata,
-                    agent_name="system"
-                )
             
         except asyncio.CancelledError:
             logger.info("🛑 StreamChat cancelled by client")

@@ -54,17 +54,32 @@ import {
   Newspaper,
   FindInPage,
   Block,
-  Audiotrack
+  Audiotrack,
+  ImageSearch,
+  Download,
+  AccountTree
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { motion, AnimatePresence } from 'framer-motion';
 import apiService from '../services/apiService';
 import folderService from '../services/folder/FolderService';
 import { useAuth } from '../contexts/AuthContext';
+import { useCapabilities } from '../contexts/CapabilitiesContext';
 import DocumentMetadataPane from './DocumentMetadataPane';
 import FolderMetadataPane from './FolderMetadataPane';
 import rssService from '../services/rssService';
 import DataWorkspacesSection from './data_workspace/DataWorkspacesSection';
+import ImageMetadataModal from './images/ImageMetadataModal';
+import DescribeFolderImagesDialog from './images/DescribeFolderImagesDialog';
+
+// Helper function to filter out .metadata.json files from document lists
+const filterMetadataFiles = (documents) => {
+  if (!Array.isArray(documents)) return documents;
+  return documents.filter(doc => {
+    const filename = doc?.filename || '';
+    return !filename.toLowerCase().endsWith('.metadata.json');
+  });
+};
 
 const FileTreeSidebar = ({ 
   selectedFolderId, 
@@ -78,15 +93,20 @@ const FileTreeSidebar = ({
 }) => {
   const theme = useTheme();
   const { user } = useAuth();
+  const { has: hasCapability } = useCapabilities();
   const queryClient = useQueryClient();
   
   // State
   const [expandedFolders, setExpandedFolders] = useState(() => {
-    // Load expanded folders from localStorage
+    // Load expanded folders from localStorage (including virtual roots so collapse state persists)
     try {
       const saved = localStorage.getItem('expandedFolders');
       const defaultExpanded = ['my_documents_root', 'global_documents_root'];
-      return saved ? new Set([...defaultExpanded, ...JSON.parse(saved)]) : new Set(defaultExpanded);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return new Set(Array.isArray(parsed) ? parsed : defaultExpanded);
+      }
+      return new Set(defaultExpanded);
     } catch (error) {
       console.error('Failed to load expanded folders from localStorage:', error);
       return new Set(['my_documents_root', 'global_documents_root']);
@@ -95,6 +115,9 @@ const FileTreeSidebar = ({
   const [contextMenu, setContextMenu] = useState(null);
   const [contextMenuTarget, setContextMenuTarget] = useState(null);
   const [vectorizationSubmenu, setVectorizationSubmenu] = useState(null);
+  const [imageMetadataModalOpen, setImageMetadataModalOpen] = useState(false);
+  const [imageMetadataDocument, setImageMetadataDocument] = useState(null);
+  const [describeFolderDialogFolder, setDescribeFolderDialogFolder] = useState(null);
   const [createFolderDialog, setCreateFolderDialog] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderParent, setNewFolderParent] = useState(null);
@@ -131,6 +154,7 @@ const FileTreeSidebar = ({
   const isControlledCollapse = typeof collapsedProp === 'boolean';
   const isCollapsed = isControlledCollapse ? collapsedProp : internalCollapsed;
   const [processingFiles, setProcessingFiles] = useState([]);
+  const [documentsMenuAnchor, setDocumentsMenuAnchor] = useState(null);
 
   // Save expanded folders to localStorage whenever they change
   useEffect(() => {
@@ -218,11 +242,11 @@ const FileTreeSidebar = ({
                     // Ensure documents have normalized status field (create new object to trigger re-render)
                     const normalizedContents = {
                       ...contents,
-                      documents: contents.documents?.map(doc => ({
+                      documents: filterMetadataFiles(contents.documents?.map(doc => ({
                         ...doc,
                         status: doc.status || doc.processing_status || null,
                         processing_status: doc.processing_status || doc.status || null
-                      })) || []
+                      })) || [])
                     };
                     const newContents = { ...prev, [update.folder_id]: normalizedContents };
                     console.log(`✅ Real-time folder contents updated!`, {
@@ -240,19 +264,50 @@ const FileTreeSidebar = ({
                   
                   // Remove from processing files list AFTER folder contents are updated
                   // Use requestAnimationFrame to ensure folder contents update is rendered first
-                  if (update.status === 'completed' && update.filename) {
+                  if (update.status === 'completed') {
                     requestAnimationFrame(() => {
-                      setProcessingFiles(prev => prev.filter(f => f.filename !== update.filename));
-                      showToast(`✅ "${update.filename}" processing completed!`, 'success');
+                      setProcessingFiles(prev => {
+                        // Find the file to remove (match by filename or document_id)
+                        const fileToRemove = prev.find(f => 
+                          (update.filename && f.filename === update.filename) ||
+                          (update.document_id && f.documentId === update.document_id)
+                        );
+                        
+                        if (fileToRemove) {
+                          const displayName = update.filename || fileToRemove.filename || 'File';
+                          showToast(`✅ "${displayName}" processing completed!`, 'success');
+                          // Remove the matching file
+                          return prev.filter(f => 
+                            !((update.filename && f.filename === update.filename) ||
+                              (update.document_id && f.documentId === update.document_id))
+                          );
+                        }
+                        return prev;
+                      });
                     });
                   }
                 })
                 .catch(error => {
                   console.error(`❌ Failed to refresh folder ${update.folder_id}:`, error);
                   // Still remove from processing list even if folder refresh fails
-                  if (update.status === 'completed' && update.filename) {
-                    setProcessingFiles(prev => prev.filter(f => f.filename !== update.filename));
-                    showToast(`✅ "${update.filename}" processing completed!`, 'success');
+                  if (update.status === 'completed') {
+                    setProcessingFiles(prev => {
+                      const before = prev.length;
+                      const after = prev.filter(f => 
+                        !(update.filename && f.filename === update.filename) &&
+                        !(update.document_id && f.documentId === update.document_id)
+                      );
+                      // Get filename for toast (use from update or find in processingFiles)
+                      const completedFile = prev.find(f => 
+                        (update.filename && f.filename === update.filename) ||
+                        (update.document_id && f.documentId === update.document_id)
+                      );
+                      const displayName = update.filename || completedFile?.filename || 'File';
+                      if (before > after.length) {
+                        showToast(`✅ "${displayName}" processing completed!`, 'success');
+                      }
+                      return after;
+                    });
                   }
                 });
             } else {
@@ -308,9 +363,26 @@ const FileTreeSidebar = ({
               queryClient.invalidateQueries(['folders', 'contents']);
               
               // Remove from processing files list if status is completed
-              if (update.status === 'completed' && update.filename) {
-                setProcessingFiles(prev => prev.filter(f => f.filename !== update.filename));
-                showToast(`✅ "${update.filename}" processing completed!`, 'success');
+              // Match by filename OR document_id (fallback if filename missing)
+              if (update.status === 'completed') {
+                setProcessingFiles(prev => {
+                  // Find the file to remove (match by filename or document_id)
+                  const fileToRemove = prev.find(f => 
+                    (update.filename && f.filename === update.filename) ||
+                    (update.document_id && f.documentId === update.document_id)
+                  );
+                  
+                  if (fileToRemove) {
+                    const displayName = update.filename || fileToRemove.filename || 'File';
+                    showToast(`✅ "${displayName}" processing completed!`, 'success');
+                    // Remove the matching file
+                    return prev.filter(f => 
+                      !((update.filename && f.filename === update.filename) ||
+                        (update.document_id && f.documentId === update.document_id))
+                    );
+                  }
+                  return prev;
+                });
               }
             }
           } else if (update.type === 'file_deleted') {
@@ -880,7 +952,10 @@ const FileTreeSidebar = ({
           const newContents = { ...prev };
           results.forEach(({ folderId, contents }) => {
             if (contents) {
-              newContents[folderId] = contents;
+              newContents[folderId] = {
+                ...contents,
+                documents: filterMetadataFiles(contents.documents || [])
+              };
             }
           });
           return newContents;
@@ -1030,17 +1105,13 @@ const FileTreeSidebar = ({
     localStorage.setItem('orgToolsExpanded', JSON.stringify(orgToolsExpanded));
   }, [orgToolsExpanded]);
   
-  // **ROOSEVELT**: Persist expandedFolders to localStorage ALWAYS when it changes
+  // Persist expandedFolders to localStorage (including virtual roots so collapse state persists)
   useEffect(() => {
     try {
-      const expandedArray = Array.from(expandedFolders).filter(id => 
-        // Filter out virtual roots - they're always expanded by default
-        id !== 'my_documents_root' && id !== 'global_documents_root'
-      );
+      const expandedArray = Array.from(expandedFolders);
       localStorage.setItem('expandedFolders', JSON.stringify(expandedArray));
-      console.log('💾 Saved expanded folders:', expandedArray);
     } catch (error) {
-      console.error('❌ Failed to save expanded folders:', error);
+      console.error('Failed to save expanded folders:', error);
     }
   }, [expandedFolders]);
 
@@ -1514,7 +1585,7 @@ const FileTreeSidebar = ({
     (documentId) => apiService.deleteDocument(documentId),
     {
       onSuccess: (_data, documentId) => {
-        // Optimistically remove from current folder contents if present
+        window.tabbedContentManagerRef?.closeDocumentTab?.(documentId);
         const folderId = contextMenuTarget?.folder_id;
         if (folderId && folderContents[folderId]?.documents) {
           setFolderContents(prev => ({
@@ -1524,11 +1595,9 @@ const FileTreeSidebar = ({
               documents: prev[folderId].documents.filter(d => d.document_id !== documentId)
             }
           }));
-          // Invalidate the specific folder contents to confirm deletion with server
           queryClient.invalidateQueries(['folders', 'contents', folderId]);
         }
         setContextMenu(null);
-        // Keep counts in sync
         queryClient.invalidateQueries(['folders', 'tree']);
       },
       onError: (error) => {
@@ -1546,7 +1615,7 @@ const FileTreeSidebar = ({
         const { documentId } = variables || {};
         const newFilename = resp?.new_filename || variables?.newFilename;
         const newTitle = newFilename;
-        // Update folder contents in place for immediate UI feedback
+        window.tabbedContentManagerRef?.updateDocumentTabTitle?.(documentId, newTitle ?? newFilename);
         const folderId = contextMenuTarget?.folder_id;
         if (folderId && folderContents[folderId]?.documents) {
           setFolderContents(prev => ({
@@ -2153,12 +2222,22 @@ const FileTreeSidebar = ({
 
   // Validation helpers
   const isValidDropTarget = useCallback((targetFolderId, draggedItem) => {
-    if (!draggedItem || !targetFolderId) return false;
+    if (!draggedItem) return false;
     
-    // Don't allow dropping on virtual roots
-    if (targetFolderId === 'my_documents_root' || targetFolderId === 'global_documents_root') {
-      return false;
+    // Dropping on virtual roots = move folder to root (only folders, not files)
+    if (targetFolderId === 'my_documents_root') {
+      if (draggedItem.type !== 'folder') return false;
+      const collectionType = draggedItem.data?.collection_type;
+      return collectionType === 'user';
     }
+    if (targetFolderId === 'global_documents_root') {
+      if (draggedItem.type !== 'folder') return false;
+      if (user?.role !== 'admin') return false;
+      const collectionType = draggedItem.data?.collection_type;
+      return collectionType === 'global';
+    }
+    
+    if (!targetFolderId) return false;
     
     // Find target folder in tree to check if it's virtual
     const findFolder = (folders, folderId) => {
@@ -2214,7 +2293,7 @@ const FileTreeSidebar = ({
     }
     
     return true;
-  }, [folderTree]);
+  }, [folderTree, user?.role]);
 
   const handleDragOverInternal = useCallback((event, folderId) => {
     event.preventDefault();
@@ -2260,13 +2339,17 @@ const FileTreeSidebar = ({
       return;
     }
     
+    // Dropping on virtual roots means move to root (null parent)
+    const effectiveTargetId = (targetFolderId === 'my_documents_root' || targetFolderId === 'global_documents_root')
+      ? null
+      : targetFolderId;
+    
     try {
       if (draggedItem.type === 'file') {
-        await apiService.moveDocument(draggedItem.id, targetFolderId, user?.user_id);
+        await apiService.moveDocument(draggedItem.id, effectiveTargetId, user?.user_id);
         showToast(`📄 Moved "${draggedItem.data.filename}"`, 'success');
       } else if (draggedItem.type === 'folder') {
-        // targetFolderId is the new parent folder ID (can be null for root)
-        await folderService.moveFolder(draggedItem.id, targetFolderId || null);
+        await folderService.moveFolder(draggedItem.id, effectiveTargetId);
         showToast(`📁 Moved "${draggedItem.data.name}"`, 'success');
       }
       
@@ -2320,7 +2403,8 @@ const FileTreeSidebar = ({
     const isDragged = draggedItem?.type === 'folder' && draggedItem?.id === folder.folder_id;
     const isDragOver = dragOverFolderId === folder.folder_id;
     const canDrag = isRealFolder && !isVirtualRoot && !folder.is_virtual_source;
-    const canDrop = isRealFolder && !isVirtualRoot && !folder.is_virtual_source;
+    const canDropOnVirtualRoot = isVirtualRoot && draggedItem && isValidDropTarget(folder.folder_id, draggedItem);
+    const canDrop = (isRealFolder && !isVirtualRoot && !folder.is_virtual_source) || canDropOnVirtualRoot;
 
     return (
       <Box key={folder.folder_id}>
@@ -2567,7 +2651,7 @@ const FileTreeSidebar = ({
         {isExpanded && !isVirtualRoot && folderContents[folder.folder_id]?.documents && folderContents[folder.folder_id].documents.length > 0 && (
           <Collapse in={isExpanded} timeout="auto" unmountOnExit>
             <List component="div" disablePadding>
-              {folderContents[folder.folder_id].documents.map(doc => renderFileItem(doc, level + 1))}
+              {filterMetadataFiles(folderContents[folder.folder_id].documents).map(doc => renderFileItem(doc, level + 1, folder))}
             </List>
           </Collapse>
         )}
@@ -2601,8 +2685,8 @@ const FileTreeSidebar = ({
     theme
   ]);
 
-  // Render file item
-  const renderFileItem = useCallback((file, level = 0) => {
+  // Render file item (parentFolder used for context menu to know collection_type)
+  const renderFileItem = useCallback((file, level = 0, parentFolder = null) => {
     const isSelected = false; // TODO: Implement file selection
     
     const getFileIcon = (filename, status) => {
@@ -2695,9 +2779,8 @@ const FileTreeSidebar = ({
       }
     };
 
-    // Long-press handler for mobile touch devices
-    const longPressHandlers = createLongPressHandlers(file);
-    
+    const fileWithFolder = { ...file, folder_id: parentFolder?.folder_id, collection_type: parentFolder?.collection_type };
+    const longPressHandlers = createLongPressHandlers(fileWithFolder);
     const isDragged = draggedItem?.type === 'file' && draggedItem?.id === file.document_id;
 
     return (
@@ -2723,12 +2806,12 @@ const FileTreeSidebar = ({
             backgroundColor: 'action.hover',
           },
         }}
-        onContextMenu={(e) => handleContextMenu(e, file)}
+        onContextMenu={(e) => handleContextMenu(e, fileWithFolder)}
         {...longPressHandlers}
       >
         <ListItemButton
           onClick={() => onFileSelect?.(file)}
-          sx={{ minHeight: 30 }}
+          sx={{ minHeight: 22 }}
         >
           <ListItemIcon sx={{ minWidth: 24 }}>
             {getFileIcon(file.filename, file.status)}
@@ -2741,6 +2824,28 @@ const FileTreeSidebar = ({
                   {file.filename}
                 </Typography>
                 {(() => {
+                  // Check if file is an image with searchable metadata
+                  const filename = file.filename || '';
+                  const isImage = /\.(jpg|jpeg|png|gif|bmp|webp|svg|tiff|tif|heic|heif)$/i.test(filename);
+                  const hasMetadata = file.metadata_json && 
+                    (typeof file.metadata_json === 'string' 
+                      ? JSON.parse(file.metadata_json || '{}').has_searchable_metadata
+                      : file.metadata_json.has_searchable_metadata);
+                  
+                  if (isImage && hasMetadata) {
+                    return (
+                      <Tooltip title="This image has searchable metadata" placement="top">
+                        <ImageSearch 
+                          sx={{ 
+                            color: 'primary.main', 
+                            fontSize: 14,
+                            ml: 0.5
+                          }} 
+                        />
+                      </Tooltip>
+                    );
+                  }
+                  
                   const effective = getEffectiveFileExemption(file);
                   // Normalize status - handle both 'status' and 'processing_status' fields, and ensure it's a string
                   const fileStatus = file.status || file.processing_status || null;
@@ -2753,11 +2858,18 @@ const FileTreeSidebar = ({
         </ListItemButton>
       </ListItem>
     );
-  }, [getEffectiveFileExemption, handleContextMenu, onFileSelect, theme, handleDragStart, handleDragEnd, draggedItem]);
+  }, [getEffectiveFileExemption, handleContextMenu, createLongPressHandlers, onFileSelect, theme, handleDragStart, handleDragEnd, draggedItem]);
 
   // Render destination item for Move dialog
   const renderDestinationItem = useCallback((folder, level = 0) => {
-    const disabled = folder.folder_id.includes('_root') || folder.is_virtual_source;
+    const isVirtualRoot = folder.folder_id === 'my_documents_root' || folder.folder_id === 'global_documents_root';
+    const canSelectRoot =
+      moveTarget?.type === 'folder' &&
+      isVirtualRoot &&
+      (folder.folder_id === 'my_documents_root'
+        ? moveTarget.data?.collection_type === 'user'
+        : user?.role === 'admin' && moveTarget.data?.collection_type === 'global');
+    const disabled = (!isVirtualRoot && (folder.folder_id.includes('_root') || folder.is_virtual_source)) || (isVirtualRoot && !canSelectRoot);
     const isSelected = moveDestinationId === folder.folder_id;
     return (
       <>
@@ -2783,7 +2895,7 @@ const FileTreeSidebar = ({
         )}
       </>
     );
-  }, [moveDestinationId]);
+  }, [moveDestinationId, moveTarget, user?.role]);
 
   if (isLoading) {
     return (
@@ -2843,16 +2955,57 @@ const FileTreeSidebar = ({
           <Typography variant="h6" sx={{ fontWeight: 600, fontSize: 'var(--font-size-lg)' }}>
             Documents
           </Typography>
-          <Box sx={{ display: 'flex', gap: 0.5 }}>
-            <Tooltip title="Refresh File List">
-              <IconButton size="small" onClick={() => refetch()}>
-                <Refresh fontSize="small" />
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+            <Tooltip title="Documents actions">
+              <IconButton
+                size="small"
+                onClick={(e) => setDocumentsMenuAnchor(e.currentTarget)}
+                aria-controls={documentsMenuAnchor ? 'documents-menu' : undefined}
+                aria-haspopup="true"
+                aria-expanded={documentsMenuAnchor ? 'true' : undefined}
+              >
+                <MoreVert fontSize="small" />
               </IconButton>
             </Tooltip>
-            <Tooltip title="Rescan & Recover Orphaned Files">
-              <IconButton 
-                size="small" 
+            <Menu
+              id="documents-menu"
+              anchorEl={documentsMenuAnchor}
+              open={Boolean(documentsMenuAnchor)}
+              onClose={() => setDocumentsMenuAnchor(null)}
+              anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+              transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+              slotProps={{ paper: { sx: { minWidth: 220 } } }}
+            >
+              <MenuItem
                 onClick={async () => {
+                  setDocumentsMenuAnchor(null);
+                  try {
+                    await apiService.downloadLibrary();
+                  } catch (err) {
+                    console.error('Library download failed:', err);
+                    alert(err.message || 'Download failed');
+                  }
+                }}
+              >
+                <ListItemIcon>
+                  <Download fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>Download my Library</ListItemText>
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  setDocumentsMenuAnchor(null);
+                  refetch();
+                }}
+              >
+                <ListItemIcon>
+                  <Refresh fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>Refresh File List</ListItemText>
+              </MenuItem>
+              <MenuItem
+                onClick={async () => {
+                  setDocumentsMenuAnchor(null);
                   try {
                     const confirmed = window.confirm(
                       'Scan filesystem for files not in database?\n\n' +
@@ -2863,10 +3016,7 @@ const FileTreeSidebar = ({
                       'Continue?'
                     );
                     if (!confirmed) return;
-                    
-                    console.log('🔍 Starting file rescan...');
                     const response = await apiService.post('/api/user/documents/rescan');
-                    
                     if (response.success) {
                       alert(
                         `File Recovery Complete!\n\n` +
@@ -2874,19 +3024,35 @@ const FileTreeSidebar = ({
                         `Skipped (already in DB): ${response.skipped_count}\n` +
                         `Errors: ${response.error_count}`
                       );
-                      refetch(); // Refresh the file tree
+                      refetch();
                     } else {
                       alert(`Recovery failed: ${response.error}`);
                     }
                   } catch (error) {
-                    console.error('❌ Rescan failed:', error);
+                    console.error('Rescan failed:', error);
                     alert(`Recovery failed: ${error.message}`);
                   }
                 }}
               >
-                <FindInPage fontSize="small" />
-              </IconButton>
-            </Tooltip>
+                <ListItemIcon>
+                  <FindInPage fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>Rescan & Recover Orphaned Files</ListItemText>
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  setDocumentsMenuAnchor(null);
+                  if (window.tabbedContentManagerRef?.openFileGraph) {
+                    window.tabbedContentManagerRef.openFileGraph('all');
+                  }
+                }}
+              >
+                <ListItemIcon>
+                  <AccountTree fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>File Relations (link map)</ListItemText>
+              </MenuItem>
+            </Menu>
             <Tooltip title="Collapse Documents">
               <IconButton onClick={handleToggleCollapse} size="small">
                 <ChevronLeft />
@@ -3177,19 +3343,6 @@ const FileTreeSidebar = ({
             
             <MenuItem
               onClick={() => {
-                setProjectParentFolder(contextMenuTarget.folder_id);
-                setNewProjectDialog(true);
-                handleContextMenuClose();
-              }}
-            >
-              <ListItemIcon>
-                <Add fontSize="small" />
-              </ListItemIcon>
-              New Project
-            </MenuItem>
-            
-            <MenuItem
-              onClick={() => {
                 // Don't allow uploading to virtual roots
                 if (contextMenuTarget.folder_id === 'global_documents_root' || contextMenuTarget.folder_id === 'my_documents_root') {
                   alert('Cannot upload files directly to root folders. Please upload to specific folders.');
@@ -3217,6 +3370,20 @@ const FileTreeSidebar = ({
                   <Edit fontSize="small" />
                 </ListItemIcon>
                 Edit Folder Metadata
+              </MenuItem>
+            )}
+
+            {!contextMenuTarget.folder_id.includes('_root') && !contextMenuTarget.is_virtual_source && hasCapability('feature.image.llm_description') && (
+              <MenuItem
+                onClick={() => {
+                  setDescribeFolderDialogFolder(contextMenuTarget);
+                  handleContextMenuClose();
+                }}
+              >
+                <ListItemIcon>
+                  <ImageSearch fontSize="small" />
+                </ListItemIcon>
+                Describe folder images with LLM
               </MenuItem>
             )}
             
@@ -3455,6 +3622,31 @@ const FileTreeSidebar = ({
 
                  {contextMenuTarget?.document_id && (
            <>
+             {/* Edit Image Metadata: only for images, and only for admins or non-Global documents (regular users cannot save to Global) */}
+             {(() => {
+               const filename = contextMenuTarget?.filename || '';
+               const isImage = /\.(jpg|jpeg|png|gif|bmp|webp|svg|tiff|tif|heic|heif)$/i.test(filename);
+               const isGlobal = contextMenuTarget?.collection_type === 'global' || contextMenuTarget?.folder_id === 'global_documents_root';
+               const canEditImageMetadata = isImage && (user?.role === 'admin' || !isGlobal);
+               return canEditImageMetadata;
+             })() && (
+               <MenuItem
+                 onClick={() => {
+                   setImageMetadataDocument({
+                     documentId: contextMenuTarget.document_id,
+                     filename: contextMenuTarget.filename
+                   });
+                   setImageMetadataModalOpen(true);
+                   handleContextMenuClose();
+                 }}
+               >
+                 <ListItemIcon>
+                   <ImageSearch fontSize="small" />
+                 </ListItemIcon>
+                 Edit Image Metadata
+               </MenuItem>
+             )}
+             
              <MenuItem
                onClick={() => {
                  handleReprocessDocument(contextMenuTarget.document_id);
@@ -3467,14 +3659,23 @@ const FileTreeSidebar = ({
                Re-process Document
              </MenuItem>
              
-             <MenuItem
-               onClick={(e) => handleEditMetadata(contextMenuTarget, e)}
-             >
-               <ListItemIcon>
-                 <Edit fontSize="small" />
-               </ListItemIcon>
-               Edit Metadata
-             </MenuItem>
+             {/* Edit Metadata: hide for images (use Edit Image Metadata instead); restrict Global to admins */}
+             {(() => {
+               const filename = contextMenuTarget?.filename || '';
+               const isImage = /\.(jpg|jpeg|png|gif|bmp|webp|svg|tiff|tif|heic|heif)$/i.test(filename);
+               const isGlobal = contextMenuTarget?.collection_type === 'global' || contextMenuTarget?.folder_id === 'global_documents_root';
+               const canEditDocMetadata = !isImage && (user?.role === 'admin' || !isGlobal);
+               return canEditDocMetadata;
+             })() && (
+               <MenuItem
+                 onClick={(e) => handleEditMetadata(contextMenuTarget, e)}
+               >
+                 <ListItemIcon>
+                   <Edit fontSize="small" />
+                 </ListItemIcon>
+                 Edit Metadata
+               </MenuItem>
+             )}
             
             <Divider />
             
@@ -3847,10 +4048,13 @@ const FileTreeSidebar = ({
               try {
                 if (!moveDestinationId) return;
                 if (!moveTarget) return;
+                const effectiveDestinationId = (moveDestinationId === 'my_documents_root' || moveDestinationId === 'global_documents_root')
+                  ? null
+                  : moveDestinationId;
                 if (moveTarget.type === 'folder') {
-                  await apiService.moveFolder(moveTarget.data.folder_id, moveDestinationId);
+                  await folderService.moveFolder(moveTarget.data.folder_id, effectiveDestinationId);
                   showToast('📁 Folder moved', 'success');
-                  // Optimistically update tree immediately
+                  // Optimistically update tree immediately (use moveDestinationId for tree structure)
                   queryClient.setQueryData(['folders', 'tree', user?.user_id, user?.role], (oldData) => {
                     if (!oldData) return oldData;
                     const movedFolder = moveTarget.data;
@@ -4080,6 +4284,36 @@ const FileTreeSidebar = ({
           open={folderMetadataPane.open}
           onClose={() => setFolderMetadataPane({ open: false, folder: null, position: { x: 0, y: 0 } })}
           position={folderMetadataPane.position}
+        />
+
+        {/* Image Metadata Modal */}
+        <ImageMetadataModal
+          open={imageMetadataModalOpen}
+          onClose={(success) => {
+            setImageMetadataModalOpen(false);
+            if (success) {
+              // Refresh folder contents if metadata was saved
+              if (imageMetadataDocument?.documentId) {
+                // Invalidate queries to refresh data
+                queryClient.invalidateQueries(['folders', 'contents']);
+                queryClient.invalidateQueries(['documents', 'root', user?.user_id]);
+              }
+            }
+            setImageMetadataDocument(null);
+          }}
+          documentId={imageMetadataDocument?.documentId}
+          filename={imageMetadataDocument?.filename}
+        />
+
+        <DescribeFolderImagesDialog
+          open={Boolean(describeFolderDialogFolder)}
+          onClose={() => {
+            setDescribeFolderDialogFolder(null);
+            queryClient.invalidateQueries(['folders', 'contents']);
+            queryClient.invalidateQueries(['documents', 'root', user?.user_id]);
+          }}
+          folderId={describeFolderDialogFolder?.folder_id}
+          folderName={describeFolderDialogFolder?.name}
         />
 
         {/* Processing Files Indicator */}

@@ -24,11 +24,12 @@ class DocumentFileHandler(FileSystemEventHandler):
     **BULLY!** This runs in a watchdog thread, so we need to bridge to the main event loop!
     """
     
-    def __init__(self, document_service, folder_service, event_loop):
+    def __init__(self, document_service, folder_service, event_loop, file_watcher_service=None):
         super().__init__()
         self.document_service = document_service
         self.folder_service = folder_service
         self.event_loop = event_loop  # Reference to main event loop
+        self.file_watcher_service = file_watcher_service  # Reference to FileWatcherService for admin user access
         self.processing_files = set()  # Track files currently being written by us
         self.debounce_time = 2.0  # Wait 2 seconds after last modification
         self.pending_events = {}  # File path -> (event, timestamp)
@@ -50,6 +51,15 @@ class DocumentFileHandler(FileSystemEventHandler):
             '/.cursor/', '\\.cursor\\'
         ]
         if any(ignored in path_lower for ignored in ignored_dirs):
+            return True
+        
+        # Teams directories are managed by the application (team_service)
+        # File watcher should not process Teams files - they have access control
+        if '/teams/' in path_lower or '\\teams\\' in path_lower:
+            return True
+        
+        # web_sources is for generated images and web scraping - not tracked in document system
+        if '/web_sources/' in path_lower or '\\web_sources\\' in path_lower:
             return True
 
         # **BULLY!** NEVER ignore other directories - only filter files!
@@ -73,6 +83,21 @@ class DocumentFileHandler(FileSystemEventHandler):
         if '/messaging/' in path_lower:
             return True
         
+        # NEVER ignore .metadata.json files - these are image metadata sidecars
+        if path_lower.endswith('.metadata.json'):
+            return False  # Always process metadata sidecars
+        
+        # For Global/Comics: process image files so they show in UI
+        # (they won't be vectorized, but users can right-click to add metadata)
+        if '/global/comics' in path_lower:
+            # Allow image files in Comics folder
+            image_extensions = [
+                '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico',
+                '.tiff', '.tif', '.heic', '.heif'
+            ]
+            if any(path_lower.endswith(ext) for ext in image_extensions):
+                return False  # Process images (add to database, visible in UI)
+        
         # For team posts: allow text/document files but ignore images
         # Team post attachments are in: uploads/Teams/{team_id}/posts/
         if '/teams/' in path_lower and '/posts/' in path_lower:
@@ -84,13 +109,13 @@ class DocumentFileHandler(FileSystemEventHandler):
             if any(path_lower.endswith(ext) for ext in text_doc_extensions):
                 return False  # Process these files
             
-            # Ignore image files in team posts (they're just display attachments)
+            # Allow image files in team posts (so they show in UI)
             image_extensions = [
                 '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico',
                 '.tiff', '.tif', '.heic', '.heif'
             ]
             if any(path_lower.endswith(ext) for ext in image_extensions):
-                return True  # Ignore images
+                return False  # Process images (add to database, visible in UI)
             
             # Ignore other non-text files in team posts
             return True
@@ -120,8 +145,29 @@ class DocumentFileHandler(FileSystemEventHandler):
             path = Path(file_path)
             filename = path.name
             
-            logger.info(f"🔍 DUPLICATE CHECK: Looking up file: {filename}")
-            logger.info(f"🔍 Full path: {file_path}")
+            # If this is a metadata sidecar file, look up by the actual document/image filename
+            if filename.lower().endswith('.metadata.json'):
+                try:
+                    import json
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        metadata = json.load(f)
+                    schema_type = (metadata.get('schema_type') or '').strip().lower()
+                    if schema_type == 'document':
+                        doc_filename = metadata.get('document_filename', '')
+                        if doc_filename:
+                            filename = doc_filename
+                            logger.debug(f"Document metadata sidecar detected, looking up by document filename: {filename}")
+                        else:
+                            logger.warning(f"No document_filename in document metadata sidecar: {file_path}")
+                    else:
+                        image_filename = metadata.get('image_filename', '')
+                        if image_filename:
+                            filename = image_filename
+                            logger.debug(f"Metadata sidecar detected, looking up by image filename: {filename}")
+                        else:
+                            logger.warning(f"No image_filename in metadata sidecar: {file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to read metadata sidecar for lookup: {file_path}: {e}")
             
             # Parse the path to extract user context
             parts = path.parts
@@ -150,8 +196,6 @@ class DocumentFileHandler(FileSystemEventHandler):
                         logger.warning(f"⚠️ Could not find user_id for username: {username}")
                         return None
                     
-                    logger.info(f"🔍 Lookup context: user_id={user_id}, collection={collection_type}")
-                    
                     # **BULLY!** Get the DEEPEST folder_id from the FULL folder hierarchy!
                     folder_id = None
                     folder_start_idx = uploads_idx + 3
@@ -160,18 +204,12 @@ class DocumentFileHandler(FileSystemEventHandler):
                     if folder_start_idx < folder_end_idx:
                         # We have folders in the path - resolve to the deepest one
                         folder_parts = parts[folder_start_idx:folder_end_idx]
-                        logger.info(f"🔍 Resolving folder hierarchy: {folder_parts}")
                         folder_id = await self._resolve_deepest_folder_id(folder_parts, user_id, collection_type)
-                        logger.info(f"🔍 Resolved folder_id: {folder_id}")
-                    else:
-                        logger.info(f"🔍 No folders in path - folder_id will be NULL")
                     
                 elif collection_dir == 'Global':
                     # Global file: uploads/Global/{folders...}/{filename}
                     collection_type = 'global'
                     user_id = None
-                    
-                    logger.info(f"🔍 Lookup context: user_id=NULL (global), collection={collection_type}")
                     
                     # **BULLY!** Get the DEEPEST folder_id from the FULL folder hierarchy!
                     folder_id = None
@@ -181,11 +219,12 @@ class DocumentFileHandler(FileSystemEventHandler):
                     if folder_start_idx < folder_end_idx:
                         # We have folders in the path - resolve to the deepest one
                         folder_parts = parts[folder_start_idx:folder_end_idx]
-                        logger.info(f"🔍 Resolving Global folder hierarchy: {folder_parts}")
                         folder_id = await self._resolve_deepest_folder_id(folder_parts, None, collection_type)
-                        logger.info(f"🔍 Resolved Global folder_id: {folder_id}")
-                    else:
-                        logger.info(f"🔍 No folders in path - folder_id will be NULL")
+                elif collection_dir == 'Teams':
+                    # Teams files are managed by the application (team_service)
+                    # File watcher should not process them - they have access control
+                    logger.debug(f"⏭️  Skipping Teams file (managed by application): {file_path}")
+                    return None
                 else:
                     logger.warning(f"⚠️ Unknown collection directory: {collection_dir}")
                     return None
@@ -194,7 +233,6 @@ class DocumentFileHandler(FileSystemEventHandler):
                 return None
             
             # Find document by filename, user_id, and folder_id
-            logger.info(f"🔍 Searching DB: filename='{filename}', user_id={user_id}, collection={collection_type}, folder_id={folder_id}")
             document = await self.document_service.document_repository.find_by_filename_and_context(
                 filename=filename,
                 user_id=user_id,
@@ -203,7 +241,6 @@ class DocumentFileHandler(FileSystemEventHandler):
             )
             
             if document:
-                logger.info(f"✅ FOUND EXISTING: document_id={document.document_id} for {filename}")
                 return {
                     'document_id': document.document_id,
                     'filename': document.filename,
@@ -291,15 +328,15 @@ class DocumentFileHandler(FileSystemEventHandler):
             doc_repo = DocumentRepository()
             folders_data = await doc_repo.get_folders_by_user(user_id, collection_type)
             
-            logger.info(f"🔍 RESOLVE: Got {len(folders_data)} RAW folders from database")
-            logger.info(f"🔍 RESOLVE: Looking for path: {folder_parts}")
+            logger.debug(f"🔍 RESOLVE: Got {len(folders_data)} RAW folders from database")
+            logger.debug(f"🔍 RESOLVE: Looking for path: {folder_parts}")
             
             # Build a lookup map: (name, parent_folder_id) -> folder_id
             # Use .get() since folders_data is a list of dicts, not DocumentFolder objects
             folder_map = {(f.get('name'), f.get('parent_folder_id')): f.get('folder_id') for f in folders_data}
             
-            logger.info(f"🔍 RESOLVE: Built folder map with {len(folder_map)} entries")
-            logger.info(f"🔍 RESOLVE: Available folders: {[(name, parent) for (name, parent) in folder_map.keys()]}")
+            logger.debug(f"🔍 RESOLVE: Built folder map with {len(folder_map)} entries")
+            logger.debug(f"🔍 RESOLVE: Available folders: {[(name, parent) for (name, parent) in folder_map.keys()]}")
             
             # Walk the folder hierarchy from root to deepest
             parent_folder_id = None
@@ -308,16 +345,16 @@ class DocumentFileHandler(FileSystemEventHandler):
             for folder_name in folder_parts:
                 # Look for folder with this name and current parent
                 key = (folder_name, parent_folder_id)
-                logger.info(f"🔍 RESOLVE: Looking for folder '{folder_name}' with parent {parent_folder_id}")
+                logger.debug(f"🔍 RESOLVE: Looking for folder '{folder_name}' with parent {parent_folder_id}")
                 
                 if key in folder_map:
                     current_folder_id = folder_map[key]
                     parent_folder_id = current_folder_id  # Next level uses this as parent
-                    logger.info(f"✅ RESOLVE: Found folder '{folder_name}' → {current_folder_id}")
+                    logger.debug(f"✅ RESOLVE: Found folder '{folder_name}' → {current_folder_id}")
                 else:
                     # Folder doesn't exist in hierarchy - return None
-                    logger.info(f"❌ RESOLVE: Folder '{folder_name}' NOT found under parent {parent_folder_id}")
-                    logger.info(f"❌ RESOLVE: This file's folder doesn't exist in DB - cannot find existing document!")
+                    logger.debug(f"❌ RESOLVE: Folder '{folder_name}' NOT found under parent {parent_folder_id}")
+                    logger.debug(f"❌ RESOLVE: This file's folder doesn't exist in DB - cannot find existing document!")
                     return None
             
             return current_folder_id
@@ -354,8 +391,8 @@ class DocumentFileHandler(FileSystemEventHandler):
                 rls_context={'user_id': team_creator_id, 'user_role': 'admin'}
             )
             
-            logger.info(f"🔍 RESOLVE TEAM: Got {len(folders_data)} team folders from database for team {team_id}")
-            logger.info(f"🔍 RESOLVE TEAM: Looking for path: {folder_parts}")
+            logger.debug(f"🔍 RESOLVE TEAM: Got {len(folders_data)} team folders from database for team {team_id}")
+            logger.debug(f"🔍 RESOLVE TEAM: Looking for path: {folder_parts}")
             
             # Build a lookup map: (name, parent_folder_id) -> folder_id
             folder_map = {}
@@ -365,7 +402,7 @@ class DocumentFileHandler(FileSystemEventHandler):
                 folder_id = f.get('folder_id')
                 folder_map[(name, parent_id)] = folder_id
             
-            logger.info(f"🔍 RESOLVE TEAM: Built folder map with {len(folder_map)} entries")
+            logger.debug(f"🔍 RESOLVE TEAM: Built folder map with {len(folder_map)} entries")
             
             # Walk the folder hierarchy from root to deepest
             parent_folder_id = None
@@ -374,15 +411,15 @@ class DocumentFileHandler(FileSystemEventHandler):
             for folder_name in folder_parts:
                 # Look for folder with this name and current parent
                 key = (folder_name, parent_folder_id)
-                logger.info(f"🔍 RESOLVE TEAM: Looking for folder '{folder_name}' with parent {parent_folder_id}")
+                logger.debug(f"🔍 RESOLVE TEAM: Looking for folder '{folder_name}' with parent {parent_folder_id}")
                 
                 if key in folder_map:
                     current_folder_id = folder_map[key]
                     parent_folder_id = current_folder_id  # Next level uses this as parent
-                    logger.info(f"✅ RESOLVE TEAM: Found folder '{folder_name}' → {current_folder_id}")
+                    logger.debug(f"✅ RESOLVE TEAM: Found folder '{folder_name}' → {current_folder_id}")
                 else:
                     # Folder doesn't exist in hierarchy - return None
-                    logger.info(f"❌ RESOLVE TEAM: Folder '{folder_name}' NOT found under parent {parent_folder_id}")
+                    logger.debug(f"❌ RESOLVE TEAM: Folder '{folder_name}' NOT found under parent {parent_folder_id}")
                     return None
             
             return current_folder_id
@@ -405,10 +442,11 @@ class DocumentFileHandler(FileSystemEventHandler):
     def on_created(self, event: FileSystemEvent):
         """Handle file or folder creation"""
         if self._should_ignore_path(event.src_path, event.is_directory):
+            logger.debug(f"⏭️  Ignoring path (file watcher): {event.src_path} (is_directory={event.is_directory})")
             return
         
         if event.is_directory:
-            # **BULLY!** Handle folder creation immediately (no debounce needed)
+            # Handle folder creation immediately (no debounce needed)
             logger.info(f"📁 Folder created: {event.src_path}")
             asyncio.run_coroutine_threadsafe(
                 self._handle_folder_created(event.src_path),
@@ -463,6 +501,15 @@ class DocumentFileHandler(FileSystemEventHandler):
         """Process file modification"""
         try:
             logger.info(f"🔄 Processing modified file: {file_path}")
+            
+            # CRITICAL: Check if this is a .metadata.json sidecar file FIRST
+            # Sidecars must ALWAYS route to ImageSidecarService, not text processing
+            path = Path(file_path)
+            if path.name.lower().endswith('.metadata.json'):
+                logger.info(f"📸 Modified file is image metadata sidecar - routing to ImageSidecarService")
+                # Route to ImageSidecarService (same as new file)
+                await self._handle_new_file(file_path)
+                return
             
             # Find document record
             doc_info = await self._get_document_by_path(file_path)
@@ -614,6 +661,17 @@ class DocumentFileHandler(FileSystemEventHandler):
         try:
             logger.info(f"🗑️ Processing deleted file: {file_path}")
             
+            # Check for and delete orphaned sidecar metadata file (stem: image.jpg -> image.metadata.json)
+            from pathlib import Path
+            file_path_obj = Path(file_path)
+            sidecar_path = file_path_obj.parent / f"{file_path_obj.stem}.metadata.json"
+            if sidecar_path.exists():
+                try:
+                    sidecar_path.unlink()
+                    logger.info(f"🗑️ Deleted orphaned sidecar metadata: {sidecar_path}")
+                except Exception as sidecar_e:
+                    logger.warning(f"⚠️ Failed to delete orphaned sidecar {sidecar_path}: {sidecar_e}")
+            
             # Find document record
             doc_info = await self._get_document_by_path(file_path)
             
@@ -652,14 +710,8 @@ class DocumentFileHandler(FileSystemEventHandler):
             except Exception as e:
                 logger.error(f"❌ Failed to send deletion notification: {e}")
             
-            # Delete from vector store
-            try:
-                await self.document_service.embedding_manager.delete_document_chunks(document_id, user_id)
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to delete embeddings for {document_id}: {e}")
-            
-            # Delete from database with proper user context
-            success = await self.document_service.document_repository.delete(document_id, user_id)
+            # Full cleanup: metadata + image embeddings (face/object), DB rows, document record (file already gone)
+            success = await self.document_service.delete_document_database_only(document_id)
             if success:
                 logger.info(f"✅ Document deleted from system: {document_id}")
             else:
@@ -742,53 +794,60 @@ class DocumentFileHandler(FileSystemEventHandler):
                     logger.warning(f"⚠️ Root global folder deleted - skipping")
                     return
             
-            elif collection_dir == 'Teams' and uploads_idx + 2 < len(parts):
-                # Team folder: uploads/Teams/{team_id}/documents/{folders...}
-                collection_type = 'team'
-                team_id = parts[uploads_idx + 2]
-                
-                # Get the team creator directly from database for RLS context
-                try:
-                    from services.database_manager.database_helpers import fetch_one
-                    team = await fetch_one(
-                        "SELECT team_id, created_by FROM teams WHERE team_id = $1",
-                        team_id,
-                        rls_context={'user_id': '', 'user_role': 'admin'}  # Admin context to bypass RLS for team lookup
-                    )
-                    if not team:
-                        logger.warning(f"⚠️ Team not found for deletion: {team_id}")
+            elif collection_dir == 'Teams':
+                # Teams folders are managed by the application (team_service)
+                # File watcher should not process them - they have access control
+                if uploads_idx + 2 < len(parts):
+                    # Team folder: uploads/Teams/{team_id}/documents/{folders...}
+                    collection_type = 'team'
+                    team_id = parts[uploads_idx + 2]
+                    
+                    # Get the team creator directly from database for RLS context
+                    try:
+                        from services.database_manager.database_helpers import fetch_one
+                        team = await fetch_one(
+                            "SELECT team_id, created_by FROM teams WHERE team_id = $1",
+                            team_id,
+                            rls_context={'user_id': '', 'user_role': 'admin'}  # Admin context to bypass RLS for team lookup
+                        )
+                        if not team:
+                            logger.info(f"⏭️  Team not found for deletion: {team_id} (managed by application)")
+                            return
+                        # Use team creator as user_id for RLS context (they have admin rights)
+                        user_id = team.get('created_by')
+                        if not user_id:
+                            logger.info(f"⏭️  Team {team_id} has no creator recorded (managed by application)")
+                            return
+                    except Exception as e:
+                        logger.info(f"⏭️  Could not find team creator for {team_id}: {e} (managed by application)")
                         return
-                    # Use team creator as user_id for RLS context (they have admin rights)
-                    user_id = team.get('created_by')
-                    if not user_id:
-                        logger.warning(f"⚠️ Team {team_id} has no creator recorded")
+                    
+                    # Skip if this is just the team_id directory or documents directory
+                    if uploads_idx + 3 >= len(parts):
+                        logger.info(f"⏭️  Team root directory - no folder record to delete (managed by application)")
                         return
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not find team creator for {team_id}: {e}")
+                    
+                    documents_dir = parts[uploads_idx + 3]
+                    if documents_dir != 'documents':
+                        logger.info(f"⏭️  Skipping non-documents team folder: {folder_path} (managed by application)")
+                        return
+                    
+                    # Get folder path parts (everything after documents/)
+                    folder_start_idx = uploads_idx + 4
+                    folder_parts = parts[folder_start_idx:]
+                    
+                    if not folder_parts:
+                        logger.info(f"⏭️  Team documents root - no folder record to delete (managed by application)")
+                        return
+                    
+                    logger.info(f"📁 Deleted team folder path: {' -> '.join(folder_parts)}")
+                    
+                    # Resolve to folder_id using team_id and creator
+                    folder_id = await self._resolve_deepest_folder_id_for_team(tuple(folder_parts), team_id, user_id)
+                else:
+                    # Teams root directory - skip
+                    logger.info(f"⏭️  Teams root directory - skipping (managed by application)")
                     return
-                
-                # Skip if this is just the team_id directory or documents directory
-                if uploads_idx + 3 >= len(parts):
-                    logger.info(f"📁 Team root directory - no folder record to delete")
-                    return
-                
-                documents_dir = parts[uploads_idx + 3]
-                if documents_dir != 'documents':
-                    logger.warning(f"⚠️ Unexpected team folder structure: {folder_path}")
-                    return
-                
-                # Get folder path parts (everything after documents/)
-                folder_start_idx = uploads_idx + 4
-                folder_parts = parts[folder_start_idx:]
-                
-                if not folder_parts:
-                    logger.info(f"📁 Team documents root - no folder record to delete")
-                    return
-                
-                logger.info(f"📁 Deleted team folder path: {' -> '.join(folder_parts)}")
-                
-                # Resolve to folder_id using team_id and creator
-                folder_id = await self._resolve_deepest_folder_id_for_team(tuple(folder_parts), team_id, user_id)
             
             else:
                 logger.warning(f"⚠️ Unknown collection directory: {collection_dir}")
@@ -863,12 +922,18 @@ class DocumentFileHandler(FileSystemEventHandler):
     async def _handle_folder_created(self, folder_path: str):
         """Process folder creation
         
-        **ROOSEVELT'S FOLDER CREATION CAVALRY!** 📁
-        Create folder record in database when folder is created on disk
+        Create folder record in database when folder is created on disk.
+        Handles folders created via backend disk manipulation, WebDAV, or any filesystem operation.
         """
         try:
             from pathlib import Path
             logger.info(f"📁 Processing created folder: {folder_path}")
+            
+            # Verify folder still exists (might have been deleted quickly)
+            path = Path(folder_path)
+            if not path.exists() or not path.is_dir():
+                logger.warning(f"⚠️ Folder no longer exists or is not a directory: {folder_path}")
+                return
             
             # Parse path to get folder context
             path = Path(folder_path)
@@ -1139,18 +1204,125 @@ class DocumentFileHandler(FileSystemEventHandler):
             from models.api_models import ProcessingStatus
             import mimetypes
             
-            logger.info(f"📄 Checking for existing document record for new file: {file_path}")
+            path = Path(file_path)
+            filename = path.name
             
-            # **ROOSEVELT FIX:** Check if document already exists to avoid duplicates!
+            # Check if this is a .metadata.json sidecar file (image or document metadata)
+            # CRITICAL: Process metadata sidecars FIRST; route by schema_type (document vs image)
+            if filename.lower().endswith('.metadata.json'):
+                try:
+                    import json
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        metadata = json.load(f)
+                    schema_type = (metadata.get('schema_type') or '').strip().lower()
+                except Exception as e:
+                    logger.warning(f"Failed to read metadata sidecar: {file_path}: {e}")
+                    return
+
+                if schema_type == 'document':
+                    # Document metadata sidecar: require existing document; sync to DB + re-embed
+                    existing_doc = await self._get_document_by_path(file_path)
+                    if not existing_doc:
+                        logger.warning(f"No existing document found for document metadata sidecar: {file_path}")
+                        return
+                    try:
+                        from services.document_sidecar_service import get_document_sidecar_service
+                        sidecar_service = await get_document_sidecar_service()
+                        result = await sidecar_service.process_document_metadata(file_path, document_info=existing_doc)
+                        if result.get("success"):
+                            logger.info(f"Document metadata sidecar processed: {existing_doc.get('document_id')}")
+                            try:
+                                from services.file_manager.websocket_notifier import WebSocketNotifier
+                                from utils.websocket_manager import get_websocket_manager
+                                ws_manager = get_websocket_manager()
+                                ws_notifier = WebSocketNotifier(ws_manager)
+                                path_str = str(path).lower()
+                                if '/global/' in path_str:
+                                    await ws_notifier.notify_folder_updated(
+                                        folder_id=None, user_id=None, collection_type='global'
+                                    )
+                                elif '/users/' in path_str:
+                                    parts = path.parts
+                                    uploads_idx = parts.index('uploads') if 'uploads' in parts else -1
+                                    if uploads_idx >= 0 and uploads_idx + 2 < len(parts):
+                                        username = parts[uploads_idx + 2]
+                                        user_id = await self._get_user_id_from_username(username)
+                                        if user_id:
+                                            await ws_notifier.notify_folder_updated(
+                                                folder_id=None, user_id=user_id, collection_type='user'
+                                            )
+                            except Exception as e:
+                                logger.warning(f"Failed to send folder update notification: {e}")
+                        else:
+                            logger.error(f"Failed to process document metadata: {result.get('error')}")
+                    except Exception as e:
+                        logger.error(f"Error processing document metadata JSON: {e}")
+                    return
+
+                # Image metadata sidecar (schema_type missing or "image")
+                logger.info(f"Detected image metadata sidecar: {file_path}")
+                image_filename = metadata.get('image_filename', '')
+                if not image_filename:
+                    logger.warning(f"No image_filename field in metadata sidecar: {file_path}")
+                    return
+                image_path = path.parent / image_filename
+                if image_path.exists():
+                    logger.info(f"Found corresponding image file: {image_path}")
+                    try:
+                        from services.image_sidecar_service import get_image_sidecar_service
+                        sidecar_service = await get_image_sidecar_service()
+                        result = await sidecar_service.process_image_metadata(file_path)
+                        if result.get("success"):
+                            logger.info(f"Image metadata processed successfully: {result.get('title')}")
+                            try:
+                                from services.file_manager.websocket_notifier import WebSocketNotifier
+                                from utils.websocket_manager import get_websocket_manager
+                                ws_manager = get_websocket_manager()
+                                ws_notifier = WebSocketNotifier(ws_manager)
+                                path_str = str(path).lower()
+                                if '/global/' in path_str:
+                                    await ws_notifier.notify_folder_updated(
+                                        folder_id=None, user_id=None, collection_type='global'
+                                    )
+                                elif '/users/' in path_str:
+                                    parts = path.parts
+                                    uploads_idx = parts.index('uploads') if 'uploads' in parts else -1
+                                    if uploads_idx >= 0 and uploads_idx + 2 < len(parts):
+                                        username = parts[uploads_idx + 2]
+                                        user_id = await self._get_user_id_from_username(username)
+                                        if user_id:
+                                            await ws_notifier.notify_folder_updated(
+                                                folder_id=None, user_id=user_id, collection_type='user'
+                                            )
+                            except Exception as e:
+                                logger.warning(f"Failed to send folder update notification: {e}")
+                        else:
+                            logger.error(f"Failed to process image metadata: {result.get('error')}")
+                    except Exception as e:
+                        logger.error(f"Error processing image metadata JSON: {e}")
+                else:
+                    logger.warning(f"Image file not found for metadata sidecar: {image_path}")
+                return  # Don't process as regular document
+            
+            # Check if this file already has a document record (prevents duplicates)
+            # Note: Metadata sidecars are handled above and return early, so this won't affect them
             existing_doc = await self._get_document_by_path(file_path)
             if existing_doc:
-                logger.info(f"✅ Document already exists for {file_path}, skipping creation (ID: {existing_doc['document_id']})")
+                logger.debug(f"✅ Document already exists for {file_path}, skipping creation (ID: {existing_doc['document_id']})")
                 return
             
             logger.info(f"📄 Creating document record for new file: {file_path}")
             
-            path = Path(file_path)
-            filename = path.name
+            # Check if this is an image file that has a corresponding .metadata.json sidecar
+            # If sidecar exists, skip creating a document for the image file (sidecar will handle it)
+            image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico', '.tiff', '.tif', '.heic', '.heif']
+            if any(filename.lower().endswith(ext) for ext in image_extensions):
+                # Check for corresponding sidecar file: image.jpg -> image.metadata.json
+                sidecar_path = path.parent / f"{path.stem}.metadata.json"
+                if sidecar_path.exists():
+                    logger.info(f"📸 Image file has metadata sidecar, skipping duplicate document creation: {filename}")
+                    logger.info(f"   Sidecar will create document: {sidecar_path.name}")
+                    return  # Don't create document for image - sidecar will handle it
             
             # Parse path to get user and folder context
             parts = path.parts
@@ -1226,6 +1398,11 @@ class DocumentFileHandler(FileSystemEventHandler):
                     logger.info(f"📁 Global folder ID result: {folder_id}")
                 else:
                     logger.info(f"📁 No folders in path (file directly under Global)")
+            elif collection_dir == 'Teams':
+                # Teams files are managed by the application (team_service)
+                # File watcher should not process them - they have access control
+                logger.info(f"⏭️  Skipping Teams file (managed by application): {file_path}")
+                return
             else:
                 logger.warning(f"⚠️ Unknown collection directory: {collection_dir}")
                 return
@@ -1367,12 +1544,25 @@ class DocumentFileHandler(FileSystemEventHandler):
         Ensure all folders in the hierarchy exist, creating them if needed
         Returns the folder_id of the deepest folder
         
-        **ROOSEVELT'S SIMPLIFIED CAVALRY!** 🏇
-        Now uses UPSERT pattern - no need for complex caching or race condition handling!
+        Uses UPSERT pattern - no need for complex caching or race condition handling!
         The database handles everything!
         """
         try:
             logger.info(f"📁 Building folder hierarchy: {folder_parts} for user {user_id}, collection: {collection_type}")
+            
+            # For Global folders, we need an admin user's ID for RLS context
+            admin_user_id = user_id  # For user folders, use the user's own ID
+            if collection_type == 'global':
+                # Get system admin user for RLS context from FileWatcherService
+                if self.file_watcher_service:
+                    admin_user_id = await self.file_watcher_service._get_system_admin_user_id()
+                    if not admin_user_id:
+                        logger.error(f"❌ Cannot create Global folders: No admin user available for RLS context")
+                        return None
+                    logger.info(f"📁 Using admin user {admin_user_id} for Global folder creation")
+                else:
+                    logger.error(f"❌ Cannot create Global folders: FileWatcherService reference not available")
+                    return None
             
             parent_id = None
             current_folder_id = None
@@ -1381,15 +1571,16 @@ class DocumentFileHandler(FileSystemEventHandler):
             for i, folder_name in enumerate(folder_parts):
                 logger.info(f"📁 Level {i+1}/{len(folder_parts)}: Ensuring '{folder_name}' exists (parent: {parent_id})")
                 
-                # **BULLY!** Just create the folder - UPSERT handles duplicates!
-                # File watcher acts as admin creating folders for the user
+                # File watcher acts as admin creating folders
+                # For Global folders: user_id=None (global), admin_user_id=system_admin (RLS context)
+                # For User folders: user_id=user, admin_user_id=user (standard)
                 folder = await self.folder_service.create_folder(
                     name=folder_name,
                     parent_folder_id=parent_id,
                     user_id=user_id,
                     collection_type=collection_type,
                     current_user_role="admin",
-                    admin_user_id=user_id
+                    admin_user_id=admin_user_id
                 )
                 
                 if not folder:
@@ -1461,6 +1652,48 @@ class FileWatcherService:
         self.observer = None
         self.event_handler = None
         self.running = False
+        self._system_admin_user_id = None  # Cached system admin user_id for RLS context
+    
+    async def _get_system_admin_user_id(self) -> Optional[str]:
+        """
+        Get a system admin user_id for file watcher operations.
+        This is needed for RLS context when creating Global folders.
+        
+        Returns the user_id of any admin user, or None if no admin exists.
+        """
+        if self._system_admin_user_id:
+            return self._system_admin_user_id
+        
+        try:
+            import psycopg2
+            from config import settings
+            
+            conn = psycopg2.connect(
+                host=settings.POSTGRES_HOST,
+                port=settings.POSTGRES_PORT,
+                user=settings.POSTGRES_USER,
+                password=settings.POSTGRES_PASSWORD,
+                database=settings.POSTGRES_DB
+            )
+            
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT user_id FROM users WHERE role = 'admin' ORDER BY created_at ASC LIMIT 1")
+                row = cur.fetchone()
+                
+                if row:
+                    self._system_admin_user_id = row[0]
+                    logger.info(f"✅ File watcher using admin user {self._system_admin_user_id} for Global operations")
+                    return self._system_admin_user_id
+                else:
+                    logger.warning(f"⚠️ No admin user found - file watcher cannot create Global folders")
+                    return None
+            finally:
+                conn.close()
+                
+        except Exception as e:
+            logger.error(f"❌ Error getting system admin user: {e}")
+            return None
     
     async def _fix_org_file_folder_ids(self):
         """
@@ -1508,6 +1741,7 @@ class FileWatcherService:
                         continue
                     
                     # Walk all subdirectories under this user
+                    logger.debug(f"📁 Scanning user directory: {user_dir} for user {username}")
                     for dir_path in user_dir.rglob('*'):
                         if not dir_path.is_dir():
                             continue
@@ -1517,6 +1751,11 @@ class FileWatcherService:
                         # Get folder path relative to user directory
                         rel_path = dir_path.relative_to(user_dir)
                         folder_parts = rel_path.parts
+                        
+                        # Skip the user root directory itself (empty parts)
+                        if not folder_parts:
+                            logger.debug(f"⏭️  Skipping user root directory for {username}")
+                            continue
                         
                         # Check if this folder exists in database
                         folder_id = await self.event_handler._resolve_deepest_folder_id(
@@ -1533,12 +1772,19 @@ class FileWatcherService:
                                 if created_folder_id:
                                     imported_count += 1
                                     logger.info(f"✅ Imported folder: {rel_path} → {created_folder_id}")
+                                else:
+                                    logger.warning(f"⚠️ Failed to create folder hierarchy for: {rel_path}")
                             except Exception as e:
                                 logger.error(f"❌ Failed to import folder {rel_path}: {e}")
+                                import traceback
+                                traceback.print_exc()
+                        else:
+                            logger.debug(f"✅ User folder already exists in database: {rel_path} → {folder_id}")
             
             # Scan Global folders
             global_dir = uploads_dir / 'Global'
             if global_dir.exists():
+                logger.info(f"📁 Scanning Global directory: {global_dir}")
                 for dir_path in global_dir.rglob('*'):
                     if not dir_path.is_dir():
                         continue
@@ -1548,6 +1794,11 @@ class FileWatcherService:
                     # Get folder path relative to Global directory
                     rel_path = dir_path.relative_to(global_dir)
                     folder_parts = rel_path.parts
+                    
+                    # Skip the Global root directory itself (empty parts)
+                    if not folder_parts:
+                        logger.debug(f"⏭️  Skipping Global root directory")
+                        continue
                     
                     # Check if this folder exists in database
                     folder_id = await self.event_handler._resolve_deepest_folder_id(
@@ -1564,15 +1815,21 @@ class FileWatcherService:
                             if created_folder_id:
                                 imported_count += 1
                                 logger.info(f"✅ Imported global folder: {rel_path} → {created_folder_id}")
+                            else:
+                                logger.warning(f"⚠️ Failed to create folder hierarchy for: {rel_path}")
                         except Exception as e:
                             logger.error(f"❌ Failed to import global folder {rel_path}: {e}")
+                            import traceback
+                            traceback.print_exc()
+                    else:
+                        logger.debug(f"✅ Global folder already exists in database: {rel_path} → {folder_id}")
             
             logger.info(f"📁 FOLDER IMPORT COMPLETE!")
             logger.info(f"   📊 Folders scanned: {scanned_count}")
             logger.info(f"   ✅ Folders imported: {imported_count}")
             
             if imported_count > 0:
-                logger.info(f"   🏇 BULLY! {imported_count} folders imported into database!")
+                logger.info(f"   ✅ {imported_count} folders imported into database!")
             
         except Exception as e:
             logger.error(f"❌ Folder import scan failed: {e}")
@@ -1590,7 +1847,7 @@ class FileWatcherService:
         """
         try:
             from pathlib import Path
-            logger.info("🧹 Cleaning up missing folders from database...")
+            logger.debug("🧹 Cleaning up missing folders from database...")
             
             cleaned_count = 0
             checked_count = 0
@@ -1601,7 +1858,7 @@ class FileWatcherService:
             
             # Check user folders
             user_folders = await doc_repo.get_folders_by_user(None, 'user')  # Get all user folders
-            logger.info(f"🔍 Checking {len(user_folders)} user folders...")
+            logger.debug(f"🔍 Checking {len(user_folders)} user folders...")
             
             for folder_dict in user_folders:
                 checked_count += 1
@@ -1654,19 +1911,19 @@ class FileWatcherService:
                 
                 # Check if folder exists on disk
                 if not folder_fs_path.exists():
-                    logger.info(f"🗑️ Folder missing on disk: {folder_fs_path}")
-                    logger.info(f"🗑️ Deleting from database: {folder_name} ({folder_id})")
+                    logger.debug(f"🗑️ Folder missing on disk: {folder_fs_path}")
+                    logger.debug(f"🗑️ Deleting from database: {folder_name} ({folder_id})")
                     
                     try:
                         await self.folder_service.delete_folder(folder_id, user_id, recursive=True, current_user_role='admin')
                         cleaned_count += 1
-                        logger.info(f"✅ Deleted orphaned folder: {folder_name}")
+                        logger.debug(f"✅ Deleted orphaned folder: {folder_name}")
                     except Exception as e:
                         logger.error(f"❌ Failed to delete folder {folder_id}: {e}")
             
             # Check global folders
             global_folders = await doc_repo.get_folders_by_user(None, 'global')
-            logger.info(f"🔍 Checking {len(global_folders)} global folders...")
+            logger.debug(f"🔍 Checking {len(global_folders)} global folders...")
             
             for folder_dict in global_folders:
                 checked_count += 1
@@ -1687,22 +1944,22 @@ class FileWatcherService:
                 folder_fs_path = uploads_dir / 'Global' / Path(*folder_path_parts)
                 
                 if not folder_fs_path.exists():
-                    logger.info(f"🗑️ Global folder missing on disk: {folder_fs_path}")
-                    logger.info(f"🗑️ Deleting from database: {folder_name} ({folder_id})")
+                    logger.debug(f"🗑️ Global folder missing on disk: {folder_fs_path}")
+                    logger.debug(f"🗑️ Deleting from database: {folder_name} ({folder_id})")
                     
                     try:
                         await self.folder_service.delete_folder(folder_id, None, recursive=True, current_user_role='admin')
                         cleaned_count += 1
-                        logger.info(f"✅ Deleted orphaned global folder: {folder_name}")
+                        logger.debug(f"✅ Deleted orphaned global folder: {folder_name}")
                     except Exception as e:
                         logger.error(f"❌ Failed to delete global folder {folder_id}: {e}")
             
-            logger.info(f"🧹 FOLDER CLEANUP COMPLETE!")
-            logger.info(f"   📊 Folders checked: {checked_count}")
-            logger.info(f"   🗑️ Orphaned folders removed: {cleaned_count}")
+            logger.debug(f"🧹 FOLDER CLEANUP COMPLETE!")
+            logger.debug(f"   📊 Folders checked: {checked_count}")
+            logger.debug(f"   🗑️ Orphaned folders removed: {cleaned_count}")
             
             if cleaned_count > 0:
-                logger.info(f"   🏇 BULLY! {cleaned_count} orphaned folders cleaned up!")
+                logger.debug(f"   🏇 BULLY! {cleaned_count} orphaned folders cleaned up!")
             
         except Exception as e:
             logger.error(f"❌ Folder cleanup failed: {e}")
@@ -1718,7 +1975,7 @@ class FileWatcherService:
         """
         try:
             from pathlib import Path
-            logger.info("🧹 Cleaning up missing files from database...")
+            logger.debug("🧹 Cleaning up missing files from database...")
             
             cleaned_count = 0
             checked_count = 0
@@ -1747,7 +2004,7 @@ class FileWatcherService:
                 if not rows:
                     break
                 
-                logger.info(f"🔍 Checking batch: {len(rows)} documents (offset: {offset})")
+                logger.debug(f"🔍 Checking batch: {len(rows)} documents (offset: {offset})")
                 
                 for row in rows:
                     checked_count += 1
@@ -1776,8 +2033,8 @@ class FileWatcherService:
                         
                         # Check if file exists on disk
                         if not file_path.exists():
-                            logger.info(f"🗑️ File missing on disk: {file_path}")
-                            logger.info(f"🗑️ Deleting from database: {filename} ({document_id})")
+                            logger.debug(f"🗑️ File missing on disk: {file_path}")
+                            logger.debug(f"🗑️ Deleting from database: {filename} ({document_id})")
                             
                             # Delete from vector store
                             try:
@@ -1789,7 +2046,7 @@ class FileWatcherService:
                             success = await self.document_service.document_repository.delete(document_id, user_id)
                             if success:
                                 cleaned_count += 1
-                                logger.info(f"✅ Deleted orphaned document: {filename} ({document_id})")
+                                logger.debug(f"✅ Deleted orphaned document: {filename} ({document_id})")
                             else:
                                 logger.warning(f"⚠️ Failed to delete document {document_id} from database")
                                 error_count += 1
@@ -1808,13 +2065,13 @@ class FileWatcherService:
                 
                 offset += limit
             
-            logger.info(f"🧹 FILE CLEANUP COMPLETE!")
-            logger.info(f"   📊 Documents checked: {checked_count}")
-            logger.info(f"   🗑️ Orphaned documents removed: {cleaned_count}")
-            logger.info(f"   ❌ Errors: {error_count}")
+            logger.debug(f"🧹 FILE CLEANUP COMPLETE!")
+            logger.debug(f"   📊 Documents checked: {checked_count}")
+            logger.debug(f"   🗑️ Orphaned documents removed: {cleaned_count}")
+            logger.debug(f"   ❌ Errors: {error_count}")
             
             if cleaned_count > 0:
-                logger.info(f"   ✅ {cleaned_count} orphaned documents cleaned up!")
+                logger.debug(f"   ✅ {cleaned_count} orphaned documents cleaned up!")
             
         except Exception as e:
             logger.error(f"❌ File cleanup failed: {e}")
@@ -1823,12 +2080,10 @@ class FileWatcherService:
     
     async def _perform_startup_scan(self):
         """
-        **ROOSEVELT'S STARTUP CAVALRY CHARGE!**
-        
         Scan the uploads directory on startup and create database records
         for any files that were added while the app was down.
         
-        **By George!** This ensures the database ALWAYS matches the filesystem!
+        This ensures the database always matches the filesystem.
         """
         try:
             from pathlib import Path
@@ -1870,13 +2125,13 @@ class FileWatcherService:
                 scanned_count += 1
                 
                 try:
-                    # **ROOSEVELT**: Check if this file already has a database record
+                    # Check if this file already has a database record
                     # This prevents duplicates by comparing filename + user + folder context
                     doc_info = await self.event_handler._get_document_by_path(str(file_path))
                     
                     if not doc_info:
                         # File exists on disk but NOT in database!
-                        logger.info(f"📄 NEW FILE FOUND: {file_path.relative_to(uploads_dir)}")
+                        logger.debug(f"📄 NEW FILE FOUND: {file_path.relative_to(uploads_dir)}")
                         await self.event_handler._handle_new_file(str(file_path))
                         new_count += 1
                     else:
@@ -1890,24 +2145,24 @@ class FileWatcherService:
                     traceback.print_exc()
                     error_count += 1
             
-            logger.info(f"🎯 ROOSEVELT STARTUP SCAN COMPLETE!")
+            logger.info(f"🎯 Startup scan complete")
             logger.info(f"   📊 Files scanned: {scanned_count}")
             logger.info(f"   ✅ New files added: {new_count}")
             logger.info(f"   ⏭️  Already tracked (duplicates prevented): {skipped_count}")
             logger.info(f"   ❌ Errors: {error_count}")
             
             if new_count > 0:
-                logger.info(f"   🏇 BULLY! {new_count} files recovered and added to the database!")
+                logger.info(f"   ✅ {new_count} files recovered and added to the database")
             if skipped_count > 0:
-                logger.info(f"   🛡️  TRUST BUST! {skipped_count} duplicates prevented!")
+                logger.info(f"   ⏭️  {skipped_count} duplicates prevented")
             
-            # **BULLY!** Now scan for folders on disk that aren't in database!
+            # Scan for folders on disk that aren't in database
             await self._scan_and_import_folders(uploads_dir)
             
-            # **BULLY!** Now clean up folders that no longer exist on disk!
+            # Clean up folders that no longer exist on disk
             await self._cleanup_missing_folders(uploads_dir)
             
-            # **BULLY!** Now clean up files that no longer exist on disk!
+            # Clean up files that no longer exist on disk
             await self._cleanup_missing_files(uploads_dir)
             
         except Exception as e:
@@ -1916,45 +2171,56 @@ class FileWatcherService:
             traceback.print_exc()
             # Don't fail startup if scan fails
             pass
-        
+
+    async def run_rescan(self) -> Dict[str, Any]:
+        """Re-scan uploads directory and add any files on disk that are not in the database.
+        Safe to call after clearing the document database so files are re-read without restart."""
+        if not getattr(self, "event_handler", None):
+            return {"success": False, "error": "File watcher not started", "new_count": 0, "scanned_count": 0}
+        try:
+            await self._perform_startup_scan()
+            return {"success": True, "new_count": 0, "scanned_count": 0}
+        except Exception as e:
+            logger.error(f"Rescan failed: {e}")
+            return {"success": False, "error": str(e), "new_count": 0, "scanned_count": 0}
+
     async def start(self):
         """Start watching the uploads directory"""
         try:
-            logger.info("👀 Starting File System Watcher...")
+            logger.debug("👀 Starting File System Watcher...")
             
             # Get the current event loop for thread-safe async scheduling
             event_loop = asyncio.get_running_loop()
             
             # Create event handler FIRST (needed for startup scan)
+            # Pass self reference so handler can access _get_system_admin_user_id
             self.event_handler = DocumentFileHandler(
                 self.document_service, 
                 self.folder_service,
-                event_loop
+                event_loop,
+                file_watcher_service=self
             )
             
-            # **BULLY!** Fix any org files missing folder_id (deprecated, does nothing)
+            # Fix any org files missing folder_id (deprecated, does nothing)
             await self._fix_org_file_folder_ids()
             
-            # **ROOSEVELT CAVALRY CHARGE!** Scan for files added while app was down!
-            logger.info("🔍 ROOSEVELT: Performing startup file synchronization scan...")
-            await self._perform_startup_scan()
-            
-            # Create observer
+            # Create observer and start watching first so the server can accept connections
             self.observer = Observer()
-            
-            # Watch uploads directory recursively
             watch_path = str(Path(settings.UPLOAD_DIR).resolve())
             self.observer.schedule(
-                self.event_handler, 
-                watch_path, 
+                self.event_handler,
+                watch_path,
                 recursive=True
             )
-            
-            # Start observer in a separate thread
             self.observer.start()
             self.running = True
-            
-            logger.info(f"✅ File System Watcher started, monitoring: {watch_path}")
+            logger.info(f"✅ File System Watcher started, monitoring: {watch_path} (recursive=True)")
+
+            # Run startup scan in background so lifespan can yield and uvicorn can bind
+            logger.debug("🔍 Performing startup file synchronization scan in background...")
+            asyncio.create_task(self._perform_startup_scan())
+            logger.info(f"📁 Watcher will detect: folder creation, deletion, move/rename operations")
+            logger.info(f"📁 Watcher will detect: file creation, modification, deletion, move/rename operations")
             
             # Start debounce processor
             asyncio.create_task(self._debounce_loop())
@@ -1977,11 +2243,11 @@ class FileWatcherService:
         """Stop watching"""
         try:
             if self.observer:
-                logger.info("⏹️ Stopping File System Watcher...")
+                logger.debug("⏹️ Stopping File System Watcher...")
                 self.running = False
                 self.observer.stop()
                 self.observer.join(timeout=5)
-                logger.info("✅ File System Watcher stopped")
+                logger.debug("✅ File System Watcher stopped")
         except Exception as e:
             logger.error(f"❌ Error stopping File System Watcher: {e}")
 

@@ -230,7 +230,7 @@ class BaseAgent:
             logger.warning(f"⚠️ Failed to load checkpoint messages: {e}, starting fresh")
             return new_messages
     
-    def _get_llm(self, temperature: float = 0.7, model: Optional[str] = None, state: Optional[Dict[str, Any]] = None) -> ChatOpenAI:
+    def _get_llm(self, temperature: float = 0.7, model: Optional[str] = None, state: Optional[Dict[str, Any]] = None, max_tokens: Optional[int] = None) -> ChatOpenAI:
         """Get configured LLM instance, using user model preferences if available"""
         # Check for user model preferences in state metadata or shared_memory
         user_model = None
@@ -251,6 +251,8 @@ class BaseAgent:
         final_model = model or user_model or settings.DEFAULT_MODEL
         logger.info(f"🎯 SELECTED MODEL: {final_model} (explicit={model}, user={user_model}, default={settings.DEFAULT_MODEL})")
         logger.info(f"🌡️ SELECTED TEMPERATURE: {temperature}")
+        if max_tokens:
+            logger.info(f"🔢 SELECTED MAX_TOKENS: {max_tokens}")
         
         # Add reasoning support via extra_body
         # Note: LangChain ChatOpenAI passes model_kwargs to the underlying OpenAI client
@@ -274,6 +276,7 @@ class BaseAgent:
             openai_api_key=settings.OPENROUTER_API_KEY,
             openai_api_base=settings.OPENROUTER_BASE_URL,
             temperature=temperature,
+            max_tokens=max_tokens,
             model_kwargs=model_kwargs if model_kwargs else None
         )
     
@@ -467,16 +470,59 @@ class BaseAgent:
             logger.error(f"❌ {error_context} failed with unexpected error: {e}")
             raise
     
+    def _filter_large_data_from_content(self, content: str) -> str:
+        """
+        Filter out large data URIs and HTML chart code blocks from message content.
+        
+        Removes:
+        - Base64 image data URIs: ![...](data:image/...)
+        - HTML chart code blocks: ```html:chart\n...\n```
+        - Other data URIs that could bloat context
+        
+        Args:
+            content: Message content string
+            
+        Returns:
+            Filtered content with placeholders for removed data
+        """
+        if not content or not isinstance(content, str):
+            return content
+        
+        import re
+        filtered = content
+        
+        # Remove base64 image data URIs (replace with placeholder)
+        # Pattern: ![alt](data:image/type;base64,...)
+        data_image_pattern = r'!\[([^\]]*)\]\(data:image/[^)]+\)'
+        def replace_image(match):
+            alt_text = match.group(1) if match.groups() else "Image"
+            return f"![{alt_text}](<image_removed_from_context>)"
+        filtered = re.sub(data_image_pattern, replace_image, filtered)
+        
+        # Remove HTML chart code blocks (replace with placeholder)
+        # Pattern: ```html:chart\n...\n```
+        html_chart_pattern = r'```html:chart\n.*?\n```'
+        filtered = re.sub(html_chart_pattern, '```html:chart\n<chart_removed_from_context>\n```', filtered, flags=re.DOTALL)
+        
+        # Remove other data URIs (data:text/html, data:application/json, etc.)
+        # Pattern: data:[^)]+
+        other_data_pattern = r'data:[^)]+'
+        filtered = re.sub(other_data_pattern, '<data_uri_removed_from_context>', filtered)
+        
+        return filtered
+    
     def _extract_conversation_history(self, messages: List[Any], limit: int = 10) -> List[Dict[str, str]]:
-        """Extract conversation history from LangChain messages"""
+        """Extract conversation history from LangChain messages, filtering out large data URIs"""
         try:
             history = []
             for msg in messages[-limit:]:
                 if hasattr(msg, 'content'):
                     role = "assistant" if hasattr(msg, 'type') and msg.type == "ai" else "user"
+                    # Filter out large data URIs and HTML chart code blocks from content
+                    filtered_content = self._filter_large_data_from_content(msg.content)
                     history.append({
                         "role": role,
-                        "content": msg.content
+                        "content": filtered_content
                     })
             return history
         except Exception as e:
@@ -700,20 +746,82 @@ class BaseAgent:
             logger.debug(f"Could not load checkpoint state for pending operation: {e}")
         return None
     
-    def _get_datetime_context(self) -> str:
+    def _get_datetime_context(self, state: Optional[Dict[str, Any]] = None) -> str:
         """
-        Get current date/time context for agent grounding
+        Get current date/time context for agent grounding using user's timezone
         
-        Returns formatted datetime string for inclusion in prompts.
-        This ensures all agents know the current date/time for proper grounding.
+        Args:
+            state: Optional state dictionary containing user_id and shared_memory.
+                   If provided, will use user's timezone from shared_memory or fetch from backend.
+                   If not provided or timezone not found, defaults to UTC.
+        
+        Returns:
+            Formatted datetime string for inclusion in prompts.
+            This ensures all agents know the current date/time for proper grounding.
         """
-        from datetime import datetime
-        now = datetime.now()
+        from datetime import datetime, timezone as dt_timezone
+        import pytz
+        
+        # Try to get user timezone from state
+        user_timezone = "UTC"  # Default fallback
+        
+        if state:
+            # First check shared_memory for timezone (passed from backend)
+            shared_memory = state.get("shared_memory", {})
+            if "user_timezone" in shared_memory:
+                user_timezone = shared_memory["user_timezone"]
+                logger.debug(f"🌍 Using timezone from shared_memory: {user_timezone}")
+            else:
+                # Try to get from metadata
+                metadata = state.get("metadata", {})
+                if "user_timezone" in metadata:
+                    user_timezone = metadata["user_timezone"]
+                    logger.debug(f"🌍 Using timezone from metadata: {user_timezone}")
+                else:
+                    # Could fetch via gRPC, but for now fallback to UTC
+                    # This ensures backward compatibility
+                    logger.debug("🌍 No timezone in state, using UTC")
+        
+        # Get timezone-aware datetime
+        try:
+            if user_timezone.upper() == "UTC":
+                current_time = datetime.now(dt_timezone.utc)
+                timezone_name = "UTC"
+            else:
+                # For pytz timezones, use the recommended pytz approach
+                tz = pytz.timezone(user_timezone)
+                # Get naive UTC time, then localize to target timezone
+                utc_naive = datetime.utcnow()
+                utc_aware = pytz.utc.localize(utc_naive)
+                current_time = utc_aware.astimezone(tz)
+                timezone_name = current_time.strftime('%Z')  # Use strftime to get timezone abbreviation
+        except Exception as e:
+            # Fallback to UTC if timezone is invalid
+            logger.warning(f"Invalid timezone '{user_timezone}', falling back to UTC: {e}")
+            current_time = datetime.now(dt_timezone.utc)
+            timezone_name = "UTC"
+        
+        current_date = current_time.strftime("%A, %B %d, %Y")
+        iso_date = current_time.strftime("%Y-%m-%d")
+        current_time_str = current_time.strftime("%I:%M %p")
+        current_year = current_time.year
+
+        # Format timezone more clearly (e.g., "EST" or "America/New_York")
+        if timezone_name == "UTC":
+            timezone_display = "UTC"
+        else:
+            # Show both abbreviation and full timezone name for clarity
+            timezone_display = f"{timezone_name} ({user_timezone})"
+
         return (
-            f"CURRENT DATE AND TIME: {now.strftime('%Y-%m-%d %H:%M:%S %Z')} "
-            f"({now.isoformat()})\n"
-            f"DATE CONTEXT: Today is {now.strftime('%A, %B %d, %Y')}. "
-            f"The current time is {now.strftime('%I:%M %p %Z')}."
+            f"**Current Context (LOCAL TIME):**\n"
+            f"- Today's date: {current_date}\n"
+            f"- Today's date (YYYY-MM-DD, use for search/filter): {iso_date}\n"
+            f"- Current time: {current_time_str} {timezone_display}\n"
+            f"- Current year: {current_year}\n"
+            f"- **IMPORTANT**: This is the LOCAL time in the user's timezone ({user_timezone}), NOT UTC.\n"
+            f"- When users refer to \"today\", \"yesterday\", \"this week\", \"this month\", or \"this year\", use this date context to understand what they mean.\n"
+            f"- When answering time/date questions, use this LOCAL time directly - do NOT convert to UTC unless specifically requested."
         )
     
     def _build_messages(self, system_prompt: str, user_query: str, conversation_history: List[Dict[str, str]] = None) -> List[Any]:
@@ -754,7 +862,8 @@ class BaseAgent:
         system_prompt: str,
         user_prompt: str,
         messages_list: List[Any],
-        look_back_limit: int = 10
+        look_back_limit: int = 10,
+        state: Optional[Dict[str, Any]] = None
     ) -> List[Any]:
         """
         Build message list for non-editing conversational agents with conversation history
@@ -764,7 +873,7 @@ class BaseAgent:
         
         Message Structure:
         1. SystemMessage: system_prompt
-        2. SystemMessage: datetime_context (automatic)
+        2. SystemMessage: datetime_context (automatic, uses user timezone if available)
         3. Conversation history as alternating HumanMessage/AIMessage objects
         4. HumanMessage: user_prompt (contains query + all context embedded)
         
@@ -773,6 +882,7 @@ class BaseAgent:
             user_prompt: User's query with all context embedded in one string
             messages_list: Conversation history from state.get("messages", [])
             look_back_limit: Number of previous messages to include (default: 10)
+            state: Optional state dictionary for timezone-aware datetime context
             
         Returns:
             List of LangChain message objects ready for LLM
@@ -784,13 +894,14 @@ class BaseAgent:
                 system_prompt=system_prompt,
                 user_prompt=prompt,
                 messages_list=messages_list,
-                look_back_limit=10
+                look_back_limit=10,
+                state=state
             )
         """
         # Start with system messages
         messages = [
             SystemMessage(content=system_prompt),
-            SystemMessage(content=self._get_datetime_context())
+            SystemMessage(content=self._get_datetime_context(state))
         ]
         
         # Add conversation history as proper message objects
@@ -817,7 +928,8 @@ class BaseAgent:
         context_parts: List[str],
         current_request: str,
         messages_list: List[Any],
-        look_back_limit: int = 6
+        look_back_limit: int = 6,
+        state: Optional[Dict[str, Any]] = None
     ) -> List[Any]:
         """
         Build message list for editing agents with conversation history and separate context
@@ -826,7 +938,7 @@ class BaseAgent:
         
         Message Structure:
         1. SystemMessage: system_prompt
-        2. SystemMessage: datetime_context (automatic)
+        2. SystemMessage: datetime_context (automatic, uses user timezone if available)
         3. Conversation history as alternating HumanMessage/AIMessage objects
         4. HumanMessage: file context (from context_parts - file content, references)
         5. HumanMessage: current_request (user query + mode-specific instructions)
@@ -837,6 +949,7 @@ class BaseAgent:
             current_request: User's request with mode-specific instructions
             messages_list: Conversation history from state.get("messages", [])
             look_back_limit: Number of previous messages to include (default: 6)
+            state: Optional state dictionary for timezone-aware datetime context
             
         Returns:
             List of LangChain message objects ready for LLM
@@ -854,13 +967,14 @@ class BaseAgent:
                 context_parts=context_parts,
                 current_request=request,
                 messages_list=state.get("messages", []),
-                look_back_limit=6
+                look_back_limit=6,
+                state=state
             )
         """
         # Start with system messages
         messages = [
             SystemMessage(content=system_prompt),
-            SystemMessage(content=self._get_datetime_context())
+            SystemMessage(content=self._get_datetime_context(state))
         ]
         
         # Add conversation history as proper message objects

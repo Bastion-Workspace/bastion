@@ -208,45 +208,35 @@ const FloatingHistoryWindow = ({
   const handleDeleteAllConfirm = async () => {
     setIsDeletingAll(true);
     try {
-      // If there is an active conversation, delete all others
-      if (activeConversationId) {
-        const all = conversations || [];
-        const toDelete = all
-          .map(c => c.conversation_id)
-          .filter(id => id && id !== activeConversationId);
+      const currentConv = conversations.find(c => c.conversation_id === activeConversationId);
+      const isCurrentEmpty =
+        activeConversationId &&
+        currentConv &&
+        (currentConv.message_count === 0 || currentConv.message_count == null);
 
-        for (const id of toDelete) {
-          try {
-            // Delete sequentially to keep API simple; list is typically small
-            await apiService.deleteConversation(id);
-          } catch (e) {
-            console.error('Failed to delete conversation', id, e);
-          }
-        }
+      if (isCurrentEmpty) {
+        const toDelete = conversations.filter(c => c.conversation_id !== activeConversationId);
+        await Promise.all(toDelete.map(c => apiService.deleteConversation(c.conversation_id)));
       } else {
-        // No active conversation; delete them all
         await apiService.deleteAllConversations();
       }
-      
-      // Invalidate and refetch conversations
+
       await queryClient.invalidateQueries(['conversations']);
-      
+
       setSnackbar({
         open: true,
-        message: activeConversationId ? 'Cleared all except active conversation' : 'All conversations deleted successfully',
+        message: 'All conversations deleted successfully',
         severity: 'success'
       });
-      
+
       setDeleteAllDialogOpen(false);
-      
-      // Clear current conversation only if none was preserved
-      if (!activeConversationId && onClearCurrentConversation) {
-        onClearCurrentConversation();
+
+      if (!isCurrentEmpty) {
+        if (onClearCurrentConversation) onClearCurrentConversation();
+        if (onNewChat) onNewChat();
       }
-      
-      // Close the history window
+
       onClose();
-      
     } catch (error) {
       console.error('Failed to delete all conversations:', error);
       setSnackbar({
@@ -515,16 +505,10 @@ const FloatingHistoryWindow = ({
         maxWidth="sm"
         fullWidth
       >
-        <DialogTitle>{activeConversationId ? 'Clear All Except Active' : 'Delete All Conversations'}</DialogTitle>
+        <DialogTitle>Delete All Conversations</DialogTitle>
         <DialogContent>
           <Typography>
-            {activeConversationId
-              ? (
-                <>Are you sure you want to delete <strong>all other conversations</strong> and keep the active one?</>
-              )
-              : (
-                <>Are you sure you want to delete <strong>ALL {filteredConversations.length} conversations</strong>? This action cannot be undone.</>
-              )}
+            Are you sure you want to delete <strong>ALL {filteredConversations.length} conversations</strong>? This action cannot be undone.
           </Typography>
           <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
             This will permanently delete all your conversation history, including all messages and context.
@@ -548,9 +532,7 @@ const FloatingHistoryWindow = ({
           >
             {isDeletingAll
               ? 'Deleting...'
-              : activeConversationId
-                ? 'Clear Others'
-                : `Delete All (${filteredConversations.length})`}
+              : `Delete All (${filteredConversations.length})`}
           </Button>
         </DialogActions>
       </Dialog>

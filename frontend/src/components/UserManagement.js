@@ -478,6 +478,10 @@ const UserManagement = () => {
                   control={<Switch checked={!!capabilities['feature.news.notifications']} onChange={(e) => setCapabilities(prev => ({ ...prev, 'feature.news.notifications': e.target.checked }))} />}
                   label="News: Notifications"
                 />
+                <FormControlLabel
+                  control={<Switch checked={!!capabilities['feature.maps.view']} onChange={(e) => setCapabilities(prev => ({ ...prev, 'feature.maps.view': e.target.checked }))} />}
+                  label="Maps: View"
+                />
               </Box>
             </Box>
           )}

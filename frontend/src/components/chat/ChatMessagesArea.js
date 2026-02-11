@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
 import {
   Box,
   Typography,
@@ -17,31 +17,28 @@ import {
   Popover,
 } from '@mui/material';
 import {
-  Person,
-  Error,
   AutoAwesome,
   CloudUpload,
   Fullscreen,
   Close,
-  Search,
-  Chat,
-  Code,
-  Language,
 } from '@mui/icons-material';
 import { useQuery } from 'react-query';
 import ExportButton from './ExportButton';
-import AsyncTaskProgress from './AsyncTaskProgress';
 import { useChatSidebar } from '../../contexts/ChatSidebarContext';
 import apiService from '../../services/apiService';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { materialLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { markdownToPlainText, renderCitations, smartCopy } from '../../utils/chatUtils';
 import { useCapabilities } from '../../contexts/CapabilitiesContext';
 import EditorOpsPreviewModal from './EditorOpsPreviewModal';
 import FolderSelectionDialog from './FolderSelectionDialog';
+import { useImageLightbox } from '../common/ImageLightbox';
+import ChatMessage from './ChatMessage';
 
 /**
  * ROOSEVELT'S CHART RENDERER: Safely renders standalone Plotly HTML in an iframe
@@ -110,7 +107,7 @@ const ChartRenderer = ({ html, staticData, staticFormat, onImport, onFullScreen 
   );
 };
 
-const ChatMessagesArea = () => {
+const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
   const theme = useTheme();
   const { 
     messages, 
@@ -120,13 +117,12 @@ const ChatMessagesArea = () => {
     executingPlans,
     replyToMessage,
     setReplyToMessage,
-    cancelAsyncTask,
     sendMessage,
     backgroundJobService
   } = useChatSidebar();
   const { isAdmin, has } = useCapabilities();
+  const { openLightbox } = useImageLightbox();
 
-  // ROOSEVELT'S CONVERSATION LOADING STATE: Show proper feedback during restoration
   const { data: conversationData, isLoading: conversationLoading } = useQuery(
     ['conversation', currentConversationId],
     () => currentConversationId ? apiService.getConversation(currentConversationId) : null,
@@ -543,64 +539,45 @@ ${message.content}
     return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
-  const getMessageIcon = (role, agentType = null) => {
-    if (role === 'user') return <Person fontSize="small" />;
-    if (role === 'system') return <Error fontSize="small" />;
-    
-    if (role === 'assistant') {
-      if (agentType) {
-        const type = agentType.toLowerCase();
-        if (type.includes('research')) return <Search fontSize="small" />;
-        if (type.includes('chat')) return <Chat fontSize="small" />;
-        if (type.includes('coding')) return <Code fontSize="small" />;
-        if (type.includes('crawl')) return <Language fontSize="small" />;
-        if (type.includes('direct')) return <AutoAwesome fontSize="small" />;
-      }
-      
-      return (
-        <Box
-          component="img"
-          src="/images/favicon.ico"
-          alt="Bastion"
-          sx={{ 
-            width: 20, 
-            height: 20,
-            objectFit: 'contain'
-          }}
-        />
-      );
-    }
-    
-    return <Person fontSize="small" />;
-  };
-
-  const getMessageColor = (role, isError) => {
-    if (isError) return 'error.main';
-    
-    switch (role) {
-      case 'user':
-        return 'primary.main';
-      case 'assistant':
-        return 'secondary.main';
-      case 'system':
-        return 'error.main';
-      default:
-        return 'text.primary';
-    }
-  };
-
   // Extract image URLs from assistant message content for preview rendering
   const extractImageUrls = (text) => {
     try {
       if (!text || typeof text !== 'string') return [];
       const urls = [];
-      const regex = /(https?:\/\/[^\s)]+|\/static\/images\/[^\s)]+)/g;
+      
+      // Match data URIs for base64 images (e.g., from comic search)
+      const dataUriRegex = /!\[([^\]]*)\]\((data:image\/[^)]+)\)/g;
+      let dataMatch;
+      while ((dataMatch = dataUriRegex.exec(text)) !== null) {
+        urls.push(dataMatch[2]); // Extract the data URI
+      }
+      
+      // Match markdown images with /api/images/ URLs (e.g., from image generation)
+      const apiImagesRegex = /!\[([^\]]*)\]\((\/api\/images\/[^)]+)\)/g;
+      let apiMatch;
+      while ((apiMatch = apiImagesRegex.exec(text)) !== null) {
+        urls.push(apiMatch[2]); // Extract the /api/images/ URL
+      }
+
+      // Match markdown images with /api/documents/ file URLs (e.g., from research fast path)
+      const apiDocumentsRegex = /!\[([^\]]*)\]\((\/api\/documents\/[^)]+)\)/g;
+      let apiDocMatch;
+      while ((apiDocMatch = apiDocumentsRegex.exec(text)) !== null) {
+        urls.push(apiDocMatch[2]);
+      }
+      
+      // Match HTTP/HTTPS URLs, static images, comic API endpoints, and document file URLs
+      const regex = /(https?:\/\/[^\s)]+|\/static\/images\/[^\s)]+|\/api\/comics\/[^\s)]+|\/api\/images\/[^\s)]+|\/api\/documents\/[^\s)]+\/file)/g;
       let match;
       while ((match = regex.exec(text)) !== null) {
         const url = match[1];
         if (typeof url === 'string') {
           const lower = url.toLowerCase();
-          if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.webp')) {
+          // Document file URLs (research fast path) - no extension, served as image
+          if (lower.includes('/api/documents/') && lower.endsWith('/file')) {
+            urls.push(url);
+          } else if (lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') ||
+              lower.endsWith('.webp') || lower.endsWith('.gif')) {
             urls.push(url);
           }
         }
@@ -617,71 +594,19 @@ ${message.content}
       const filename = url.replace('/static/images/', '');
       return `/api/images/${filename}`;
     }
+    // API endpoints are already correct - return as-is
+    if (url.startsWith('/api/comics/') || url.startsWith('/api/images/') || url.startsWith('/api/documents/')) {
+      return url;
+    }
     return url; // Return as-is for external URLs
   };
 
-  // Open image in new tab with proper authentication
-  const handleOpenImage = async (url) => {
-    try {
+  // Open image in lightbox
+  const handleOpenImage = (url) => {
       const apiUrl = getImageApiUrl(url);
-      console.log('🖼️ Opening image:', { originalUrl: url, apiUrl });
-      
-      // For external URLs, open directly
-      if (!apiUrl.startsWith('/api/images/')) {
-        window.open(apiUrl, '_blank', 'noopener,noreferrer');
-        return;
-      }
-      
-      // For internal API URLs, fetch with authentication and create blob URL
-      const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
-      if (!token) {
-        console.error('❌ No auth token available');
-        alert('Please log in to view images.');
-        return;
-      }
-      
-      // Construct full URL for fetch
-      const fetchUrl = `${window.location.origin}${apiUrl}`;
-      console.log('🖼️ Fetching image from:', fetchUrl);
-      
-      const response = await fetch(fetchUrl, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
-      
-      console.log('🖼️ Image fetch response:', { status: response.status, ok: response.ok, contentType: response.headers.get('Content-Type') });
-      
-      if (response.ok) {
-        const blob = await response.blob();
-        console.log('🖼️ Image blob created:', { size: blob.size, type: blob.type });
-        const blobUrl = URL.createObjectURL(blob);
-        console.log('🖼️ Blob URL created:', blobUrl);
-        
-        // Open in new tab - blob URLs display images instead of downloading
-        const newWindow = window.open(blobUrl, '_blank', 'noopener,noreferrer');
-        
-        if (!newWindow) {
-          URL.revokeObjectURL(blobUrl);
-          alert('Please allow popups to view images in a new tab.');
-          return;
-        }
-        
-        // Clean up blob URL after a delay (window should have loaded it)
-        setTimeout(() => {
-          // Revoke after window opens (give it time to load)
-          setTimeout(() => {
-            URL.revokeObjectURL(blobUrl);
-            console.log('🖼️ Blob URL revoked');
-          }, 2000);
-        }, 100);
-      } else {
-        const errorText = await response.text();
-        console.error('❌ Failed to load image:', { status: response.status, statusText: response.statusText, error: errorText });
-        alert(`Failed to load image: ${response.status} ${response.statusText}`);
-      }
-    } catch (error) {
-      console.error('❌ Error opening image:', error);
-      alert(`Failed to open image: ${error.message}`);
-    }
+    // Extract filename from URL if possible
+    const filename = url.split('/').pop().split('?')[0];
+    openLightbox(apiUrl, { filename, alt: 'Generated image' });
   };
 
   // Check if a message contains a research plan
@@ -695,16 +620,6 @@ ${message.content}
         message.content.includes('Research Plan:') ||
         (message.content.includes('Step') && message.content.includes('Research'))
       ))
-    );
-  };
-
-  // Check if a message is a research plan that needs approval
-  const isResearchPlanPending = (message) => {
-    return (
-      hasResearchPlan(message) &&
-      !message.planApproved &&
-      !message.isExecuting &&
-      !executingPlans.has(message.jobId || message.metadata?.job_id)
     );
   };
 
@@ -732,8 +647,8 @@ ${message.content}
     );
   };
 
-  // Custom markdown components for better styling
-  const markdownComponents = {
+  // Custom markdown components for better styling (memoized to avoid re-rendering all ReactMarkdown children)
+  const markdownComponents = useMemo(() => ({
     // Style code blocks - ROOSEVELT'S ENHANCED CODE BLOCK HANDLING
     code: ({ node, inline, className, children, staticData, staticFormat, onImport, onFullScreen, ...props }) => {
       const match = /language-([\w:]+)/.exec(className || '');
@@ -1035,43 +950,54 @@ ${message.content}
     
     // Handle chart images (base64 data URIs) and regular images
     img: ({ node, src, alt, ...props }) => {
-      // Check if this is a chart image (base64 data URI)
+      // Check if this is a base64 data URI image (charts, generated images, embedded images)
       if (src?.startsWith('data:image/')) {
         return (
           <Box sx={{ my: 2, textAlign: 'center' }}>
             <img 
               src={src}
-              alt={alt || 'Chart'}
+              alt={alt || 'Image'}
               {...props}
+              onClick={() => handleOpenImage(src)}
               style={{
                 maxWidth: '100%',
                 height: 'auto',
                 border: '1px solid',
                 borderColor: theme.palette.divider,
                 borderRadius: theme.shape.borderRadius,
+                cursor: 'pointer',
                 ...props.style
               }}
             />
           </Box>
         );
       }
-      // Regular image
+      // Regular image - fix double "Comics" in path for /api/comics URLs
+      let imageSrc = src;
+      if (src && src.startsWith('/api/comics/')) {
+        // Remove duplicate "Comics" segment if present
+        // e.g., /api/comics/Comics/Dilbert/... -> /api/comics/Dilbert/...
+        imageSrc = src.replace(/^\/api\/comics\/Comics\//, '/api/comics/');
+      }
+      
       return (
         <Box sx={{ my: 2, textAlign: 'center' }}>
           <img 
-            src={src}
+            src={imageSrc}
             alt={alt}
             {...props}
+            onClick={() => handleOpenImage(imageSrc)}
             style={{
               maxWidth: '100%',
               height: 'auto',
+              cursor: 'pointer',
               ...props.style
             }}
           />
         </Box>
       );
     },
-  };
+  }), [handleOpenImage, theme]);
 
   if (!currentConversationId) {
     return (
@@ -1167,569 +1093,35 @@ ${message.content}
             return null;
           }
 
-          // Signal Corps: Render notifications as centered, borderless pills
-          if (message.type === 'notification') {
-            const severityColor = {
-              'info': 'info',
-              'success': 'success',
-              'warning': 'warning',
-              'error': 'error'
-            }[message.severity] || 'info';
-            
-            // Determine background color for dark mode
-            let bgColor = 'transparent';
-            if (theme.palette.mode === 'dark') {
-              if (severityColor === 'info') {
-                bgColor = 'rgba(33, 150, 243, 0.1)';
-              } else if (severityColor === 'success') {
-                bgColor = 'rgba(76, 175, 80, 0.1)';
-              } else if (severityColor === 'warning') {
-                bgColor = 'rgba(255, 152, 0, 0.1)';
-              } else if (severityColor === 'error') {
-                bgColor = 'rgba(244, 67, 54, 0.1)';
-              }
-            }
-            
-            return (
-              <Box
-                key={message.id || index}
-                sx={{
-                  width: '100%',
-                  display: 'flex',
-                  justifyContent: 'center',
-                  my: 1
-                }}
-              >
-                <Chip
-                  label={message.content}
-                  color={severityColor}
-                  variant="outlined"
-                  size="small"
-                  sx={{
-                    fontStyle: 'italic',
-                    opacity: 0.8,
-                    backgroundColor: bgColor,
-                    borderColor: (theme.palette[severityColor] && theme.palette[severityColor].main) || theme.palette.info.main,
-                    '& .MuiChip-label': {
-                      fontSize: '0.75rem',
-                      px: 1.5
-                    }
-                  }}
-                />
-              </Box>
-            );
-          }
-
-          // Regular message rendering
           return (
-            <Box
+            <ChatMessage
               key={message.id || index}
-              sx={{
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: message.role === 'user' ? 'flex-end' : 'flex-start',
-              }}
-            >
-            <Paper
-              elevation={1}
-              onContextMenu={(e) => handleContextMenu(e, message)}
-              sx={{
-                p: 2,
-                maxWidth: '85%',
-                backgroundColor: message.role === 'user' 
-                  ? (theme.palette.mode === 'dark' 
-                      ? 'rgba(25, 118, 210, 0.4)' 
-                      : 'primary.light')
-                  : message.isError 
-                    ? 'error.light'
-                    : message.isToolStatus
-                      ? 'action.hover'
-                      : 'background.paper',
-                border: message.isError ? '1px solid' : message.isToolStatus ? '1px dashed' : 'none',
-                borderColor: message.isError ? 'error.main' : message.isToolStatus ? 'primary.main' : 'transparent',
-                cursor: 'context-menu',
-              }}
-            >
-              {/* Message Header */}
-              <Box sx={{ 
-                display: 'flex', 
-                alignItems: 'center', 
-                gap: 1, 
-                mb: 1,
-                justifyContent: message.role === 'user' ? 'flex-end' : 'flex-start',
-                userSelect: 'none'
-              }}>
-                {message.role !== 'user' && (
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Box 
-                      component="img" 
-                      src="/images/favicon.ico" 
-                      sx={{ width: 18, height: 18, objectFit: 'contain' }} 
-                    />
-                    <Typography 
-                      variant="caption" 
-                      color="text.secondary"
-                      sx={{ fontSize: '0.75rem', fontWeight: 600 }}
-                    >
-                      {aiName}
-                    </Typography>
-                    {(message.metadata?.agent_type || message.agent_type) && (
-                      <Chip 
-                        size="small" 
-                        label={
-                          (message.metadata?.agent_type || message.agent_type)
-                            .split('_')
-                            .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-                            .join(' ')
-                        }
-                        sx={{ 
-                          height: 16, 
-                          fontSize: '0.6rem', 
-                          backgroundColor: 'rgba(0, 0, 0, 0.05)',
-                          '& .MuiChip-label': { px: 1 }
-                        }} 
-                      />
-                    )}
-                  </Box>
-                )}
-                
-                {message.role === 'user' && (
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Typography 
-                      variant="caption" 
-                      color="text.secondary"
-                      sx={{ fontSize: '0.75rem', fontWeight: 600 }}
-                    >
-                      You
-                    </Typography>
-                    <Person fontSize="small" sx={{ color: 'primary.main' }} />
-                  </Box>
-                )}
-              </Box>
-
-              {/* Message Content */}
-              <Box 
-                sx={{ 
-                  mb: 1, 
-                  userSelect: 'text',
-                  WebkitUserSelect: 'text',
-                  MozUserSelect: 'text',
-                  msUserSelect: 'text',
-                }}
-              >
-                {message.role === 'user' ? (
-                  <Typography 
-                    variant="body2" 
-                    sx={{ 
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                      color: message.isError ? 'error.main' : 'text.primary',
-                    }}
-                  >
-                    {message.content}
-                  </Typography>
-                ) : (
-                  <Box sx={{ 
-                    color: message.isError ? 'error.main' : 'text.primary',
-                    '& .markdown-content': {
-                      whiteSpace: 'normal',  // ROOSEVELT'S NEWLINE FIX - Let remarkBreaks handle line breaks
-                      wordBreak: 'break-word',
-                      lineHeight: 1.6,
-                      // Ensure text selection works properly without jumping
-                      userSelect: 'text',
-                      WebkitUserSelect: 'text',
-                    },
-                    '& pre': { 
-                      margin: '8px 0',
-                      borderRadius: '4px',
-                      overflow: 'auto',
-                      backgroundColor: 'rgba(0, 0, 0, 0.05)',
-                      padding: '12px'
-                    },
-                    '& code': {
-                      fontFamily: 'monospace',
-                      backgroundColor: 'rgba(0, 0, 0, 0.1)',
-                      padding: '2px 4px',
-                      borderRadius: '3px',
-                      fontSize: '0.9em'
-                    },
-                    '& p': {
-                      marginBottom: '12px',
-                      whiteSpace: 'normal',  // ROOSEVELT'S FIX - Ensure paragraphs don't conflict
-                      userSelect: 'text',
-                      // Prevent double-click from selecting entire paragraph
-                      WebkitUserSelect: 'text',
-                    },
-                    '& h1, & h2, & h3, & h4, & h5, & h6': {
-                      marginTop: '16px',
-                      marginBottom: '8px'
-                    },
-                    '& ul, & ol': {
-                      marginBottom: '12px',
-                      paddingLeft: '20px'
-                    },
-                    '& li': {
-                      marginBottom: '4px'
-                    },
-                    '& blockquote': {
-                      margin: '16px 0',
-                      padding: '8px 16px'
-                    }
-                  }}>
-                    {(() => {
-                      const displayContent = message.content || '';
-                      
-                      const handleChartImport = (data, format) => {
-                        // For SVG, we convert to a Data URI
-                        let dataUri = data;
-                        if (format === 'svg' && !data.startsWith('data:')) {
-                          dataUri = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(data)))}`;
-                        } else if (format === 'base64_png' && !data.startsWith('data:')) {
-                          dataUri = `data:image/png;base64,${data}`;
-                        }
-                        handleImportImage(dataUri);
-                      };
-
-                      return (
-                        <ReactMarkdown 
-                          className="markdown-content"
-                          components={{
-                            ...markdownComponents,
-                            code: (props) => markdownComponents.code({
-                              ...props,
-                              staticData: message.metadata?.static_visualization_data,
-                              staticFormat: message.metadata?.static_format,
-                              onImport: handleChartImport,
-                              onFullScreen: (html) => setFullScreenChart(html)
-                            })
-                          }}
-                          remarkPlugins={[remarkBreaks, remarkGfm]}
-                        >
-                          {displayContent}
-                        </ReactMarkdown>
-                      );
-                    })()}
-                  </Box>
-                )}
-
-                {/* ROOSEVELT'S ENHANCED CITATION DISPLAY: Support new numbered format */}
-                {(message.metadata?.citations || message.citations) && renderCitations(message.metadata?.citations || message.citations)}
-
-                {/* Fiction editing HITL controls */}
-                {message.role === 'assistant' && Array.isArray(message.editor_operations) && message.editor_operations.length > 0 && (
-                  <Box sx={{ mt: 2 }}>
-                    {/* ROOSEVELT'S BEFORE/AFTER EDIT PREVIEW */}
-                    <Box sx={{ mb: 2, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                      {message.editor_operations.slice(0, 3).map((op, idx) => {
-                        const original = op.original_text || op.anchor_text || '';
-                        const newText = op.text || '';
-                        const opType = op.op_type || 'replace_range';
-                        const isInsert = opType === 'insert_after_heading' || opType === 'insert_after';
-                        
-                        return (
-                          <Paper key={idx} variant="outlined" sx={{ p: 1.5, bgcolor: 'background.default' }}>
-                            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                              <Chip 
-                                size="small" 
-                                label={`Edit ${idx + 1}`} 
-                                color="primary" 
-                                variant="outlined"
-                              />
-                              <Chip 
-                                size="small" 
-                                label={isInsert ? 'insert' : 'replace'} 
-                                color={isInsert ? 'success' : 'warning'}
-                              />
-                            </Box>
-                            
-                            {original && (
-                              <Box sx={{ mb: 1 }}>
-                                <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, display: 'block', mb: 0.5 }}>
-                                  {isInsert ? 'Insert after:' : 'Replace:'}
-                                </Typography>
-                                <Box sx={{ 
-                                  p: 1, 
-                                  bgcolor: 'rgba(211, 47, 47, 0.08)', 
-                                  border: '1px solid rgba(211, 47, 47, 0.2)',
-                                  borderRadius: 1,
-                                  fontFamily: 'monospace',
-                                  fontSize: '0.875rem',
-                                  whiteSpace: 'pre-wrap',
-                                  maxHeight: '80px',
-                                  overflow: 'hidden',
-                                  position: 'relative'
-                                }}>
-                                  {original.length > 150 ? original.substring(0, 150) + '...' : original}
-                                </Box>
-                              </Box>
-                            )}
-                            
-                            <Box>
-                              <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, display: 'block', mb: 0.5 }}>
-                                {isInsert ? 'New text:' : 'With:'}
-                              </Typography>
-                              <Box sx={{ 
-                                p: 1, 
-                                bgcolor: 'rgba(46, 125, 50, 0.08)', 
-                                border: '1px solid rgba(46, 125, 50, 0.2)',
-                                borderRadius: 1,
-                                fontFamily: 'monospace',
-                                fontSize: '0.875rem',
-                                whiteSpace: 'pre-wrap',
-                                maxHeight: '80px',
-                                overflow: 'hidden'
-                              }}>
-                                {newText.length > 150 ? newText.substring(0, 150) + '...' : newText}
-                              </Box>
-                            </Box>
-                          </Paper>
-                        );
-                      })}
-                      
-                      {message.editor_operations.length > 3 && (
-                        <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'center', fontStyle: 'italic' }}>
-                          ... and {message.editor_operations.length - 3} more edit{message.editor_operations.length - 3 > 1 ? 's' : ''}
-                        </Typography>
-                      )}
-                    </Box>
-                    
-                    <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                      <Chip size="small" color="primary" label={`${message.editor_operations.length} edit${message.editor_operations.length > 1 ? 's' : ''} ready`} />
-                      <Button size="small" variant="outlined" onClick={() => setPreviewOpenFor(message.id || message.timestamp || Date.now())}>Review all edits</Button>
-                      <Button size="small" variant="contained" onClick={() => {
-                        try {
-                          const ops = Array.isArray(message.editor_operations) ? message.editor_operations : [];
-                          const mEdit = message.manuscript_edit || null;
-                          window.dispatchEvent(new CustomEvent('codexApplyEditorOps', { detail: { operations: ops, manuscript_edit: mEdit } }));
-                        } catch (e) {
-                          console.error('Failed to dispatch editor operations apply event:', e);
-                        }
-                      }}>Apply all</Button>
-                    </Box>
-                  </Box>
-                )}
-
-                {/* News results rendering */}
-                {message.role === 'assistant' && (isAdmin || has('feature.news.view')) && Array.isArray(message.news_results) && message.news_results.length > 0 && (
-                  <Box sx={{ mt: 1.5, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 1 }}>
-                    {message.news_results.map((h, idx) => (
-                      <Paper key={`${h.id}-${idx}`} variant="outlined" sx={{ p: 1.5, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
-                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                          <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>{h.title}</Typography>
-                          <Chip size="small" label={h.severity?.toUpperCase() || 'NEWS'} color={h.severity === 'breaking' ? 'error' : h.severity === 'urgent' ? 'warning' : 'default'} />
-                        </Box>
-                        <Typography variant="body2" color="text.secondary">{h.summary}</Typography>
-                        <Box sx={{ display: 'flex', gap: 1, mt: 0.5 }}>
-                          <Chip size="small" label={`${h.sources_count || 0} sources`} />
-                          {typeof h.diversity_score === 'number' && <Chip size="small" label={`diversity ${Math.round((h.diversity_score||0)*100)}%`} />}
-                        </Box>
-                        <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
-                          <Button size="small" variant="contained" onClick={() => {
-                            try {
-                              // Prefer client-side navigation to preserve app state
-                              if (window?.history && typeof window.history.pushState === 'function') {
-                                window.history.pushState({}, '', `/news/${h.id}`);
-                                // Dispatch a popstate event so routers listening can react
-                                window.dispatchEvent(new PopStateEvent('popstate'));
-                              } else {
-                                window.location.href = `/news/${h.id}`;
-                              }
-                            } catch {
-                              window.location.href = `/news/${h.id}`;
-                            }
-                          }}>Open</Button>
-                        </Box>
-                      </Paper>
-                    ))}
-                  </Box>
-                )}
-
-                {/* Image Previews for generated images */}
-                {message.role === 'assistant' && (() => {
-                  const imageUrls = extractImageUrls(message.content);
-                  return imageUrls.length > 0 ? (
-                    <Box mt={1.5} display="flex" flexDirection="column" gap={1.5}>
-                      {imageUrls.map((url, idx) => (
-                        <Paper key={`${url}-${idx}`} variant="outlined" sx={{ p: 1.5 }}>
-                          <Box
-                            component="img"
-                            src={url}
-                            alt="Generated image"
-                            onClick={() => handleOpenImage(url)}
-                            sx={{
-                              maxWidth: '100%',
-                              height: 'auto',
-                              borderRadius: 1,
-                              display: 'block',
-                              cursor: 'pointer'
-                            }}
-                          />
-                          <Box mt={1} display="flex" gap={1}>
-                            <Button
-                              onClick={() => handleOpenImage(url)}
-                              size="small"
-                              variant="contained"
-                            >
-                              Open
-                            </Button>
-                            <Button
-                              onClick={() => handleImportImage(url)}
-                              size="small"
-                              variant="outlined"
-                              disabled={importing}
-                            >
-                              Import
-                            </Button>
-                          </Box>
-                        </Paper>
-                      ))}
-                    </Box>
-                  ) : null;
-                })()}
-              </Box>
-
-              {/* Async Task Progress */}
-              <AsyncTaskProgress 
-                message={message} 
-                onCancel={cancelAsyncTask}
-              />
-
-              {/* HITL Permission Request Actions */}
-              {isHITLPermissionRequest(message) && (
-                <Box mt={2}>
-                  <Box display="flex" gap={1} mb={1}>
-                    <Button
-                      variant="contained"
-                      color="success"
-                      size="small"
-                      onClick={() => handleHITLResponse('Yes')}
-                      disabled={isLoading}
-                      sx={{ minWidth: '80px' }}
-                      startIcon={isLoading ? <CircularProgress size={16} color="inherit" /> : null}
-                    >
-                      {isLoading ? 'Sending...' : 'Yes'}
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      color="error"
-                      size="small"
-                      onClick={() => handleHITLResponse('No')}
-                      disabled={isLoading}
-                      sx={{ minWidth: '80px' }}
-                      startIcon={isLoading ? <CircularProgress size={16} color="inherit" /> : null}
-                    >
-                      {isLoading ? 'Sending...' : 'No'}
-                    </Button>
-                  </Box>
-                  <Typography variant="caption" color="text.secondary" display="block">
-                    🛡️ Click "Yes" to auto-approve web search or "No" to use local resources only. Response will be sent automatically.
-                  </Typography>
-                </Box>
-              )}
-
-              {/* Research Plan Actions */}
-              {hasResearchPlan(message) && !isHITLPermissionRequest(message) && (
-                <Box mt={2}>
-                  {message.planApproved ? (
-                    <Box display="flex" alignItems="center" gap={1}>
-                      <Chip 
-                        label="✅ Plan Approved & Executing" 
-                        color="success" 
-                        size="small"
-                        variant="outlined"
-                      />
-                      <Typography variant="caption" color="text.secondary">
-                        Research tools are running based on this plan
-                      </Typography>
-                    </Box>
-                  ) : (
-                    <Box>
-                      {executingPlans && executingPlans.has(message.jobId || message.metadata?.job_id) ? (
-                        <Box display="flex" alignItems="center" gap={1}>
-                          <Button
-                            variant="outlined"
-                            color="info"
-                            size="small"
-                            disabled={true}
-                            startIcon={<CircularProgress size={16} />}
-                            sx={{ mr: 1 }}
-                          >
-                            In Progress
-                          </Button>
-                          <Typography variant="caption" color="text.secondary" display="block" mt={0.5}>
-                            Research plan is currently being executed. Please wait for completion.
-                          </Typography>
-                        </Box>
-                      ) : null}
-                    </Box>
-                  )}
-                </Box>
-              )}
-
-              {/* Reactions Display */}
-              {(() => {
-                const metadata = message.metadata || message.metadata_json || {};
-                const reactions = metadata.reactions || {};
-                const hasReactions = Object.keys(reactions).length > 0;
-                
-                if (!hasReactions) return null;
-                
-                return (
-                  <Box sx={{ 
-                    display: 'flex', 
-                    flexWrap: 'wrap', 
-                    gap: 0.5, 
-                    mt: 1,
-                    pt: 1,
-                    borderTop: '1px solid',
-                    borderColor: 'divider'
-                  }}>
-                    {Object.entries(reactions).map(([emoji, userIds]) => {
-                      if (!userIds || userIds.length === 0) return null;
-                      return (
-                        <Chip
-                          key={emoji}
-                          label={`${emoji} ${userIds.length}`}
-                          size="small"
-                          sx={{ 
-                            height: 24,
-                            fontSize: '0.75rem',
-                            '& .MuiChip-label': { px: 0.5 }
-                          }}
-                        />
-                      );
-                    })}
-                  </Box>
-                );
-              })()}
-
-              {/* Message Footer */}
-              <Box sx={{ 
-                display: 'flex', 
-                alignItems: 'center', 
-                justifyContent: 'space-between',
-                gap: 1,
-                userSelect: 'none',
-                mt: 1
-              }}>
-                <Typography variant="caption" color="text.secondary">
-                  {formatTimestamp(message.timestamp)}
-                </Typography>
-                
-                <Box sx={{ display: 'flex', gap: 0.5 }}>
-                  <ExportButton
-                    message={message}
-                    onCopyMessage={handleCopyMessage}
-                    onSaveAsNote={handleSaveAsMarkdown}
-                    copiedMessageId={copiedMessageId}
-                    savingNoteFor={savingNoteFor}
-                    currentConversationId={currentConversationId}
-                    isUser={message.role === 'user'}
-                  />
-                </Box>
-              </Box>
-            </Paper>
-          </Box>
+              message={message}
+              index={index}
+              isLoading={isLoading}
+              theme={theme}
+              aiName={aiName}
+              markdownComponents={markdownComponents}
+              handleContextMenu={handleContextMenu}
+              handleImportImage={handleImportImage}
+              setFullScreenChart={setFullScreenChart}
+              formatTimestamp={formatTimestamp}
+              handleCopyMessage={handleCopyMessage}
+              handleSaveAsMarkdown={handleSaveAsMarkdown}
+              isHITLPermissionRequest={isHITLPermissionRequest}
+              handleHITLResponse={handleHITLResponse}
+              hasResearchPlan={hasResearchPlan}
+              executingPlans={executingPlans}
+              extractImageUrls={extractImageUrls}
+              getImageApiUrl={getImageApiUrl}
+              openLightbox={openLightbox}
+              setPreviewOpenFor={setPreviewOpenFor}
+              currentConversationId={currentConversationId}
+              copiedMessageId={copiedMessageId}
+              savingNoteFor={savingNoteFor}
+              isAdmin={isAdmin}
+              has={has}
+            />
           );
         })}
 
@@ -1946,4 +1338,4 @@ ${message.content}
   );
 };
 
-export default ChatMessagesArea; 
+export default React.memo(ChatMessagesArea); 

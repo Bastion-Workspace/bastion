@@ -6,12 +6,14 @@ import grpc
 import logging
 import time
 import hashlib
+import json
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from concurrent import futures
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 # Import generated proto files (will be generated during Docker build)
 import sys
@@ -46,10 +48,13 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
             await self.embedding_engine.initialize()
             await self.embedding_cache.initialize()
             
-            # Initialize Qdrant client
+            # Initialize Qdrant client (timeout avoids default 5s read timeout on slow upserts)
             if settings.QDRANT_URL:
-                self.qdrant_client = QdrantClient(url=settings.QDRANT_URL)
-                logger.info(f"Connected to Qdrant at {settings.QDRANT_URL}")
+                self.qdrant_client = QdrantClient(
+                    url=settings.QDRANT_URL,
+                    timeout=settings.QDRANT_TIMEOUT
+                )
+                logger.info(f"Connected to Qdrant at {settings.QDRANT_URL} (timeout={settings.QDRANT_TIMEOUT}s)")
                 # Ensure tools collection exists
                 self._ensure_collection_exists(settings.TOOL_COLLECTION_NAME)
             else:
@@ -182,6 +187,543 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
         except Exception as e:
             logger.error(f"SearchTools failed: {e}")
             return vector_service_pb2.SearchToolsResponse(error=str(e))
+
+    # ===== Generic Vector Operations =====
+    
+    async def UpsertVectors(self, request, context):
+        """Store arbitrary vectors in Qdrant (documents, faces, objects, etc.)"""
+        try:
+            if not self._initialized or not self.qdrant_client:
+                return vector_service_pb2.UpsertVectorsResponse(
+                    success=False,
+                    points_stored=0,
+                    error="Service or Qdrant not initialized"
+                )
+            
+            if not request.points:
+                return vector_service_pb2.UpsertVectorsResponse(
+                    success=True,
+                    points_stored=0
+                )
+            
+            # Ensure collection exists
+            self._ensure_collection_for_vectors(
+                collection_name=request.collection_name,
+                vector_size=len(request.points[0].vector) if request.points else 128
+            )
+            
+            # Convert VectorPoint messages to PointStruct
+            qdrant_points = []
+            for pb_point in request.points:
+                # Parse payload - handle JSON-encoded complex types
+                payload = {}
+                for key, value in pb_point.payload.items():
+                    # Try to parse as JSON for complex types (lists, dicts)
+                    try:
+                        parsed = json.loads(value)
+                        payload[key] = parsed
+                    except (json.JSONDecodeError, TypeError):
+                        # Keep as string if not valid JSON
+                        payload[key] = value
+                
+                # Convert point ID - handle both UUID strings and numeric IDs
+                point_id = pb_point.id
+                try:
+                    # Try to parse as integer (for document chunks using content_hash)
+                    point_id = int(point_id)
+                except (ValueError, TypeError):
+                    # Keep as string (for UUIDs)
+                    pass
+                
+                qdrant_points.append(
+                    PointStruct(
+                        id=point_id,
+                        vector=list(pb_point.vector),
+                        payload=payload
+                    )
+                )
+            
+            # Batch upsert (100 points per batch) with retry on timeout/connection errors
+            batch_size = 100
+            total_stored = 0
+            max_retries = getattr(settings, "QDRANT_UPSERT_MAX_RETRIES", 3)
+
+            for i in range(0, len(qdrant_points), batch_size):
+                batch = qdrant_points[i:i + batch_size]
+                last_error = None
+                for attempt in range(max_retries):
+                    try:
+                        self.qdrant_client.upsert(
+                            collection_name=request.collection_name,
+                            points=batch
+                        )
+                        total_stored += len(batch)
+                        break
+                    except Exception as batch_err:
+                        last_error = batch_err
+                        err_str = str(batch_err).lower()
+                        is_retryable = (
+                            "timeout" in err_str or "timed out" in err_str or
+                            "connection" in err_str or "read" in err_str
+                        )
+                        if is_retryable and attempt < max_retries - 1:
+                            wait_time = 2 ** attempt
+                            logger.warning(
+                                f"Qdrant upsert batch failed (attempt {attempt + 1}/{max_retries}): {batch_err}; "
+                                f"will retry in {wait_time}s"
+                            )
+                            time.sleep(wait_time)
+                        else:
+                            raise
+
+            logger.info(f"Upserted {total_stored} vectors to collection '{request.collection_name}'")
+            return vector_service_pb2.UpsertVectorsResponse(
+                success=True,
+                points_stored=total_stored
+            )
+            
+        except Exception as e:
+            logger.error(f"UpsertVectors failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return vector_service_pb2.UpsertVectorsResponse(
+                success=False,
+                points_stored=0,
+                error=str(e)
+            )
+    
+    async def SearchVectors(self, request, context):
+        """Search for similar vectors across any collection"""
+        try:
+            if not self._initialized or not self.qdrant_client:
+                return vector_service_pb2.SearchVectorsResponse(
+                    success=False,
+                    error="Service or Qdrant not initialized"
+                )
+            
+            # Build Qdrant filter from VectorFilter messages
+            query_filter = None
+            if request.filters:
+                filter_conditions = []
+                for vf in request.filters:
+                    if vf.operator == "equals":
+                        filter_conditions.append(
+                            FieldCondition(
+                                key=vf.field,
+                                match=MatchValue(value=vf.value)
+                            )
+                        )
+                    elif vf.operator == "in":
+                        # For array fields - check if value is in array
+                        # Qdrant doesn't have native "in" for arrays, use "contains" for now
+                        filter_conditions.append(
+                            FieldCondition(
+                                key=vf.field,
+                                match=MatchValue(value=vf.value)
+                            )
+                        )
+                    # Add more operators as needed
+                
+                if filter_conditions:
+                    query_filter = Filter(must=filter_conditions)
+            
+            # Check if collection exists first
+            collections = self.qdrant_client.get_collections()
+            collection_names = [c.name for c in collections.collections]
+            
+            if request.collection_name not in collection_names:
+                # Collection doesn't exist - return empty results (not an error)
+                logger.info(f"SearchVectors: Collection '{request.collection_name}' doesn't exist, returning empty results")
+                return vector_service_pb2.SearchVectorsResponse(
+                    success=True,
+                    results=[]
+                )
+            
+            # Execute search (may throw if collection was deleted between check and search)
+            # Use 0.0 when score_threshold is 0 or unset so "no threshold" is honored (0.0 is falsy in Python)
+            effective_threshold = request.score_threshold if request.score_threshold > 0 else 0.0
+            try:
+                search_results = self.qdrant_client.search(
+                    collection_name=request.collection_name,
+                    query_vector=list(request.query_vector),
+                    limit=request.limit or 50,
+                    query_filter=query_filter,
+                    score_threshold=effective_threshold
+                )
+            except UnexpectedResponse as e:
+                # Handle 404 from Qdrant (collection doesn't exist)
+                if e.status_code == 404 or "doesn't exist" in str(e).lower() or "not found" in str(e).lower():
+                    logger.info(f"SearchVectors: Collection '{request.collection_name}' not found during search, returning empty results")
+                    return vector_service_pb2.SearchVectorsResponse(
+                        success=True,
+                        results=[]
+                    )
+                # Re-raise other UnexpectedResponse errors
+                raise
+            
+            # Convert results to proto format
+            results = []
+            for hit in search_results:
+                # Convert payload dict to map<string, string> (JSON encode complex types)
+                payload_map = {}
+                for key, value in hit.payload.items():
+                    if isinstance(value, (list, dict)):
+                        payload_map[key] = json.dumps(value)
+                    else:
+                        payload_map[key] = str(value)
+                
+                results.append(
+                    vector_service_pb2.VectorSearchResult(
+                        id=str(hit.id),
+                        score=hit.score,
+                        payload=payload_map
+                    )
+                )
+            
+            logger.info(f"SearchVectors: Found {len(results)} results in '{request.collection_name}'")
+            return vector_service_pb2.SearchVectorsResponse(
+                success=True,
+                results=results
+            )
+            
+        except Exception as e:
+            logger.error(f"SearchVectors failed: {e}")
+            import traceback
+            traceback.print_exc()
+            # For 404 errors (collection not found), return empty results instead of error
+            if "404" in str(e) or "doesn't exist" in str(e).lower() or "not found" in str(e).lower():
+                logger.info(f"SearchVectors: Collection not found, returning empty results")
+                return vector_service_pb2.SearchVectorsResponse(
+                    success=True,
+                    results=[]
+                )
+            return vector_service_pb2.SearchVectorsResponse(
+                success=False,
+                error=str(e)
+            )
+    
+    async def DeleteVectors(self, request, context):
+        """Delete vectors by filter (e.g., delete all for document_id)"""
+        try:
+            if not self._initialized or not self.qdrant_client:
+                return vector_service_pb2.DeleteVectorsResponse(
+                    success=False,
+                    points_deleted=0,
+                    error="Service or Qdrant not initialized"
+                )
+            
+            # Build Qdrant filter from VectorFilter messages
+            if not request.filters:
+                return vector_service_pb2.DeleteVectorsResponse(
+                    success=False,
+                    points_deleted=0,
+                    error="No filters provided - use DeleteCollection for full deletion"
+                )
+            
+            filter_conditions = []
+            for vf in request.filters:
+                filter_conditions.append(
+                    FieldCondition(
+                        key=vf.field,
+                        match=MatchValue(value=vf.value)
+                    )
+                )
+            
+            query_filter = Filter(must=filter_conditions)
+            
+            # Execute delete
+            delete_result = self.qdrant_client.delete(
+                collection_name=request.collection_name,
+                points_selector=query_filter
+            )
+            
+            # Qdrant delete returns operation result, extract deleted count if available
+            deleted_count = 0
+            if hasattr(delete_result, 'operation_id'):
+                # For async operations, we may need to check status
+                deleted_count = 1  # Indicate success, exact count may not be available
+            
+            logger.info(f"DeleteVectors: Deleted vectors from '{request.collection_name}' with filters")
+            return vector_service_pb2.DeleteVectorsResponse(
+                success=True,
+                points_deleted=deleted_count
+            )
+            
+        except Exception as e:
+            logger.error(f"DeleteVectors failed: {e}")
+            return vector_service_pb2.DeleteVectorsResponse(
+                success=False,
+                points_deleted=0,
+                error=str(e)
+            )
+    
+    async def UpdateVectorMetadata(self, request, context):
+        """Update metadata for vectors matching filters"""
+        try:
+            if not self._initialized or not self.qdrant_client:
+                return vector_service_pb2.UpdateVectorMetadataResponse(
+                    success=False,
+                    points_updated=0,
+                    error="Service or Qdrant not initialized"
+                )
+            
+            # Build filter
+            filter_conditions = []
+            for vf in request.filters:
+                filter_conditions.append(
+                    FieldCondition(
+                        key=vf.field,
+                        match=MatchValue(value=vf.value)
+                    )
+                )
+            
+            query_filter = Filter(must=filter_conditions)
+            
+            # Parse metadata updates - handle JSON-encoded values
+            payload_updates = {}
+            for key, value in request.metadata_updates.items():
+                try:
+                    parsed = json.loads(value)
+                    payload_updates[key] = parsed
+                except (json.JSONDecodeError, TypeError):
+                    payload_updates[key] = value
+            
+            # Update payload using set_payload
+            # Note: Qdrant's set_payload requires scroll + upsert pattern for filtered updates
+            # Scroll with with_vectors=True so PointStruct(id, vector, payload) has valid vector for upsert
+            scroll_result = self.qdrant_client.scroll(
+                collection_name=request.collection_name,
+                scroll_filter=query_filter,
+                limit=10000,
+                with_vectors=True
+            )
+            
+            updated_count = 0
+            if scroll_result and scroll_result[0]:
+                points_to_update = []
+                for point in scroll_result[0]:
+                    # Update payload
+                    new_payload = point.payload.copy()
+                    new_payload.update(payload_updates)
+                    
+                    points_to_update.append(
+                        PointStruct(
+                            id=point.id,
+                            vector=point.vector,
+                            payload=new_payload
+                        )
+                    )
+                
+                # Upsert updated points
+                if points_to_update:
+                    self.qdrant_client.upsert(
+                        collection_name=request.collection_name,
+                        points=points_to_update
+                    )
+                    updated_count = len(points_to_update)
+            
+            logger.info(f"UpdateVectorMetadata: Updated {updated_count} vectors in '{request.collection_name}'")
+            return vector_service_pb2.UpdateVectorMetadataResponse(
+                success=True,
+                points_updated=updated_count
+            )
+            
+        except Exception as e:
+            logger.error(f"UpdateVectorMetadata failed: {e}")
+            return vector_service_pb2.UpdateVectorMetadataResponse(
+                success=False,
+                points_updated=0,
+                error=str(e)
+            )
+    
+    async def CreateCollection(self, request, context):
+        """Create a new Qdrant collection with specified dimensions"""
+        try:
+            if not self._initialized or not self.qdrant_client:
+                return vector_service_pb2.CreateCollectionResponse(
+                    success=False,
+                    error="Service or Qdrant not initialized"
+                )
+            
+            # Check if collection already exists
+            collections = self.qdrant_client.get_collections()
+            collection_names = [c.name for c in collections.collections]
+            
+            if request.collection_name in collection_names:
+                logger.info(f"Collection '{request.collection_name}' already exists (idempotent success)")
+                return vector_service_pb2.CreateCollectionResponse(success=True)
+
+            # Qdrant client uses Distance.EUCLID (not EUCLIDEAN)
+            distance_map = {
+                "COSINE": Distance.COSINE,
+                "DOT": Distance.DOT,
+                "EUCLIDEAN": Distance.EUCLID,
+                "EUCLID": Distance.EUCLID,
+            }
+            distance_str = (request.distance or "").strip().upper() or "COSINE"
+            distance = distance_map.get(distance_str, Distance.COSINE)
+
+            self.qdrant_client.create_collection(
+                collection_name=request.collection_name,
+                vectors_config=VectorParams(
+                    size=request.vector_size,
+                    distance=distance,
+                ),
+            )
+
+            logger.info(
+                "Created collection '%s' with %s dimensions, distance=%s",
+                request.collection_name,
+                request.vector_size,
+                distance_str,
+            )
+            return vector_service_pb2.CreateCollectionResponse(success=True)
+
+        except Exception as e:
+            logger.error("CreateCollection failed: %s: %s", type(e).__name__, e)
+            return vector_service_pb2.CreateCollectionResponse(
+                success=False,
+                error=str(e),
+            )
+    
+    async def DeleteCollection(self, request, context):
+        """Delete a Qdrant collection"""
+        try:
+            if not self._initialized or not self.qdrant_client:
+                return vector_service_pb2.DeleteCollectionResponse(
+                    success=False,
+                    error="Service or Qdrant not initialized"
+                )
+            
+            self.qdrant_client.delete_collection(collection_name=request.collection_name)
+            
+            logger.info(f"Deleted collection '{request.collection_name}'")
+            return vector_service_pb2.DeleteCollectionResponse(success=True)
+            
+        except Exception as e:
+            logger.error(f"DeleteCollection failed: {e}")
+            return vector_service_pb2.DeleteCollectionResponse(
+                success=False,
+                error=str(e)
+            )
+    
+    async def ListCollections(self, request, context):
+        """List all Qdrant collections"""
+        try:
+            if not self._initialized or not self.qdrant_client:
+                return vector_service_pb2.ListCollectionsResponse(
+                    success=False,
+                    error="Service or Qdrant not initialized"
+                )
+            
+            collections = self.qdrant_client.get_collections()
+            
+            collection_infos = []
+            for col in collections.collections:
+                # Get collection info for points count
+                try:
+                    col_info = self.qdrant_client.get_collection(col.name)
+                    points_count = col_info.points_count if hasattr(col_info, 'points_count') else 0
+                    vector_size = col_info.config.params.vectors.size if hasattr(col_info.config.params, 'vectors') else 0
+                    distance = str(col_info.config.params.vectors.distance) if hasattr(col_info.config.params, 'vectors') else "COSINE"
+                except Exception:
+                    points_count = 0
+                    vector_size = 0
+                    distance = "COSINE"
+                
+                collection_infos.append(
+                    vector_service_pb2.CollectionInfo(
+                        name=col.name,
+                        vector_size=vector_size,
+                        distance=distance,
+                        points_count=points_count,
+                        status="green"
+                    )
+                )
+            
+            return vector_service_pb2.ListCollectionsResponse(
+                success=True,
+                collections=collection_infos
+            )
+            
+        except Exception as e:
+            logger.error(f"ListCollections failed: {e}")
+            return vector_service_pb2.ListCollectionsResponse(
+                success=False,
+                error=str(e)
+            )
+    
+    async def GetCollectionInfo(self, request, context):
+        """Get information about a specific collection"""
+        try:
+            if not self._initialized or not self.qdrant_client:
+                return vector_service_pb2.GetCollectionInfoResponse(
+                    success=False,
+                    error="Service or Qdrant not initialized"
+                )
+            
+            # Check if collection exists first
+            collections = self.qdrant_client.get_collections()
+            collection_names = [c.name for c in collections.collections]
+            
+            if request.collection_name not in collection_names:
+                # Collection doesn't exist - return success=False with clear error
+                logger.info(f"GetCollectionInfo: Collection '{request.collection_name}' doesn't exist")
+                return vector_service_pb2.GetCollectionInfoResponse(
+                    success=False,
+                    error=f"Collection '{request.collection_name}' doesn't exist"
+                )
+            
+            col_info = self.qdrant_client.get_collection(request.collection_name)
+            
+            vector_size = col_info.config.params.vectors.size if hasattr(col_info.config.params, 'vectors') else 0
+            distance = str(col_info.config.params.vectors.distance) if hasattr(col_info.config.params, 'vectors') else "COSINE"
+            points_count = col_info.points_count if hasattr(col_info, 'points_count') else 0
+            
+            collection_info = vector_service_pb2.CollectionInfo(
+                name=request.collection_name,
+                vector_size=vector_size,
+                distance=distance,
+                points_count=points_count,
+                status="green"
+            )
+            
+            return vector_service_pb2.GetCollectionInfoResponse(
+                success=True,
+                collection=collection_info
+            )
+            
+        except Exception as e:
+            logger.error(f"GetCollectionInfo failed: {e}")
+            # For 404 errors (collection not found), return clear error message
+            if "404" in str(e) or "doesn't exist" in str(e).lower() or "not found" in str(e).lower():
+                return vector_service_pb2.GetCollectionInfoResponse(
+                    success=False,
+                    error=f"Collection '{request.collection_name}' doesn't exist"
+                )
+            return vector_service_pb2.GetCollectionInfoResponse(
+                success=False,
+                error=str(e)
+            )
+    
+    def _ensure_collection_for_vectors(self, collection_name: str, vector_size: int):
+        """Ensure collection exists with correct dimensions"""
+        try:
+            collections = self.qdrant_client.get_collections()
+            collection_names = [c.name for c in collections.collections]
+            
+            if collection_name not in collection_names:
+                logger.info(f"Creating collection '{collection_name}' with {vector_size} dimensions")
+                self.qdrant_client.create_collection(
+                    collection_name=collection_name,
+                    vectors_config=VectorParams(
+                        size=vector_size,
+                        distance=Distance.COSINE
+                    )
+                )
+        except Exception as e:
+            logger.error(f"Failed to ensure collection '{collection_name}' exists: {e}")
+            raise
 
     async def GenerateEmbedding(self, request, context):
         """Generate single embedding with cache lookup"""

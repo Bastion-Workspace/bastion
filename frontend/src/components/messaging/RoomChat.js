@@ -14,9 +14,6 @@ import {
   Paper,
   Avatar,
   Tooltip,
-  Modal,
-  Backdrop,
-  Fade,
   Button,
 } from '@mui/material';
 import {
@@ -32,6 +29,7 @@ import messagingService from '../../services/messagingService';
 import AudioPlayer from '../AudioPlayer';
 import TeamInvitationMessage from './TeamInvitationMessage';
 import { formatTimestamp } from '../../utils/chatUtils';
+import { useImageLightbox } from '../common/ImageLightbox';
 
 const RoomChat = () => {
   const {
@@ -46,8 +44,8 @@ const RoomChat = () => {
   const [inputValue, setInputValue] = useState('');
   const [imagePreview, setImagePreview] = useState(null);
   const [previewFile, setPreviewFile] = useState(null);
-  const [selectedImage, setSelectedImage] = useState(null);
   const [messageAttachments, setMessageAttachments] = useState({});
+  const { openLightbox } = useImageLightbox();
   const [imageBlobUrls, setImageBlobUrls] = useState({});
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -404,7 +402,10 @@ const RoomChat = () => {
                           component="img"
                           src={imageBlobUrls[attachment.attachment_id] || messagingService.getAttachmentUrl(attachment.attachment_id)}
                           alt={attachment.filename}
-                          onClick={() => setSelectedImage(attachment)}
+                          onClick={() => openLightbox(
+                            imageBlobUrls[attachment.attachment_id] || messagingService.getAttachmentUrl(attachment.attachment_id),
+                            { filename: attachment.filename }
+                          )}
                           sx={{
                             maxWidth: '100%',
                             maxHeight: '300px',
@@ -447,68 +448,6 @@ const RoomChat = () => {
         )}
         <div ref={messagesEndRef} />
       </Box>
-
-      {/* Image modal */}
-      <Modal
-        open={!!selectedImage}
-        onClose={() => setSelectedImage(null)}
-        closeAfterTransition
-        BackdropComponent={Backdrop}
-        BackdropProps={{ timeout: 500 }}
-      >
-        <Fade in={!!selectedImage}>
-          <Box
-            sx={{
-              position: 'absolute',
-              top: '50%',
-              left: '50%',
-              transform: 'translate(-50%, -50%)',
-              bgcolor: 'background.paper',
-              boxShadow: 24,
-              p: 2,
-              borderRadius: 2,
-              maxWidth: '90vw',
-              maxHeight: '90vh',
-              display: 'flex',
-              flexDirection: 'column',
-              gap: 2,
-            }}
-          >
-            {selectedImage && (
-              <>
-                <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Typography variant="h6">{selectedImage.filename}</Typography>
-                  <Box>
-                    <IconButton
-                      component="a"
-                      href={messagingService.getAttachmentUrl(selectedImage.attachment_id)}
-                      download={selectedImage.filename}
-                      size="small"
-                    >
-                      <Download />
-                    </IconButton>
-                    <IconButton onClick={() => setSelectedImage(null)} size="small">
-                      <Close />
-                    </IconButton>
-                  </Box>
-                </Box>
-                <Box
-                  component="img"
-                  src={imageBlobUrls[selectedImage.attachment_id] || messagingService.getAttachmentUrl(selectedImage.attachment_id)}
-                  alt={selectedImage.filename}
-                  sx={{
-                    maxWidth: '100%',
-                    maxHeight: '70vh',
-                    height: 'auto',
-                    borderRadius: 1,
-                    objectFit: 'contain',
-                  }}
-                />
-              </>
-            )}
-          </Box>
-        </Fade>
-      </Modal>
 
       {/* Input area */}
       <Box

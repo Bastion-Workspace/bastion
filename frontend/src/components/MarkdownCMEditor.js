@@ -4,7 +4,7 @@ import { EditorView, keymap, Decoration, ViewPlugin } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { history, defaultKeymap, historyKeymap } from '@codemirror/commands';
-import { searchKeymap } from '@codemirror/search';
+import { searchKeymap, getSearchQuery, setSearchQuery, openSearchPanel, closeSearchPanel } from '@codemirror/search';
 import { useEditor } from '../contexts/EditorContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { parseFrontmatter as parseMarkdownFrontmatter } from '../utils/frontmatterUtils';
@@ -15,6 +15,7 @@ import { createInlineEditSuggestionsExtension } from './editor/extensions/inline
 import { createLiveEditDiffExtension, getLiveEditDiffPlugin } from './editor/extensions/liveEditDiffExtension';
 import { editorSuggestionService } from '../services/editor/EditorSuggestionService';
 import { documentDiffStore } from '../services/documentDiffStore';
+import OrgFileLinkDialog from './OrgFileLinkDialog';
 
 const createMdTheme = (darkMode) => EditorView.baseTheme({
   '&': {
@@ -196,7 +197,7 @@ function buildFrontmatter(data) {
   return `---\n${lines.join('\n')}\n---\n`;
 }
 
-const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath, documentId, initialScrollPosition = 0, onScrollChange }, ref) => {
+const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath, documentId, initialScrollPosition = 0, onScrollChange, onCurrentSectionChange }, ref) => {
   const { darkMode } = useTheme();
   
   const [diffCount, setDiffCount] = useState(0);
@@ -225,6 +226,24 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
   const shouldRestoreScrollRef = useRef(false);
   const scrollCallbackTimeoutRef = useRef(null);
   const hasRestoredInitialScrollRef = useRef(false);
+  const [fileLinkDialogOpen, setFileLinkDialogOpen] = useState(false);
+
+  const insertTextAtCursor = React.useCallback((text) => {
+    const view = editorViewRef.current;
+    if (!view) return;
+    const state = view.state;
+    const selection = state.selection.main;
+    const from = selection.from;
+    const to = selection.to;
+    view.dispatch({
+      changes: { from, to, insert: text },
+      selection: { anchor: from + text.length },
+    });
+  }, []);
+
+  const handleFileLinkSelect = React.useCallback((linkText) => {
+    insertTextAtCursor(linkText);
+  }, [insertTextAtCursor]);
 
   // Expose scrollToLine method to parent via ref
   useImperativeHandle(ref, () => ({
@@ -310,15 +329,149 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     }, 30000);
     return ext;
   }, [documentId]);
+  // Persistent search configuration
+  const persistentSearchExt = useMemo(() => {
+    // ViewPlugin to keep search panel open and restore search term
+    const persistentSearchPlugin = ViewPlugin.fromClass(class {
+      constructor(view) {
+        this.view = view;
+        this.lastSearch = localStorage.getItem('editor_last_search') || '';
+        this.panelElement = null;
+        
+        // Set up observer to monitor search panel
+        this.observer = new MutationObserver(() => {
+          this.handlePanelChange();
+        });
+        
+        // Start observing after a short delay to let panel render
+        setTimeout(() => {
+          this.panelElement = view.dom.querySelector('.cm-search');
+          if (this.panelElement) {
+            this.observer.observe(this.panelElement, {
+              attributes: true,
+              attributeFilter: ['style', 'class']
+            });
+            // Prevent panel from closing when clicking editor
+            this.setupClickHandler();
+          }
+        }, 200);
+      }
+      
+      setupClickHandler() {
+        // Override default behavior: keep panel open when clicking editor
+        const editorContent = this.view.contentDOM;
+        if (editorContent) {
+          const handleMouseDown = (e) => {
+            const panel = this.view.dom.querySelector('.cm-search');
+            if (panel && !panel.contains(e.target)) {
+              // Click in editor - prevent panel from closing
+              // CodeMirror closes panel on focus loss, so we'll reopen it
+              setTimeout(() => {
+                const currentPanel = this.view.dom.querySelector('.cm-search');
+                if (!currentPanel || currentPanel.style.display === 'none') {
+                  // Panel was closed, reopen it
+                  openSearchPanel(this.view);
+                  // Restore search term
+                  if (this.lastSearch) {
+                    const query = getSearchQuery(this.view.state);
+                    if (query) {
+                      this.view.dispatch({
+                        effects: setSearchQuery(this.view.state, {
+                          search: this.lastSearch,
+                          caseSensitive: query.caseSensitive || false,
+                          literal: query.literal || false,
+                          regexp: query.regexp || false,
+                          wholeWord: query.wholeWord || false
+                        })
+                      });
+                    }
+                  }
+                }
+              }, 10);
+            }
+          };
+          editorContent.addEventListener('mousedown', handleMouseDown, true);
+          this.clickHandler = handleMouseDown;
+        }
+      }
+      
+      handlePanelChange() {
+        const panel = this.view.dom.querySelector('.cm-search');
+        if (panel && this.panelElement !== panel) {
+          this.panelElement = panel;
+          this.setupClickHandler();
+        }
+      }
+      
+      update(update) {
+        // Save search term when it changes
+        const query = getSearchQuery(update.state);
+        if (query && query.search) {
+          this.lastSearch = query.search;
+          localStorage.setItem('editor_last_search', query.search);
+        }
+      }
+      
+      destroy() {
+        if (this.observer) {
+          this.observer.disconnect();
+        }
+        if (this.clickHandler && this.view.contentDOM) {
+          this.view.contentDOM.removeEventListener('mousedown', this.clickHandler, true);
+        }
+      }
+    });
+    
+    // Custom keymap for Ctrl+F that restores last search
+    const persistentSearchKeymap = keymap.of([
+      {
+        key: 'Mod-f',
+        run: (view) => {
+          const lastSearch = localStorage.getItem('editor_last_search') || '';
+          openSearchPanel(view);
+          // Restore last search term after opening panel
+          if (lastSearch) {
+            setTimeout(() => {
+              const query = getSearchQuery(view.state);
+              if (query) {
+                view.dispatch({
+                  effects: setSearchQuery(view.state, {
+                    search: lastSearch,
+                    caseSensitive: query.caseSensitive || false,
+                    literal: query.literal || false,
+                    regexp: query.regexp || false,
+                    wholeWord: query.wholeWord || false
+                  })
+                });
+              }
+            }, 150);
+          }
+          return true;
+        }
+      }
+    ]);
+    
+    return [
+      persistentSearchKeymap,
+      persistentSearchPlugin
+    ];
+  }, []);
+
+  const fileLinkKeymap = useMemo(() => keymap.of([
+    { key: 'Mod-Alt-l', run: () => { setFileLinkDialogOpen(true); return true; } }
+  ]), []);
+
   const extensions = useMemo(() => [
     history(),
     keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
+    fileLinkKeymap,
     markdown({ base: markdownLanguage }),
     EditorView.lineWrapping,
     mdTheme,
     inlineEditExt,
-    liveEditDiffExt
-  ], [mdTheme, inlineEditExt, liveEditDiffExt]);
+    liveEditDiffExt,
+    ...persistentSearchExt
+  ], [mdTheme, inlineEditExt, liveEditDiffExt, persistentSearchExt, fileLinkKeymap]);
 
   const { setEditorState } = useEditor();
   const [fmOpen, setFmOpen] = useState(false);
@@ -443,45 +596,45 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
   // Track last documentId to detect document switches
   const lastDocumentIdRef = React.useRef(null);
   
-  // Set editor state when document changes or content loads
-  // This ensures frontmatter is correct when switching tabs
-  useEffect(() => {
-    const fullText = (value || '').replace(/\r\n/g, '\n');
+  // Helper function to parse frontmatter and update cache (on-demand only)
+  const refreshEditorCacheWithFrontmatter = React.useCallback((content = null) => {
+    const fullText = content !== null ? content : (value || '').replace(/\r\n/g, '\n');
     const { data, lists } = parseFrontmatter(fullText);
     const mergedFrontmatter = { ...data, ...lists };
     
-    // Only update if documentId changed OR if we have content and documentId matches
-    // This prevents stale frontmatter when switching tabs
-    const documentChanged = lastDocumentIdRef.current !== documentId;
-    const hasContent = fullText.trim().length > 0;
-    
-    // Skip if document hasn't changed and we don't have content yet (waiting for content to load)
-    if (!documentChanged && !hasContent) {
-      return;
-    }
-    
-    // Update ref to track current document
-    if (documentChanged) {
-      lastDocumentIdRef.current = documentId;
-    }
-    
-    console.log('📝 MarkdownCMEditor UPDATE: Parsed frontmatter:', {
-      documentChanged,
-      hasContent,
-      documentId,
-      dataKeys: Object.keys(data),
-      listsKeys: Object.keys(lists),
-      dataType: data.type,
-      mergedType: mergedFrontmatter.type,
-      mergedKeys: Object.keys(mergedFrontmatter),
-      contentLength: fullText.length
-    });
-    
-    // CRITICAL FIX: Initialize window cache for typing handler to reuse
+    // Update window cache
     window.__last_editor_frontmatter = mergedFrontmatter;
     window.__last_editor_content = fullText;
     
-    // Set context state to indicate editor is open
+    // CRITICAL FIX: Get actual cursor position from CodeMirror view
+    let cursorOffset = -1;
+    let selectionStart = -1;
+    let selectionEnd = -1;
+    
+    if (editorViewRef.current) {
+      try {
+        const sel = editorViewRef.current.state.selection.main;
+        cursorOffset = sel.head;
+        selectionStart = sel.from;
+        selectionEnd = sel.to;
+        
+        console.log('📍 CURSOR POSITION DEBUG: Cache refresh captured cursor at:', {
+          cursorOffset,
+          selectionStart,
+          selectionEnd,
+          documentLength: fullText.length,
+          isAtEndOfFile: cursorOffset === fullText.length,
+          filename: filename
+        });
+      } catch (e) {
+        // If we can't get cursor position, fall back to -1
+        console.warn('Failed to get cursor position from editor view:', e);
+      }
+    } else {
+      console.warn('⚠️ No editorViewRef available when refreshing cache - cursor position will be -1');
+    }
+    
+    // Set context state
     const payload = {
       isEditable: true,
       filename: filename || 'untitled.md',
@@ -489,27 +642,38 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
       content: fullText,
       contentLength: fullText.length,
       frontmatter: mergedFrontmatter,
-      cursorOffset: -1,
-      selectionStart: -1,
-      selectionEnd: -1,
+      cursorOffset: cursorOffset,
+      selectionStart: selectionStart,
+      selectionEnd: selectionEnd,
       canonicalPath: canonicalPath || null,
-      documentId: documentId || null, // ✅ CRITICAL: Include documentId for diff persistence
+      documentId: documentId || null,
     };
     
     setEditorState(payload);
     
-    // Also write to localStorage for chat to read immediately
+    // Write to localStorage for chat to read
     try {
-      console.log('📝 MarkdownCMEditor UPDATE: Writing editor_ctx_cache:', {
-        filename: payload.filename,
-        frontmatterKeys: Object.keys(payload.frontmatter || {}),
-        frontmatterType: payload.frontmatter?.type,
-        fullFrontmatter: payload.frontmatter,
-        contentLength: payload.contentLength,
-        documentId: payload.documentId
-      });
       localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
     } catch {}
+    
+    return mergedFrontmatter;
+  }, [value, filename, canonicalPath, documentId, setEditorState]);
+
+  // Set editor state when document changes (NOT on every value change)
+  // This ensures frontmatter is correct when switching tabs
+  useEffect(() => {
+    const documentChanged = lastDocumentIdRef.current !== documentId;
+    
+    // Only update if document changed
+    if (!documentChanged) {
+      return;
+    }
+    
+    // Update ref to track current document
+    lastDocumentIdRef.current = documentId;
+    
+    // Parse frontmatter and update cache when document changes
+    refreshEditorCacheWithFrontmatter();
     
     // Cleanup on unmount - clear editor state
     return () => {
@@ -526,49 +690,40 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
           selectionStart: -1,
           selectionEnd: -1,
           canonicalPath: null,
-          documentId: null, // ✅ Clear documentId on unmount
+          documentId: null,
         });
       }
     };
-    // Run when document changes OR when content loads for the current document
+    // Only run when documentId/filename/canonicalPath changes, NOT on value changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filename, canonicalPath, documentId, value]);
+  }, [filename, canonicalPath, documentId, refreshEditorCacheWithFrontmatter]);
 
-  // Watch for content changes and update cache (CRITICAL for fresh content after edits)
+  // Watch for content changes and update cache (content only, no frontmatter parsing)
   // Debounced to avoid excessive updates during typing
   useEffect(() => {
     const fullText = (value || '').replace(/\r\n/g, '\n');
-    const { data, lists } = parseFrontmatter(fullText);
-    const mergedFrontmatter = { ...data, ...lists };
-    
-    // Compare with cached content to detect changes (not just frontmatter)
-    const cachedFrontmatter = window.__last_editor_frontmatter || {};
     const cachedContent = window.__last_editor_content || '';
+    const cachedFrontmatter = window.__last_editor_frontmatter || {};
     
-    const frontmatterChanged = JSON.stringify(mergedFrontmatter) !== JSON.stringify(cachedFrontmatter);
-    const contentChanged = fullText !== cachedContent;
-    
-    // Update cache if EITHER frontmatter OR content changed
-    // This ensures we catch chapter additions, saves, and all other content changes
-    if (frontmatterChanged || contentChanged) {
-      // Debounce updates to avoid excessive writes during typing (300ms)
+    // Only update if content changed (don't parse frontmatter during typing)
+    if (fullText !== cachedContent) {
+      // Debounce updates to avoid excessive writes during typing (500ms)
       if (window.__editor_content_update_timer) {
         clearTimeout(window.__editor_content_update_timer);
       }
       
       window.__editor_content_update_timer = setTimeout(() => {
-        // Update window caches
-        window.__last_editor_frontmatter = mergedFrontmatter;
+        // Update content cache (keep existing frontmatter - don't reparse)
         window.__last_editor_content = fullText;
         
-        // Update React context
+        // Update React context and localStorage with current content but cached frontmatter
         const payload = {
           isEditable: true,
           filename: filename || 'untitled.md',
           language: 'markdown',
           content: fullText,
           contentLength: fullText.length,
-          frontmatter: mergedFrontmatter,
+          frontmatter: cachedFrontmatter, // Use cached frontmatter, not re-parsed
           cursorOffset: -1,
           selectionStart: -1,
           selectionEnd: -1,
@@ -578,19 +733,13 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
         
         setEditorState(payload);
         
-        // Update localStorage cache so ChatSidebar picks up changes immediately
+        // Update localStorage cache so ChatSidebar picks up content changes
         try {
           localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
-          console.log('✅ Editor cache updated:', {
-            frontmatterChanged,
-            contentChanged,
-            contentLength: fullText.length,
-            filename: payload.filename
-          });
         } catch (e) {
           console.error('Failed to update editor_ctx_cache:', e);
         }
-      }, 300); // 300ms debounce
+      }, 500); // 500ms debounce for content updates
     }
     
     // Cleanup: clear timeout on unmount or when deps change
@@ -603,20 +752,21 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
 
   // Removed floating Accept listener; no longer needed
 
-  // Global test listener for editorOperationsLive (temporary debug)
+  // Listen for cache refresh requests (e.g., from chat before sending message)
   useEffect(() => {
-    const globalTestListener = (e) => {
-      console.log('🔍 GLOBAL TEST: editorOperationsLive event received:', {
-        type: e.type,
-        detail: e.detail,
-        operationsCount: e.detail?.operations?.length
-      });
+    const handleRefreshCache = () => {
+      // Refresh cache with fresh frontmatter parsing before chat reads it
+      refreshEditorCacheWithFrontmatter();
+      
+      // Dispatch event to notify that cache refresh is complete
+      window.dispatchEvent(new CustomEvent('editorCacheRefreshed'));
     };
-    window.addEventListener('editorOperationsLive', globalTestListener);
+    
+    window.addEventListener('refreshEditorCache', handleRefreshCache);
     return () => {
-      window.removeEventListener('editorOperationsLive', globalTestListener);
+      window.removeEventListener('refreshEditorCache', handleRefreshCache);
     };
-  }, []);
+  }, [refreshEditorCacheWithFrontmatter]);
 
   // Clean up decorations on unmount to prevent duplicates
   useEffect(() => {
@@ -737,35 +887,14 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
           // Update React state via onChange to keep it in sync
           if (onChange) {
             onChange(nextText);
-            console.log('✅ onChange called with new text from transaction');
             
             // CRITICAL: Force immediate cache update after operations (bypass debounce)
             // This ensures chat messages sent immediately after accepting diffs use fresh content
+            // Parse frontmatter here since operations may have changed it
             try {
-              const { data, lists } = parseFrontmatter(nextText);
-              const mergedFrontmatter = { ...data, ...lists };
-              
-              const payload = {
-                isEditable: true,
-                filename: filename || 'untitled.md',
-                language: 'markdown',
-                content: nextText,
-                contentLength: nextText.length,
-                frontmatter: mergedFrontmatter,
-                cursorOffset: -1,
-                selectionStart: -1,
-                selectionEnd: -1,
-                canonicalPath: canonicalPath || null,
-                documentId: documentId || null,
-              };
-              
-              localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
-              console.log('💾 IMMEDIATE cache update after operation apply:', {
-                contentLength: nextText.length,
-                filename: payload.filename
-              });
+              refreshEditorCacheWithFrontmatter(nextText);
             } catch (err) {
-              console.error('Failed to immediate update cache:', err);
+              console.error('Failed to update cache after operation apply:', err);
             }
           } else {
             console.warn('⚠️ onChange callback is not defined');
@@ -914,6 +1043,11 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     const fmBlock = mergeFrontmatter(parsed.raw || fmRaw || '', nextData, listUpdates, parsed.order || fmOrder || []);
     const next = `${fmBlock}${parsed.body}`;
     onChange && onChange(next);
+    
+    // Refresh cache with fresh frontmatter after applying changes
+    setTimeout(() => {
+      refreshEditorCacheWithFrontmatter(next);
+    }, 0);
   };
 
   const addEntry = () => setFmEntries(prev => [...prev, { key: '', value: '' }]);
@@ -925,7 +1059,11 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
       <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
         <FormControlLabel control={<Switch size="small" checked={suggestionsEnabled} onChange={(e) => setSuggestionsEnabled(!!e.target.checked)} />} label={<Typography variant="caption">Predictive Suggestions</Typography>} />
         <Tooltip title="Edit frontmatter (stored invisibly at top as YAML)">
-          <Button variant="outlined" size="small" onClick={() => setFmOpen(true)}>
+          <Button variant="outlined" size="small" onClick={() => {
+            // Refresh frontmatter cache when opening drawer
+            refreshEditorCacheWithFrontmatter();
+            setFmOpen(true);
+          }}>
             Frontmatter
           </Button>
         </Tooltip>
@@ -998,10 +1136,10 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
           </Box>
         </Box>
       </Drawer>
-      {/* Memoize update listener to avoid reconfiguring extensions on every render */}
-      {useMemo(() => (
+      {/* Memoize update listener to avoid reconfiguring extensions on every render. Key includes darkMode so editor remounts when theme changes (CodeMirror applies theme at mount only). */}
+        {useMemo(() => (
         <CodeMirror
-        key={documentId || 'no-doc'}  // ✅ Stable key prevents recreation
+        key={`${documentId || 'no-doc'}-${darkMode ? 'dark' : 'light'}`}
         value={value}
         height="100%"
         basicSetup={false}
@@ -1019,6 +1157,11 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
             const selectionStart = sel.from;
             const selectionEnd = sel.to;
             const docText = update.state.doc.toString();
+            
+            // Update current section if callback provided
+            if (onCurrentSectionChange && (update.selectionSet || update.docChanged)) {
+              onCurrentSectionChange(docText, cursorOffset);
+            }
             
             // **CRITICAL FIX**: NEVER re-parse frontmatter after mount!
             // The mount effect already parsed it correctly. Re-parsing during typing often fails
@@ -1049,23 +1192,13 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
             // Throttle localStorage writes for chat to read when sending messages
             if (!window.__editor_ctx_write_ts || Date.now() - window.__editor_ctx_write_ts > 500) {
               window.__editor_ctx_write_ts = Date.now();
-              
-              console.log('📝 MarkdownCMEditor TYPING: Writing editor_ctx_cache:', {
-                filename: payload.filename,
-                frontmatterKeys: Object.keys(payload.frontmatter || {}),
-                frontmatterType: payload.frontmatter?.type,
-                fullFrontmatter: payload.frontmatter,
-                contentLength: payload.contentLength,
-                needsContentUpdate: needsContentUpdate,
-                usingCachedFrontmatter: true
-              });
               localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
             }
           } catch {}
         })]}
         onChange={(val) => onChange && onChange(val)}
         style={{ height: '60vh' }}
-      />), [value, filename, canonicalPath, extensions, frontmatterHider, ghostExt, liveEditDiffExt, setEditorState])}
+      />), [value, filename, canonicalPath, extensions, frontmatterHider, ghostExt, liveEditDiffExt, setEditorState, onCurrentSectionChange, documentId, darkMode])}
       {/* Removed floating Accept/Dismiss UI */}
       {/* Diff navigation and batch operations */}
       {diffCount > 0 && (
@@ -1166,6 +1299,13 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
           </Box>
         </Box>
       )}
+      <OrgFileLinkDialog
+        open={fileLinkDialogOpen}
+        onClose={() => setFileLinkDialogOpen(false)}
+        onSelect={handleFileLinkSelect}
+        currentDocumentPath={canonicalPath}
+        linkFormat="markdown"
+      />
     </Box>
   );
 });

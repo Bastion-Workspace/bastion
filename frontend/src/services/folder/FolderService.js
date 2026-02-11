@@ -43,6 +43,32 @@ class FolderService extends ApiServiceBase {
   overrideFolderExemption = async (folderId) => {
     return this.post(`/api/folders/${folderId}/exempt/override`);
   }
+
+  /**
+   * Download the user's library (My Documents) as a zip file.
+   * Fetches as blob and triggers browser download.
+   */
+  downloadLibrary = async () => {
+    const token = localStorage.getItem('auth_token');
+    const baseUrl = process.env.REACT_APP_API_URL || '';
+    const resp = await fetch(`${baseUrl}/api/folders/library/download`, {
+      method: 'GET',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: 'include',
+    });
+    if (!resp.ok) {
+      throw new Error(resp.statusText || 'Download failed');
+    }
+    const blob = await resp.blob();
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'my-library.zip';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+  }
 }
 
 export default new FolderService();

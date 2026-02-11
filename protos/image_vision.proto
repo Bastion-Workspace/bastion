@@ -1,0 +1,141 @@
+syntax = "proto3";
+
+package image_vision;
+
+// Image Vision Service - Face detection and object detection
+service ImageVisionService {
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Face detection
+  rpc DetectFaces(FaceDetectionRequest) returns (FaceDetectionResponse);
+
+  // Face matching against known identities
+  rpc MatchFaces(FaceMatchingRequest) returns (FaceMatchingResponse);
+
+  // Object detection (YOLO + optional CLIP semantic matching)
+  rpc DetectObjects(ObjectDetectionRequest) returns (ObjectDetectionResponse);
+
+  // Extract CLIP embeddings for user-annotated region
+  rpc ExtractObjectFeatures(ObjectFeatureExtractionRequest) returns (ObjectFeatureExtractionResponse);
+}
+
+// ============================================================================
+// Health Check Messages
+// ============================================================================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;  // "healthy", "degraded", "unhealthy"
+  string service_version = 2;
+  string device = 3;  // "cpu" or "cuda"
+  map<string, string> details = 4;
+}
+
+// ============================================================================
+// Face Detection Messages
+// ============================================================================
+
+message FaceDetectionRequest {
+  string image_path = 1;
+  string document_id = 2;
+}
+
+message DetectedFace {
+  int32 bbox_x = 1;
+  int32 bbox_y = 2;
+  int32 bbox_width = 3;
+  int32 bbox_height = 4;
+  repeated float face_encoding = 5;  // 128-dimensional vector
+  float confidence = 6;
+}
+
+message FaceDetectionResponse {
+  repeated DetectedFace faces = 1;
+  int32 image_width = 2;
+  int32 image_height = 3;
+  float processing_time_seconds = 4;
+  optional string error = 5;
+}
+
+// ============================================================================
+// Face Matching Messages
+// ============================================================================
+
+message KnownIdentity {
+  string identity_name = 1;
+  repeated float face_encoding = 2;  // 128-dimensional vector
+  int32 sample_count = 3;
+}
+
+message UnknownFace {
+  repeated float face_encoding = 1;  // 128-dimensional vector
+}
+
+message FaceMatchingRequest {
+  repeated UnknownFace unknown_faces = 1;
+  repeated KnownIdentity known_identities = 2;
+  float confidence_threshold = 3;  // Default 0.82 (82%), aligns with L2 < 0.6 same-person rule
+}
+
+message FaceMatch {
+  int32 face_index = 1;  // Index in unknown_faces array
+  string matched_identity = 2;
+  float confidence = 3;  // 0-100 percentage
+}
+
+message FaceMatchingResponse {
+  repeated FaceMatch matches = 1;
+  float processing_time_seconds = 2;
+  optional string error = 3;
+}
+
+// ============================================================================
+// Object Detection Messages
+// ============================================================================
+
+message ObjectDetectionRequest {
+  string image_path = 1;
+  string document_id = 2;
+  repeated string class_filter = 3;
+  float confidence_threshold = 4;
+  repeated string semantic_descriptions = 5;
+}
+
+message DetectedObject {
+  string class_name = 1;
+  int32 class_id = 2;
+  float confidence = 3;
+  int32 bbox_x = 4;
+  int32 bbox_y = 5;
+  int32 bbox_width = 6;
+  int32 bbox_height = 7;
+  string detection_method = 8;
+  string matched_description = 9;
+}
+
+message ObjectDetectionResponse {
+  repeated DetectedObject objects = 1;
+  int32 image_width = 2;
+  int32 image_height = 3;
+  float processing_time_seconds = 4;
+  optional string error = 5;
+}
+
+message ObjectFeatureExtractionRequest {
+  string image_path = 1;
+  int32 bbox_x = 2;
+  int32 bbox_y = 3;
+  int32 bbox_width = 4;
+  int32 bbox_height = 5;
+  string description = 6;
+}
+
+message ObjectFeatureExtractionResponse {
+  repeated float visual_embedding = 1;
+  repeated float semantic_embedding = 2;
+  repeated float combined_embedding = 3;
+  int32 embedding_dim = 4;
+  optional string error = 5;
+}

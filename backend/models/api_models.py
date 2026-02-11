@@ -62,6 +62,12 @@ class DocumentCategory(str, Enum):
     NEWS = "news"
     EDUCATION = "education"
     ENTERTAINMENT = "entertainment"
+    COMIC = "comic"
+    ARTWORK = "artwork"
+    MEME = "meme"
+    SCREENSHOT = "screenshot"
+    DOCUMENTATION = "documentation"
+    MAPS = "maps"
     OTHER = "other"
 
 

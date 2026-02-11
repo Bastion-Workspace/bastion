@@ -89,9 +89,37 @@ class GRPCContextGatherer:
             
             # Initialize request context if not provided
             request_context = request_context or {}
-            
-            # === CONVERSATION HISTORY ===
-            await self._add_conversation_history(grpc_request, state, conversation_id, user_id)
+            if request_context.get("user_chat_model"):
+                grpc_request.metadata["user_chat_model"] = request_context["user_chat_model"]
+
+            # === CONVERSATION HISTORY + ATTACHMENTS (load messages once when not in state) ===
+            messages_data: Optional[Dict[str, Any]] = None
+            if not (state and "messages" in state):
+                try:
+                    from services.conversation_service import ConversationService
+                    conversation_service = ConversationService()
+                    conversation_service.set_current_user(user_id)
+                    messages_data = await conversation_service.get_conversation_messages(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        skip=0,
+                        limit=20,
+                    )
+                    if messages_data and messages_data.get("messages"):
+                        logger.info(
+                            "CONTEXT: Loaded %s messages from database for conversation %s",
+                            len(messages_data["messages"]),
+                            conversation_id,
+                        )
+                except Exception as db_error:
+                    logger.warning("CONTEXT: Failed to load conversation messages: %s", db_error)
+
+            await self._add_conversation_history(
+                grpc_request, state, conversation_id, user_id, messages_data=messages_data
+            )
+            await self._add_attachments(
+                grpc_request, conversation_id, user_id, messages_data=messages_data
+            )
             
             # === USER PERSONA ===
             await self._add_user_persona(grpc_request, user_id)
@@ -113,6 +141,13 @@ class GRPCContextGatherer:
             
             # === CHECKPOINTING (Conditional) ===
             await self._add_checkpoint_info(grpc_request, request_context)
+            
+            # === IMAGE DESCRIPTION CONTEXT (when agent_type is image_description) ===
+            if agent_type == "image_description":
+                self._add_image_description_context(grpc_request, request_context)
+            # === DOCUMENT DESCRIPTION CONTEXT (when agent_type is document_description) ===
+            if agent_type == "document_description":
+                self._add_document_description_context(grpc_request, request_context)
             
             # === PRIMARY AGENT SELECTED (for conversation continuity) ===
             await self._add_primary_agent_selected(grpc_request, state)
@@ -137,44 +172,50 @@ class GRPCContextGatherer:
         grpc_request: orchestrator_pb2.ChatRequest,
         state: Optional[Dict[str, Any]],
         conversation_id: str,
-        user_id: str
+        user_id: str,
+        messages_data: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Add conversation history to request"""
+        """Add conversation history to request. Uses state['messages'] if present, else messages_data if provided, else loads from DB."""
         try:
             messages = []
-            
-            # First, try to extract from state if available
+
             if state and "messages" in state:
                 messages = state["messages"]
+            elif messages_data and "messages" in messages_data:
+                from langchain_core.messages import HumanMessage, AIMessage
+                for msg_dict in messages_data["messages"]:
+                    role = msg_dict.get("message_type", "user")
+                    content = msg_dict.get("content", "")
+
+                    if role == "user":
+                        messages.append(HumanMessage(content=content))
+                    elif role == "assistant":
+                        messages.append(AIMessage(content=content))
+                logger.info("CONTEXT: Added %s messages to history (from shared messages_data)", len(messages))
             else:
-                # Load conversation history from database when state is not available
                 try:
                     from services.conversation_service import ConversationService
                     conversation_service = ConversationService()
                     conversation_service.set_current_user(user_id)
-                    
-                    messages_data = await conversation_service.get_conversation_messages(
+                    loaded = await conversation_service.get_conversation_messages(
                         conversation_id=conversation_id,
                         user_id=user_id,
                         skip=0,
-                        limit=20  # Last 20 messages for context
+                        limit=20,
                     )
-                    
-                    # Convert database messages to LangChain format
-                    if messages_data and "messages" in messages_data:
+                    if loaded and "messages" in loaded:
                         from langchain_core.messages import HumanMessage, AIMessage
-                        for msg_dict in messages_data["messages"]:
+                        for msg_dict in loaded["messages"]:
                             role = msg_dict.get("message_type", "user")
                             content = msg_dict.get("content", "")
-                            
+
                             if role == "user":
                                 messages.append(HumanMessage(content=content))
                             elif role == "assistant":
                                 messages.append(AIMessage(content=content))
-                    
-                    logger.info(f"📚 CONTEXT: Loaded {len(messages)} messages from database for conversation {conversation_id}")
+                        logger.info("CONTEXT: Loaded %s messages from database for conversation %s", len(messages), conversation_id)
                 except Exception as db_error:
-                    logger.warning(f"⚠️ CONTEXT: Failed to load conversation history from database: {db_error}")
+                    logger.warning("CONTEXT: Failed to load conversation history from database: %s", db_error)
             
             # Limit to last 20 messages for context window
             recent_messages = messages[-20:] if len(messages) > 20 else messages
@@ -197,6 +238,163 @@ class GRPCContextGatherer:
             
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add conversation history: {e}")
+    
+    async def _add_attachments(
+        self,
+        grpc_request: orchestrator_pb2.ChatRequest,
+        conversation_id: str,
+        user_id: str,
+        messages_data: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Extract attachments from latest user message and add to request metadata"""
+        try:
+            attachments = await self._extract_latest_message_attachments(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                messages_data=messages_data,
+            )
+            
+            if attachments:
+                import json
+                grpc_request.metadata["attachments"] = json.dumps(attachments)
+                attached_images = [{"data": a.get("base64_data"), "base64": a.get("base64_data")} for a in attachments if a.get("base64_data")]
+                if attached_images:
+                    grpc_request.metadata["attached_images"] = json.dumps(attached_images)
+                logger.info(f"✅ CONTEXT: Added {len(attachments)} attachment(s) from latest message")
+            else:
+                logger.debug("📎 CONTEXT: No attachments found in latest message")
+                
+        except Exception as e:
+            logger.warning(f"⚠️ CONTEXT: Failed to extract attachments: {e}")
+    
+    async def _extract_latest_message_attachments(
+        self,
+        conversation_id: str,
+        user_id: str,
+        messages_data: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Extract attachments from the latest user message in the conversation.
+        Uses messages_data when provided (avoids duplicate load); otherwise loads from DB.
+        Queries conversation_message_attachments when available; falls back to metadata_json.
+        For images, reads file and adds base64_data for orchestrator vision/face analysis.
+        """
+        try:
+            import base64
+            import json
+            from pathlib import Path
+            from services.conversation_service import ConversationService
+            from services.database_manager.database_helpers import fetch_all
+
+            if not messages_data or "messages" not in messages_data:
+                conversation_service = ConversationService()
+                conversation_service.set_current_user(user_id)
+                messages_data = await conversation_service.get_conversation_messages(
+                    conversation_id=conversation_id,
+                    user_id=user_id,
+                    skip=0,
+                    limit=20,
+                )
+
+            if not messages_data or "messages" not in messages_data:
+                return []
+
+            messages = messages_data["messages"]
+            latest_message_id = None
+
+            for msg in reversed(messages):
+                if msg.get("message_type") == "user" or msg.get("role") == "user":
+                    latest_message_id = msg.get("message_id")
+                    break
+
+            if not latest_message_id:
+                return []
+
+            attachments = []
+
+            try:
+                rows = await fetch_all(
+                    """
+                    SELECT attachment_id, filename, content_type, file_size, file_path,
+                           uploaded_at, is_image, metadata_json
+                    FROM conversation_message_attachments
+                    WHERE message_id = $1
+                    ORDER BY uploaded_at DESC
+                    """,
+                    latest_message_id,
+                )
+                if rows:
+                    for row in rows:
+                        file_path = row.get("file_path")
+                        content_type = row.get("content_type", "")
+                        is_image = row.get("is_image", content_type.startswith("image/"))
+                        base64_data = None
+                        if is_image and file_path and Path(file_path).exists():
+                            try:
+                                with open(file_path, "rb") as f:
+                                    base64_data = base64.b64encode(f.read()).decode("utf-8")
+                            except Exception as e:
+                                logger.warning(f"Failed to read image for attachment: {e}")
+                        uploaded_at = row.get("uploaded_at")
+                        attachments.append({
+                            "attachment_id": str(row.get("attachment_id", "")),
+                            "filename": row.get("filename", ""),
+                            "content_type": content_type,
+                            "file_size": row.get("file_size", 0),
+                            "file_path": file_path,
+                            "base64_data": base64_data,
+                            "uploaded_at": uploaded_at.isoformat() if hasattr(uploaded_at, "isoformat") else str(uploaded_at),
+                        })
+            except Exception as e:
+                logger.debug(f"message_attachments table not available or query failed: {e}")
+
+            if attachments:
+                logger.info(f"Found {len(attachments)} attachment(s) from conversation_message_attachments")
+                return attachments
+
+            metadata_json = None
+            for msg in reversed(messages):
+                if msg.get("message_type") == "user" or msg.get("role") == "user":
+                    metadata_json = msg.get("metadata_json", {})
+                    if isinstance(metadata_json, str):
+                        metadata_json = json.loads(metadata_json)
+                    break
+
+            if not metadata_json:
+                return []
+
+            attachments = metadata_json.get("attachments", [])
+            if not attachments:
+                return []
+
+            result = []
+            for att in attachments:
+                storage_path = att.get("storage_path") or att.get("file_path")
+                content_type = att.get("content_type", "")
+                is_image = content_type.startswith("image/") if content_type else False
+                base64_data = att.get("base64_data") or att.get("data")
+                if is_image and storage_path and not base64_data:
+                    try:
+                        if Path(storage_path).exists():
+                            with open(storage_path, "rb") as f:
+                                base64_data = base64.b64encode(f.read()).decode("utf-8")
+                    except Exception as e:
+                        logger.warning(f"Failed to read image at {storage_path}: {e}")
+                result.append({
+                    "attachment_id": att.get("attachment_id", ""),
+                    "filename": att.get("filename", ""),
+                    "content_type": content_type or "application/octet-stream",
+                    "file_size": att.get("file_size") or att.get("size_bytes", 0),
+                    "file_path": storage_path,
+                    "base64_data": base64_data,
+                    "uploaded_at": att.get("uploaded_at", ""),
+                })
+            logger.info(f"Found {len(result)} attachment(s) in latest user message metadata")
+            return result
+
+        except Exception as e:
+            logger.warning(f"Failed to extract attachments from latest message: {e}")
+            return []
     
     async def _add_user_persona(
         self,
@@ -235,9 +433,9 @@ class GRPCContextGatherer:
             except Exception as e:
                 logger.warning(f"⚠️ CONTEXT: Failed to add user context: {e}")
             
-            # Add model preferences from settings service
+            # Add model preferences from settings service (or keep override from request_context, e.g. external chat)
             try:
-                chat_model = await settings_service.get_llm_model()
+                chat_model = grpc_request.metadata.get("user_chat_model") or await settings_service.get_llm_model()
                 fast_model = await settings_service.get_classification_model()
                 image_model = await settings_service.get_image_generation_model()
                 
@@ -252,6 +450,15 @@ class GRPCContextGatherer:
                 logger.info(f"✅ CONTEXT: Added model preferences (chat={chat_model}, fast={fast_model}, image={image_model})")
             except Exception as e:
                 logger.warning(f"⚠️ CONTEXT: Failed to add model preferences: {e}")
+            
+            # Add user timezone to metadata (for datetime context in agents)
+            try:
+                user_timezone = await settings_service.get_user_timezone(user_id)
+                if user_timezone:
+                    grpc_request.metadata["user_timezone"] = user_timezone
+                    logger.info(f"🌍 CONTEXT: Added user timezone to metadata: {user_timezone}")
+            except Exception as e:
+                logger.warning(f"⚠️ CONTEXT: Failed to add user timezone: {e}")
             
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add persona: {e}")
@@ -524,6 +731,42 @@ class GRPCContextGatherer:
             
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add checkpoint info: {e}")
+
+    def _add_image_description_context(
+        self,
+        grpc_request: orchestrator_pb2.ChatRequest,
+        request_context: Dict[str, Any]
+    ) -> None:
+        """Add image description context (image_base64, image_analysis_model) for image_description agent."""
+        try:
+            image_base64 = request_context.get("image_base64")
+            image_analysis_model = request_context.get("image_analysis_model")
+            if image_base64:
+                grpc_request.metadata["image_base64"] = image_base64
+                logger.info("CONTEXT: Added image_base64 for image description")
+            if image_analysis_model:
+                grpc_request.metadata["image_analysis_model"] = image_analysis_model
+                logger.info(f"CONTEXT: Added image_analysis_model = {image_analysis_model}")
+        except Exception as e:
+            logger.warning(f"CONTEXT: Failed to add image description context: {e}")
+
+    def _add_document_description_context(
+        self,
+        grpc_request: orchestrator_pb2.ChatRequest,
+        request_context: Dict[str, Any]
+    ) -> None:
+        """Add document description context (document_content, document_analysis_model) for document_description agent."""
+        try:
+            document_content = request_context.get("document_content")
+            document_analysis_model = request_context.get("document_analysis_model") or request_context.get("image_analysis_model")
+            if document_content is not None:
+                grpc_request.metadata["document_content"] = document_content
+                logger.info("CONTEXT: Added document_content for document description")
+            if document_analysis_model:
+                grpc_request.metadata["document_analysis_model"] = document_analysis_model
+                logger.info(f"CONTEXT: Added document_analysis_model = {document_analysis_model}")
+        except Exception as e:
+            logger.warning(f"CONTEXT: Failed to add document description context: {e}")
     
     async def _add_primary_agent_selected(
         self,

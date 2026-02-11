@@ -125,6 +125,32 @@ async def create_user(
         raise HTTPException(status_code=500, detail="Failed to create user")
 
 
+@router.put("/api/auth/profile", response_model=UserResponse)
+async def update_profile(
+    update_request: UserUpdateRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Update current user's profile (email, display_name). Same field admins see in User Management."""
+    try:
+        # Only allow email and display_name for self-update
+        request = UserUpdateRequest(
+            email=update_request.email,
+            display_name=update_request.display_name,
+            avatar_url=None,
+            role=None,
+            is_active=None,
+        )
+        result = await auth_service.update_user(current_user.user_id, request)
+        if not result:
+            raise HTTPException(status_code=404, detail="User not found")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Profile update failed: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update profile")
+
+
 @router.put("/api/auth/users/{user_id}", response_model=UserResponse)
 async def update_user(
     user_id: str,

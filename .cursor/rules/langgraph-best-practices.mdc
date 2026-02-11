@@ -89,6 +89,11 @@ if has_pending_permission and user_approves:
 - All available tools are documented with usage examples
 - Tools are categorized by type (gRPC-backed vs pure utilities)
 
+### Tool Placement (Local vs Tools Service)
+- **See [langgraph-tool-placement.mdc](mdc:.cursor/rules/langgraph-tool-placement.mdc) for the full rule**
+- **Local to LLM Orchestrator**: Tools that only use in-memory data or strings (math, parsing, formatting, LLM-in-process) — no gRPC, no backend_tool_client
+- **External**: Tools that touch database, vector store, web, email, files, or any service outside the orchestrator — implementation in Tools Service ([backend/services/grpc_tool_service.py](mdc:backend/services/grpc_tool_service.py)), orchestrator has thin gRPC wrappers only
+
 ### Centralized Tool Management
 - Use [backend/services/langgraph_tools/centralized_tool_registry.py](mdc:backend/services/langgraph_tools/centralized_tool_registry.py)
 - Group tools by domain in [backend/services/langgraph_tools/](mdc:backend/services/langgraph_tools/) directory
@@ -316,8 +321,71 @@ response = await chat_service.openai_client.chat.completions.create(...)  # NEVE
 #### 8. Checkpoint and State Management
 - **ALWAYS use** `_get_checkpoint_config(metadata)` for thread_id management
 - **ALWAYS use** `_load_and_merge_checkpoint_messages()` for conversation history
-- **ALWAYS merge** shared_memory from checkpoints with metadata
+- **ALWAYS merge** shared_memory from checkpoints with metadata **IN CORRECT ORDER** (see below)
 - **ALWAYS pass** `config=config` to `workflow.ainvoke()`
+
+#### 8a. ⚠️ CRITICAL: Checkpoint Merge Order Pattern (MANDATORY)
+
+**THE BUG:** Merging `shared_memory` in wrong order causes stale checkpoint data to overwrite fresh request data!
+
+**The Problem:**
+```python
+# ❌ WRONG ORDER - CAUSES STALE CONTENT BUG!
+checkpoint_state = await workflow.aget_state(config)
+existing_shared_memory = checkpoint_state.values.get("shared_memory", {}) if checkpoint_state and checkpoint_state.values else {}
+
+# Start with fresh data
+shared_memory = metadata.get("shared_memory", {}) or {}
+# Then let stale checkpoint overwrite it
+shared_memory.update(existing_shared_memory)  # ❌ OLD OVERWRITES NEW!
+
+# Result: active_editor has STALE content from previous turn!
+```
+
+**Real-World Bug Example:**
+1. **Request 1**: File has 140 chars (frontmatter only) → saved to checkpoint
+2. **Request 2**: File now has 2163 chars → sent in fresh `active_editor`
+3. **Wrong merge**: Stale 140-char checkpoint overwrites fresh 2163-char data
+4. **Agent behavior**: Only sees 140 chars → treats file as empty → recreates content instead of editing!
+
+**The Fix (MANDATORY):**
+```python
+# ✅ CORRECT ORDER - FRESH DATA OVERWRITES STALE!
+checkpoint_state = await workflow.aget_state(config)
+existing_shared_memory = {}
+if checkpoint_state and checkpoint_state.values:
+    existing_shared_memory = checkpoint_state.values.get("shared_memory", {})
+
+# Start with checkpoint (old/stale)
+shared_memory_merged = existing_shared_memory.copy()
+# Then let fresh metadata overwrite stale checkpoint
+shared_memory_merged.update(metadata.get("shared_memory", {}) or {})  # ✅ NEW OVERWRITES OLD!
+
+# Use shared_memory_merged in initial_state
+initial_state = {
+    "shared_memory": shared_memory_merged,  # ✅ Fresh active_editor content!
+    # ... other fields
+}
+```
+
+**Why This Matters:**
+- `active_editor` contains **current file content** from request
+- Checkpoint may have **stale `active_editor`** from previous conversation turn
+- Wrong order = agent sees old file state, creates duplicates, loses user edits
+- **This is not a theoretical edge case** - this bug was discovered in production!
+
+**Rule of Thumb:**
+- **Checkpoint data = STALE** (from previous turn)
+- **Metadata data = FRESH** (from current request)
+- **ALWAYS let fresh overwrite stale**
+
+**Applies to ALL agents using checkpointing**, especially:
+- Writing Assistant
+- Character Development Agent
+- Fiction Editing Agent
+- Any agent accessing `active_editor`
+
+**See:** `dev-notes/AGENT_INTEGRATION_GUIDE.md` for detailed bug investigation and examples.
 
 #### 9. Workflow Requirements Checklist
 - [ ] Inherits from `BaseAgent`
@@ -665,6 +733,335 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
 ```
 
 **Key Takeaway:** Subgraphs that operate on domain-specific data (like fiction manuscripts) must preserve BOTH the critical 5 keys AND all domain context keys. Missing domain context causes downstream nodes to lose critical information (e.g., `chapter_ranges` being empty makes LLM think file is empty).
+
+### Standardized Image Handling in Subgraphs (CRITICAL)
+
+**ALL subgraphs that handle images MUST use the standardized image emission pattern.**
+
+**Required Pattern for Image-Emitting Subgraphs:**
+
+1. **Image Search Tools Return Structured Data:**
+   ```python
+   # Image search tools return:
+   {
+       "images_markdown": "![]({data_uri})\n![]({data_uri})...",  # For display
+       "metadata": [{title, date, series, author, ...}],         # For LLM context
+       "images": [{url, alt_text, type, metadata}]                # For AgentResponse
+   }
+   ```
+
+2. **Subgraphs Extract and Pass Through Both Formats:**
+   ```python
+   # In intelligent_document_retrieval_subgraph or image_search_subgraph
+   image_search_result = await search_images_intelligently(...)
+   
+   # Extract both formats
+   images_markdown = image_search_result.get("images_markdown", "")
+   structured_images = image_search_result.get("images", [])
+   
+   return {
+       "image_search_results": images_markdown,  # Markdown for backward compatibility
+       "structured_images": structured_images,   # Structured data for AgentResponse
+       # ... preserve critical state keys ...
+   }
+   ```
+
+3. **Research Workflow Subgraphs Collect from Parallel Searches:**
+   ```python
+   # Collect structured images from all parallel search results
+   all_structured_images = []
+   all_image_results = []
+   
+   for result in parallel_search_results:
+       if result.get("structured_images"):
+           all_structured_images.extend(result.get("structured_images"))
+       if result.get("image_search_results"):
+           all_image_results.append(result.get("image_search_results"))
+   
+   return {
+       "round1_results": {
+           "image_search_results": "\n\n".join(all_image_results),  # Combined markdown
+           "structured_images": all_structured_images                 # Combined structured data
+       },
+       # ... preserve critical state keys ...
+   }
+   ```
+
+4. **Agents Include Both in Final AgentResponse:**
+   ```python
+   # In agent synthesis/format nodes
+   structured_images = round1_results.get("structured_images")
+   image_search_results = round1_results.get("image_search_results")
+   
+   # Append markdown to response text
+   final_response = f"{text_response}"
+   if image_search_results:
+       final_response = f"{final_response}\n\n{image_search_results}"
+   
+   # Include in AgentResponse
+   standard_response = AgentResponse(
+       response=final_response,  # Text + markdown images
+       task_status="complete",
+       agent_type="your_agent",
+       timestamp=datetime.now().isoformat(),
+       images=structured_images if structured_images else None  # Structured data
+   )
+   ```
+
+**Why This Pattern?**
+- **Markdown in response**: Frontend extracts images from markdown for immediate chat display
+- **Structured `images` field**: Provides full metadata, enables image galleries, tooltips, programmatic access
+- **Backward compatibility**: Existing frontend code continues to work
+- **Future enhancements**: Structured data enables rich image features (galleries, metadata tooltips, etc.)
+
+**State Preservation for Images:**
+- **ALWAYS preserve** `structured_images` through ALL subgraph nodes (even if not used)
+- **ALWAYS preserve** `image_search_results` (markdown) through ALL subgraph nodes
+- **ALWAYS include both** in final AgentResponse (markdown in `response` text + structured in `images` field)
+
+**See [agent-response-contract.mdc](mdc:.cursor/rules/agent-response-contract.mdc) for complete image emission documentation.**
+
+## LangGraph State Flow Principles (CRITICAL - HARD-WON LESSONS)
+
+### Principle 1: Returns Don't Exit Graphs! (CRITICAL!)
+
+**In LangGraph, returning from a node does NOT exit the graph!** The return dict updates state, and execution continues to the next node defined by edges.
+
+**Problem Pattern:**
+```python
+# ❌ WRONG ASSUMPTION: This does NOT exit the graph!
+async def _vector_search_node(state):
+    # Do image search
+    image_results = await search_images(...)
+    
+    if image_results:
+        return {
+            "formatted_context": "Found 3 comics...",  # Set valuable state
+            "image_search_results": image_results
+        }
+        # ❌ Graph CONTINUES to next node, which might overwrite this!
+    
+    # Regular document search...
+    return {"formatted_context": "...", "retrieved_documents": [...]}
+
+# Later nodes in the graph:
+async def _format_context_node(state):
+    if not state.get("retrieved_documents"):
+        # ❌ This OVERWRITES the formatted_context from image search!
+        return {"formatted_context": ""}  # Destroys valuable data!
+```
+
+**Correct Solutions:**
+
+**Option A: Use Conditional Routing**
+```python
+# ✅ CORRECT: Route to END when done
+workflow.add_conditional_edges(
+    "vector_search",
+    lambda state: "END" if state.get("image_search_results") else "format_context",
+    {
+        "END": END,
+        "format_context": "format_context"
+    }
+)
+```
+
+**Option B: Preserve Existing State**
+```python
+# ✅ CORRECT: Don't blindly overwrite
+async def _format_context_node(state):
+    if not state.get("retrieved_documents"):
+        # Preserve existing formatted_context if it exists
+        existing_context = state.get("formatted_context", "")
+        return {"formatted_context": existing_context}  # Keep it!
+```
+
+**Rule**: Plan your graph flow carefully. If a node might set final state, either route to END immediately or ensure all downstream nodes preserve that state.
+
+### Principle 2: Never Blindly Overwrite State Fields
+
+Before setting a state field to a default/empty value, check if it already contains valuable data:
+
+```python
+# ❌ WRONG: Destroys existing state
+async def _some_node(state):
+    if not my_condition:
+        return {
+            "formatted_context": "",  # Overwrites any existing value!
+            "result": None
+        }
+
+# ✅ CORRECT: Preserve existing values
+async def _some_node(state):
+    if not my_condition:
+        return {
+            "formatted_context": state.get("formatted_context", ""),  # Keep existing!
+            "result": state.get("result")  # Preserve
+        }
+```
+
+**Rule**: Only overwrite a state field when you have NEW data for it. Otherwise, preserve the existing value with `state.get("field", default)`.
+
+### Principle 3: Identify ALL Workflow State Keys
+
+Beyond the critical 5 keys (metadata, user_id, shared_memory, messages, query), identify EVERY state key your workflow might use:
+
+**Workflow State Audit Checklist:**
+1. **List all nodes in your workflow/subgraph**
+2. **For each node, identify what state keys it sets**
+3. **Create master list of ALL possible state keys**
+4. **Add ALL keys to EVERY node's return dict**
+
+**Example - Chat Agent Workflow:**
+```python
+# Workflow: prepare_context → check_local_data → detect_calculations → generate_response
+
+# State keys used across workflow:
+# - Critical 5: metadata, user_id, shared_memory, messages, query
+# - Workflow-specific: local_data_results, calculation_result, needs_calculations, 
+#   persona, system_prompt, llm_messages, extracted_images
+
+# EVERY node must preserve ALL of these!
+async def _any_node_in_chat_workflow(state: ChatState) -> Dict[str, Any]:
+    # Node logic...
+    
+    return {
+        # Node output
+        "my_field": result,
+        # ✅ CRITICAL 5
+        "metadata": state.get("metadata", {}),
+        "user_id": state.get("user_id", "system"),
+        "shared_memory": state.get("shared_memory", {}),
+        "messages": state.get("messages", []),
+        "query": state.get("query", ""),
+        # ✅ Chat workflow specific
+        "local_data_results": state.get("local_data_results"),
+        "calculation_result": state.get("calculation_result"),
+        "needs_calculations": state.get("needs_calculations"),
+        "persona": state.get("persona"),
+        "system_prompt": state.get("system_prompt"),
+        "llm_messages": state.get("llm_messages"),
+        "extracted_images": state.get("extracted_images", [])
+    }
+```
+
+### Principle 4: Graph Flow Continues Through ALL Nodes
+
+When a subgraph has flow: `node_1 → node_2 → node_3 → END`:
+- If node_1 sets `state["special_data"]`
+- Nodes 2 AND 3 MUST preserve it (even if they don't use it!)
+- Otherwise it's DROPPED by the time you reach END
+
+```python
+# Subgraph with 3 nodes:
+async def _node_1(state): 
+    return {"formatted_context": "Important!", "result_1": "data"}
+
+async def _node_2(state):
+    return {"result_2": "more data"}  # ❌ Drops formatted_context!
+
+async def _node_3(state):
+    # formatted_context is now missing!
+    return {"final": "result"}
+
+# ✅ CORRECT:
+async def _node_2(state):
+    return {
+        "result_2": "more data",
+        "formatted_context": state.get("formatted_context", "")  # Preserve!
+    }
+```
+
+### Principle 5: Debug State Loss with Logging
+
+When state mysteriously disappears:
+
+```python
+# Add these logs to EVERY node during debugging:
+async def _suspicious_node(state: YourState) -> Dict[str, Any]:
+    logger.info(f"📊 {node_name} ENTRY - state keys: {list(state.keys())}")
+    
+    # Node logic...
+    return_dict = {
+        "my_field": result,
+        # ... state preservation ...
+    }
+    
+    logger.info(f"📤 {node_name} EXIT - returning keys: {list(return_dict.keys())}")
+    return return_dict
+```
+
+**Debug Process:**
+1. Log state keys at ENTRY to each node
+2. Log return dict keys at EXIT from each node
+3. Compare: missing keys in EXIT = culprit found!
+4. Check logs for where state keys suddenly disappear
+
+### Real-World Example: Image Search Metadata Loss
+
+**Problem:** Image search found comics with metadata, but LLM said "no comics found"
+
+**Root Cause Discovery:**
+```
+✅ Image search node: sets formatted_context = "Found 3 comics..."
+   (Graph continues...)
+✅ Document retrieval node: preserves formatted_context
+   (Graph continues...)
+❌ Format context node: sees no retrieved_documents, returns formatted_context = ""
+   (OVERWRITES the image metadata!)
+✅ Final result: formatted_context is empty
+❌ Chat agent: sees empty formatted_context, LLM gets no metadata!
+```
+
+**Fix Applied:**
+```python
+async def _format_context_node(state):
+    if not retrieved_documents:
+        # ✅ FIX: Preserve existing formatted_context
+        existing = state.get("formatted_context", "")
+        return {"formatted_context": existing}  # Don't overwrite!
+```
+
+**Time to Find:** 3+ hours of debugging  
+**Time to Fix:** 1 line of code  
+**Lesson:** Always preserve existing state unless you have new data!
+
+### Principle 6: Test State Preservation End-to-End
+
+**Testing Checklist:**
+- [ ] Add state key logging to all nodes
+- [ ] Run workflow with complex state (multiple keys set)
+- [ ] Verify state keys at END match what was set at beginning
+- [ ] Check that user model preference (metadata) survives all nodes
+- [ ] Verify database queries work (user_id preserved)
+- [ ] Confirm formatted results reach the LLM
+
+**Quick Test Pattern:**
+```python
+# Set distinctive state at start
+initial_state = {
+    "query": "test",
+    "metadata": {"user_chat_model": "test-model"},
+    "formatted_context": "TEST_VALUE_SHOULD_SURVIVE"
+}
+
+result = await workflow.ainvoke(initial_state)
+
+# Verify it survived
+assert result.get("formatted_context") == "TEST_VALUE_SHOULD_SURVIVE", \
+    "State was dropped during graph execution!"
+```
+
+### Summary: State Preservation Commandments
+
+1. **Returns don't exit** - Use conditional routing to skip nodes
+2. **Never blindly overwrite** - Check existing values before defaulting
+3. **Preserve ALL workflow keys** - Not just the critical 5
+4. **Every node preserves everything** - Even fields it doesn't use
+5. **Debug with logging** - Track state keys through the graph
+6. **Test end-to-end** - Verify state survives the entire flow
+
+**These principles prevent hours of debugging "disappearing data" bugs!**
 
 ### Base Agent Extension (Backend Agents)
 - Extend [backend/services/langgraph_agents/base_agent.py](mdc:backend/services/langgraph_agents/base_agent.py)
@@ -1090,6 +1487,7 @@ def _parse_json_response(self, content: str) -> Dict[str, Any]:
 - **Missing checkpointer compilation** - always compile with `checkpointer=checkpointer`
 - **Skipping message history loading** - always use `_load_and_merge_checkpoint_messages()`
 - **Ignoring shared_memory from checkpoints** - always merge checkpointed shared_memory
+- **WRONG checkpoint merge order** - letting stale checkpoint overwrite fresh metadata (causes stale content bug!)
 - **Nodes that raise exceptions** - nodes should return error states, not raise
 - **Missing entry point** - always set entry point with `workflow.set_entry_point()`
 - **Missing edges** - all nodes must be connected with edges or conditional edges
@@ -1097,6 +1495,10 @@ def _parse_json_response(self, content: str) -> Dict[str, Any]:
 - **Subgraph nodes dropping metadata** - causes LLM to fall back to default model instead of user's choice!
 - **Subgraph nodes missing critical 5 keys** - metadata, user_id, shared_memory, messages, query
 - **Not testing with user model preference** - subgraph may silently use wrong model
+- **Assuming returns exit graphs** - they don't! Use conditional routing to END
+- **Blindly overwriting state with defaults** - preserve existing values first
+- **Only preserving critical 5** - preserve ALL workflow-specific state keys
+- **Nodes continuing when should stop** - route to END explicitly for early completion
 
 ### ✅ DO THESE INSTEAD:
 - **Structured Pydantic models** for all agent communication
@@ -1115,10 +1517,15 @@ def _parse_json_response(self, content: str) -> Dict[str, Any]:
 - **Error handling in nodes** - return error states, don't raise exceptions
 - **Consistent naming** - follow `_*_node` pattern for all node methods
 - **Standard process method** - implement `process()` with checkpoint management
+- **CORRECT checkpoint merge order** - always let fresh metadata overwrite stale checkpoint (see section 8a!)
 - **Explicit state preservation** - each node returns all critical state keys (active_editor, shared_memory, messages, etc.)
 - **ALL subgraph nodes preserve the 5 critical keys** - metadata, user_id, shared_memory, messages, query (in success AND error paths!)
 - **Test with user model preference** - verify subgraphs use correct model, not default
 - **Subgraph state checklist** - every node, every path, all 5 keys
+- **Conditional routing to END** - when work is complete, route directly to END
+- **Preserve before defaulting** - check `state.get(key)` before setting defaults
+- **Audit ALL workflow state** - identify and preserve every key any node might set
+- **Debug with state logging** - track state keys through graph execution
 
 **Remember: A well-organized LangGraph system ensures every agent knows its role and executes it perfectly.**
 

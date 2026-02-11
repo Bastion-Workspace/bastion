@@ -49,6 +49,7 @@ class ApiService {
   logout = () => this.auth.logout();
   getCurrentUser = () => this.auth.getCurrentUser();
   register = (userData) => this.auth.register(userData);
+  updateProfile = (data) => this.auth.updateProfile(data);
   changePassword = (userId, currentPassword, newPassword) => this.auth.changePassword(userId, currentPassword, newPassword);
   adminChangePassword = (userId, passwordData) => this.auth.adminChangePassword(userId, passwordData);
 
@@ -69,6 +70,11 @@ class ApiService {
   moveDocument = (documentId, newFolderId, userId) => this.documents.moveDocument(documentId, newFolderId, userId);
   getDocumentContent = (documentId) => this.documents.getDocumentContent(documentId);
   updateDocumentContent = (documentId, content) => this.documents.updateDocumentContent(documentId, content);
+  getLinkGraph = (scope = 'all', folderId = null) => {
+    const params = new URLSearchParams({ scope: scope === 'folder' && folderId ? 'folder' : 'all' });
+    if (folderId) params.set('folder_id', folderId);
+    return this.get(`/api/graph/link-graph?${params.toString()}`);
+  };
   createDocument = (documentData) => this.documents.createDocument(documentData);
   createDocumentFromContent = (args) => this.documents.createDocumentFromContent(args);
   exemptDocument = (documentId) => this.documents.exemptDocument(documentId);
@@ -136,6 +142,8 @@ class ApiService {
   clearQdrantDatabase = () => this.admin.clearQdrantDatabase();
   clearNeo4jDatabase = () => this.admin.clearNeo4jDatabase();
   clearAllDocuments = () => this.admin.clearAllDocuments();
+  clearDocumentsDatabaseOnly = (rescan = true) => this.admin.clearDocumentsDatabaseOnly(rescan);
+  rebuildAllLinks = () => this.admin.rebuildAllLinks();
   getUsers = () => this.admin.getUsers();
   createUser = (userData) => this.admin.createUser(userData);
   updateUser = (userId, userData) => this.admin.updateUser(userId, userData);
@@ -152,6 +160,7 @@ class ApiService {
   removeFolderExemption = (folderId) => this.folders.removeFolderExemption(folderId);
   overrideFolderExemption = (folderId) => this.folders.overrideFolderExemption(folderId);
   createDefaultFolders = () => this.folders.createDefaultFolders();
+  downloadLibrary = () => this.folders.downloadLibrary();
 
   // ===== PROJECT METHODS =====
   createProject = async (parentFolderId, projectName, projectType) => {
@@ -181,6 +190,15 @@ class ApiService {
     this.templates.confirmTemplateUsage(conversationId, templateId, action, modifications);
   getTemplateExecutionStatus = (conversationId) => this.templates.getTemplateExecutionStatus(conversationId);
   generateTemplatePlan = (templateId, query) => this.templates.generateTemplatePlan(templateId, query);
+
+  detectObjects = (documentId, options) => this.post('/api/documents/' + documentId + '/detect-objects', options);
+  createObjectAnnotation = (documentId, annotation) => this.post('/api/documents/' + documentId + '/annotate-object', annotation);
+  getDetectedObjects = (documentId) => this.get('/api/documents/' + documentId + '/objects');
+  getObjectAnnotations = (documentId) => this.get('/api/documents/' + documentId + '/object-annotations');
+  confirmObjectDetection = (objectId) => this.put('/api/detected-objects/' + objectId + '/confirm');
+  updateDetectedObject = (objectId, body) => this.patch('/api/detected-objects/' + objectId, body);
+  deleteObjectAnnotation = (annotationId) => this.delete('/api/annotations/' + annotationId);
+  addAnnotationExample = (annotationId, body) => this.post('/api/annotations/' + annotationId + '/add-example', body);
 
   // ===== INTEGRATION METHODS =====
 }

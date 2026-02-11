@@ -304,7 +304,7 @@ Correct routing:
 
 8. **ALWAYS EXTRACT**: Even if content seems small, extract it! Technical details like 12VDC and 40-44 ohms are valuable and should be saved.
 
-9. **NO NEW FILE CREATION**: All content goes into the primary electronics document using standard sections. Do NOT create new files - use the standard sections instead.
+9. **NO AUTOMATIC FILE CREATION**: All content goes into the primary document. If content would benefit from a separate reference file, note it in the response but do NOT set `create_new_file` to true.
 
 10. **USE EXACT FILENAMES**: For existing files, always use the exact filename from AVAILABLE FILES
 

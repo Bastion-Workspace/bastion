@@ -25,7 +25,7 @@ class ConversationLifecycleManager:
     
     def __init__(self):
         self.db_pool = None
-        logger.info("🔄 Initializing ConversationLifecycleManager...")
+        logger.debug("🔄 Initializing ConversationLifecycleManager...")
     
     async def _get_db_pool(self):
         """Get database connection pool"""
@@ -370,6 +370,17 @@ class ConversationLifecycleManager:
             
             logger.info(f"✅ Updated metadata for conversation {conversation_id}")
             return True
+
+    async def ensure_conversation_exists(
+        self, conversation_id: str, user_id: str, initial_message: str = None
+    ) -> bool:
+        """Ensure a conversation exists; create it if not. Returns True if it exists or was created."""
+        pool = await self._get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+            return await self._ensure_conversation_exists_in_connection(
+                conn, conversation_id, user_id, initial_message=initial_message
+            )
     
     async def get_conversation_lifecycle(self, conversation_id: str, user_id: str = None) -> Dict[str, Any]:
         """Get complete conversation lifecycle information"""
@@ -482,10 +493,10 @@ class ConversationService:
     def __init__(self):
         self.lifecycle_manager = ConversationLifecycleManager()
         # Title generation moved to LLM orchestrator - no longer needed here
-        logger.info("🗨️ Initializing Conversation Service...")
+        logger.debug("🗨️ Initializing Conversation Service...")
         
         # Note: Database connection is handled by the lifecycle manager
-        logger.info("✅ Conversation Service initialized with lifecycle manager")
+        logger.debug("✅ Conversation Service initialized with lifecycle manager")
         
         # User context is handled internally via lifecycle manager
         self.current_user_id = None
@@ -638,6 +649,7 @@ class ConversationService:
                 
                 message_list = []
                 for row in messages:
+                    parsed_metadata = json.loads(row["metadata_json"] or "{}")
                     message_list.append({
                         "message_id": row["message_id"],
                         "conversation_id": row["conversation_id"],
@@ -651,7 +663,8 @@ class ConversationService:
                         "sequence_number": row["sequence_number"],
                         "created_at": row["created_at"].isoformat(),
                         "updated_at": row["updated_at"].isoformat(),  # ✅ Fixed: Added missing updated_at
-                        "metadata_json": json.loads(row["metadata_json"] or "{}"),
+                        "metadata_json": parsed_metadata,  # Keep for backward compatibility
+                        "metadata": parsed_metadata,  # Frontend expects this name
                         "citations": json.loads(row["citations"] or "[]") if "citations" in row else [],
                         "parent_message_id": row.get("parent_message_id"),
                         "is_edited": row.get("is_edited", False),
@@ -702,6 +715,14 @@ class ConversationService:
         except Exception as e:
             logger.error(f"❌ Failed to update conversation metadata: {e}")
             return False
+
+    async def ensure_conversation_exists(self, conversation_id: str, user_id: str) -> bool:
+        """Ensure a conversation exists for the user; create it if not. Returns True if it exists or was created."""
+        try:
+            return await self.lifecycle_manager.ensure_conversation_exists(conversation_id, user_id)
+        except Exception as e:
+            logger.error(f"❌ Failed to ensure conversation exists: {e}")
+            return False
     
     async def get_conversation_analytics(self, conversation_id: str, user_id: str) -> Dict[str, Any]:
         """Get comprehensive analytics for a conversation"""
@@ -741,7 +762,7 @@ class ConversationService:
             return None
 
     async def delete_conversation(self, conversation_id: str) -> bool:
-        """Delete a conversation and all its messages"""
+        """Delete a conversation and all its messages, including attachments"""
         try:
             logger.info(f"🗑️ Deleting conversation: {conversation_id}")
             
@@ -765,6 +786,15 @@ class ConversationService:
             if conversation_user_id != current_user_id:
                 logger.warning(f"⚠️ User {current_user_id} attempted to delete conversation {conversation_id} owned by {conversation_user_id}")
                 return False
+            
+            # Clean up attachments before deleting messages
+            try:
+                from services.chat_attachment_service import chat_attachment_service
+                await chat_attachment_service.initialize()
+                await chat_attachment_service.cleanup_conversation_attachments(conversation_id)
+            except Exception as cleanup_error:
+                logger.warning(f"⚠️ Failed to cleanup attachments for conversation {conversation_id}: {cleanup_error}")
+                # Continue with deletion even if cleanup fails
             
             # Delete the conversation and all its messages
             pool = await self.lifecycle_manager._get_db_pool()

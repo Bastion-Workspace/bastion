@@ -41,6 +41,11 @@ from orchestrator.models.diagramming_models import (
     DiagramAnalysis,
     DiagramResult
 )
+from orchestrator.models.agent_response_contract import (
+    AgentResponse,
+    ManuscriptEditMetadata,
+    TaskStatus
+)
 
 __all__ = [
     'SimpleIntentResult',
@@ -64,6 +69,10 @@ __all__ = [
     'VisualizationAnalysis',
     'VisualizationResult',
     'DiagramAnalysis',
-    'DiagramResult'
+    'DiagramResult',
+    'AgentResponse',
+    'ManuscriptEditMetadata',
+    'TaskStatus',
+    'QueryPlan'
 ]
 

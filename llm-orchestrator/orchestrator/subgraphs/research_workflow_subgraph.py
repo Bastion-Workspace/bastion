@@ -28,7 +28,8 @@ from orchestrator.tools import (
     crawl_web_content_tool,
     expand_query_tool,
     search_conversation_cache_tool,
-    get_document_content_tool
+    get_document_content_tool,
+    search_images_tool
 )
 from orchestrator.models import ResearchAssessmentResult, ResearchGapAnalysis
 from orchestrator.backend_tool_client import get_backend_tool_client
@@ -40,6 +41,52 @@ logger = logging.getLogger(__name__)
 
 # Use Dict[str, Any] for compatibility with main agent state
 ResearchSubgraphState = Dict[str, Any]
+
+
+async def intelligent_research_with_classification(
+    query: str,
+    user_id: str,
+    metadata: Dict[str, Any],
+    messages: List[Any],
+) -> Optional[Dict[str, Any]]:
+    """
+    Classify query and run fast path (collection_search or factual_query) if applicable.
+    Returns response dict for collection/factual paths, or None to use full exploratory workflow.
+    """
+    try:
+        from orchestrator.utils.query_resolver import resolve_follow_up_query
+        from orchestrator.utils.query_classifier import classify_query_intent
+        from orchestrator.subgraphs.collection_search_subgraph import execute_collection_search
+        from orchestrator.subgraphs.factual_query_subgraph import execute_factual_query
+
+        resolved_query = await resolve_follow_up_query(query, messages, metadata)
+        plan = await classify_query_intent(
+            query=resolved_query,
+            user_model=metadata.get("user_chat_model"),
+            metadata=metadata,
+            messages=messages,
+        )
+        logger.info(f"Query classified as: {plan.query_type}, reasoning: {plan.reasoning[:80]}...")
+
+        shared_memory = dict(metadata.get("shared_memory") or {})
+        if metadata.get("user_chat_model") and "user_chat_model" not in shared_memory:
+            shared_memory["user_chat_model"] = metadata["user_chat_model"]
+        state = {
+            "query": resolved_query,
+            "user_id": user_id,
+            "metadata": metadata,
+            "messages": messages,
+            "shared_memory": shared_memory,
+        }
+
+        if plan.query_type == "collection_search":
+            return await execute_collection_search(plan, state, resolved_query)
+        if plan.query_type == "factual_query":
+            return await execute_factual_query(plan, resolved_query, state)
+        return None
+    except Exception as e:
+        logger.warning(f"Query classification or fast path failed: {e}, falling back to full workflow")
+        return None
 
 
 async def cache_check_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -68,17 +115,17 @@ async def cache_check_node(state: Dict[str, Any]) -> Dict[str, Any]:
             
             logger.info(f"Cache HIT - found {len(cache_result['entries'])} cached entries")
             
-        return {
-            "cache_hit": True,
-            "cached_context": cached_context,
-            "research_findings": {"cached": True, "content": cached_context},
-            "query": query,  # Preserve query in state
-            # CRITICAL: Preserve metadata for user model selection
-            "metadata": state.get("metadata", {}),
-            "user_id": state.get("user_id", "system"),
-            "shared_memory": state.get("shared_memory", {}),
-            "messages": state.get("messages", [])
-        }
+            return {
+                "cache_hit": True,
+                "cached_context": cached_context,
+                "research_findings": {"cached": True, "content": cached_context},
+                "query": query,  # Preserve query in state
+                # CRITICAL: Preserve metadata for user model selection
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", [])
+            }
         
         logger.info("Cache MISS - no previous research found")
         return {
@@ -113,7 +160,29 @@ async def query_expansion_node(state: Dict[str, Any]) -> Dict[str, Any]:
     try:
         query = state.get("query", "")
         logger.info(f"Expanding query: {query}")
-        
+
+        # Skip expansion for simple queries, but not for follow-ups (they need context)
+        query_length = len(query.split())
+        follow_up_indicators = ["more", "another", "also", "again", "else", "additional", "next", "other"]
+        query_words = set(query.lower().split())
+        is_follow_up = any(word in query_words for word in follow_up_indicators)
+        is_simple = query_length <= 5 and not is_follow_up
+        shared_memory = state.get("shared_memory", {})
+        skip_expansion = shared_memory.get("skip_query_expansion", False) or is_simple
+
+        if skip_expansion:
+            logger.info(f"Skipping query expansion for simple query: {query}")
+            return {
+                "expanded_queries": [query],
+                "key_entities": [],
+                "original_query": query,
+                "query": query,
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": shared_memory,
+                "messages": state.get("messages", []),
+            }
+
         # If provided_queries exist and skip_expansion is implied, just pass them through
         provided_queries = state.get("provided_queries", None)
         if provided_queries:
@@ -219,8 +288,8 @@ async def query_expansion_node(state: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
-async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
-    """Round 1: Parallel local and web search"""
+async def round1_local_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Round 1 LOCAL: Documents + Entity Graph + Images (NO web search yet)"""
     try:
         query = state.get("query", "")
         # Preserve query throughout this node
@@ -271,6 +340,10 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 
                 user_id = shared_memory.get("user_id", "system")
                 
+                # Note: Image search is handled automatically by retrieve_documents_intelligently
+                # (via intelligent_document_retrieval_subgraph._vector_search_node)
+                # No need to call it separately - same approach as Chat Agent
+                
                 # Run all expanded queries in parallel (filter out empty queries)
                 query_tasks = []
                 valid_queries = [q for q in expanded_queries[:3] if q and q.strip()]
@@ -278,21 +351,47 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     logger.warning("No valid queries for local search, using original query")
                     valid_queries = [query] if query and query.strip() else []
                 
+                # Get metadata and shared_memory for model selection (same as Chat Agent)
+                metadata = state.get("metadata", {})
+                shared_memory_for_search = dict(state.get("shared_memory", {}))
+
+                # Run image analyzer ONCE before parallel search (reuse for all query variants)
+                image_analysis_cache = None
+                if any(kw in query.lower() for kw in ["photo", "image", "picture", "comic"]):
+                    from orchestrator.tools.image_query_analyzer import analyze_image_query
+                    try:
+                        image_analysis_cache = await analyze_image_query(
+                            query=query,
+                            user_id=user_id,
+                            metadata=metadata,
+                            shared_memory=shared_memory_for_search,
+                        )
+                        shared_memory_for_search["image_analysis_cache"] = image_analysis_cache
+                        logger.info("Single image analysis completed, reusing for all queries")
+                    except Exception as e:
+                        logger.warning(f"Image analysis failed, continuing without cache: {e}")
+
                 for q in valid_queries:
                     task = retrieve_documents_intelligently(
                         query=q,
                         user_id=user_id,
                         mode="comprehensive",
                         max_results=10,
-                        small_doc_threshold=15000
+                        small_doc_threshold=15000,
+                        metadata=metadata,  # Pass metadata for model selection in image search
+                        shared_memory=shared_memory_for_search  # Pass shared_memory (includes image_analysis_cache)
                     )
                     query_tasks.append(task)
                 
                 results = await asyncio.gather(*query_tasks, return_exceptions=True)
                 
                 # Combine results
+                # Note: Image search results are already included in formatted_context
+                # from retrieve_documents_intelligently (same as Chat Agent)
                 all_formatted_contexts = []
                 all_documents = []
+                all_image_results = []  # Collect image search results (markdown)
+                all_structured_images = []  # Collect structured image data for AgentResponse contract
                 seen_doc_ids = set()
                 
                 for result in results:
@@ -302,6 +401,18 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     if result.get("success") and result.get("formatted_context"):
                         all_formatted_contexts.append(result.get("formatted_context", ""))
                         
+                        # Collect image search results (base64 images markdown)
+                        image_results = result.get("image_search_results")
+                        if image_results:
+                            all_image_results.append(image_results)
+                            logger.info(f"Collected image search results: {len(image_results)} characters")
+                        
+                        # Collect structured images for AgentResponse contract
+                        structured_images = result.get("structured_images")
+                        if structured_images:
+                            all_structured_images.extend(structured_images)
+                            logger.info(f"Collected {len(structured_images)} structured image(s)")
+                        
                         for doc in result.get("retrieved_documents", []):
                             doc_id = doc.get('document_id')
                             if doc_id and doc_id not in seen_doc_ids:
@@ -309,17 +420,22 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                                 all_documents.append(doc)
                 
                 combined_results = "\n\n".join(all_formatted_contexts)
+                combined_image_results = "\n\n".join(all_image_results) if all_image_results else None
                 round1_document_ids = list(seen_doc_ids)
                 
-                logger.info(f"Tool used: retrieve_documents_intelligently (parallel local search)")
+                logger.info(f"Tool used: retrieve_documents_intelligently (parallel local search with integrated image search)")
                 logger.info(f"Parallel search: {len([r for r in results if not isinstance(r, Exception)])} queries succeeded, {len(all_documents)} unique documents found")
+                if combined_image_results:
+                    logger.info(f"Image search results preserved: {len(combined_image_results)} characters")
                 
                 return {
                     "search_results": combined_results,
                     "queries_used": expanded_queries[:3],
                     "result_count": len([r for r in results if not isinstance(r, Exception)]),
                     "documents_found": len(all_documents),
-                    "round1_document_ids": round1_document_ids
+                    "round1_document_ids": round1_document_ids,
+                    "image_search_results": combined_image_results,  # Pass through image results (markdown)
+                    "structured_images": all_structured_images if all_structured_images else None  # Pass through structured images
                 }
             except Exception as e:
                 logger.error(f"Local search error: {e}")
@@ -364,102 +480,10 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     "error": str(e)
                 }
         
-        async def web_search_task():
-            """Web search task"""
-            try:
-                shared_memory = state.get("shared_memory", {})
-                previous_tools = shared_memory.get("previous_tools_used", [])
-                if "search_web_tool" not in previous_tools:
-                    previous_tools.append("search_web_tool")
-                    previous_tools.append("crawl_web_content_tool")
-                    shared_memory["previous_tools_used"] = previous_tools
-                    state["shared_memory"] = shared_memory
-                
-                # Use first expanded query (or original query as fallback)
-                search_query = expanded_queries[0] if expanded_queries and expanded_queries[0] else query
-                if not search_query:
-                    logger.warning("No valid query for web search, skipping")
-                    return {"error": "No valid query", "content": ""}
-                
-                # Search web using structured search for better URL prioritization
-                from orchestrator.tools import search_web_structured
-                structured_results = await search_web_structured(query=search_query, max_results=10)
-                logger.info("Tool used: search_web_structured (web search)")
-                
-                # Format results for display
-                formatted_parts = []
-                for i, res in enumerate(structured_results, 1):
-                    formatted_parts.append(f"\n{i}. **{res.get('title', 'No Title')}**")
-                    formatted_parts.append(f"   URL: {res.get('url', 'No URL')}")
-                    if res.get('snippet'):
-                        formatted_parts.append(f"   {res['snippet']}")
-                search_result = '\n'.join(formatted_parts) if formatted_parts else ""
-                
-                # Prioritize URLs based on relevance scores
-                from urllib.parse import urlparse
-                official_keywords = ["allin.com", "allinpodcast.co", "youtube.com/@allin", "podcasts.apple.com"]
-                
-                priority_urls = []
-                seen_domains = set()
-                
-                # Sort by relevance
-                sorted_results = sorted(
-                    structured_results,
-                    key=lambda x: x.get('relevance_score', 0.0),
-                    reverse=True
-                )
-                
-                for result in sorted_results:
-                    url = result.get('url')
-                    if not url:
-                        continue
-                    
-                    domain = urlparse(url).netloc
-                    relevance = result.get('relevance_score', 0.0)
-                    is_official = any(kw in url for kw in official_keywords)
-                    is_high_relevance = relevance >= 0.7
-                    
-                    if is_official and url not in priority_urls:
-                        priority_urls.insert(0, url)
-                    elif is_high_relevance and domain not in seen_domains and url not in priority_urls:
-                        priority_urls.append(url)
-                        seen_domains.add(domain)
-                    elif url not in priority_urls and domain not in seen_domains:
-                        priority_urls.append(url)
-                        seen_domains.add(domain)
-                
-                # Smart limit: crawl more if many high-relevance results
-                high_relevance_count = sum(1 for r in structured_results if r.get('relevance_score', 0.0) >= 0.7)
-                if high_relevance_count >= 5:
-                    effective_limit = min(7, len(priority_urls))
-                elif high_relevance_count >= 3:
-                    effective_limit = min(5, len(priority_urls))
-                else:
-                    effective_limit = min(3, len(priority_urls))
-                
-                top_urls = priority_urls[:effective_limit] if priority_urls else []
-                
-                crawled_content = ""
-                if top_urls:
-                    crawl_result = await crawl_web_content_tool(urls=top_urls)
-                    logger.info("Tool used: crawl_web_content_tool (crawled top results)")
-                    crawled_content = f"\n\n=== Crawled Content ===\n{crawl_result}"
-                
-                combined_result = f"{search_result}{crawled_content}"
-                
-                return {
-                    "content": combined_result,
-                    "query_used": search_query
-                }
-            except Exception as e:
-                logger.error(f"Web search error: {e}")
-                return {"error": str(e), "content": ""}
-        
-        # Execute all THREE searches in parallel
-        local_result, entity_result, web_result = await asyncio.gather(
+        # Execute LOCAL searches only (local + entity) in parallel - NO WEB YET
+        local_result, entity_result = await asyncio.gather(
             local_search_task(),
-            entity_graph_search_task(),  # NEW
-            web_search_task(),
+            entity_graph_search_task(),
             return_exceptions=True
         )
         
@@ -472,13 +496,9 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
             logger.error(f"Entity graph search exception: {entity_result}")
             entity_result = {"error": str(entity_result), "kg_formatted_results": "", "kg_success": False}
         
-        if isinstance(web_result, Exception):
-            logger.error(f"Web search exception: {web_result}")
-            web_result = {"error": str(web_result), "content": ""}
+        logger.info(f"Local search complete: local={bool(local_result.get('search_results'))}, entity={bool(entity_result.get('kg_success'))}")
         
-        logger.info(f"Parallel search complete: local={bool(local_result.get('search_results'))}, entity={bool(entity_result.get('kg_success'))}, web={bool(web_result.get('content'))}")
-        
-        # Build sources list
+        # Build sources list from local results only
         sources_found = []
         if local_result.get("round1_document_ids"):
             for doc_id in local_result.get("round1_document_ids", [])[:5]:
@@ -488,7 +508,7 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     "source": "local"
                 })
         
-        # NEW: Entity graph sources
+        # Entity graph sources
         if entity_result and not isinstance(entity_result, Exception) and entity_result.get("kg_success"):
             kg_count = entity_result.get("kg_document_count", 0)
             if kg_count > 0:
@@ -500,50 +520,44 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
                         "source": "knowledge_graph"
                     })
         
-        if web_result.get("content"):
-            urls = re.findall(r'URL: (https?://[^\s]+)', web_result.get("content", ""))
-            for url in urls[:5]:
-                sources_found.append({
-                    "type": "web",
-                    "url": url,
-                    "source": "web"
-                })
-        
-        # Combine results
+        # Combine local results
         combined_findings = {}
         
         # Local results
         if local_result and not isinstance(local_result, Exception):
             combined_findings["local_results"] = local_result.get("search_results", "")
+            # Preserve image search results from local search
+            if local_result.get("image_search_results"):
+                combined_findings["image_search_results"] = local_result.get("image_search_results")
+            # Preserve structured images from local search
+            if local_result.get("structured_images"):
+                combined_findings["structured_images"] = local_result.get("structured_images")
         
-        # NEW: Entity graph results
+        # Entity graph results
         if entity_result and not isinstance(entity_result, Exception) and entity_result.get("kg_success"):
             kg_formatted = entity_result.get("kg_formatted_results", "")
             kg_count = entity_result.get("kg_document_count", 0)
             
             if kg_formatted:
                 combined_findings["entity_graph_results"] = kg_formatted
-                logger.info(f"Added {kg_count} knowledge graph documents to Round 1 results")
-        
-        # Web results
-        if web_result and not isinstance(web_result, Exception):
-            combined_findings["web_results"] = web_result.get("content", "")
+                logger.info(f"Added {kg_count} knowledge graph documents to Round 1 LOCAL results")
         
         # Log what we're returning
         local_content_len = len(local_result.get("search_results", "")) if local_result else 0
         entity_content_len = len(entity_result.get("kg_formatted_results", "")) if entity_result and not isinstance(entity_result, Exception) else 0
-        web_content_len = len(web_result.get("content", "")) if web_result else 0
-        logger.info(f"📊 Round 1 parallel search complete: local={local_content_len} chars, entity={entity_content_len} chars, web={web_content_len} chars, sources={len(sources_found)}")
+        image_content_len = len(local_result.get("image_search_results", "")) if local_result and local_result.get("image_search_results") else 0
+        logger.info(f"📊 Round 1 LOCAL complete: local={local_content_len} chars, entity={entity_content_len} chars, images={image_content_len} chars, sources={len(sources_found)}")
         
         return {
             "round1_results": {
                 "search_results": local_result.get("search_results", "") if local_result else "",
-                "entity_graph_results": entity_result.get("kg_formatted_results", "") if entity_result and not isinstance(entity_result, Exception) else "",  # NEW
+                "entity_graph_results": entity_result.get("kg_formatted_results", "") if entity_result and not isinstance(entity_result, Exception) else "",
                 "documents_found": local_result.get("documents_found", 0) if local_result else 0,
-                "kg_documents_found": entity_result.get("kg_document_count", 0) if entity_result and not isinstance(entity_result, Exception) else 0,  # NEW
-                "round1_document_ids": local_result.get("round1_document_ids", []) if local_result else []
+                "kg_documents_found": entity_result.get("kg_document_count", 0) if entity_result and not isinstance(entity_result, Exception) else 0,
+                "round1_document_ids": local_result.get("round1_document_ids", []) if local_result else [],
+                "image_search_results": local_result.get("image_search_results") if local_result else None,
+                "structured_images": local_result.get("structured_images") if local_result else None
             },
-            "web_round1_results": web_result if web_result else {},
             "sources_found": sources_found,
             "research_findings": combined_findings,
             "query": query,  # Preserve query in state
@@ -556,10 +570,9 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
         }
         
     except Exception as e:
-        logger.error(f"Round 1 parallel search error: {e}")
+        logger.error(f"Round 1 local search error: {e}")
         return {
             "round1_results": {"error": str(e), "search_results": ""},
-            "web_round1_results": {"error": str(e), "content": ""},
             "sources_found": [],
             "research_findings": {},
             "query": state.get("query", ""),  # Preserve query in state
@@ -569,6 +582,329 @@ async def round1_parallel_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "user_id": state.get("user_id", "system"),
             "shared_memory": state.get("shared_memory", {}),
             "messages": state.get("messages", [])
+        }
+
+
+async def assess_local_results_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Assess ONLY local results (documents + entity graph + images) for sufficiency"""
+    try:
+        query = state.get("query", "")
+        round1_results = state.get("round1_results", {})
+        
+        local_results = round1_results.get("search_results", "")
+        entity_results = round1_results.get("entity_graph_results", "")
+        image_results = round1_results.get("image_search_results")
+        
+        logger.info("Assessing LOCAL results only (no web yet)")
+        
+        # Build combined local context
+        local_context_parts = []
+        if local_results:
+            local_context_parts.append(f"LOCAL DOCUMENT RESULTS:\n{local_results}")
+        if entity_results:
+            local_context_parts.append(f"ENTITY GRAPH RESULTS:\n{entity_results}")
+        if image_results:
+            # Count images in markdown
+            image_count = image_results.count("![") if isinstance(image_results, str) else 0
+            local_context_parts.append(f"IMAGE RESULTS: Found {image_count} relevant images")
+        
+        combined_local = "\n\n".join(local_context_parts) if local_context_parts else "No local results found."
+        
+        # Use LLM to assess quality
+        assessment_prompt = f"""Assess the quality and sufficiency of these LOCAL search results for answering the user's query.
+
+USER QUERY: {query}
+
+LOCAL RESULTS (Documents + Entity Graph + Images):
+{combined_local}
+
+Evaluate:
+1. Do the local results contain relevant information?
+2. Is there enough detail to answer the query comprehensively from LOCAL sources alone?
+3. Would WEB search add significant value, or are local results sufficient?
+4. What specific information (if any) is missing that web search might provide?
+
+STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact schema:
+{{
+    "sufficient": boolean (true if local results can answer the query comprehensively),
+    "has_relevant_info": boolean,
+    "missing_info": ["list", "of", "specific", "gaps"],
+    "confidence": float (0.0 to 1.0),
+    "best_source": "local" | "need_web" | "none",
+    "needs_web_search": boolean (true if web search would add significant value),
+    "reasoning": "explanation of assessment"
+}}"""
+        
+        # Get LLM for assessment
+        from orchestrator.agents.base_agent import BaseAgent
+        base_agent = BaseAgent("research_subgraph")
+        assessment_llm = base_agent._get_llm(temperature=0.7, state=state)
+        
+        response = await assessment_llm.ainvoke([{"role": "user", "content": assessment_prompt}])
+        
+        # Parse response
+        content = response.content if hasattr(response, 'content') else str(response)
+        
+        try:
+            # Extract JSON from markdown code blocks if present
+            json_text = content.strip()
+            if '```json' in json_text:
+                match = re.search(r'```json\s*\n(.*?)\n```', json_text, re.DOTALL)
+                if match:
+                    json_text = match.group(1).strip()
+            elif '```' in json_text:
+                match = re.search(r'```\s*\n(.*?)\n```', json_text, re.DOTALL)
+                if match:
+                    json_text = match.group(1).strip()
+            
+            assessment = json.loads(json_text)
+            
+            sufficient = assessment.get("sufficient", False)
+            confidence = assessment.get("confidence", 0.5)
+            needs_web = assessment.get("needs_web_search", True)
+            best_source = assessment.get("best_source", "local" if sufficient else "need_web")
+            
+            logger.info(f"Local assessment: sufficient={sufficient}, confidence={confidence}, needs_web={needs_web}, best_source={best_source}")
+            logger.info(f"Assessment reasoning: {assessment.get('reasoning', 'N/A')}")
+            
+            return {
+                "local_sufficient": sufficient,
+                "local_assessment": assessment,
+                "needs_web_search": needs_web,
+                "research_sufficient": sufficient,  # If local is sufficient, research is sufficient
+                "query": query,
+                # CRITICAL: Preserve round1_results so they flow to next nodes
+                "round1_results": round1_results,
+                "sources_found": state.get("sources_found", []),
+                "research_findings": state.get("research_findings", {}),
+                # CRITICAL: Preserve metadata for user model selection
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "expanded_queries": state.get("expanded_queries", [])
+            }
+            
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning(f"Local assessment parsing failed: {e}, defaulting to needs_web=True")
+            # Default to needing web search if assessment fails
+            return {
+                "local_sufficient": False,
+                "local_assessment": {
+                    "sufficient": False,
+                    "has_relevant_info": bool(local_results or entity_results or image_results),
+                    "missing_info": ["Assessment failed"],
+                    "confidence": 0.5,
+                    "best_source": "need_web",
+                    "needs_web_search": True,
+                    "reasoning": f"Assessment parsing failed: {str(e)}"
+                },
+                "needs_web_search": True,
+                "research_sufficient": False,
+                "query": state.get("query", ""),
+                # CRITICAL: Preserve round1_results
+                "round1_results": state.get("round1_results", {}),
+                "sources_found": state.get("sources_found", []),
+                "research_findings": state.get("research_findings", {}),
+                # CRITICAL: Preserve metadata for user model selection
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "expanded_queries": state.get("expanded_queries", [])
+            }
+        
+    except Exception as e:
+        logger.error(f"Local assessment error: {e}")
+        return {
+            "local_sufficient": False,
+            "local_assessment": {},
+            "needs_web_search": True,
+            "research_sufficient": False,
+            "query": state.get("query", ""),
+            # CRITICAL: Preserve round1_results
+            "round1_results": state.get("round1_results", {}),
+            "sources_found": state.get("sources_found", []),
+            "research_findings": state.get("research_findings", {}),
+            # CRITICAL: Preserve metadata for user model selection
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "expanded_queries": state.get("expanded_queries", [])
+        }
+
+
+async def round1_web_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
+    """Round 1 WEB: Web search (only runs if local results insufficient). Skill config can disable web search."""
+    try:
+        skill_config = state.get("skill_config", {})
+        if not skill_config.get("web_search", True):
+            logger.info("Round 1 WEB: Skipping web search - skill config has web_search=False")
+            return {
+                "web_round1_results": {"content": "", "skipped": True},
+                "query": state.get("query", ""),
+                "round1_results": state.get("round1_results", {}),
+                "sources_found": state.get("sources_found", []),
+                "research_findings": state.get("research_findings", {}),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "expanded_queries": state.get("expanded_queries", []),
+                "skill_config": skill_config,
+            }
+
+        query = state.get("query", "")
+        expanded_queries = state.get("expanded_queries", [])
+        shared_memory = state.get("shared_memory", {})
+        
+        logger.info(f"Round 1 WEB: Local results insufficient - running web search")
+        
+        # Track tool usage
+        previous_tools = shared_memory.get("previous_tools_used", [])
+        if "search_web_tool" not in previous_tools:
+            previous_tools.append("search_web_tool")
+            previous_tools.append("crawl_web_content_tool")
+            shared_memory["previous_tools_used"] = previous_tools
+        
+        # Use first expanded query (or original query as fallback)
+        search_query = expanded_queries[0] if expanded_queries and expanded_queries[0] else query
+        if not search_query:
+            logger.warning("No valid query for web search, skipping")
+            return {
+                "web_round1_results": {"error": "No valid query", "content": ""},
+                "query": state.get("query", ""),
+                "round1_results": state.get("round1_results", {}),
+                "sources_found": state.get("sources_found", []),
+                "research_findings": state.get("research_findings", {}),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": shared_memory,
+                "messages": state.get("messages", []),
+                "expanded_queries": state.get("expanded_queries", []),
+                "skill_config": state.get("skill_config", {}),
+            }
+        
+        # Search web using structured search for better URL prioritization
+        from orchestrator.tools import search_web_structured
+        structured_results = await search_web_structured(query=search_query, max_results=10)
+        logger.info("Tool used: search_web_structured (web search)")
+        
+        # Format results for display
+        formatted_parts = []
+        for i, res in enumerate(structured_results, 1):
+            formatted_parts.append(f"\n{i}. **{res.get('title', 'No Title')}**")
+            formatted_parts.append(f"   URL: {res.get('url', 'No URL')}")
+            if res.get('snippet'):
+                formatted_parts.append(f"   {res['snippet']}")
+        search_result = '\n'.join(formatted_parts) if formatted_parts else ""
+        
+        # Prioritize URLs based on relevance scores
+        from urllib.parse import urlparse
+        official_keywords = ["allin.com", "allinpodcast.co", "youtube.com/@allin", "podcasts.apple.com"]
+        
+        priority_urls = []
+        seen_domains = set()
+        
+        # Sort by relevance
+        sorted_results = sorted(
+            structured_results,
+            key=lambda x: x.get('relevance_score', 0.0),
+            reverse=True
+        )
+        
+        for result in sorted_results:
+            url = result.get('url')
+            if not url:
+                continue
+            
+            domain = urlparse(url).netloc
+            relevance = result.get('relevance_score', 0.0)
+            is_official = any(kw in url for kw in official_keywords)
+            is_high_relevance = relevance >= 0.7
+            
+            if is_official and url not in priority_urls:
+                priority_urls.insert(0, url)
+            elif is_high_relevance and domain not in seen_domains and url not in priority_urls:
+                priority_urls.append(url)
+                seen_domains.add(domain)
+            elif url not in priority_urls and domain not in seen_domains:
+                priority_urls.append(url)
+                seen_domains.add(domain)
+        
+        # Smart limit: crawl more if many high-relevance results
+        high_relevance_count = sum(1 for r in structured_results if r.get('relevance_score', 0.0) >= 0.7)
+        if high_relevance_count >= 5:
+            effective_limit = min(7, len(priority_urls))
+        elif high_relevance_count >= 3:
+            effective_limit = min(5, len(priority_urls))
+        else:
+            effective_limit = min(3, len(priority_urls))
+        
+        top_urls = priority_urls[:effective_limit] if priority_urls else []
+        
+        crawled_content = ""
+        if top_urls:
+            crawl_result = await crawl_web_content_tool(urls=top_urls)
+            logger.info("Tool used: crawl_web_content_tool (crawled top results)")
+            crawled_content = f"\n\n=== Crawled Content ===\n{crawl_result}"
+        
+        combined_result = f"{search_result}{crawled_content}"
+        
+        web_result = {
+            "content": combined_result,
+            "query_used": search_query
+        }
+        
+        # Add web sources to sources_found
+        sources_found = list(state.get("sources_found", []))  # Copy existing sources
+        if web_result.get("content"):
+            urls = re.findall(r'URL: (https?://[^\s]+)', web_result.get("content", ""))
+            for url in urls[:5]:
+                sources_found.append({
+                    "type": "web",
+                    "url": url,
+                    "source": "web"
+                })
+        
+        # Update research_findings with web results
+        research_findings = dict(state.get("research_findings", {}))  # Copy existing findings
+        research_findings["web_results"] = web_result.get("content", "")
+        # Preserve structured_images if they exist
+        if "structured_images" not in research_findings and state.get("research_findings", {}).get("structured_images"):
+            research_findings["structured_images"] = state.get("research_findings", {}).get("structured_images")
+        
+        logger.info(f"📊 Round 1 WEB complete: web={len(web_result.get('content', ''))} chars, sources={len(sources_found)}")
+        
+        return {
+            "web_round1_results": web_result,
+            "sources_found": sources_found,
+            "research_findings": research_findings,
+            "query": state.get("query", ""),
+            "round1_results": state.get("round1_results", {}),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": shared_memory,
+            "messages": state.get("messages", []),
+            "expanded_queries": state.get("expanded_queries", []),
+            "skill_config": state.get("skill_config", {}),
+        }
+        
+    except Exception as e:
+        logger.error(f"Round 1 web search error: {e}")
+        return {
+            "web_round1_results": {"error": str(e), "content": ""},
+            "query": state.get("query", ""),
+            "round1_results": state.get("round1_results", {}),
+            "sources_found": state.get("sources_found", []),
+            "research_findings": state.get("research_findings", {}),
+            "metadata": state.get("metadata", {}),
+            "user_id": state.get("user_id", "system"),
+            "shared_memory": state.get("shared_memory", {}),
+            "messages": state.get("messages", []),
+            "expanded_queries": state.get("expanded_queries", []),
+            "skill_config": state.get("skill_config", {}),
         }
 
 
@@ -724,10 +1060,12 @@ async def synthesize_findings_node(state: Dict[str, Any]) -> Dict[str, Any]:
         round1_results = state.get("round1_results", {})
         web_round1_results = state.get("web_round1_results", {})
         sources_found = state.get("sources_found", [])
-        
+
         local_results = round1_results.get("search_results", "")
-        web_results = web_round1_results.get("content", "")
-        
+        web_results = web_round1_results.get("content", "") if web_round1_results else ""
+        image_search_results = round1_results.get("image_search_results")  # Get image results (markdown)
+        structured_images = round1_results.get("structured_images")  # Get structured image data
+
         # Build citations
         citations = []
         for source in sources_found:
@@ -743,17 +1081,26 @@ async def synthesize_findings_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     "url": source.get("url"),
                     "source": "web"
                 })
+
+        # Combine results (web may be empty if local was sufficient)
+        combined_parts = [local_results] if local_results else []
+        if web_results:
+            combined_parts.append(web_results)
         
         research_findings = {
             "local_results": local_results,
             "web_results": web_results,
-            "combined_results": f"{local_results}\n\n{web_results}".strip(),
+            "combined_results": "\n\n".join(combined_parts) if combined_parts else "",
             "sources_count": len(sources_found),
-            "citations": citations
+            "citations": citations,
+            "image_search_results": image_search_results,  # Include image results (markdown)
+            "structured_images": structured_images  # Include structured image data
         }
-        
+
         # Log what we're synthesizing
-        logger.info(f"📊 Synthesizing findings: local_results length={len(local_results)}, web_results length={len(web_results)}, sources={len(sources_found)}")
+        image_count = len(image_search_results) if image_search_results else 0
+        web_status = "included" if web_results else "skipped (local sufficient)"
+        logger.info(f"📊 Synthesizing findings: local={len(local_results)} chars, web={len(web_results)} chars ({web_status}), images={image_count} chars, sources={len(sources_found)}")
         
         # Pass through gap analysis and round1 assessment for routing decisions
         gap_analysis = state.get("gap_analysis", {})
@@ -848,7 +1195,17 @@ def build_research_workflow_subgraph(checkpointer, skip_cache: bool = False, ski
             return {
                 "gap_analysis": gap_analysis,
                 "identified_gaps": identified_gaps,
-                "query": query  # Preserve query in state
+                "query": query,  # Preserve query in state
+                # CRITICAL: Preserve all state
+                "round1_results": state.get("round1_results", {}),
+                "web_round1_results": state.get("web_round1_results", {}),
+                "sources_found": state.get("sources_found", []),
+                "research_findings": state.get("research_findings", {}),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "expanded_queries": state.get("expanded_queries", [])
             }
             
         except Exception as e:
@@ -864,26 +1221,38 @@ def build_research_workflow_subgraph(checkpointer, skip_cache: bool = False, ski
                     "reasoning": f"Gap analysis failed: {str(e)}"
                 },
                 "identified_gaps": [],
-                "query": state.get("query", "")  # Preserve query in state
+                "query": state.get("query", ""),  # Preserve query in state
+                # CRITICAL: Preserve all state even on error
+                "round1_results": state.get("round1_results", {}),
+                "web_round1_results": state.get("web_round1_results", {}),
+                "sources_found": state.get("sources_found", []),
+                "research_findings": state.get("research_findings", {}),
+                "metadata": state.get("metadata", {}),
+                "user_id": state.get("user_id", "system"),
+                "shared_memory": state.get("shared_memory", {}),
+                "messages": state.get("messages", []),
+                "expanded_queries": state.get("expanded_queries", [])
             }
     
     subgraph = StateGraph(Dict[str, Any])
     
-    # Add nodes
+    # Add nodes - NEW SEQUENTIAL FLOW
     subgraph.add_node("cache_check", cache_check_node)
     subgraph.add_node("query_expansion", query_expansion_node)
-    subgraph.add_node("round1_parallel_search", round1_parallel_search_node)
-    subgraph.add_node("assess_combined_round1", assess_combined_round1_node)
+    subgraph.add_node("round1_local_search", round1_local_search_node)  # Local only
+    subgraph.add_node("assess_local_results", assess_local_results_node)  # NEW: Assess local first
+    subgraph.add_node("round1_web_search", round1_web_search_node)  # NEW: Conditional web search
+    subgraph.add_node("assess_combined_round1", assess_combined_round1_node)  # Only after web search
     subgraph.add_node("gap_analysis", gap_analysis_node_with_subgraph)
     subgraph.add_node("synthesize_findings", synthesize_findings_node)
     
     # Set entry point based on skip_cache flag
     if skip_cache:
-        subgraph.set_entry_point("query_expansion" if not skip_expansion else "round1_parallel_search")
+        subgraph.set_entry_point("query_expansion" if not skip_expansion else "round1_local_search")
     else:
         subgraph.set_entry_point("cache_check")
     
-    # Flow
+    # Flow - SEQUENTIAL with CONDITIONAL web search
     if not skip_cache:
         subgraph.add_conditional_edges(
             "cache_check",
@@ -895,9 +1264,32 @@ def build_research_workflow_subgraph(checkpointer, skip_cache: bool = False, ski
         )
     
     if not skip_expansion:
-        subgraph.add_edge("query_expansion", "round1_parallel_search")
-    subgraph.add_edge("round1_parallel_search", "assess_combined_round1")
+        subgraph.add_edge("query_expansion", "round1_local_search")
     
+    # After local search, assess local results
+    subgraph.add_edge("round1_local_search", "assess_local_results")
+    
+    # Conditional routing: local sufficient -> synthesize; else web search only if permission granted
+    def _route_after_local_assessment(state: Dict[str, Any]) -> str:
+        if state.get("local_sufficient"):
+            return "synthesize_findings"
+        if not state.get("shared_memory", {}).get("web_search_permission"):
+            return "synthesize_findings"  # No web permission: synthesize from local only (same as direct Research routing)
+        return "round1_web_search"
+
+    subgraph.add_conditional_edges(
+        "assess_local_results",
+        _route_after_local_assessment,
+        {
+            "synthesize_findings": "synthesize_findings",
+            "round1_web_search": "round1_web_search"
+        }
+    )
+    
+    # After web search, assess combined results
+    subgraph.add_edge("round1_web_search", "assess_combined_round1")
+    
+    # After combined assessment, either synthesize or do gap analysis
     subgraph.add_conditional_edges(
         "assess_combined_round1",
         lambda state: "synthesize_findings" if state.get("round1_sufficient") else "gap_analysis",

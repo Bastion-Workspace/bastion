@@ -39,7 +39,8 @@ class DirectSearchService:
         tags: Optional[List[str]] = None,
         date_from: Optional[datetime] = None,
         date_to: Optional[datetime] = None,
-        include_metadata: bool = True
+        include_metadata: bool = True,
+        exclude_document_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Perform direct semantic search on documents
@@ -87,13 +88,19 @@ class DirectSearchService:
             # Include team_ids for hybrid search across user, team, and global collections
             search_results = await self.embedding_manager.search_similar(
                 query_embedding=query_embeddings[0],
-                limit=limit,
+                limit=limit * 2 if exclude_document_ids else limit,
                 score_threshold=similarity_threshold,
                 user_id=user_id if user_id and user_id != "system" else None,
                 team_ids=team_ids if team_ids else None,
                 filter_category=categories[0] if categories and len(categories) > 0 else None,
                 filter_tags=tags if tags else None
             )
+            if exclude_document_ids:
+                exclude_set = set(exclude_document_ids)
+                search_results = [r for r in search_results if r.get("document_id") not in exclude_set]
+                search_results = search_results[:limit]
+            else:
+                search_results = search_results[:limit]
             
             # Format results (already filtered by threshold in search_similar)
             filtered_results = []
@@ -145,7 +152,15 @@ class DirectSearchService:
             # search_similar returns 'score', not 'similarity_score'
             similarity_score = result.get("score", result.get("similarity_score", 0.0))
             # search_similar returns 'content', not 'chunk_text'
-            chunk_text = result.get("content", result.get("chunk_text", ""))
+            # Handle case where content might be a dict (from JSON parsing) or string
+            chunk_text_raw = result.get("content", result.get("chunk_text", ""))
+            if isinstance(chunk_text_raw, dict):
+                # If content is a dict, try to extract text or convert to string
+                chunk_text = chunk_text_raw.get("text", chunk_text_raw.get("content", str(chunk_text_raw)))
+            elif isinstance(chunk_text_raw, str):
+                chunk_text = chunk_text_raw
+            else:
+                chunk_text = str(chunk_text_raw) if chunk_text_raw else ""
             
             if not chunk_id or not document_id:
                 return None

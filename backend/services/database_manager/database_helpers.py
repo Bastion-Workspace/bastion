@@ -8,7 +8,7 @@ Automatically handles both main app and Celery worker environments!
 
 import logging
 import os
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional, Union, Set
 from .database_manager_service import get_database_manager
 from .models.database_models import QueryResult
 from .celery_database_helpers import (
@@ -94,7 +94,7 @@ async def fetch_one(query: str, *args, rls_context: Dict[str, str] = None) -> Op
             return await celery_fetch_one(query, *args, rls_context=rls_context)
 
 
-async def fetch_value(query: str, *args) -> Any:
+async def fetch_value(query: str, *args, rls_context: Dict[str, str] = None) -> Any:
     """
     Execute a query and fetch a single value
     
@@ -106,20 +106,20 @@ async def fetch_value(query: str, *args) -> Any:
         import threading
         if 'ForkPoolWorker' in threading.current_thread().name:
             logger.debug("Detected ForkPoolWorker - using simple connection")
-            return await celery_fetch_value(query, *args)
+            return await celery_fetch_value(query, *args, rls_context=rls_context)
     except:
         pass
     
     if is_celery_worker():
         # **BULLY!** Use simple connection for Celery workers!
         logger.debug("Using Celery helpers (is_celery_worker=True)")
-        return await celery_fetch_value(query, *args)
+        return await celery_fetch_value(query, *args, rls_context=rls_context)
     else:
         # Use DatabaseManager for main app
         logger.debug("Using DatabaseManager (is_celery_worker=False)")
         try:
             db_manager = await get_database_manager()
-            result = await db_manager.execute_query(query, *args, fetch='val')
+            result = await db_manager.execute_query(query, *args, fetch='val', rls_context=rls_context)
             
             if result.success:
                 return result.data
@@ -128,7 +128,7 @@ async def fetch_value(query: str, *args) -> Any:
                 raise Exception(f"Database query failed: {result.error}")
         except Exception as e:
             logger.error(f"❌ DatabaseManager failed, falling back to Celery helpers: {e}")
-            return await celery_fetch_value(query, *args)
+            return await celery_fetch_value(query, *args, rls_context=rls_context)
 
 
 async def execute(query: str, *args, rls_context: Dict[str, str] = None) -> str:
@@ -283,8 +283,46 @@ async def count_records(table: str, where_clause: str = "", *args) -> int:
 async def record_exists(table: str, where_clause: str, *args) -> bool:
     """
     Check if a record exists
-    
+
     **BULLY!** Check if something exists!
     """
     query = f"SELECT EXISTS(SELECT 1 FROM {table} WHERE {where_clause})"
     return await fetch_value(query, *args)
+
+
+async def get_document_ids_by_metadata(
+    series: Optional[str] = None,
+    image_type: Optional[str] = None,
+    author: Optional[str] = None,
+    date: Optional[str] = None,
+    rls_context: Optional[Dict[str, str]] = None,
+) -> Set[str]:
+    """
+    Fast SQL query for document_ids matching metadata filters (document_metadata.metadata_json).
+    Used for hybrid collection search: intersect with vector results.
+    """
+    conditions = []
+    params = []
+    idx = 1
+    if series:
+        conditions.append(f"(metadata_json->>'series' ILIKE ${idx})")
+        params.append(f"%{series}%")
+        idx += 1
+    if image_type:
+        conditions.append(f"(metadata_json->>'image_type' = ${idx} OR metadata_json->>'type' = ${idx})")
+        params.append(image_type.lower())
+        idx += 1
+    if author:
+        conditions.append(f"(metadata_json->>'author' ILIKE ${idx})")
+        params.append(f"%{author}%")
+        idx += 1
+    if date:
+        conditions.append(f"(metadata_json->>'date' LIKE ${idx})")
+        params.append(f"{date}%")
+        idx += 1
+    if not conditions:
+        return set()
+    where = " AND ".join(conditions)
+    query = f"SELECT document_id FROM document_metadata WHERE {where}"
+    rows = await fetch_all(query, *params, rls_context=rls_context)
+    return {row["document_id"] for row in rows if row.get("document_id")}

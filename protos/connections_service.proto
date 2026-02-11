@@ -1,0 +1,263 @@
+syntax = "proto3";
+
+package connections_service;
+
+// Connections Service - OAuth-based external integrations (email, calendar, etc.)
+service ConnectionsService {
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Email operations (provider-agnostic; backend passes access_token for the connection)
+  rpc GetEmails(GetEmailsRequest) returns (GetEmailsResponse);
+  rpc GetEmailById(GetEmailByIdRequest) returns (GetEmailByIdResponse);
+  rpc GetEmailThread(GetEmailThreadRequest) returns (GetEmailThreadResponse);
+  rpc SearchEmails(SearchEmailsRequest) returns (SearchEmailsResponse);
+  rpc SendEmail(SendEmailRequest) returns (SendEmailResponse);
+  rpc ReplyToEmail(ReplyToEmailRequest) returns (ReplyToEmailResponse);
+  rpc UpdateEmail(UpdateEmailRequest) returns (UpdateEmailResponse);
+  rpc MoveEmail(MoveEmailRequest) returns (MoveEmailResponse);
+  rpc DeleteEmail(DeleteEmailRequest) returns (DeleteEmailResponse);
+  rpc GetFolders(GetFoldersRequest) returns (GetFoldersResponse);
+  rpc SyncFolder(SyncFolderRequest) returns (SyncFolderResponse);
+  rpc GetEmailStatistics(GetEmailStatisticsRequest) returns (GetEmailStatisticsResponse);
+
+  // Bot lifecycle management (called by backend)
+  rpc RegisterBot(RegisterBotRequest) returns (RegisterBotResponse);
+  rpc UnregisterBot(UnregisterBotRequest) returns (UnregisterBotResponse);
+  rpc GetBotStatus(GetBotStatusRequest) returns (GetBotStatusResponse);
+}
+
+// ============================================================================
+// Health Check
+// ============================================================================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+  string service_name = 2;
+  string version = 3;
+}
+
+// ============================================================================
+// Email Messages
+// ============================================================================
+
+message GetEmailsRequest {
+  string access_token = 1;
+  string provider = 2;   // "microsoft", "gmail", etc. - used for routing
+  string folder_id = 3;   // e.g. "inbox", or provider folder id
+  int32 top = 4;
+  int32 skip = 5;
+  string filter = 6;     // optional OData-style filter
+  bool unread_only = 7;
+}
+
+message EmailMessage {
+  string id = 1;
+  string conversation_id = 2;
+  string subject = 3;
+  string from_address = 4;
+  string from_name = 5;
+  repeated string to_addresses = 6;
+  repeated string cc_addresses = 7;
+  string received_datetime = 8;
+  bool is_read = 9;
+  bool has_attachments = 10;
+  string importance = 11;
+  string body_preview = 12;
+  string body_content = 13;  // optional full body
+}
+
+message GetEmailsResponse {
+  repeated EmailMessage messages = 1;
+  int32 total_count = 2;
+  optional string error = 3;
+}
+
+message GetEmailByIdRequest {
+  string access_token = 1;
+  string provider = 2;
+  string message_id = 3;
+}
+
+message GetEmailByIdResponse {
+  EmailMessage message = 1;
+  optional string error = 2;
+}
+
+message GetEmailThreadRequest {
+  string access_token = 1;
+  string provider = 2;
+  string conversation_id = 3;
+}
+
+message GetEmailThreadResponse {
+  repeated EmailMessage messages = 1;
+  optional string error = 2;
+}
+
+message SearchEmailsRequest {
+  string access_token = 1;
+  string provider = 2;
+  string query = 3;
+  int32 top = 4;
+  string from_address = 5;   // optional filter
+  string start_date = 6;     // optional ISO date
+  string end_date = 7;       // optional ISO date
+}
+
+message SearchEmailsResponse {
+  repeated EmailMessage messages = 1;
+  optional string error = 2;
+}
+
+message SendEmailRequest {
+  string access_token = 1;
+  string provider = 2;
+  repeated string to_recipients = 3;
+  string subject = 4;
+  string body = 5;
+  repeated string cc_recipients = 6;
+  repeated string bcc_recipients = 7;
+  bool body_is_html = 8;
+}
+
+message SendEmailResponse {
+  bool success = 1;
+  string message_id = 2;
+  optional string error = 3;
+}
+
+message ReplyToEmailRequest {
+  string access_token = 1;
+  string provider = 2;
+  string message_id = 3;
+  string body = 4;
+  bool reply_all = 5;
+  bool body_is_html = 6;
+}
+
+message ReplyToEmailResponse {
+  bool success = 1;
+  string message_id = 2;
+  optional string error = 3;
+}
+
+message UpdateEmailRequest {
+  string access_token = 1;
+  string provider = 2;
+  string message_id = 3;
+  optional bool is_read = 4;
+  optional string importance = 5;
+}
+
+message UpdateEmailResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message MoveEmailRequest {
+  string access_token = 1;
+  string provider = 2;
+  string message_id = 3;
+  string destination_folder_id = 4;
+}
+
+message MoveEmailResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message DeleteEmailRequest {
+  string access_token = 1;
+  string provider = 2;
+  string message_id = 3;
+}
+
+message DeleteEmailResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message EmailFolder {
+  string id = 1;
+  string name = 2;
+  string parent_id = 3;
+  int32 unread_count = 4;
+  int32 total_count = 5;
+}
+
+message GetFoldersRequest {
+  string access_token = 1;
+  string provider = 2;
+}
+
+message GetFoldersResponse {
+  repeated EmailFolder folders = 1;
+  optional string error = 2;
+}
+
+message SyncFolderRequest {
+  string access_token = 1;
+  string provider = 2;
+  string folder_id = 3;
+  string delta_token = 4;  // from previous sync for incremental
+}
+
+message SyncFolderResponse {
+  repeated EmailMessage added = 1;
+  repeated EmailMessage updated = 2;
+  repeated string deleted_ids = 3;
+  string next_delta_token = 4;
+  optional string error = 5;
+}
+
+message GetEmailStatisticsRequest {
+  string access_token = 1;
+  string provider = 2;
+  string folder_id = 3;  // optional, default inbox
+}
+
+message GetEmailStatisticsResponse {
+  int32 total_count = 1;
+  int32 unread_count = 2;
+  optional string error = 3;
+}
+
+// ============================================================================
+// Messaging Bots (Telegram, Discord)
+// ============================================================================
+
+message RegisterBotRequest {
+  string connection_id = 1;   // external_connections.id
+  string user_id = 2;
+  string provider = 3;       // "telegram" or "discord"
+  string bot_token = 4;       // Decrypted bot token
+  string display_name = 5;
+  map<string, string> config = 6;  // Platform-specific config
+}
+
+message RegisterBotResponse {
+  bool success = 1;
+  string bot_username = 2;    // Resolved bot identity
+  optional string error = 3;
+}
+
+message UnregisterBotRequest {
+  string connection_id = 1;
+}
+
+message UnregisterBotResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message GetBotStatusRequest {
+  string connection_id = 1;
+}
+
+message GetBotStatusResponse {
+  string status = 1;   // "running", "stopped", "error"
+  string bot_username = 2;
+  optional string error = 3;
+}

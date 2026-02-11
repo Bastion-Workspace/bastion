@@ -16,11 +16,14 @@ import {
   Clear,
   Stop,
   Mic,
+  AttachFile,
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { useChatSidebar } from '../../contexts/ChatSidebarContext';
 import { useModel } from '../../contexts/ModelContext';
+import { useTheme } from '../../contexts/ThemeContext';
 import apiService from '../../services/apiService';
+import ConversationService from '../../services/conversation/ConversationService';
 
 const ChatInputArea = () => {
   const {
@@ -37,6 +40,7 @@ const ChatInputArea = () => {
     setReplyToMessage,
   } = useChatSidebar();
   const { selectedModel, setSelectedModel } = useModel();
+  const { darkMode } = useTheme();
 
   const textFieldRef = useRef(null);
   // Use local input state to avoid global context updates on each keystroke
@@ -53,6 +57,10 @@ const ChatInputArea = () => {
   const [liveTranscript, setLiveTranscript] = useState('');
   const lastPartialTimeRef = useRef(0);
   const partialInFlightRef = useRef(false);
+  
+  // File attachment state
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const fileInputRef = useRef(null);
 
   // Model selection mutation to notify backend
   const selectModelMutation = useMutation(
@@ -93,12 +101,21 @@ const ChatInputArea = () => {
     setInputValue(query || '');
   }, [query]);
 
-  // Set default model when data loads
+  // Chat dropdown excludes image generation model (that one is for image creation only)
+  const chatModels = (enabledModelsData?.enabled_models || []).filter(
+    (m) => m !== (enabledModelsData?.image_generation_model || '')
+  );
+
+  // Set default model when data loads; use chat models only (exclude image gen model)
   useEffect(() => {
-    if (enabledModelsData?.enabled_models?.length > 0 && !selectedModel) {
-      const defaultModel = enabledModelsData.enabled_models[0];
+    const list = (enabledModelsData?.enabled_models || []).filter(
+      (m) => m !== (enabledModelsData?.image_generation_model || '')
+    );
+    if (list.length === 0) return;
+    const validSelection = list.includes(selectedModel);
+    if (!selectedModel || !validSelection) {
+      const defaultModel = list[0];
       setSelectedModel(defaultModel);
-      // Also notify backend of the default model selection
       selectModelMutation.mutate(defaultModel);
     }
   }, [enabledModelsData, selectedModel]);
@@ -111,14 +128,83 @@ const ChatInputArea = () => {
     selectModelMutation.mutate(newModel);
   };
 
-  const handleSendMessage = () => {
+  const handleSendMessage = async () => {
     const trimmed = (inputValue || '').trim();
-    if (!trimmed) return;
-    // Use override to avoid relying on context query
-    sendMessage('auto', trimmed);
+    if (!trimmed && selectedFiles.length === 0) return;
+    
+    // If we have files, we need to send message first to get message_id, then upload files
+    if (selectedFiles.length > 0 && currentConversationId) {
+      try {
+        // Send message first (even if empty, to get message_id)
+        const messageContent = trimmed || '📎 Attached files';
+        sendMessage('auto', messageContent);
+        
+        // Get the message_id from the response (we'll need to wait for it)
+        // For now, we'll upload files after a short delay
+        // In production, we'd get message_id from sendMessage response
+        setTimeout(async () => {
+          try {
+              // Get latest message for this conversation
+              const messagesResponse = await ConversationService.getConversationMessages(currentConversationId, 0, 1);
+              const messages = messagesResponse?.messages || [];
+              if (messages.length > 0) {
+                const messageId = messages[0].message_id;
+                
+                // Upload each file
+                for (const file of selectedFiles) {
+                  const formData = new FormData();
+                  formData.append('file', file);
+                  
+                  await ConversationService.uploadAttachment(currentConversationId, messageId, file);
+                }
+              }
+          } catch (error) {
+            console.error('❌ Failed to upload attachments:', error);
+          }
+        }, 1000);
+      } catch (error) {
+        console.error('❌ Failed to send message with attachments:', error);
+      }
+    } else {
+      // No files, send normally
+      sendMessage('auto', trimmed);
+    }
+    
     // Clear local and context input after sending
     setInputValue('');
     setQuery('');
+    setSelectedFiles([]);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+  
+  const handleFileSelect = (e) => {
+    const files = Array.from(e.target.files || []);
+    
+    // Validate file count (max 5)
+    if (selectedFiles.length + files.length > 5) {
+      alert('Maximum 5 files allowed per message');
+      return;
+    }
+    
+    // Validate file sizes (max 10MB each)
+    const maxSize = 10 * 1024 * 1024; // 10MB
+    const oversizedFiles = files.filter(f => f.size > maxSize);
+    if (oversizedFiles.length > 0) {
+      alert(`Some files exceed 10MB limit: ${oversizedFiles.map(f => f.name).join(', ')}`);
+      return;
+    }
+    
+    setSelectedFiles(prev => [...prev, ...files]);
+  };
+  
+  const handleRemoveFile = (index) => {
+    setSelectedFiles(prev => prev.filter((_, i) => i !== index));
+  };
+  
+  const handleAttachClick = () => {
+    fileInputRef.current?.click();
   };
 
   const handleKeyPress = (e) => {
@@ -296,9 +382,9 @@ const ChatInputArea = () => {
   };
 
   return (
-    <Box sx={{ p: 1.5, borderTop: '1px solid', borderColor: 'divider' }}>
+    <Box key={darkMode ? 'dark' : 'light'} sx={{ p: 1.5, borderTop: '1px solid', borderColor: 'divider' }}>
       {/* Model Selection */}
-      {enabledModelsData?.enabled_models?.length > 0 && (
+      {chatModels.length > 0 && (
         <Box sx={{ mb: 1.5 }}>
           <FormControl size="small" fullWidth>
             <InputLabel>AI Model</InputLabel>
@@ -307,7 +393,7 @@ const ChatInputArea = () => {
               onChange={(e) => handleModelChange(e.target.value)}
               label="AI Model"
             >
-              {enabledModelsData.enabled_models.map((modelId) => {
+              {chatModels.map((modelId) => {
                 const modelInfo = getModelInfo(modelId);
                 const pricingInfo = formatPricing(modelInfo);
                 const isSelected = selectedModel === modelId;
@@ -380,8 +466,49 @@ const ChatInputArea = () => {
         </Box>
       )}
 
+      {/* File Preview Area */}
+      {selectedFiles.length > 0 && (
+        <Box sx={{ mb: 1, display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+          {selectedFiles.map((file, index) => (
+            <Chip
+              key={index}
+              label={`${file.name} (${(file.size / 1024 / 1024).toFixed(2)}MB)`}
+              onDelete={() => handleRemoveFile(index)}
+              size="small"
+              color="primary"
+              variant="outlined"
+            />
+          ))}
+        </Box>
+      )}
+
+      {/* Hidden File Input */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        style={{ display: 'none' }}
+        onChange={handleFileSelect}
+        accept="image/*,application/pdf,text/*,audio/*"
+      />
+
       {/* Input Area */}
       <Box sx={{ display: 'flex', gap: 1, alignItems: 'center' }}>
+        <Tooltip title="Attach file">
+          <IconButton
+            onClick={handleAttachClick}
+            size="small"
+            sx={{
+              backgroundColor: 'action.hover',
+              '&:hover': {
+                backgroundColor: 'action.selected',
+              },
+            }}
+          >
+            <AttachFile fontSize="small" />
+          </IconButton>
+        </Tooltip>
+        
         <TextField
           ref={textFieldRef}
           multiline
@@ -440,7 +567,7 @@ const ChatInputArea = () => {
             <Tooltip title="Send message (Enter)">
               <IconButton
                 onClick={handleSendMessage}
-                disabled={isSendDisabled}
+                disabled={!inputValue.trim() && selectedFiles.length === 0 || isLoading}
                 color="primary"
                 size="small"
                 sx={{ 

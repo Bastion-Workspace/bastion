@@ -6,13 +6,18 @@ CRUD operations for user org-mode configuration
 import logging
 from fastapi import APIRouter, Depends, HTTPException
 
+from pathlib import Path
+from typing import List, Dict, Any
+
 from utils.auth_middleware import get_current_user, AuthenticatedUserResponse
 from services.org_settings_service import get_org_settings_service
+from services.database_manager.database_helpers import fetch_one
 from models.org_settings_models import (
     OrgModeSettings,
     OrgModeSettingsUpdate,
     OrgModeSettingsResponse
 )
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -158,5 +163,67 @@ async def get_tags(
     
     except Exception as e:
         logger.error(f"❌ Failed to get tags: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/org/settings/journal-locations")
+async def get_journal_locations(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+) -> Dict[str, Any]:
+    """
+    Get available filesystem directories for journal location
+    
+    Returns a tree of directories under the user's directory
+    """
+    try:
+        # Get username
+        row = await fetch_one("SELECT username FROM users WHERE user_id = $1", current_user.user_id)
+        username = row['username'] if row else current_user.user_id
+        
+        # Build user directory path
+        upload_dir = Path(settings.UPLOAD_DIR)
+        user_dir = upload_dir / "Users" / username
+        
+        def build_directory_tree(path: Path, relative_path: str = "") -> List[Dict[str, Any]]:
+            """Recursively build directory tree"""
+            directories = []
+            
+            if not path.exists() or not path.is_dir():
+                return directories
+            
+            try:
+                # Get all subdirectories
+                for item in sorted(path.iterdir()):
+                    if item.is_dir() and not item.name.startswith('.'):
+                        # Build relative path
+                        item_relative = f"{relative_path}/{item.name}" if relative_path else item.name
+                        
+                        # Recursively get children
+                        children = build_directory_tree(item, item_relative)
+                        
+                        directories.append({
+                            "name": item.name,
+                            "path": item_relative,
+                            "children": children
+                        })
+            except PermissionError:
+                logger.warning(f"Permission denied accessing {path}")
+            
+            return directories
+        
+        # Build tree starting from user directory
+        tree = build_directory_tree(user_dir)
+        
+        # Also include root option (empty path)
+        result = {
+            "success": True,
+            "directories": tree,
+            "root_path": str(user_dir.relative_to(upload_dir))
+        }
+        
+        return result
+    
+    except Exception as e:
+        logger.error(f"❌ Failed to get journal locations: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 

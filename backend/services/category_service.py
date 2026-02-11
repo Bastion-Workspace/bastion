@@ -22,12 +22,12 @@ class CategoryService:
     
     async def initialize(self, document_repository: DocumentRepository = None, notes_service=None, shared_db_pool: Optional[asyncpg.Pool] = None):
         """Initialize the category service with dependencies"""
-        logger.info("🏷️ Initializing Category Service...")
+        logger.debug("🏷️ Initializing Category Service...")
         
         # Use shared database pool if provided
         if shared_db_pool:
             self._shared_db_pool = shared_db_pool
-            logger.info("✅ Category Service using shared database pool")
+            logger.debug("✅ Category Service using shared database pool")
         
         # Use provided document repository or create one with shared pool
         if document_repository:
@@ -41,11 +41,11 @@ class CategoryService:
                 await self.document_repository.initialize_with_pool(self._shared_db_pool)
             else:
                 await self.document_repository.initialize()
-            logger.info("✅ Category Service created new DocumentRepository")
+            logger.debug("✅ Category Service created new DocumentRepository")
         
         self.notes_service = notes_service
         
-        logger.info("✅ Category Service initialized")
+        logger.debug("✅ Category Service initialized")
     
     async def get_all_categories(self) -> Dict[str, Any]:
         """Get all categories from both documents and notes, unified and sorted"""

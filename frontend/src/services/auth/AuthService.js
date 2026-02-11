@@ -21,6 +21,10 @@ class AuthService extends ApiServiceBase {
     return this.get('/api/auth/me');
   }
 
+  updateProfile = async (data) => {
+    return this.put('/api/auth/profile', data);
+  }
+
   register = async (userData) => {
     return this.post('/api/auth/register', userData);
   }

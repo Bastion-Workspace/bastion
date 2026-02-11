@@ -46,6 +46,7 @@ const OrgQuickCapture = ({ open, onClose }) => {
   const [priority, setPriority] = useState(null);
   const [scheduled, setScheduled] = useState('');
   const [deadline, setDeadline] = useState('');
+  const [entryDate, setEntryDate] = useState(new Date().toISOString().split('T')[0]);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [error, setError] = useState(null);
@@ -71,9 +72,10 @@ const OrgQuickCapture = ({ open, onClose }) => {
     }
   }, [open]);
   
-  // Check for inbox issues when dialog opens
+  // When dialog opens: refresh journal entry date to today and check inbox
   useEffect(() => {
     if (open) {
+      setEntryDate(new Date().toISOString().split('T')[0]);
       checkInboxStatus();
     }
   }, [open]);
@@ -106,6 +108,7 @@ const OrgQuickCapture = ({ open, onClose }) => {
         setPriority(null);
         setScheduled('');
         setDeadline('');
+        setEntryDate(new Date().toISOString().split('T')[0]);
         setShowAdvanced(false);
         setError(null);
         setSuccess(null);
@@ -132,6 +135,14 @@ const OrgQuickCapture = ({ open, onClose }) => {
         setTags([...tags, tagInput.trim()]);
       }
       setTagInput('');
+    }
+  };
+  
+  // Handle tag input key down (for Ctrl+Enter)
+  const handleTagKeyDown = (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      handleCapture();
     }
   };
   
@@ -168,15 +179,33 @@ const OrgQuickCapture = ({ open, onClose }) => {
         tags: tags.length > 0 ? tags : null,
         priority: priority || null,
         scheduled: scheduled || null,
-        deadline: deadline || null
+        deadline: deadline || null,
+        entry_date: templateType === 'journal' ? entryDate : null
       };
       
       const response = await apiService.post('/api/org/capture', captureRequest);
       
       if (response.success) {
-        setSuccess(`✅ Captured to inbox.org`);
+        // Use backend message, but make it cleaner for journal entries
+        let successMessage = response.message || 'Captured successfully';
         
-        // Close after brief success message
+        // For journal entries, show "Captured to Journal" instead of filename
+        if (templateType === 'journal' && successMessage.includes('journal')) {
+          successMessage = '✅ Captured to Journal';
+        } else if (successMessage.includes('Successfully captured to')) {
+          // Extract just the filename for cleaner display
+          const filename = successMessage.replace('Successfully captured to ', '');
+          successMessage = `✅ Captured to ${filename}`;
+        } else {
+          successMessage = `✅ ${successMessage}`;
+        }
+        
+        setSuccess(successMessage);
+
+        if (templateType === 'journal') {
+          window.dispatchEvent(new CustomEvent('journalDocumentUpdated'));
+        }
+
         setTimeout(() => {
           onClose();
         }, 1000);
@@ -261,7 +290,7 @@ const OrgQuickCapture = ({ open, onClose }) => {
           onKeyDown={handleContentKeyDown}
           placeholder={
             templateType === 'todo' ? 'What needs to be done?' :
-            templateType === 'journal' ? 'What happened today?' :
+            templateType === 'journal' ? 'What happened today? Use %T (date+time), %t (date), %<%I:%M %p> (time e.g. 02:30 PM)' :
             templateType === 'meeting' ? 'Meeting topic or title' :
             'Quick note...'
           }
@@ -275,10 +304,11 @@ const OrgQuickCapture = ({ open, onClose }) => {
           <TextField
             fullWidth
             size="small"
-            label="Tags (press Enter to add)"
+            label="Tags (press Enter to add, Ctrl+Enter to capture)"
             value={tagInput}
             onChange={(e) => setTagInput(e.target.value)}
             onKeyPress={handleTagKeyPress}
+            onKeyDown={handleTagKeyDown}
             placeholder="work, urgent, review..."
             disabled={capturing}
           />
@@ -296,6 +326,22 @@ const OrgQuickCapture = ({ open, onClose }) => {
             </Box>
           )}
         </Box>
+        
+        {/* Date Picker (for Journal) */}
+        {templateType === 'journal' && (
+          <TextField
+            fullWidth
+            type="date"
+            label="Entry Date"
+            value={entryDate}
+            onChange={(e) => setEntryDate(e.target.value)}
+            InputLabelProps={{ shrink: true }}
+            helperText="Select date for this journal entry (defaults to today)"
+            margin="normal"
+            sx={{ mb: 2 }}
+            disabled={capturing}
+          />
+        )}
         
         {/* Advanced Options (for TODO) */}
         {templateType === 'todo' && (
