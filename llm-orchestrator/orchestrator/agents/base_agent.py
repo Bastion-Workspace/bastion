@@ -512,7 +512,10 @@ class BaseAgent:
         return filtered
     
     def _extract_conversation_history(self, messages: List[Any], limit: int = 10) -> List[Dict[str, str]]:
-        """Extract conversation history from LangChain messages, filtering out large data URIs"""
+        """Extract conversation history from LangChain messages, filtering out large data URIs.
+        If limit <= 0, returns [] (avoids messages[-0:] giving all messages)."""
+        if not messages or limit <= 0:
+            return []
         try:
             history = []
             for msg in messages[-limit:]:

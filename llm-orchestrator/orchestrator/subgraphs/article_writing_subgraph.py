@@ -58,6 +58,7 @@ class ArticleWritingState(TypedDict, total=False):
     editor_content: str
     frontmatter: Dict[str, Any]
     editing_mode: bool
+    analysis_only: bool  # Read-only analysis mode (no editing, no generation)
     structured_edit: Optional[Dict[str, Any]]
     editor_operations: List[Dict[str, Any]]
     content_block: str
@@ -75,6 +76,183 @@ class ArticleWritingState(TypedDict, total=False):
     reference_bodies: List[str]
     reference_titles: List[str]
     manuscript_content: str
+    draft_messages: List[Any]
+    draft_article_text: str
+    refinement_messages: List[Any]
+
+
+# ============================================
+# Two-pass article generation (draft -> refine with style/outline)
+# ============================================
+
+def _route_article_generation_mode(state: Dict[str, Any]) -> str:
+    """Route after extract_content: two-pass when user says 'two-pass' and not analysis-only."""
+    if state.get("analysis_only"):
+        return "generate_article"
+    user_message = (state.get("user_message") or "").lower()
+    if "two-pass" in user_message or "two pass" in user_message:
+        logger.info("Article two-pass generation activated (user requested two-pass)")
+        return "build_article_draft_prompt"
+    return "generate_article"
+
+
+def _build_article_draft_system_prompt(persona: Optional[Dict[str, Any]] = None) -> str:
+    """System prompt for Pass 1: content-only, no JSON."""
+    base = (
+        "You are a professional long-form article writer. Synthesize the provided sources into a cohesive article.\n\n"
+        "=== OUTPUT INSTRUCTION ===\n"
+        "Output ONLY the article text. Start with # Title, then ## sections as indicated in the outline. "
+        "No JSON, no metadata, no code fences, no explanation. Just the article markdown.\n\n"
+        "Follow the NON-FICTION OUTLINE structure and STYLE GUIDE. Ground content in the provided references. "
+        "Use the target length, tone, and style from the user instruction.\n"
+    )
+    if persona:
+        persona_name = persona.get("ai_name", "")
+        if persona_name:
+            base += f"\nYou are {persona_name}."
+        persona_style = persona.get("persona_style", "professional")
+        if persona_style and persona_style != "professional":
+            base += f" Adopt a {persona_style} tone."
+    return base
+
+
+async def _build_article_draft_prompt_node(state: ArticleWritingState) -> Dict[str, Any]:
+    """Build messages for Pass 1: draft article only (raw text, no JSON)."""
+    try:
+        content_block = state.get("content_block", "")
+        task_block = state.get("task_block", "")
+        if not content_block and not task_block:
+            return {"draft_messages": [], "error": "No content for draft", "task_status": "error", **preserve_critical_state(state)}
+        system_prompt = _build_article_draft_system_prompt(state.get("persona"))
+        messages = [SystemMessage(content=system_prompt)]
+        if content_block:
+            messages.append(HumanMessage(content=content_block))
+        draft_task = (task_block or "").strip() + "\n\nOutput raw article text only (no JSON, no code fences)."
+        messages.append(HumanMessage(content=draft_task))
+        return {"draft_messages": messages, **preserve_critical_state(state)}
+    except Exception as e:
+        logger.error("Failed to build article draft prompt: %s", e)
+        return {"draft_messages": [], "error": str(e), "task_status": "error", **preserve_critical_state(state)}
+
+
+async def _call_article_draft_llm_node(
+    state: ArticleWritingState,
+    llm_factory: Callable,
+) -> Dict[str, Any]:
+    """Pass 1: generate draft article at temperature 0.6 (raw text)."""
+    try:
+        draft_messages = state.get("draft_messages", [])
+        if not draft_messages:
+            return {"draft_article_text": "", "error": "No draft messages", "task_status": "error", **preserve_critical_state(state)}
+        llm = llm_factory(temperature=0.6, state=state)
+        response = await llm.ainvoke(draft_messages)
+        raw = response.content if hasattr(response, "content") else str(response)
+        draft_article_text = raw.strip()
+        if draft_article_text.startswith("```"):
+            match = re.match(r"^```(?:\w*)\n?(.*?)```", draft_article_text, re.DOTALL)
+            if match:
+                draft_article_text = match.group(1).strip()
+        return {"draft_article_text": draft_article_text, **preserve_critical_state(state)}
+    except Exception as e:
+        logger.error("Article draft LLM failed: %s", e)
+        return {"draft_article_text": "", "error": str(e), "task_status": "error", **preserve_critical_state(state)}
+
+
+def _build_article_refinement_system_prompt(editing_mode: bool) -> str:
+    """System prompt for Pass 2: refine draft and output required JSON."""
+    if editing_mode:
+        return (
+            "You are refining a first draft of article edits. Check style guide and outline compliance, remove redundancy, tighten. "
+            "Then output the same JSON format as required for editing:\n"
+            '{"summary": "...", "operations": [...]}\n'
+            "Use EXACT original_text from the document. Output valid JSON only, no markdown fences."
+        )
+    return (
+        "You are refining a first draft article. Check style guide and outline compliance, remove redundancy, tighten prose. "
+        "Then output the same JSON format as required:\n"
+        '{"task_status": "complete", "article_text": "# Title\\n\\n## Section...\\n\\nRefined article markdown", "metadata": {"word_count": N, "reading_time_minutes": N, "section_count": N}}\n'
+        "Output valid JSON only, no markdown fences."
+    )
+
+
+async def _build_article_refinement_prompt_node(state: ArticleWritingState) -> Dict[str, Any]:
+    """Build Pass 2 messages: include style guide, outline, references, and draft so refinement can verify compliance."""
+    try:
+        draft_article_text = state.get("draft_article_text", "")
+        if not draft_article_text:
+            return {"refinement_messages": [], "error": "No draft article", "task_status": "error", **preserve_critical_state(state)}
+        editing_mode = state.get("editing_mode", False)
+        ref_parts = []
+        style_body = state.get("style_body") or ""
+        if style_body:
+            ref_parts.append("=== STYLE GUIDE (CHECK COMPLIANCE) ===\n" + style_body + "\n\n")
+        nfoutline_body = state.get("nfoutline_body") or ""
+        if nfoutline_body:
+            ref_parts.append("=== NON-FICTION OUTLINE (VERIFY STRUCTURE AND BEATS) ===\n" + nfoutline_body + "\n\n")
+        outline_sections_list = state.get("outline_sections_list") or []
+        if outline_sections_list:
+            ref_parts.append("Section order: " + ", ".join(outline_sections_list) + "\n\n")
+        reference_bodies = state.get("reference_bodies") or []
+        reference_titles = state.get("reference_titles") or []
+        titles = reference_titles if reference_titles and len(reference_titles) >= len(reference_bodies) else [f"Reference {i+1}" for i in range(len(reference_bodies))]
+        for body, title in zip(reference_bodies, titles):
+            ref_parts.append(f"=== REFERENCE: {title} ===\n{body}\n\n")
+        ref_block = "".join(ref_parts)
+        system_prompt = _build_article_refinement_system_prompt(editing_mode)
+        user_content = (
+            ref_block
+            + "=== FIRST DRAFT (REFINE THIS) ===\n\n"
+            + draft_article_text
+            + "\n\n=== END FIRST DRAFT ===\n\n"
+            + "Refine the above draft against the Style Guide and Outline above. Then output the required JSON (same format as single-pass). "
+            "Your response must be JSON only, no markdown fences."
+        )
+        refinement_messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_content),
+        ]
+        return {"refinement_messages": refinement_messages, **preserve_critical_state(state)}
+    except Exception as e:
+        logger.error("Failed to build article refinement prompt: %s", e)
+        return {"refinement_messages": [], "error": str(e), "task_status": "error", **preserve_critical_state(state)}
+
+
+async def _call_article_refinement_llm_node(
+    state: ArticleWritingState,
+    llm_factory: Callable,
+) -> Dict[str, Any]:
+    """Pass 2: refine draft at temperature 0.3 and parse into same state shape as generate_article."""
+    try:
+        refinement_messages = state.get("refinement_messages", [])
+        if not refinement_messages:
+            return {"error": "No refinement messages", "task_status": "error", **preserve_critical_state(state)}
+        llm = llm_factory(temperature=0.3, state=state)
+        response = await llm.ainvoke(refinement_messages)
+        content = response.content if hasattr(response, "content") else str(response)
+        editing_mode = state.get("editing_mode", False)
+        if editing_mode:
+            structured_edit = _parse_editing_response(content)
+            return {
+                "structured_edit": structured_edit,
+                "task_status": "complete",
+                **preserve_critical_state(state),
+            }
+        article_text, metadata = _parse_response(content)
+        return {
+            "response": {
+                "messages": [AIMessage(content=article_text)],
+                "agent_results": {"agent_type": "article_writing", "success": True, "metadata": metadata, "is_complete": True},
+                "is_complete": True,
+            },
+            "article_text": article_text,
+            "metadata_result": metadata,
+            "task_status": "complete",
+            "manuscript_content": article_text,
+            **preserve_critical_state(state),
+        }
+    except Exception as e:
+        logger.error("Article refinement LLM failed: %s", e)
+        return {"error": str(e), "task_status": "error", **preserve_critical_state(state)}
 
 
 # ============================================
@@ -263,6 +441,44 @@ def _build_system_prompt(persona: Optional[Dict[str, Any]] = None, editing_mode:
     return base
 
 
+def _build_analysis_system_prompt(persona: Optional[Dict[str, Any]] = None) -> str:
+    """Build system prompt for read-only content analysis mode."""
+    base = (
+        "You are a professional content analyst and editorial consultant. "
+        "Your role is to analyze non-fiction documents and provide thoughtful, actionable feedback. "
+        "You do NOT edit or rewrite the document — you provide analysis only.\n\n"
+        "=== ANALYSIS GUIDELINES ===\n"
+        "STRUCTURE ASSESSMENT:\n"
+        "- Evaluate the overall organization and flow\n"
+        "- Identify whether sections follow a logical progression\n"
+        "- Check for a clear thesis/central argument\n"
+        "- Assess introduction hook and conclusion strength\n\n"
+        "CONTENT ASSESSMENT:\n"
+        "- Identify gaps in coverage or missing perspectives\n"
+        "- Flag unsupported claims or weak arguments\n"
+        "- Note areas where more evidence, examples, or data would strengthen the piece\n"
+        "- Evaluate source integration and citation quality\n\n"
+        "STYLE AND TONE:\n"
+        "- Assess consistency of voice throughout\n"
+        "- Note any tonal shifts or inconsistencies\n"
+        "- Evaluate readability and audience appropriateness\n\n"
+        "RESPONSE FORMAT:\n"
+        "- Use clear section headers (##) for each aspect of your analysis\n"
+        "- Be specific — reference particular sections, paragraphs, or passages\n"
+        "- Prioritize feedback: lead with the most impactful observations\n"
+        "- Balance strengths and weaknesses — acknowledge what works well\n"
+        "- Keep analysis proportional to the document (don't write more than the article)\n"
+    )
+    if persona:
+        persona_name = persona.get("ai_name", "")
+        if persona_name:
+            base += f"\n\nYou are {persona_name}."
+        persona_style = persona.get("persona_style", "professional")
+        if persona_style and persona_style != "professional":
+            base += f"\n\nAdopt a {persona_style} tone and style."
+    return base
+
+
 def _build_task_block(
     user_message: str,
     target_length: int,
@@ -402,21 +618,28 @@ async def _prepare_context_node(state: ArticleWritingState) -> Dict[str, Any]:
         latest_message = messages[-1] if messages else None
         user_message = latest_message.content if hasattr(latest_message, "content") else ""
         editor_content = active_editor.get("content", "")
+        # Check if this is a content_analysis (read-only) request
+        skill_name = (state.get("metadata") or {}).get("skill_name", "")
+        analysis_only = skill_name == "content_analysis"
         editing_mode = False
-        if editor_content:
+        if not analysis_only and editor_content:
             fm_match = re.match(r'^---\s*\n[\s\S]*?\n---\s*\n', editor_content)
             if fm_match:
                 body_content = editor_content[fm_match.end() :].strip()
                 editing_mode = len(body_content) > 0
             else:
                 editing_mode = len(editor_content.strip()) > 0
-        logger.info(f"Article writing mode: {'EDITING' if editing_mode else 'GENERATION'}")
+        if analysis_only:
+            logger.info("Article writing mode: ANALYSIS (read-only, no edits)")
+        else:
+            logger.info(f"Article writing mode: {'EDITING' if editing_mode else 'GENERATION'}")
         persona = (state.get("metadata") or {}).get("persona")
         return {
             "user_message": user_message,
             "editor_content": editor_content,
             "frontmatter": frontmatter,
             "editing_mode": editing_mode,
+            "analysis_only": analysis_only,
             "editor_operations": [],
             "structured_edit": None,
             "persona": persona,
@@ -510,6 +733,32 @@ async def _extract_content_node(state: ArticleWritingState) -> Dict[str, Any]:
         editor_content = state.get("editor_content", "")
         frontmatter = state.get("frontmatter", {}) or {}
         persona = state.get("persona")
+        analysis_only = state.get("analysis_only", False)
+
+        # Analysis-only mode: simple prompt with full document content
+        if analysis_only:
+            logger.info("Building analysis-only prompt (no editing/generation)")
+            system_prompt = _build_analysis_system_prompt(persona)
+            # Strip frontmatter for the content block
+            fm_match = re.match(r'^---\s*\n[\s\S]*?\n---\s*\n', editor_content)
+            body_content = editor_content[fm_match.end():] if fm_match else editor_content
+            # Include outline context if loaded
+            nfoutline_body = state.get("nfoutline_body")
+            outline_context = ""
+            if nfoutline_body:
+                outline_context = f"\n\n=== DOCUMENT OUTLINE ===\n{nfoutline_body}\n=== END OUTLINE ===\n"
+            content_block = (
+                f"=== DOCUMENT CONTENT ({len(body_content)} characters) ==={outline_context}\n"
+                f"{body_content}\n\n=== END DOCUMENT ===\n"
+            )
+            task_block = f"USER REQUEST: {user_message}"
+            return {
+                "content_block": content_block,
+                "system_prompt": system_prompt,
+                "task_block": task_block,
+                **preserve_critical_state(state),
+            }
+
         target_length = int(frontmatter.get("target_length_words", 2500))
         tone = str(frontmatter.get("tone", "conversational")).lower()
         style = str(frontmatter.get("style", "commentary")).lower()
@@ -560,8 +809,9 @@ async def _generate_article_node_impl(
     llm_factory: Callable,
     get_datetime_context: Callable,
 ) -> Dict[str, Any]:
-    """Generate article or edit operations using LLM."""
+    """Generate article, edit operations, or analysis response using LLM."""
     try:
+        analysis_only = state.get("analysis_only", False)
         editing_mode = state.get("editing_mode", False)
         editor_content = state.get("editor_content", "")
         content_block = state.get("content_block", "")
@@ -575,6 +825,19 @@ async def _generate_article_node_impl(
         ]
         if content_block:
             messages.append(HumanMessage(content=content_block))
+
+        # Analysis-only mode: conversational response, no edit operations
+        if analysis_only:
+            messages.append(HumanMessage(content=task_block))
+            response = await llm.ainvoke(messages)
+            analysis_text = response.content if hasattr(response, "content") else str(response)
+            logger.info(f"Analysis response generated: {len(analysis_text)} chars")
+            return {
+                "article_text": analysis_text,
+                "task_status": "complete",
+                **preserve_critical_state(state),
+            }
+
         if editing_mode and editor_content:
             fm_match = re.match(r'^---\s*\n[\s\S]*?\n---\s*\n', editor_content)
             body_content = editor_content[fm_match.end() :] if fm_match else editor_content
@@ -694,6 +957,22 @@ async def _format_response_node(state: ArticleWritingState) -> Dict[str, Any]:
                 "task_status": state.get("task_status"),
                 **preserve_critical_state(state),
             }
+
+        # Analysis-only mode: conversational response, no editor operations
+        if state.get("analysis_only"):
+            analysis_text = state.get("article_text", "")
+            result = AgentResponse(
+                response=analysis_text,
+                task_status=TaskStatus.COMPLETE,
+                agent_type="content_analysis",
+                timestamp=datetime.now().isoformat(),
+            )
+            return {
+                "response": result.model_dump(exclude_none=True),
+                "task_status": "complete",
+                **preserve_critical_state(state),
+            }
+
         editing_mode = state.get("editing_mode", False)
         editor_operations = state.get("editor_operations", [])
         structured_edit = state.get("structured_edit", {}) or {}
@@ -749,7 +1028,11 @@ async def _format_response_node(state: ArticleWritingState) -> Dict[str, Any]:
 
 
 def _route_after_generation(state: ArticleWritingState) -> str:
-    """Route after generation: proofreading intent or resolve/format."""
+    """Route after generation: analysis → format, proofreading intent, or resolve/format."""
+    # Analysis-only mode: skip all editing/proofreading, go straight to format
+    if state.get("analysis_only"):
+        logger.info("Analysis-only mode - routing to format_response (no edits)")
+        return "format_response"
     query = (state.get("query", "") or "").lower()
     user_message = (state.get("user_message", "") or "").lower()
     proofreading_keywords = [
@@ -784,10 +1067,20 @@ def build_article_writing_subgraph(
     async def generate_node(state: Dict[str, Any]) -> Dict[str, Any]:
         return await _generate_article_node_impl(state, llm_factory, get_datetime_context)
 
+    async def call_draft_llm_node(state: Dict[str, Any]) -> Dict[str, Any]:
+        return await _call_article_draft_llm_node(state, llm_factory)
+
+    async def call_refinement_llm_node(state: Dict[str, Any]) -> Dict[str, Any]:
+        return await _call_article_refinement_llm_node(state, llm_factory)
+
     workflow.add_node("prepare_context", _prepare_context_node)
     workflow.add_node("load_references", _load_references_node)
     workflow.add_node("extract_content", _extract_content_node)
     workflow.add_node("generate_article", generate_node)
+    workflow.add_node("build_article_draft_prompt", _build_article_draft_prompt_node)
+    workflow.add_node("call_article_draft_llm", call_draft_llm_node)
+    workflow.add_node("build_article_refinement_prompt", _build_article_refinement_prompt_node)
+    workflow.add_node("call_article_refinement_llm", call_refinement_llm_node)
     workflow.add_node("proofreading", proofreading_subgraph)
     workflow.add_node("resolve_operations", _resolve_operations_node)
     workflow.add_node("format_response", _format_response_node)
@@ -804,9 +1097,28 @@ def build_article_writing_subgraph(
         {"format_response": "format_response", "load_references": "load_references"},
     )
     workflow.add_edge("load_references", "extract_content")
-    workflow.add_edge("extract_content", "generate_article")
+    workflow.add_conditional_edges(
+        "extract_content",
+        _route_article_generation_mode,
+        {
+            "build_article_draft_prompt": "build_article_draft_prompt",
+            "generate_article": "generate_article",
+        },
+    )
+    workflow.add_edge("build_article_draft_prompt", "call_article_draft_llm")
+    workflow.add_edge("call_article_draft_llm", "build_article_refinement_prompt")
+    workflow.add_edge("build_article_refinement_prompt", "call_article_refinement_llm")
     workflow.add_conditional_edges(
         "generate_article",
+        _route_after_generation,
+        {
+            "proofreading": "proofreading",
+            "resolve_operations": "resolve_operations",
+            "format_response": "format_response",
+        },
+    )
+    workflow.add_conditional_edges(
+        "call_article_refinement_llm",
         _route_after_generation,
         {
             "proofreading": "proofreading",

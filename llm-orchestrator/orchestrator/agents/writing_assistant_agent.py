@@ -459,7 +459,9 @@ class WritingAssistantAgent(BaseAgent):
             
             # Get checkpoint config (handles thread_id from conversation_id/user_id)
             config = self._get_checkpoint_config(metadata)
-            
+            # Fiction two-pass chapter generation adds 4 nodes; full path can exceed default recursion_limit (25)
+            config["recursion_limit"] = 40
+
             # Prepare new messages (current query)
             new_messages = self._prepare_messages_with_query(messages, query)
             
@@ -486,7 +488,7 @@ class WritingAssistantAgent(BaseAgent):
             #   shared_memory = metadata.get("shared_memory", {})  # Start with new
             #   shared_memory.update(existing_shared_memory)  # Old overwrites new!
             #
-            # See dev-notes/AGENT_INTEGRATION_GUIDE.md for details
+            # See docs/dev-notes/AGENT_INTEGRATION_GUIDE.md for details
             shared_memory_merged = existing_shared_memory.copy()
             shared_memory_merged.update(metadata.get("shared_memory", {}) or {})  # New data (including updated active_editor) takes precedence
             

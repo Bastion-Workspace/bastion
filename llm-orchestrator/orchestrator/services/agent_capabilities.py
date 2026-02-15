@@ -237,7 +237,7 @@ AGENT_CAPABILITIES = {
         'context_boost': 0,
         'requires_editor': False
     },
-    # technical_hyperspace_agent removed - implementation plan in dev-notes/TECHNICAL_HYPERSPACE_IMPLEMENTATION.md
+    # technical_hyperspace_agent removed - implementation plan in docs/dev-notes/TECHNICAL_HYPERSPACE_IMPLEMENTATION.md
     # article/substack/blog only via writing_assistant_agent → article_writing_subgraph
     'podcast_script_agent': {
         'domains': ['content', 'writing', 'podcast'],

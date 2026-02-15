@@ -17,7 +17,6 @@ import logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from orchestrator.utils.tool_vector_store import get_tool_vector_store
-from orchestrator.tools.tool_pack_registry import get_all_tools
 
 logging.basicConfig(
     level=logging.INFO,

@@ -133,6 +133,12 @@ const TabbedContentManager = forwardRef((props, ref) => {
         ));
     };
 
+    const updateFileGraphTabState = (tabId, updates) => {
+        setTabs(prevTabs => prevTabs.map(tab =>
+            tab.id === tabId ? { ...tab, ...updates } : tab
+        ));
+    };
+
     const closeTab = (tabId, options = {}) => {
         const { skipUnsavedCheck = false } = options;
         const tab = tabs.find(t => t.id === tabId);
@@ -457,6 +463,13 @@ const TabbedContentManager = forwardRef((props, ref) => {
                         onOpenDocument={(docId, docName) => openDocument(docId, docName)}
                         scope={tab.scope}
                         folderId={tab.folderId}
+                        persistedState={{
+                            scope: tab.scope,
+                            folderId: tab.folderId,
+                            searchFilter: tab.searchFilter,
+                            viewport: tab.viewport,
+                        }}
+                        onStateChange={(state) => updateFileGraphTabState(tab.id, state)}
                     />
                 );
             default:

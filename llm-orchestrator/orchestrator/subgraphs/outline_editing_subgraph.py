@@ -37,6 +37,7 @@ from orchestrator.utils.writing_subgraph_utilities import (
     create_writing_error_response,
     extract_user_request,
     paragraph_bounds,
+    sanitize_ai_response_for_history,
     strip_frontmatter_block,
     slice_hash,
     build_response_text_for_question,
@@ -263,6 +264,8 @@ def _extract_conversation_history(messages: List[Any], limit: int = 10) -> List[
             if hasattr(msg, 'content'):
                 role = "assistant" if hasattr(msg, 'type') and msg.type == "ai" else "user"
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                if role == "assistant":
+                    content = sanitize_ai_response_for_history(content)
                 history.append({
                     "role": role,
                     "content": content
@@ -358,7 +361,7 @@ def _build_system_prompt() -> str:
         "  - Reference major events from previous books when relevant to current outline\n"
         "  - Ensure timeline consistency (character ages, years, historical events)\n"
         "  - Maintain continuity with established series events\n"
-        "  - Example: If series timeline says 'Franklin died in 1962 (Book 12)', ensure later books reflect this\n\n"
+        "  - Example: If series timeline says 'The protagonist died in Book 12 (1962)', ensure later books reflect this\n\n"
         "- **FOR EMPTY FILES**: When the outline is empty (only frontmatter), ASK QUESTIONS FIRST before creating content\n"
         "  * Don't create the entire outline structure at once\n"
         "  * Ask about story genre, main characters, key plot points, or chapter count\n"
@@ -388,7 +391,7 @@ def _build_system_prompt() -> str:
         "OUTLINE STRUCTURE:\n"
         "# Overall Synopsis (high-level story summary - major elements only)\n"
         "# Notes (rules, themes, worldbuilding)\n"
-        "# Characters (BRIEF list only: names and roles like 'Protagonist: John', 'Antagonist: Sarah')\n"
+        "# Characters (BRIEF list only: names and roles like 'Protagonist: [name]', 'Antagonist: [name]')\n"
         "  **CRITICAL**: Character DETAILS belong in character profile files, NOT in the outline!\n"
         "  The outline should only have brief character references (name + role), not full profiles.\n"
         "  Do NOT copy character descriptions, backstories, or traits into the outline.\n"
@@ -408,6 +411,7 @@ def _build_system_prompt() -> str:
         "- If the outline frontmatter defines 'tracked_items', each chapter after Chapter 1 should include a status block\n"
         "- **CRITICAL PLACEMENT**: Status blocks appear IMMEDIATELY after the chapter heading (## Chapter N), BEFORE the summary paragraph\n"
         "- **CRITICAL MEANING**: Status represents the state of tracked items AT THE BEGINNING of the chapter (based on previous chapter's events)\n"
+        "- **NEVER derive status from the current chapter's beats**: Status for Chapter N must reflect ONLY where things stood at the END of Chapter N-1. Do not include any event or state that first appears in Chapter N's beats.\n"
         "- Format:\n"
         "  ### Status\n"
         "  - [Item name]: [State at beginning of chapter]\n"
@@ -455,27 +459,27 @@ def _build_system_prompt() -> str:
         "- Example format for Chapter 2+ (with Status and Pacing):\n"
         "  ## Chapter 2\n"
         "  ### Status\n"
-        "  - Clarissa: Went home in chapter 1\n"
-        "  - Benedict: At the warehouse\n"
+        "  - Alex: Went home in chapter 1\n"
+        "  - Sam: At the warehouse\n"
         "  ### Pacing\n"
         "  FROM: The contemplative calm of Chapter 1's resolution\n"
         "  TO: Rising tension as discoveries create new urgency\n"
         "  TECHNIQUE: Start with lingering calm, introduce first unsettling detail midway, accelerate toward revelation cliffhanger\n"
         "  ### Summary\n"
-        "  Benedict uncovers evidence linking the warehouse to Clarissa's past while Clarissa finds a hidden letter that changes everything she thought she knew.\n"
+        "  Sam uncovers evidence linking the warehouse to Alex's past while Alex finds a hidden letter that changes everything they thought they knew.\n"
         "  ### Beats\n"
-        "  - Benedict interviews witness at warehouse\n"
-        "  - Clarissa discovers hidden letter in library\n"
+        "  - Sam interviews witness at warehouse\n"
+        "  - Alex discovers hidden letter in library\n"
         "  - [additional beats...]\n\n"
         "- Example format for Chapter 1 (with optional status, no pacing needed):\n"
         "  ## Chapter 1\n"
         "  ### Status\n"
         "  - [Can be manually filled in for series continuity or initial state]\n"
         "  ### Summary\n"
-        "  Clarissa discovers the truth about her past while Benedict investigates the warehouse explosion. Tensions rise as both characters uncover secrets that will change everything.\n"
+        "  Alex discovers the truth about their past while Sam investigates the warehouse explosion. Tensions rise as both characters uncover secrets that will change everything.\n"
         "  ### Beats\n"
-        "  - Clarissa receives mysterious letter\n"
-        "  - Benedict arrives at warehouse crime scene\n"
+        "  - Alex receives mysterious letter\n"
+        "  - Sam arrives at warehouse crime scene\n"
         "  - [additional beats...]\n\n"
         "CHAPTER SUMMARY REQUIREMENTS (CRITICAL):\n"
         "- Each chapter MUST have a '### Summary' header followed by a BRIEF, HIGH-LEVEL summary paragraph (3-5 sentences MAXIMUM)\n"
@@ -1323,8 +1327,10 @@ async def generate_status_summary_node(
                     previous_status = None
                     previous_chapter_content = None
                 
-                # Build prompt
-                prompt = f"""Analyze the chapter content and generate a status summary for tracked items.
+                # Build prompt: lead with "previous chapter only" rule so status is never derived from current chapter
+                prompt = f"""Generate a status summary for Chapter {chapter_num}.
+
+**RULE (NON-NEGOTIABLE)**: Status for Chapter {chapter_num} = state of tracked items AT THE BEGINNING of the chapter, i.e. where the PREVIOUS chapter left off. Every status line must be derivable ONLY from the previous chapter (or earlier). Do NOT include any event or state that first appears in Chapter {chapter_num}'s beats.
 
 **CHAPTER NUMBER**: {chapter_num}
 
@@ -1334,62 +1340,52 @@ async def generate_status_summary_node(
                     if items:
                         prompt += f"- {category.capitalize()}: {', '.join(items)}\n"
                 
+                prompt += "\n**SOURCE OF TRUTH FOR STATUS: PREVIOUS CHAPTER ONLY**\n"
                 if previous_chapter_content:
                     prompt += f"\n**PREVIOUS CHAPTER (Chapter {chapter_num - 1}) - WHAT ACTUALLY HAPPENED**:\n{previous_chapter_content}\n"
-                    prompt += f"\n**NOTE**: The status for Chapter {chapter_num} should reflect the END STATE of Chapter {chapter_num - 1}.\n"
-                    prompt += f"Read the beats above to understand where things stood when Chapter {chapter_num - 1} ended.\n"
+                    prompt += f"\n**NOTE**: The status for Chapter {chapter_num} must reflect the END STATE of Chapter {chapter_num - 1}. Read the beats above to see where things stood when Chapter {chapter_num - 1} ended. That is the only source for status content.\n"
                     if previous_status:
                         prompt += f"\n**PREVIOUS CHAPTER'S STATUS BLOCK** (Chapter {chapter_num - 1}):\n{previous_status}\n"
-                        prompt += f"(This shows what the beginning state was for Chapter {chapter_num - 1})\n"
+                        prompt += f"(Beginning state for Chapter {chapter_num - 1}; use it to carry forward unchanged items if still relevant.)\n"
                 elif chapter_num == 1:
-                    prompt += f"\n**PREVIOUS CHAPTER**: None (this is Chapter 1 - initial state)\n"
-                    prompt += f"**NOTE**: For Chapter 1, status should describe the initial state at story start.\n"
-                    prompt += f"This is useful for series continuity or stories beginning mid-action.\n"
+                    prompt += f"\n**PREVIOUS CHAPTER**: None (this is Chapter 1 - initial state). For Chapter 1, status should describe the initial state at story start (e.g. series continuity or stories beginning mid-action).\n"
                 else:
-                    prompt += f"\n**PREVIOUS CHAPTER**: None (Chapter {chapter_num - 1} doesn't exist yet)\n"
+                    prompt += f"\n**PREVIOUS CHAPTER**: None (Chapter {chapter_num - 1} doesn't exist yet). Infer initial state from context; do NOT use Chapter {chapter_num}'s beats.\n"
                 
-                prompt += f"\n**CURRENT CHAPTER CONTENT** (Chapter {chapter_num}):\n{chapter_outline}\n"
-                prompt += f"\n**CRITICAL: CURRENT CHAPTER CONTENT IS FOR CONTEXT ONLY**\n"
-                prompt += f"- The content above shows what WILL happen in Chapter {chapter_num}\n"
-                prompt += f"- These events have NOT happened yet - they will happen IN this chapter\n"
-                prompt += f"- **ABSOLUTE PROHIBITION**: DO NOT include ANY events from the current chapter content in the status!\n"
-                prompt += f"- Use the current chapter content ONLY to identify which tracked items are relevant\n"
-                prompt += f"- The status should reflect the state BEFORE these events occur\n\n"
+                prompt += f"\n**CURRENT CHAPTER CONTENT** (Chapter {chapter_num}) - **FOR RELEVANCE ONLY, NOT FOR STATUS TEXT**:\n{chapter_outline}\n"
+                prompt += f"\nUse the current chapter content ONLY to decide which tracked items to include (e.g. who appears in this chapter). Do NOT derive any status description from the current chapter's beats. Those events have not happened yet; status describes the state BEFORE they occur.\n\n"
                 
                 if previous_chapter_content:
                     prompt += f"**HOW TO GENERATE CORRECT STATUS**:\n"
-                    prompt += f"1. Read the PREVIOUS CHAPTER (Chapter {chapter_num - 1}) beats to see what happened\n"
-                    prompt += f"2. Identify where each tracked item ended up at the END of Chapter {chapter_num - 1}\n"
-                    prompt += f"3. That END state from Chapter {chapter_num - 1} becomes the BEGINNING state for Chapter {chapter_num}\n"
-                    prompt += f"4. Look at CURRENT CHAPTER only to see which items will be relevant (don't use its events!)\n"
-                    prompt += f"5. Write status describing where things stood when Chapter {chapter_num} STARTS\n\n"
+                    prompt += f"1. Read ONLY the PREVIOUS CHAPTER (Chapter {chapter_num - 1}) to see what happened.\n"
+                    prompt += f"2. For each tracked item, determine where it ended up at the END of Chapter {chapter_num - 1}. That is the status line.\n"
+                    prompt += f"3. Use CURRENT CHAPTER only to decide which items to list (relevance); do not use its events for any status text.\n"
+                    prompt += f"4. If an item was in the previous chapter's status and is still active, carry it forward (optionally with \"(ongoing)\").\n\n"
                 else:
                     prompt += f"**HOW TO GENERATE CORRECT STATUS (No Previous Chapter)**:\n"
-                    prompt += f"1. Since there's no Chapter {chapter_num - 1}, infer the initial state from context\n"
-                    prompt += f"2. DO NOT use events from Chapter {chapter_num}'s beats - those haven't happened yet!\n"
-                    prompt += f"3. Describe the state BEFORE Chapter {chapter_num}'s events begin\n\n"
+                    prompt += f"1. Infer initial state from context only. Do NOT use events from Chapter {chapter_num}'s beats.\n"
+                    prompt += f"2. Describe the state BEFORE Chapter {chapter_num}'s events begin.\n\n"
                 
                 prompt += """
-**CRITICAL: STATUS REPRESENTS BEGINNING STATE**
-- The status block describes the state of tracked items AT THE BEGINNING of this chapter
-- It reflects what happened in PREVIOUS chapters, not what happens IN this chapter
-- The status is a snapshot of where things stand when this chapter STARTS (before any events in this chapter)
+**CRITICAL: STATUS = BEGINNING OF CHAPTER = WHERE PREVIOUS CHAPTER LEFT OFF**
+- Status is the state of tracked items when this chapter STARTS (before any events in this chapter).
+- It reflects ONLY what happened in PREVIOUS chapters, never what happens IN this chapter.
 
 **CONCRETE EXAMPLE**:
-- Chapter 3 beats say: "Benedict is murdered by Archibald at the warehouse"
-- Chapter 4 status should say: "Benedict: Murdered by Archibald at warehouse in Chapter 3"
-- Chapter 4 status should NOT say: "Benedict: Alive at warehouse" (that was Chapter 3's beginning state)
+- Chapter 3 beats say: "Sam is murdered by Jordan at the warehouse"
+- Chapter 4 status should say: "Sam: Murdered by Jordan at warehouse in Chapter 3"
+- Chapter 4 status should NOT say: "Sam: Alive at warehouse" (that was Chapter 3's beginning state)
 - Chapter 4 status should NOT include anything from Chapter 4's beats!
 
 **WRONG EXAMPLE** (DO NOT DO THIS):
-- Chapter 2 beats say: "Jack drinks drugged brandy and falls into deep sleep"
-- Chapter 2 status says: "Jack: In bedroom after drinking drugged brandy, now in deep sleep" ❌ WRONG!
+- Chapter 2 beats say: "Alex drinks drugged brandy and falls into deep sleep"
+- Chapter 2 status says: "Alex: In bedroom after drinking drugged brandy, now in deep sleep" ❌ WRONG!
 - This describes the END of Chapter 2, not the BEGINNING!
 
 **CORRECT EXAMPLE**:
-- Chapter 1 beats end with: "Jack and Reya arrive at castle, are greeted by Dracula"  
-- Chapter 2 status should say: "Jack: Arrived at castle in Chapter 1, currently in guest quarters" ✅ CORRECT!
-- This describes where Jack is at the START of Chapter 2, based on Chapter 1's ending
+- Chapter 1 beats end with: "Alex and Sam arrive at castle, are greeted by Jordan"
+- Chapter 2 status should say: "Alex: Arrived at castle in Chapter 1, currently in guest quarters" ✅ CORRECT!
+- This describes where Alex is at the START of Chapter 2, based on Chapter 1's ending
 
 **TASK**: Generate a status summary for tracked items that are:
 1. Relevant to this chapter (will be mentioned or affected - use current chapter content to identify these)
@@ -1398,7 +1394,7 @@ async def generate_status_summary_node(
 4. **CARRY FORWARD**: If a tracked item appeared in previous chapter's status and is still active/relevant, include it even if unchanged
    - This ensures the fiction agent always has context for tracked items
    - Relationships especially should be carried forward if they're ongoing
-   - Example: If "Clarissa-Benedict" was "Allies investigating together" in Chapter 2, and they're still working together in Chapter 3, include it as "Allies investigating together (ongoing)"
+   - Example: If "Alex-Sam" was "Allies investigating together" in Chapter 2, and they're still working together in Chapter 3, include it as "Allies investigating together (ongoing)"
 
 **STATUS FORMAT GUIDELINES**:
 - For characters: location at chapter start, state (alive/dead/injured), where they ended up in previous chapter
@@ -1415,21 +1411,19 @@ async def generate_status_summary_node(
 }
 
 **RULES**:
+- **EVERY status line must be derivable solely from the previous chapter (or earlier).** If a fact or event appears only in the current chapter's beats, it must NOT appear in the status. Status = where the previous chapter left off, not what happens in this chapter.
 - Include tracked items that are: (1) relevant to this chapter, OR (2) have changed, OR (3) should be carried forward from previous chapter
 - **CARRY FORWARD RULE**: If a tracked item was in the previous chapter's status and is still active/relevant, include it even if unchanged
-  - Relationships should be carried forward if they're ongoing (e.g., "Clarissa-Benedict: Allies (ongoing)")
-  - Characters should be carried forward if they're still part of the story (e.g., "Clarissa: At home (ongoing)")
-  - Locations should be carried forward if they're still relevant (e.g., "Warehouse: Under investigation (ongoing)")
-  - Items should be carried forward if they're still in play (e.g., "Artifact: In Clarissa's possession (ongoing)")
+- Relationships should be carried forward if they're ongoing (e.g., "Alex-Sam: Allies (ongoing)")
+- Characters should be carried forward if they're still part of the story (e.g., "Alex: At home (ongoing)")
+- Locations should be carried forward if they're still relevant (e.g., "Warehouse: Under investigation (ongoing)")
+- Items should be carried forward if they're still in play (e.g., "Artifact: In Alex's possession (ongoing)")
 - Keep status descriptions brief (one line per item)
 - Reference previous chapter numbers when relevant (e.g., "Went home in chapter 2")
 - Use "(ongoing)" or similar notation when carrying forward unchanged status
 - If no tracked items are relevant or need carrying forward, return empty array: {"status_items": []}
-- Be specific about what changed (e.g., "Murdered by Archibald in Chapter 3", not just "dead")
-- **ABSOLUTE PROHIBITION**: DO NOT include any events from the current chapter content in the status!
-- Status describes BEGINNING state, based ONLY on what happened in PREVIOUS chapters
-- Current chapter content shows what WILL happen - those events have NOT occurred yet
-- Status = state BEFORE current chapter events, based on previous chapter events
+- Be specific about what changed (e.g., "Murdered by Jordan in Chapter 3", not just "dead")
+- **ABSOLUTE PROHIBITION**: DO NOT include any events from the current chapter content in the status. Current chapter content shows what WILL happen; those events have NOT occurred yet. Status = state BEFORE current chapter events.
 """
                 
                 # Call LLM

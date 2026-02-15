@@ -23,10 +23,54 @@ import rehypeSanitize from 'rehype-sanitize';
 import { renderCitations } from '../../utils/chatUtils';
 import ExportButton from './ExportButton';
 import LessonPreviewCard from '../LessonPreviewCard';
+import ChartRenderer from './ChartRenderer';
 
 /** True if URL is an in-system document file (research result); needs auth and no Import. */
 const isDocumentFileUrl = (url) =>
   typeof url === 'string' && url.includes('/api/documents/') && url.includes('/file');
+
+/** Strip html:chart code blocks and preceding ## Chart: heading so markdown does not show raw HTML. */
+const stripChartCodeBlocks = (content) => {
+  if (!content || typeof content !== 'string') return content || '';
+  return content
+    .replace(/\n*## Chart: [^\n]+\n+\s*```html:chart\n[\s\S]*?```/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+};
+
+const parseJsonStringArray = (value) => {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.filter(Boolean);
+  if (typeof value !== 'string') return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+  } catch {
+    return [];
+  }
+};
+
+const formatDurationMs = (durationMs) => {
+  const ms = Number(durationMs);
+  if (!Number.isFinite(ms) || ms <= 0) return '';
+
+  const totalSeconds = Math.round(ms) / 1000;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = Math.round(totalSeconds % 60);
+  return `${minutes}m ${seconds}s`;
+};
+
+const formatSkillLabel = (name) => {
+  if (!name || typeof name !== 'string') return '';
+  const cleaned = name.replace(/_(agent|fragment)$/i, '');
+  return cleaned
+    .split('_')
+    .filter(Boolean)
+    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+};
 
 /**
  * Loads /api/documents/{id}/file with Authorization and displays as image.
@@ -346,7 +390,7 @@ const ChatMessage = React.memo(({
               }
             }}>
               {(() => {
-                const displayContent = message.content || '';
+                const displayContent = stripChartCodeBlocks(message.content || '');
                 
                 const handleChartImport = (data, format) => {
                   // For SVG, we convert to a Data URI
@@ -411,6 +455,39 @@ const ChatMessage = React.memo(({
               })()}
             </Box>
           )}
+
+          {/* Chart from metadata (primary path; avoids raw HTML in markdown) */}
+          {message.role === 'assistant' && (() => {
+            let chartResult = message.metadata?.chart_result;
+            if (typeof chartResult === 'string') {
+              try {
+                chartResult = JSON.parse(chartResult);
+              } catch {
+                chartResult = null;
+              }
+            }
+            if (!chartResult?.success || !chartResult?.chart_data) return null;
+            const staticData = message.metadata?.static_visualization_data;
+            const staticFormat = message.metadata?.static_format;
+            const handleChartImport = (data, format) => {
+              let dataUri = data;
+              if (format === 'svg' && !data.startsWith('data:')) {
+                dataUri = `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(data)))}`;
+              } else if (format === 'base64_png' && !data.startsWith('data:')) {
+                dataUri = `data:image/png;base64,${data}`;
+              }
+              handleImportImage(dataUri);
+            };
+            return (
+              <ChartRenderer
+                html={chartResult.chart_data}
+                staticData={staticData}
+                staticFormat={staticFormat}
+                onImport={handleChartImport}
+                onFullScreen={(html) => setFullScreenChart(html)}
+              />
+            );
+          })()}
 
           {/* ROOSEVELT'S ENHANCED CITATION DISPLAY: Support new numbered format */}
           {(message.metadata?.citations || message.citations) && renderCitations(message.metadata?.citations || message.citations)}
@@ -856,9 +933,52 @@ const ChatMessage = React.memo(({
           userSelect: 'none',
           mt: 1
         }}>
-          <Typography variant="caption" color="text.secondary">
-            {formatTimestamp(message.timestamp)}
-          </Typography>
+          {(() => {
+            const durationLabel =
+              message.role !== 'user' ? formatDurationMs(message.metadata?.duration_ms) : '';
+            const skillsUsed =
+              message.role !== 'user' ? parseJsonStringArray(message.metadata?.skills_used) : [];
+
+            return (
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 0.75,
+                  flexWrap: 'wrap',
+                  minWidth: 0,
+                }}
+              >
+                <Typography variant="caption" color="text.secondary">
+                  {formatTimestamp(message.timestamp)}
+                </Typography>
+
+                {durationLabel && (
+                  <Typography variant="caption" color="text.secondary">
+                    · {durationLabel}
+                  </Typography>
+                )}
+
+                {skillsUsed.length > 0 && (
+                  <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                    {skillsUsed.map((skillName) => (
+                      <Chip
+                        key={skillName}
+                        size="small"
+                        label={formatSkillLabel(skillName)}
+                        sx={{
+                          height: 16,
+                          fontSize: '0.6rem',
+                          backgroundColor: 'rgba(0, 0, 0, 0.05)',
+                          '& .MuiChip-label': { px: 1 },
+                        }}
+                      />
+                    ))}
+                  </Box>
+                )}
+              </Box>
+            );
+          })()}
           
           <Box sx={{ display: 'flex', gap: 0.5 }}>
             <ExportButton
@@ -889,6 +1009,8 @@ const ChatMessage = React.memo(({
     JSON.stringify(nextProps.message.metadata?.citations || nextProps.message.citations) &&
     JSON.stringify(prevProps.message.editor_operations) === 
     JSON.stringify(nextProps.message.editor_operations) &&
+    (prevProps.message.metadata?.duration_ms || null) === (nextProps.message.metadata?.duration_ms || null) &&
+    (prevProps.message.metadata?.skills_used || null) === (nextProps.message.metadata?.skills_used || null) &&
     prevProps.isLoading === nextProps.isLoading &&
     prevProps.copiedMessageId === nextProps.copiedMessageId &&
     prevProps.savingNoteFor === nextProps.savingNoteFor

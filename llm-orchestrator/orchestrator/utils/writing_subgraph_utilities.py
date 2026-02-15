@@ -6,6 +6,7 @@ Consolidates duplicate code and provides consistent patterns.
 """
 
 import hashlib
+import json
 import logging
 import re
 from datetime import datetime
@@ -96,6 +97,7 @@ def preserve_fiction_state(state: Dict[str, Any], updates: Dict[str, Any]) -> Di
         "has_references": state.get("has_references", False),
         "creative_freedom_requested": state.get("creative_freedom_requested", False),
         "request_type": state.get("request_type", "edit_request"),
+        "analysis_scope": state.get("analysis_scope", "chapter"),
         "outline_sync_analysis": state.get("outline_sync_analysis"),
         "consistency_warnings": state.get("consistency_warnings", []),
         "structured_edit": state.get("structured_edit"),
@@ -107,6 +109,49 @@ def preserve_fiction_state(state: Dict[str, Any], updates: Dict[str, Any]) -> Di
     }
     preserved.update(updates)
     return preserved
+
+
+def sanitize_ai_response_for_history(content: str) -> str:
+    """Strip ManuscriptEdit JSON from AI responses, keeping only the conversational summary.
+
+    Prior AI turns may contain full ManuscriptEdit JSON with original_text anchors.
+    Including these in conversation history causes the LLM to recycle stale anchors
+    instead of extracting fresh ones from the current manuscript.
+    """
+    if not content or not isinstance(content, str):
+        return content or ""
+
+    stripped = content.strip()
+    if not (stripped.startswith("{") or stripped.startswith("```")):
+        return content  # Plain text, not JSON
+
+    try:
+        # Handle markdown-wrapped JSON
+        json_text = stripped
+        if "```json" in json_text:
+            match = re.search(r"```json\s*\n(.*?)\n```", json_text, re.DOTALL)
+            if match:
+                json_text = match.group(1).strip()
+        elif json_text.startswith("```"):
+            match = re.search(r"```\s*\n(.*?)\n```", json_text, re.DOTALL)
+            if match:
+                json_text = match.group(1).strip()
+
+        parsed = json.loads(json_text)
+        if isinstance(parsed, dict) and "operations" in parsed:
+            # ManuscriptEdit JSON - extract only the conversational response
+            response = parsed.get("response", "")
+            if response:
+                logger.debug(
+                    "Stripped ManuscriptEdit JSON from AI history message (%d chars -> %d chars)",
+                    len(content),
+                    len(response),
+                )
+                return response
+            return "(edit operations proposed)"
+        return content  # Valid JSON but not ManuscriptEdit
+    except (json.JSONDecodeError, TypeError):
+        return content  # Not JSON, return as-is
 
 
 def create_writing_error_response(
@@ -182,16 +227,16 @@ def paragraph_bounds(text: str, cursor_offset: int) -> Tuple[int, int]:
 
 def strip_frontmatter_block(text: str) -> str:
     """
-    Strip YAML frontmatter from text.
-    
+    Strip only the leading YAML frontmatter block from text. Uses \\A so scene breaks (---) in the body are never stripped.
+
     Args:
         text: Text with potential frontmatter
-        
+
     Returns:
         Text without frontmatter
     """
     try:
-        return re.sub(r'^---\s*\n[\s\S]*?\n---\s*\n', '', text, flags=re.MULTILINE)
+        return re.sub(r'\A---\s*\n[\s\S]*?\n---\s*\n', '', text)
     except Exception:
         return text
 
@@ -827,8 +872,8 @@ def build_editor_common_mistakes() -> str:
         "❌ FORBIDDEN: insert_after with multi-line bullet anchor\n"
         "   Example: Section has:\n"
         "   ```\n"
-        "   - Vampires transform at will.\n"
-        "   - Human form requires\n"
+        "   - Shapeshifters transform at will.\n"
+        "   - Default form requires\n"
         "     continuous effort.\n"
         "   - Another rule here.\n"
         "   ```\n"
@@ -955,9 +1000,9 @@ def build_rules_document_guidance() -> str:
         "Section currently has:\n"
         "```\n"
         "### Transformation & Physiology\n"
-        "- Vampires can transform at will.\n"
+        "- Shapeshifters can transform at will.\n"
         "- The transformation is instantaneous.\n"
-        "- Human appearance requires continuous effort.\n"
+        "- Default appearance requires continuous effort.\n"
         "```\n"
         "\n"
         "User wants to add: \"Clothing is absorbed during transformation\"\n"
@@ -966,8 +1011,8 @@ def build_rules_document_guidance() -> str:
         "```json\n"
         "{\n"
         '  "op_type": "replace_range",\n'
-        '  "original_text": "- Human appearance requires continuous effort.",\n'
-        '  "text": "- Human appearance requires continuous effort.\\n- Clothing is absorbed during transformation."\n'
+        '  "original_text": "- Default appearance requires continuous effort.",\n'
+        '  "text": "- Default appearance requires continuous effort.\\n- Clothing is absorbed during transformation."\n'
         "}\n"
         "```\n"
         "Result: Surgical replacement - ONLY last bullet modified, first two bullets untouched!\n\n"
@@ -1114,7 +1159,8 @@ def build_outline_document_guidance() -> str:
         "- Warnings appear at 95+ beats, hard limit at 100\n\n"
         "**STATUS BLOCK PLACEMENT (CRITICAL):**\n"
         "- Status blocks appear IMMEDIATELY after the chapter heading (## Chapter N), BEFORE summary\n"
-        "- Status represents state AT THE BEGINNING of the chapter (from previous chapter's events)\n"
+        "- Status represents state AT THE BEGINNING of the chapter (where the previous chapter left off)\n"
+        "- Status must reflect ONLY previous chapter's events; never derive status from the current chapter's beats\n"
         "- Format: ### Status followed by bullets with tracked items\n"
         "- Include tracked items that are: (1) relevant, (2) changed, or (3) should be carried forward\n"
         "- **CARRY FORWARD**: If item was in previous chapter's status and still active, include it even if unchanged\n"

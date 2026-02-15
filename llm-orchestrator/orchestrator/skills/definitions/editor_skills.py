@@ -3,7 +3,7 @@ Editor engine skill definitions.
 
 Skills: fiction_editing, outline_editing, character_development, rules_editing,
 style_editing, series_editing, electronics, general_project, podcast_script,
-proofreading, article_writing.
+proofreading, article_writing, content_analysis.
 """
 
 from orchestrator.skills.skill_schema import EngineType, Skill
@@ -38,6 +38,30 @@ EDITOR_SKILLS = [
         keywords=["outline", "structure", "act", "plot points", "build an outline"],
         priority=88,
         subgraphs=["outline_editing"],
+    ),
+    Skill(
+        name="nonfiction_outline_editing",
+        description="Edit and generate non-fiction outlines: section structure, hierarchy, coverage, and flow.",
+        engine=EngineType.EDITOR,
+        domains=["content", "writing", "outline", "nonfiction"],
+        actions=["observation", "generation", "modification"],
+        editor_types=["nfoutline"],
+        requires_editor=True,
+        context_boost=20,
+        keywords=[
+            "non-fiction outline",
+            "nonfiction outline",
+            "outline",
+            "structure",
+            "sections",
+            "table of contents",
+            "toc",
+            "argument",
+            "thesis",
+            "restructure",
+        ],
+        priority=88,
+        subgraphs=["nonfiction_outline"],
     ),
     Skill(
         name="character_development",
@@ -98,6 +122,7 @@ EDITOR_SKILLS = [
         domains=["electronics", "circuit", "embedded", "arduino", "esp32", "microcontroller"],
         actions=["observation", "generation", "modification", "analysis", "query", "management"],
         editor_types=["electronics"],
+        requires_editor=True,
         context_boost=20,
         keywords=["electronics", "circuit", "arduino", "esp32", "raspberry pi", "microcontroller", "sensor", "resistor", "voltage", "pcb", "schematic", "firmware", "embedded"],
         priority=85,
@@ -150,8 +175,45 @@ EDITOR_SKILLS = [
         editor_types=["article", "substack", "blog"],
         requires_editor=True,
         context_boost=20,
-        keywords=["article", "blog", "substack", "post"],
+        keywords=[
+            "article",
+            "blog",
+            "substack",
+            "post",
+            "fix",
+            "edit",
+            "modify",
+            "rewrite",
+            "revise",
+            "improve",
+            "update",
+            "change",
+            "address issues",
+            "fill gaps",
+        ],
         priority=88,
+        subgraphs=["article_writing"],
+    ),
+    Skill(
+        name="content_analysis",
+        description=(
+            "Analyze, summarize, compare, and critique the open non-fiction document (read-only; no editing). "
+            "Use when a doc is open and the user wants assessment only (e.g. summarize, critique, identify gaps, review structure)."
+        ),
+        engine=EngineType.EDITOR,
+        domains=["general", "analysis", "documents", "writing", "content"],
+        actions=["analysis", "observation"],
+        editor_types=["article", "blog", "substack"],
+        requires_editor=True,
+        editor_preference="require",
+        context_boost=15,
+        keywords=[
+            "analyze", "analysis", "summarize", "summary", "critique",
+            "find gaps", "identify gaps", "find differences", "find conflicts",
+            "assess", "assessment", "evaluate", "review structure",
+            "strengths", "weaknesses", "what's missing",
+        ],
+        priority=82,
         subgraphs=["article_writing"],
     ),
 ]

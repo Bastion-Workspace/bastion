@@ -5,6 +5,9 @@ All notable changes to Bastion AI Workspace will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2025-02-15
+- Update: Bump version to 0.20.0 across application and Docker
+
 ## [0.16.0] - 2025-01-XX
 - Feature: Import generated images into the document library
 - Refactor: Simplify fiction agent
@@ -13,6 +16,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Feature: 'Cover' frontmatter type support in Fiction documents
 
 ## [Unreleased]
+- Fix: Skill loading idempotency — load_all_skills() guarded so safe to call multiple times; grpc_service uses _ensure_skills_loaded() to avoid re-registering 33 skills on every request
+- Feature: Ranked routing with fallback stack — skill selector returns top-3 ranked skills; on task_status=rejected orchestration retries with next fallback (no extra LLM call); help/define short-circuits get default fallbacks
+- Feature: Ranked routing with fallback stack — skill selector returns top-3 ranked skills; on rejected, orchestration retries with next fallback (no extra LLM call); help/define short-circuits get default fallbacks
+- Feature: Help-to-Research handoff when help skill detects out-of-scope question (domain knowledge); routing scopes help to application-only
+- Feature: Agent Factory design document and technical implementation guide — comprehensive plan for user-defined research agents with declarative data source connectors, composable skills/playbooks, configurable output destinations (documents, folders, Data Workspace tables, knowledge graph), entity resolution pipeline, knowledge accumulation loop, and AI-powered Assembly Agent; supersedes Data Workspace Analytics Enhancements
+- Feature: Agent Factory step I/O contracts — typed input/output schemas for all actions and connector endpoints; Workflow Composer uses contracts for visual step wiring with type checking; built-in action I/O registry; step linking validation at save time
+- Feature: Agent Factory @mention invocation — custom agents have unique @handles; users type @handle in chat to invoke; sidebar shows My Agents panel with quick-action buttons; no auto-routing for custom agents
+- Feature: Agent Factory work journal — agents maintain a persistent human-readable activity log; users can ask agents about past work; write_journal_entry and query_journal tools; journal entries searchable by date, entity, and status
+- Feature: Agent Factory team integration — agents can be shared with teams; configurable team file and post access; team tools (search_team_files, write_team_post, summarize_team_thread); team journal visibility with scoped access; credential isolation preserved
+- Feature: Agent Factory monitor mode — periodic change-aware polling (heartbeat pattern); detection tools (detect_new_files, detect_folder_changes, detect_new_data, detect_new_team_posts, detect_new_entities) with persistent watermarks; smart suppression when nothing changed; Celery Beat integration
+- Feature: Agent Factory examples document — 16 end-to-end use cases covering all patterns (deterministic pipelines, LLM-augmented research, hybrid investigations, scheduled reports, folder monitors, API monitors, team discussion summarizers, image classifiers, meeting minutes task extractor); decision guide for choosing patterns
+- Feature: Agent Factory tool catalog document — comprehensive inventory of 81 tools across 12 categories (file operations, search, task management, notifications, knowledge graph, data workspace, text processing, web, email, monitor, agent internal, external integrations); typed I/O contracts for all tools; scope-aware access control for file operations
+- Feature: Agent Factory modular plugin registry — BaseToolPlugin interface for external integrations; PluginLoader with auto-discovery; plugin I/O contracts registered in action registry; database tables for plugin config; API endpoints for plugin management
+- Feature: Agent Factory external integrations — Trello (6 tools), Notion (6 tools), Slack (3 tools), CalDAV (4 tools) plugin definitions with full I/O contracts; extensible to GitHub, Jira, Google Sheets, Airtable
+- Feature: Agent Factory notification and messaging tools — send_notification (in-app), send_channel_message (Telegram/Discord/Slack via connections-service), broadcast_to_team; granular task management tools (update_todo, complete_todo, search_todos); granular file operations (delete_file, move_file, copy_file)
+- Feature: Agent Factory workflow composition model — agents compose from three step types (deterministic tools, LLM tasks, approval gates) in any mix; three execution modes (deterministic/LLM-augmented/hybrid); three run contexts (interactive/background/scheduled); approval gates with LangGraph interrupt_before for interactive and PostgreSQL notification queue for background
+- Fix: Gate electronics skill to active editor (requires_editor=True) so technical questions without an electronics doc open route to research
+- Fix: Frontmatter stripping only removes leading YAML block (use \\A anchor) so manuscript scene breaks (---) are never stripped; fixes whole-manuscript analysis losing middle chapters
+- Feature: Paragraph-numbered two-phase fiction editing — editing existing chapters uses Phase 1 (identify paragraphs to change) and Phase 2 (batched rewrites); system-extracted original_text eliminates anchor hallucination; new chapter generation unchanged
+- Fix: Fiction request-type detection — queries with action words (revise, edit, fix, improve, etc.) route to edit path and produce editor operations even when phrased as questions; pure informational questions stay question-only
+- Fix: Fiction editor granularity — align 10-20 word guidance in generation subgraph with system prompt; clarify replacement-text completeness; add cross-chapter edit guard (original_text/anchor_text must not span chapter boundaries)
+- Feature: Two-pass article (non-fiction) generation — keyword "two-pass" in article/substack/blog requests runs draft pass (raw article text) then refinement pass with style guide and outline for compliance
+- Feature: Two-pass chapter generation for fiction — keyword "two-pass" when creating a new chapter runs draft pass (creative prose only) then refinement pass (tighten, style compliance, ManuscriptEdit JSON)
+- Fix: Fiction generation subgraph preserves invalid_anchor_operations in shared_memory so self-heal and merge nodes receive them when top-level state key is dropped
+- Fix: Fiction whole-story intent uses negative guards so edit/revise/rewrite and "this chapter" keep chapter scope; remove generic whole-story phrases (discrepancies, cohesive, overall)
+- Fix: Strip ManuscriptEdit JSON from conversation history in fiction editing subgraphs so LLM does not recycle stale original_text anchors
 - Update: Electronics agent suggests new reference files (suggested_files in response) instead of auto-creating them; content routing and save nodes no longer create files
 - Fix: Capture-to-inbox uses org_capture only (no research) unless user explicitly asks for research first; inbox is for short idea capture
 - Fix: org_capture skill uses prior_step_*_response from shared_memory when run as step 2 in a compound plan so the researched content is captured, not the user's short phrase
@@ -32,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix: Skill selection prefers research for how-to questions when no editor; research skill description/keywords include how do I, how to, how can I
 - Refactor: Fiction only via Writing Assistant; remove standalone fiction_editing_agent workflow and dispatch; remove build_context_preparation_subgraph and build_resolution_subgraph; fiction_editing_subgraph unchanged
 - Refactor: Remove standalone agents (outline, character, rules, style, article); routing and labels use Writing Assistant only; subgraphs unchanged
-- Refactor: Disable technical hyperspace agent; /hyperspace and cached technical_hyperspace route to chat (implementation plan kept in dev-notes)
+- Refactor: Disable technical hyperspace agent; /hyperspace and cached technical_hyperspace route to chat (implementation plan kept in docs/dev-notes)
 - Fix: Include structured images in research complete chunk when using skill dispatch (unified_dispatch)
 - Fix: Route local collection queries (e.g. Dilbert comics, photos of X) to research skill instead of entertainment
 - Fix: Org content agent now correctly routes via AUTOMATION skill instead of CONVERSATIONAL (prefer editor with org file open now works)
@@ -177,7 +206,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Feature: Moved ePub cover page to the end of the spine to prevent "double cover" in readers
 - Fix: Enhanced ePub cover resolution to support relative paths in frontmatter and database lookups
 - Fix: Resolved XML syntax error in ePub cover page generation
-- Update: Created Org-Mode enhancement roadmap in dev-notes
+- Update: Created Org-Mode enhancement roadmap in docs/dev-notes
 - Fix: Resolved issue where 'Filter by Tag' in All TODOs view was empty by correcting data property access
 - Update: Centralized all weather intelligence logic into dedicated gRPC Tools Service
 - Refactor: Migrated Weather Agent and Status Bar API to use gRPC weather service, eliminating redundant logic

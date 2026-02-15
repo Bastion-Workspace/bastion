@@ -341,7 +341,7 @@ const ContextAwareResearchTest = () => {
           </ListItem>
           <ListItem>
             <ListItemText 
-              primary="Clear Query: 'Research Theodore Roosevelt's foreign policy'"
+              primary="Clear Query: 'Research renewable energy policy in the European Union'"
               secondary="This should create a plan directly"
             />
           </ListItem>

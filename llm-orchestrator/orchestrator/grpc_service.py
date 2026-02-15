@@ -847,8 +847,9 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             primary_agent_name = None
             agent_type = None  # Initialize to None - will be set by routing logic or skill discovery
             discovered_skill = None  # Set by short-circuit routes or skill discovery
-            from orchestrator.skills import get_skill_registry, load_all_skills
-            load_all_skills()
+            from orchestrator.engines.unified_dispatch import _ensure_skills_loaded
+            from orchestrator.skills import get_skill_registry
+            _ensure_skills_loaded()
             registry = get_skill_registry()
 
             # SHORT-CIRCUIT ROUTING: Check for "/help" prefix for instant help routing
@@ -874,15 +875,14 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 # Merge the extracted request shared_memory (including active_editor!)
                 metadata["shared_memory"].update(request_shared_memory)
                 metadata["shared_memory"]["primary_agent_selected"] = agent_type
-                
+                metadata["shared_memory"]["routing_fallback_stack"] = ["research", "chat"]
                 if "shared_memory" not in conversation_context:
                     conversation_context["shared_memory"] = {}
                 conversation_context["shared_memory"].update(request_shared_memory)
                 conversation_context["shared_memory"]["primary_agent_selected"] = agent_type
-                
+                conversation_context["shared_memory"]["routing_fallback_stack"] = ["research", "chat"]
                 if checkpoint_shared_memory:
                     checkpoint_shared_memory["primary_agent_selected"] = agent_type
-                
                 logger.info(f"📋 SET primary_agent_selected: {agent_type} (and merged {len(request_shared_memory)} shared_memory keys)")
             # SHORT-CIRCUIT ROUTING: Check for "/define" prefix for instant dictionary routing
             elif query_lower.startswith("/define"):
@@ -906,15 +906,14 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 # Merge the extracted request shared_memory (including active_editor!)
                 metadata["shared_memory"].update(request_shared_memory)
                 metadata["shared_memory"]["primary_agent_selected"] = agent_type
-                
+                metadata["shared_memory"]["routing_fallback_stack"] = ["chat"]
                 if "shared_memory" not in conversation_context:
                     conversation_context["shared_memory"] = {}
                 conversation_context["shared_memory"].update(request_shared_memory)
                 conversation_context["shared_memory"]["primary_agent_selected"] = agent_type
-                
+                conversation_context["shared_memory"]["routing_fallback_stack"] = ["chat"]
                 if checkpoint_shared_memory:
                     checkpoint_shared_memory["primary_agent_selected"] = agent_type
-                
                 logger.info(f"📋 SET primary_agent_selected: {agent_type} (and merged {len(request_shared_memory)} shared_memory keys)")
             elif request.agent_type and request.agent_type != "auto":
                 # Explicit agent routing provided by backend
@@ -926,7 +925,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             # If agent_type is still None, run skill discovery (compound-aware)
             compound_plan = None
             if agent_type is None:
-                from orchestrator.skills.skill_llm_selector import llm_select_skill, llm_select_skill_or_plan
+                from orchestrator.skills.skill_llm_selector import llm_select_skill, llm_select_skill_or_plan, llm_select_skill_ranked
                 active_editor = (request_shared_memory or {}).get("active_editor") or conversation_context.get("shared_memory", {}).get("active_editor")
                 editor_context = None
                 if active_editor:
@@ -949,47 +948,22 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 )
                 # When user has a document open and editor_preference is "prefer", pin to the
                 # single editor skill dedicated to that document type so we skip compound plans
-                # (e.g. outline open -> outline_editing only, not story_analysis + outline_editing).
-                # Exception: for fiction, if the query explicitly asks for story analysis (e.g.
-                # "Analyze the story"), do not pin to fiction_editing so skill discovery can
-                # route to the story_analysis conversational skill.
+                # (e.g. outline open -> outline_editing only).
                 if instant_route is None and eligible and editor_context and shared.get("editor_preference") == "prefer":
                     from orchestrator.skills.skill_schema import EngineType
                     editor_type = (editor_context.get("type") or "").strip().lower()
                     if editor_type:
-                        skip_editor_pin = False
-                        route_to_story_analysis = False
-                        if editor_type == "fiction":
-                            query_lower = (request.query or "").strip().lower()
-                            explicit_analysis_keywords = [
-                                "analyze", "critique", "review", "assess", "evaluate", "examine", "study"
-                            ]
-                            if any(kw in query_lower for kw in explicit_analysis_keywords):
-                                skip_editor_pin = True
-                                route_to_story_analysis = any(
-                                    s.name == "story_analysis" for s in eligible
-                                )
-                                if route_to_story_analysis:
-                                    instant_route = "story_analysis"
-                                    logger.info(
-                                        "Skill discovery: routing to story_analysis (explicit analysis query with fiction open)"
-                                    )
-                                else:
-                                    logger.info(
-                                        "Skill discovery: skipping editor-type pin (fiction) for explicit analysis query"
-                                    )
-                        if not skip_editor_pin and not route_to_story_analysis:
-                            dedicated = [
-                                s for s in eligible
-                                if s.engine == EngineType.EDITOR and (s.editor_types or []) == [editor_type]
-                            ]
-                            if len(dedicated) == 1:
-                                instant_route = dedicated[0].name
-                                logger.info(
-                                    "Skill discovery: %s (editor-type pin: type=%s)",
-                                    instant_route,
-                                    editor_type,
-                                )
+                        dedicated = [
+                            s for s in eligible
+                            if s.engine == EngineType.EDITOR and (s.editor_types or []) == [editor_type]
+                        ]
+                        if len(dedicated) == 1:
+                            instant_route = dedicated[0].name
+                            logger.info(
+                                "Skill discovery: %s (editor-type pin: type=%s)",
+                                instant_route,
+                                editor_type,
+                            )
                 if instant_route:
                     agent_type = instant_route
                     discovered_skill = registry.get(agent_type)
@@ -1004,37 +978,66 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                         metadata=metadata,
                     )
                     if plan is None:
-                        selected_name = await llm_select_skill(
+                        routing_result = await llm_select_skill_ranked(
                             eligible,
                             request.query,
                             editor_context=editor_context,
                             conversation_context=conversation_context,
                             metadata=metadata,
                         )
-                        agent_type = selected_name or "chat"
+                        agent_type = routing_result.primary or "chat"
                         discovered_skill = registry.get(agent_type)
                         primary_agent_name = f"{agent_type}_agent" if not agent_type.endswith("_agent") else agent_type
-                        logger.info("Skill discovery: %s (fallback)", agent_type)
+                        if "shared_memory" not in metadata:
+                            metadata["shared_memory"] = {}
+                        metadata["shared_memory"]["routing_fallback_stack"] = list(routing_result.fallback_stack)
+                        conversation_context["shared_memory"]["routing_fallback_stack"] = list(routing_result.fallback_stack)
+                        logger.info("Skill discovery: %s (fallback), fallbacks=%s", agent_type, routing_result.fallback_stack)
                     elif plan.is_compound and len(plan.steps) > 1:
-                        compound_plan = plan
-                        agent_type = "compound"
-                        primary_agent_name = "compound_agent"
-                        discovered_skill = None
-                        step_skills = [s.skill_name for s in plan.steps]
-                        logger.info(
-                            "Skill discovery: compound plan (%d steps): %s",
-                            len(plan.steps),
-                            ", ".join(step_skills),
-                        )
-                        if plan.reasoning:
-                            logger.info("Compound plan reasoning: %s", plan.reasoning.strip())
-                        for s in plan.steps:
+                        # Safeguard: when user prefers editor context (e.g. outline open), do not run
+                        # compound plans. We may not have received active_editor in this request, so
+                        # editor-type pin did not run; rejecting compound avoids story_analysis +
+                        # image_generation when an outline (or other editor) is open.
+                        editor_pref = (conversation_context.get("shared_memory") or {}).get("editor_preference", "")
+                        if (editor_pref or "").strip().lower() == "prefer":
                             logger.info(
-                                "  step %s: skill=%s | sub_query=%s",
-                                s.step_id,
-                                s.skill_name,
-                                (s.sub_query or "").strip() or "(none)",
+                                "Skill discovery: rejecting compound plan (editor_preference=prefer); falling back to single skill"
                             )
+                            routing_result = await llm_select_skill_ranked(
+                                eligible,
+                                request.query,
+                                editor_context=editor_context,
+                                conversation_context=conversation_context,
+                                metadata=metadata,
+                            )
+                            agent_type = routing_result.primary or "chat"
+                            discovered_skill = registry.get(agent_type)
+                            primary_agent_name = f"{agent_type}_agent" if not agent_type.endswith("_agent") else agent_type
+                            if "shared_memory" not in metadata:
+                                metadata["shared_memory"] = {}
+                            metadata["shared_memory"]["routing_fallback_stack"] = list(routing_result.fallback_stack)
+                            conversation_context["shared_memory"]["routing_fallback_stack"] = list(routing_result.fallback_stack)
+                            logger.info("Skill discovery: %s (single-skill fallback after compound reject), fallbacks=%s", agent_type, routing_result.fallback_stack)
+                        else:
+                            compound_plan = plan
+                            agent_type = "compound"
+                            primary_agent_name = "compound_agent"
+                            discovered_skill = None
+                            step_skills = [s.skill_name for s in plan.steps]
+                            logger.info(
+                                "Skill discovery: compound plan (%d steps): %s",
+                                len(plan.steps),
+                                ", ".join(step_skills),
+                            )
+                            if plan.reasoning:
+                                logger.info("Compound plan reasoning: %s", plan.reasoning.strip())
+                            for s in plan.steps:
+                                logger.info(
+                                    "  step %s: skill=%s | sub_query=%s",
+                                    s.step_id,
+                                    s.skill_name,
+                                    (s.sub_query or "").strip() or "(none)",
+                                )
                     else:
                         agent_type = (plan.skill or "chat")
                         discovered_skill = registry.get(agent_type)
@@ -1094,10 +1097,49 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 }
                 from orchestrator.engines.plan_engine import PlanEngine
                 plan_engine = PlanEngine()
+
+                # Collect the skills/fragments used so the frontend can display them.
+                compound_skills_used: List[str] = []
+                _seen_compound: set[str] = set()
+                for step in compound_plan.steps:
+                    name = (step.fragment_name or step.skill_name or "").strip()
+                    if not name or name in _seen_compound:
+                        continue
+                    compound_skills_used.append(name)
+                    _seen_compound.add(name)
+
+                start_time = datetime.now()
+                pending_complete_chunk: Optional[orchestrator_pb2.ChatChunk] = None
                 async for chunk in plan_engine.execute_plan(
                     compound_plan, request.query, dispatch_metadata, messages, cancellation_token
                 ):
+                    # Preserve step-level complete chunks, but enrich only the final complete chunk
+                    # with duration + skills/fragments metadata (shown in the chat footer).
+                    if chunk.type == "complete":
+                        if pending_complete_chunk is not None:
+                            yield pending_complete_chunk
+                        pending_complete_chunk = chunk
+                        continue
                     yield chunk
+
+                if pending_complete_chunk is not None:
+                    import json
+
+                    duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                    merged_metadata: Dict[str, str] = (
+                        dict(pending_complete_chunk.metadata) if pending_complete_chunk.metadata else {}
+                    )
+                    merged_metadata["duration_ms"] = str(duration_ms)
+                    merged_metadata["skills_used"] = json.dumps(compound_skills_used)
+
+                    yield orchestrator_pb2.ChatChunk(
+                        type=pending_complete_chunk.type,
+                        message=pending_complete_chunk.message,
+                        timestamp=pending_complete_chunk.timestamp,
+                        agent_name=pending_complete_chunk.agent_name,
+                        metadata=merged_metadata,
+                        tools_used=list(pending_complete_chunk.tools_used),
+                    )
                 self._save_agent_identity_to_cache(
                     {"shared_memory": {"primary_agent_selected": "compound_agent", "last_agent": "compound_agent"}},
                     request.conversation_id,
@@ -1126,6 +1168,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                         except Exception as e:
                             logger.warning("Failed to queue title update: %s", e)
                 shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
+                shared_memory.setdefault("routing_fallback_stack", [])
                 dispatch_metadata = {
                     "user_id": request.user_id,
                     "conversation_id": request.conversation_id,
@@ -1134,11 +1177,62 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 }
                 from orchestrator.engines.unified_dispatch import get_unified_dispatcher
                 dispatcher = get_unified_dispatcher()
-                async for chunk in dispatcher.dispatch(
-                    discovered_skill.name, request.query, dispatch_metadata, messages, cancellation_token
-                ):
-                    yield chunk
-                agent_name = primary_agent_name or discovered_skill.name
+                start_time = datetime.now()
+                max_retries = 1
+                current_discovered_skill = discovered_skill
+                current_skill_name = discovered_skill.name
+
+                for attempt in range(max_retries + 1):
+                    if attempt > 0:
+                        fallback_stack = dispatch_metadata.get("shared_memory", {}).get("routing_fallback_stack", [])
+                        next_skill = fallback_stack.pop(0) if fallback_stack else "chat"
+                        current_discovered_skill = registry.get(next_skill)
+                        if not current_discovered_skill:
+                            current_discovered_skill = registry.get("chat")
+                            next_skill = "chat"
+                        current_skill_name = next_skill
+                        logger.info("Skill rejected, retrying with fallback: %s", current_skill_name)
+
+                    rejected = False
+                    pending_complete_chunk = None
+                    async for chunk in dispatcher.dispatch(
+                        current_skill_name, request.query, dispatch_metadata, messages, cancellation_token
+                    ):
+                        if chunk.type == "rejected":
+                            rejected = True
+                            break
+                        if chunk.type == "complete":
+                            if pending_complete_chunk is not None:
+                                yield pending_complete_chunk
+                            pending_complete_chunk = chunk
+                            continue
+                        yield chunk
+
+                    if not rejected:
+                        if pending_complete_chunk is not None:
+                            import json
+                            duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                            merged_metadata = (
+                                dict(pending_complete_chunk.metadata) if pending_complete_chunk.metadata else {}
+                            )
+                            merged_metadata["duration_ms"] = str(duration_ms)
+                            merged_metadata["skills_used"] = json.dumps([current_discovered_skill.name])
+                            yield orchestrator_pb2.ChatChunk(
+                                type=pending_complete_chunk.type,
+                                message=pending_complete_chunk.message,
+                                timestamp=pending_complete_chunk.timestamp,
+                                agent_name=pending_complete_chunk.agent_name,
+                                metadata=merged_metadata,
+                                tools_used=list(pending_complete_chunk.tools_used),
+                            )
+                        agent_name = primary_agent_name or current_discovered_skill.name
+                        self._save_agent_identity_to_cache(
+                            {"shared_memory": {"primary_agent_selected": agent_name, "last_agent": agent_name}},
+                            request.conversation_id,
+                        )
+                        return
+
+                agent_name = primary_agent_name or current_discovered_skill.name
                 self._save_agent_identity_to_cache(
                     {"shared_memory": {"primary_agent_selected": agent_name, "last_agent": agent_name}},
                     request.conversation_id,

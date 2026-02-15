@@ -31,6 +31,7 @@ from orchestrator.utils.writing_subgraph_utilities import (
     create_writing_error_response,
     extract_user_request,
     paragraph_bounds,
+    sanitize_ai_response_for_history,
     strip_frontmatter_block,
     slice_hash,
     build_response_text_for_question,
@@ -338,6 +339,8 @@ def _extract_conversation_history(messages: List[Any], limit: int = 10) -> List[
             if hasattr(msg, 'content'):
                 role = "assistant" if hasattr(msg, 'type') and msg.type == "ai" else "user"
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                if role == "assistant":
+                    content = sanitize_ai_response_for_history(content)
                 history.append({
                     "role": role,
                     "content": content
@@ -428,11 +431,11 @@ def _build_system_prompt() -> str:
         "**TERMINOLOGY GUIDELINES (CRITICAL)**:\n"
         "- Define CONCEPTS and CONSTRAINTS, not IN-UNIVERSE FORMAL TERMS\n"
         "- Use descriptive language that explains what happens\n"
-        "  GOOD: 'Vampires can transform into their natural state when threatened'\n"
-        "  BAD: 'Vampires enter their True Form when threatened'\n"
+        "  GOOD: 'Creatures can transform into their natural state when threatened'\n"
+        "  BAD: 'Creatures enter their True Form when threatened'\n"
         "- Document WHAT happens and the rules governing it, not formal capitalized terminology\n"
-        "  GOOD: 'Vampires enter a predatory hunting state with enhanced senses'\n"
-        "  BAD: 'Vampires enter Predatory Fugue with enhanced senses'\n"
+        "  GOOD: 'Creatures enter a predatory hunting state with enhanced senses'\n"
+        "  BAD: 'Creatures enter Predatory Fugue with enhanced senses'\n"
         "- Avoid creating formal terminology unless explicitly part of the user's request\n"
         "- Rules should read like a technical manual, not like in-universe lore documents\n"
         "- The fiction agent will use these rules as CONSTRAINTS, not as terms to include in prose\n\n"

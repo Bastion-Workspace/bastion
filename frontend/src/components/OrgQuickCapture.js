@@ -2,7 +2,7 @@
  * Org Quick Capture Component
  * Emacs-style quick capture to inbox.org via global hotkey
  * 
- * **BULLY!** Capture anything, anywhere with Ctrl+Shift+C!
+ * Emacs-style capture: Ctrl+Shift+C to capture from anywhere.
  */
 
 import React, { useState, useEffect, useRef } from 'react';

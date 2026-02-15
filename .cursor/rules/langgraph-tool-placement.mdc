@@ -1,0 +1,43 @@
+---
+alwaysApply: false
+description: Where LangGraph tools live — local (orchestrator) vs external (Tools Service)
+globs: llm-orchestrator/**/*.py,backend/services/grpc_tool_service.py,tools-service/**/*
+---
+
+# LangGraph Tool Placement: Local vs Tools Service
+
+LangGraph tools are split by **data boundary**: in-memory/string-only stays in LLM Orchestrator; anything external is implemented in the Tools Service and called via gRPC.
+
+## Local to LLM Orchestrator (in-memory / strings only)
+
+**Keep in [llm-orchestrator/orchestrator/tools/](mdc:llm-orchestrator/orchestrator/tools/) and do not call Tools Service.**
+
+- **Pure computation**: Math, formulas, unit conversions, expression evaluation (e.g. [math_formulas.py](mdc:llm-orchestrator/orchestrator/tools/math_formulas.py), [unit_conversions.py](mdc:llm-orchestrator/orchestrator/tools/unit_conversions.py)).
+- **String/structured parsing**: Parsing, formatting, or transforming strings or in-memory structures (e.g. [image_query_analyzer.py](mdc:llm-orchestrator/orchestrator/tools/image_query_analyzer.py) when it only uses the LLM for parsing).
+- **No external I/O**: No database, vector store, network, file system (outside orchestrator process), or other services.
+
+**Rule:** If a tool only reads/writes arguments and return values (and optionally uses the LLM inside the orchestrator), it stays local. Do not add `get_backend_tool_client()` or any gRPC call for such tools.
+
+## External: Implement in Tools Service, call via gRPC
+
+**Implement in Tools Service** ([backend/services/grpc_tool_service.py](mdc:backend/services/grpc_tool_service.py), exposed by the tools-service container). **Orchestrator** keeps thin wrappers in [llm-orchestrator/orchestrator/tools/](mdc:llm-orchestrator/orchestrator/tools/) that call [backend_tool_client](mdc:llm-orchestrator/orchestrator/backend_tool_client.py).
+
+- **Database / persistence**: Document search, conversation cache, user/org data.
+- **Vector store / embeddings**: Semantic search, embeddings (even if triggered from orchestrator).
+- **Network / APIs**: Web search, crawl, weather, email, RSS, external APIs.
+- **File system / backend storage**: Document create/update/delete, file creation, image generation (backend-side).
+- **Other services**: Any call that leaves the orchestrator process (including to backend or other containers).
+
+**Rule:** If a tool touches anything outside the orchestrator process (DB, network, backend storage, other services), its **implementation** lives in the Tools Service gRPC handlers; the orchestrator only has a small wrapper that calls `get_backend_tool_client()` and maps args/return values.
+
+## Quick decision
+
+| Tool does… | Location |
+|------------|----------|
+| Only in-memory/string work (math, parse, format, LLM-in-process) | LLM Orchestrator only |
+| Database, vector store, web, email, files, other services | Tools Service (impl) + orchestrator (gRPC wrapper) |
+
+## References
+
+- Tool catalog and usage: [agent-tools-reference.mdc](mdc:.cursor/rules/agent-tools-reference.mdc)
+- LangGraph patterns: [langgraph-best-practices.mdc](mdc:.cursor/rules/langgraph-best-practices.mdc) (Tool Registry and Access Control)

@@ -29,6 +29,7 @@ from orchestrator.utils.writing_subgraph_utilities import (
     preserve_critical_state,
     create_writing_error_response,
     extract_user_request,
+    sanitize_ai_response_for_history,
     strip_frontmatter_block,
     slice_hash,
     build_response_text_for_question,
@@ -211,6 +212,8 @@ def _extract_conversation_history(messages: List[Any], limit: int = 10) -> List[
             if hasattr(msg, "content"):
                 role = "assistant" if getattr(msg, "type", None) == "ai" else "user"
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                if role == "assistant":
+                    content = sanitize_ai_response_for_history(content)
                 history.append({"role": role, "content": content})
         return history
     except Exception as e:

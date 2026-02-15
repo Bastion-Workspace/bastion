@@ -57,13 +57,13 @@ const MainContent = () => {
   // Quick Capture state and hotkey listener
   const [captureOpen, setCaptureOpen] = useState(false);
   
-  // **ROOSEVELT'S EDITOR CONTEXT CLEANUP**: Clear stale editor context when navigating away from Documents
+  // Clear editor context cache when navigating away from Documents so Chat (or other
+  // pages) don't send stale document context. On /documents we do not clear; tab switches
+  // also leave the cache so the last open document is still sent with chat (see DocumentViewer).
   useEffect(() => {
     if (!isDocumentsRoute) {
-      // Not on Documents page - clear the editor context cache so it doesn't interfere with other pages
       try {
         localStorage.removeItem('editor_ctx_cache');
-        console.log('🧹 Cleared editor context cache (not on Documents page)');
       } catch (e) {
         console.warn('Failed to clear editor context cache:', e);
       }

@@ -56,6 +56,7 @@ class ApiService {
   // ===== DOCUMENT METHODS =====
   getDocuments = () => this.documents.getDocuments();
   getUserDocuments = (offset, limit) => this.documents.getUserDocuments(offset, limit);
+  getHasOrgDocuments = () => this.documents.getHasOrgDocuments();
   uploadDocument = (file) => this.documents.uploadDocument(file);
   uploadUserDocument = (file, userId) => this.documents.uploadUserDocument(file, userId);
   uploadMultipleDocuments = (files) => this.documents.uploadMultipleDocuments(files);
@@ -113,14 +114,23 @@ class ApiService {
   deleteAllConversations = () => this.conversations.deleteAllConversations();
 
   // ===== NOTES METHODS =====
-  getNotes = (skip, limit, category, tag, search) => this.notes.getNotes(skip, limit, category, tag, search);
-  getNote = (noteId) => this.notes.getNote(noteId);
-  createNote = (noteData) => this.notes.createNote(noteData);
-  updateNote = (noteId, noteData) => this.notes.updateNote(noteId, noteData);
-  deleteNote = (noteId) => this.notes.deleteNote(noteId);
-  searchNotes = (query, limit) => this.notes.searchNotes(query, limit);
-  getNoteTags = () => this.notes.getNoteTags();
-  exportNotes = () => this.notes.exportNotes();
+  // Notes service may be absent; guard to avoid runtime errors when feature is not used
+  getNotes = (skip, limit, category, tag, search) =>
+    this.notes ? this.notes.getNotes(skip, limit, category, tag, search) : Promise.resolve({ notes: [], total: 0 });
+  getNote = (noteId) =>
+    this.notes ? this.notes.getNote(noteId) : Promise.reject(new Error('Notes service not available'));
+  createNote = (noteData) =>
+    this.notes ? this.notes.createNote(noteData) : Promise.reject(new Error('Notes service not available'));
+  updateNote = (noteId, noteData) =>
+    this.notes ? this.notes.updateNote(noteId, noteData) : Promise.reject(new Error('Notes service not available'));
+  deleteNote = (noteId) =>
+    this.notes ? this.notes.deleteNote(noteId) : Promise.reject(new Error('Notes service not available'));
+  searchNotes = (query, limit) =>
+    this.notes ? this.notes.searchNotes(query, limit) : Promise.resolve([]);
+  getNoteTags = () =>
+    this.notes ? this.notes.getNoteTags() : Promise.resolve({ categories: [], tags: [] });
+  exportNotes = () =>
+    this.notes ? this.notes.exportNotes() : Promise.reject(new Error('Notes service not available'));
 
 
   // ===== SETTINGS METHODS =====

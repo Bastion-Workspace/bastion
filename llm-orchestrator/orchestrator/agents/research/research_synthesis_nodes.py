@@ -454,8 +454,7 @@ def combine_post_processed_results(
     if visualization_data and chart_type:
         combined += "\n\n"
         if chart_output_format == "html":
-            combined += f"## Chart: {chart_type.title()}\n\n"
-            combined += f"```html:chart\n{visualization_data}\n```"
+            combined += "---\n*Interactive {0} chart rendered below.*\n".format(chart_type.title())
         elif chart_output_format == "base64_png":
             combined += f"## Chart: {chart_type.title()}\n\n"
             combined += f"![Chart: {chart_type}]({visualization_data})"

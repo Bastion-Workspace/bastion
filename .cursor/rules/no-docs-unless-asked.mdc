@@ -1,0 +1,13 @@
+---
+description: Do not create new documentation files unless the user asks for them
+alwaysApply: true
+---
+
+# No New Documentation Unless Asked
+
+**Do not create new documentation files** (README, guides, implementation notes, summary docs, etc.) unless the user explicitly asks for documentation.
+
+- **Comment code** as usual: add comments for non-obvious logic, "why" not "what."
+- **Do not** add new `.md` files, docs folders, or written guides unless the user requests them.
+
+When in doubt, implement and comment; do not document in separate files.

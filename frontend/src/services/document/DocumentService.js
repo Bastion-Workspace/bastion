@@ -10,6 +10,11 @@ class DocumentService extends ApiServiceBase {
     return this.get(`/api/user/documents?offset=${offset}&limit=${limit}`);
   }
 
+  /** Lightweight check for org files (no document list). Use for sidebar org tools visibility. */
+  getHasOrgDocuments = async () => {
+    return this.get('/api/user/documents/has-org');
+  }
+
   uploadDocument = async (file) => {
     const formData = new FormData();
     formData.append('file', file);

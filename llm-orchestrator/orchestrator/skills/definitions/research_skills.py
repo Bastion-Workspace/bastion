@@ -1,8 +1,8 @@
 """
 Research engine skill definitions.
 
-Skills: research (deep), quick_lookup, content_analysis, knowledge_builder,
-security_analysis, site_crawl, website_crawler.
+Skills: research (deep), knowledge_builder, security_analysis, site_crawl,
+website_crawler.
 """
 
 from orchestrator.skills.skill_schema import EngineType, Skill
@@ -38,20 +38,8 @@ RESEARCH_SKILLS = [
         subgraphs=["research_workflow", "gap_analysis", "web_research", "assessment", "data_formatting", "visualization"],
     ),
     Skill(
-        name="content_analysis",
-        description="Compare, summarize, and analyze documents without web search.",
-        engine=EngineType.RESEARCH,
-        domains=["general", "analysis", "documents"],
-        actions=["analysis"],
-        editor_types=["article", "blog", "substack", "nfoutline", "reference", "document"],
-        keywords=["compare", "summarize", "analyze", "find differences", "find conflicts"],
-        priority=75,
-        tools=["search_documents_tool", "get_document_content_tool"],
-        subgraphs=["full_document_analysis"],
-    ),
-    Skill(
         name="knowledge_builder",
-        description="Distill knowledge, fact-check, and build research documents.",
+        description="Fact-check, verify claims, distill knowledge, and build research documents (not general web lookup; use research for that).",
         engine=EngineType.RESEARCH,
         domains=["research", "knowledge", "information", "truth"],
         actions=["query", "analysis"],
@@ -82,7 +70,7 @@ RESEARCH_SKILLS = [
     ),
     Skill(
         name="site_crawl",
-        description="Crawl a site or domain and extract content.",
+        description="Crawl a single site or domain and extract content (one-off).",
         engine=EngineType.RESEARCH,
         domains=["research", "web", "information"],
         actions=["query"],
@@ -93,7 +81,7 @@ RESEARCH_SKILLS = [
     ),
     Skill(
         name="website_crawler",
-        description="Ingest and process a URL or website (recursive crawl).",
+        description="Ingest a URL or whole website with recursive crawl (save/process content).",
         engine=EngineType.RESEARCH,
         domains=["general", "web", "management"],
         actions=["management", "query"],

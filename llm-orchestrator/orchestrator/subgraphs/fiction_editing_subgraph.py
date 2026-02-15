@@ -69,6 +69,7 @@ class FictionEditingSubgraphState(TypedDict, total=False):
     has_references: bool
     creative_freedom_requested: bool
     request_type: str
+    analysis_scope: str
     outline_sync_analysis: Optional[Any]
     consistency_warnings: List[Any]
     structured_edit: Optional[Dict[str, Any]]
@@ -85,6 +86,8 @@ class FictionEditingSubgraphState(TypedDict, total=False):
     prev_chapter_last_line: Optional[str]
     generation_context_parts: List[Any]
     generation_messages: List[Any]
+    draft_messages: List[Any]
+    draft_prose: str
     llm_response: str
     anchor_validation_passed: bool
     resolution_complete: bool
@@ -102,6 +105,10 @@ class FictionEditingSubgraphState(TypedDict, total=False):
     resolution_requested_chapter_number: Optional[int]
     resolved_operations: List[Any]
     validated_operations: List[Any]
+    paragraph_map: List[Any]
+    paragraph_edits: List[Any]
+    paragraph_rewrites: Dict[str, Any]
+    paragraph_edit_summary: Optional[str]
 
 
 # Context preparation (flat nodes - no subgraph boundary)
@@ -121,6 +128,20 @@ from orchestrator.subgraphs.fiction_generation_subgraph import (
     validate_anchors_node,
     self_heal_anchors_node,
     merge_operations_node,
+)
+# Two-pass chapter generation (flat nodes)
+from orchestrator.subgraphs.fiction_two_pass_generation import (
+    route_generation_mode,
+    build_draft_prompt_node,
+    call_draft_llm_node,
+    build_refinement_prompt_node,
+    call_refinement_llm_node,
+)
+# Paragraph-numbered two-phase editing (flat nodes)
+from orchestrator.subgraphs.fiction_paragraph_edit_subgraph import (
+    identify_paragraph_edits_node,
+    rewrite_paragraphs_node,
+    construct_operations_node,
 )
 # Validation (flat nodes)
 from orchestrator.subgraphs.fiction_validation_subgraph import (
@@ -207,6 +228,18 @@ def build_fiction_editing_subgraph(checkpointer, llm_factory, get_datetime_conte
     async def self_heal_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
         return await self_heal_anchors_node(state, llm_factory)
 
+    async def call_draft_llm_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
+        return await call_draft_llm_node(state, llm_factory)
+
+    async def call_refinement_llm_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
+        return await call_refinement_llm_node(state, llm_factory)
+
+    async def identify_paragraph_edits_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
+        return await identify_paragraph_edits_node(state, llm_factory)
+
+    async def rewrite_paragraphs_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
+        return await rewrite_paragraphs_node(state, llm_factory)
+
     async def detect_outline_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
         return await _detect_outline_changes_node_raw(
             state, llm_factory, get_datetime_context
@@ -235,10 +268,18 @@ def build_fiction_editing_subgraph(checkpointer, llm_factory, get_datetime_conte
     workflow.add_node("build_generation_context", build_generation_context_node)
     workflow.add_node("build_generation_prompt", build_generation_prompt_node)
     workflow.add_node("call_llm", call_llm_wrapper)
+    # --- Two-pass chapter generation (flat) ---
+    workflow.add_node("build_draft_prompt", build_draft_prompt_node)
+    workflow.add_node("call_draft_llm", call_draft_llm_wrapper)
+    workflow.add_node("build_refinement_prompt", build_refinement_prompt_node)
+    workflow.add_node("call_refinement_llm", call_refinement_llm_wrapper)
     workflow.add_node("validate_llm_output", validate_generated_output_node)
     workflow.add_node("validate_anchors", validate_anchors_node)
     workflow.add_node("self_heal_anchors", self_heal_wrapper)
     workflow.add_node("merge_operations", merge_operations_node)
+    workflow.add_node("identify_paragraph_edits", identify_paragraph_edits_wrapper)
+    workflow.add_node("rewrite_paragraphs", rewrite_paragraphs_wrapper)
+    workflow.add_node("construct_operations", construct_operations_node)
 
     # --- Validation (flat) ---
     workflow.add_node("detect_outline_changes", detect_outline_wrapper)
@@ -302,9 +343,24 @@ def build_fiction_editing_subgraph(checkpointer, llm_factory, get_datetime_conte
 
     # --- Full generation path ---
     workflow.add_edge("prepare_generation", "build_generation_context")
-    workflow.add_edge("build_generation_context", "build_generation_prompt")
+    workflow.add_conditional_edges(
+        "build_generation_context",
+        route_generation_mode,
+        {
+            "build_draft_prompt": "build_draft_prompt",
+            "build_generation_prompt": "build_generation_prompt",
+            "identify_paragraph_edits": "identify_paragraph_edits",
+        },
+    )
     workflow.add_edge("build_generation_prompt", "call_llm")
+    workflow.add_edge("identify_paragraph_edits", "rewrite_paragraphs")
+    workflow.add_edge("rewrite_paragraphs", "construct_operations")
+    workflow.add_edge("construct_operations", "prepare_resolution_context")
     workflow.add_edge("call_llm", "validate_llm_output")
+    workflow.add_edge("build_draft_prompt", "call_draft_llm")
+    workflow.add_edge("call_draft_llm", "build_refinement_prompt")
+    workflow.add_edge("build_refinement_prompt", "call_refinement_llm")
+    workflow.add_edge("call_refinement_llm", "validate_llm_output")
     workflow.add_edge("validate_llm_output", "validate_anchors")
 
     workflow.add_conditional_edges(

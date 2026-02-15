@@ -27,6 +27,7 @@ from orchestrator.utils.writing_subgraph_utilities import (
     create_writing_error_response,
     extract_user_request,
     paragraph_bounds,
+    sanitize_ai_response_for_history,
     strip_frontmatter_block,
     slice_hash,
     build_response_text_for_question,
@@ -156,8 +157,9 @@ def _extract_conversation_history(messages: List[Any], limit: int = 10) -> List[
         for msg in messages[-limit:]:
             if hasattr(msg, 'content'):
                 role = "assistant" if hasattr(msg, 'type') and msg.type == "ai" else "user"
-                # Simple content extraction (no filtering for now - can be enhanced)
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                if role == "assistant":
+                    content = sanitize_ai_response_for_history(content)
                 history.append({
                     "role": role,
                     "content": content

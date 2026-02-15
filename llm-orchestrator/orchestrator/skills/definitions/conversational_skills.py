@@ -31,5 +31,6 @@ CONVERSATIONAL_SKILLS = [
         priority=60,
         tools=[],
         system_prompt="You discuss fiction writing concepts and theory. Provide advice on storytelling techniques, structure patterns, and general writing craft. You do not review or edit specific manuscript content.",
+        internal_only=True,
     ),
 ]

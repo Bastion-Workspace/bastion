@@ -26,6 +26,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
 from orchestrator.models.agent_response_contract import AgentResponse, ManuscriptEditMetadata
+from orchestrator.utils.writing_subgraph_utilities import sanitize_ai_response_for_history
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +47,9 @@ def _slice_hash(text: str) -> str:
 
 
 def _strip_frontmatter_block(text: str) -> str:
-    """Strip YAML frontmatter from text."""
+    """Strip only the leading YAML frontmatter block from text. Uses \\A so scene breaks (---) in the body are never stripped."""
     try:
-        return re.sub(r'^---\s*\n[\s\S]*?\n---\s*\n', '', text, flags=re.MULTILINE)
+        return re.sub(r'\A---\s*\n[\s\S]*?\n---\s*\n', '', text)
     except Exception:
         return text
 
@@ -411,6 +412,8 @@ def _extract_conversation_history(messages: List[Any], limit: int = 10) -> List[
             if hasattr(msg, 'content'):
                 role = "assistant" if hasattr(msg, 'type') and msg.type == "ai" else "user"
                 content = msg.content if isinstance(msg.content, str) else str(msg.content)
+                if role == "assistant":
+                    content = sanitize_ai_response_for_history(content)
                 history.append({
                     "role": role,
                     "content": content
@@ -620,7 +623,7 @@ def _build_system_prompt() -> str:
         "- **insert_after_heading**: Use ONLY when section is completely empty below the header\n"
         "  * op_type='insert_after_heading' with anchor_text='### Header' (exact header line - ANY header the user has created)\n"
         "  * Example: Adding traits after '### Personality' header when section is completely empty\n"
-        "  * Example: Adding powers after '### Vampire Abilities' header (custom section) when section is completely empty\n"
+        "  * Example: Adding powers after '### Special Abilities' header (custom section) when section is completely empty\n"
         "  * Works with ANY section header (### Basic Information, ### Combat Style, ### Magic Powers, ### Backstory, etc.)\n"
         "  * ⚠️ CRITICAL WARNING: Before using insert_after_heading, you MUST verify the section is COMPLETELY EMPTY!\n"
         "  * ⚠️ If there is ANY text below the header (even a single line), use replace_range instead!\n"

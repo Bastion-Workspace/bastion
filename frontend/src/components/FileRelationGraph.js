@@ -5,7 +5,6 @@ import {
   Background,
   MiniMap,
   useNodesState,
-  useEdgesState,
   MarkerType,
   ReactFlowProvider,
   Handle,
@@ -69,28 +68,161 @@ function getHandleForAngle(rad) {
   return HANDLE_ANGLES[index];
 }
 
+function getConnectedComponents(mergedEdges, nodeIds) {
+  const adj = new Map();
+  for (const id of nodeIds) adj.set(id, new Set());
+  for (const e of mergedEdges) {
+    if (!nodeIds.has(e.source) || !nodeIds.has(e.target)) continue;
+    adj.get(e.source).add(e.target);
+    adj.get(e.target).add(e.source);
+  }
+  const visited = new Set();
+  const components = [];
+  for (const id of nodeIds) {
+    if (visited.has(id)) continue;
+    const stack = [id];
+    const compIds = new Set();
+    while (stack.length) {
+      const u = stack.pop();
+      if (visited.has(u)) continue;
+      visited.add(u);
+      compIds.add(u);
+      for (const v of adj.get(u) || []) if (!visited.has(v)) stack.push(v);
+    }
+    if (compIds.size) components.push(compIds);
+  }
+  return components;
+}
+
+function bbox(nodes) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const n of nodes) {
+    const x = n.x ?? n.position?.x ?? 0;
+    const y = n.y ?? n.position?.y ?? 0;
+    minX = Math.min(minX, x); minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+  }
+  const pad = 50;
+  return {
+    minX: minX - pad,
+    minY: minY - pad,
+    maxX: maxX + pad,
+    maxY: maxY + pad,
+    width: Math.max(0, maxX - minX + 2 * pad),
+    height: Math.max(0, maxY - minY + 2 * pad),
+  };
+}
+
 function computeLayout(nodesData, edgesData) {
   if (!nodesData?.length) return { nodes: [], edges: [] };
   const nodeIds = new Set(nodesData.map((n) => n.id));
   const mergedEdges = mergeBidirectionalEdges(edgesData, nodeIds);
-  const links = mergedEdges.map((e) => ({ source: e.source, target: e.target }));
-  const nodes = nodesData.map((n) => ({
-    id: n.id,
-    data: { label: n.label, ...n },
-    position: { x: 0, y: 0 },
-    type: 'fileNode',
-  }));
-  const linkForce = d3Force.forceLink(links).id((d) => d.id).distance(220);
-  const sim = d3Force.forceSimulation(nodes)
-    .force('link', linkForce)
-    .force('charge', d3Force.forceManyBody().strength(-500))
-    .force('center', d3Force.forceCenter(LAYOUT_WIDTH / 2, LAYOUT_HEIGHT / 2))
-    .force('collision', d3Force.forceCollide().radius(90));
-  for (let i = 0; i < 350; i++) sim.tick();
-  const positioned = nodes.map((n) => ({
-    ...n,
-    position: { x: n.x ?? 0, y: n.y ?? 0 },
-  }));
+  const connectedIds = new Set();
+  for (const e of mergedEdges) {
+    connectedIds.add(e.source);
+    connectedIds.add(e.target);
+  }
+  const connectedNodesData = nodesData.filter((n) => connectedIds.has(n.id));
+  const unconnectedNodesData = nodesData.filter((n) => !connectedIds.has(n.id));
+
+  const idToNode = new Map(connectedNodesData.map((n) => [n.id, n]));
+  const components = getConnectedComponents(mergedEdges, connectedIds);
+  const PAD = 120;
+  const positionedConnected = [];
+  const componentBoxes = [];
+
+  for (let c = 0; c < components.length; c++) {
+    const compIds = components[c];
+    const compNodesData = [...compIds].map((id) => idToNode.get(id)).filter(Boolean);
+    const compEdges = mergedEdges.filter((e) => compIds.has(e.source) && compIds.has(e.target));
+    const links = compEdges.map((e) => ({ source: e.source, target: e.target }));
+    const nodes = compNodesData.map((n) => ({
+      id: n.id,
+      data: { label: n.label, ...n },
+      position: { x: 0, y: 0 },
+      type: 'fileNode',
+    }));
+    if (nodes.length > 0 && links.length > 0) {
+      const linkForce = d3Force.forceLink(links).id((d) => d.id).distance(220);
+      const sim = d3Force.forceSimulation(nodes)
+        .force('link', linkForce)
+        .force('charge', d3Force.forceManyBody().strength(-400))
+        .force('center', d3Force.forceCenter(0, 0))
+        .force('collision', d3Force.forceCollide().radius(90));
+      for (let i = 0; i < 350; i++) sim.tick();
+    }
+    const withPos = nodes.map((n) => ({
+      ...n,
+      position: { x: n.x ?? 0, y: n.y ?? 0 },
+    }));
+    const box = bbox(withPos);
+    componentBoxes.push({ box, nodes: withPos });
+  }
+
+  const maxW = Math.max(200, ...componentBoxes.map(({ box }) => box.width));
+  const maxH = Math.max(120, ...componentBoxes.map(({ box }) => box.height));
+  const cols = Math.max(1, Math.ceil(Math.sqrt(componentBoxes.length)));
+  const clusterBounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  for (let i = 0; i < componentBoxes.length; i++) {
+    const { box, nodes } = componentBoxes[i];
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    const dx = col * (maxW + PAD) - box.minX;
+    const dy = row * (maxH + PAD) - box.minY;
+    for (const n of nodes) {
+      const pos = { x: (n.position?.x ?? n.x ?? 0) + dx, y: (n.position?.y ?? n.y ?? 0) + dy };
+      positionedConnected.push({ ...n, position: pos });
+      clusterBounds.minX = Math.min(clusterBounds.minX, pos.x);
+      clusterBounds.minY = Math.min(clusterBounds.minY, pos.y);
+      clusterBounds.maxX = Math.max(clusterBounds.maxX, pos.x);
+      clusterBounds.maxY = Math.max(clusterBounds.maxY, pos.y);
+    }
+  }
+  if (positionedConnected.length > 0 && Number.isFinite(clusterBounds.minX)) {
+    const cx = (clusterBounds.minX + clusterBounds.maxX) / 2;
+    const cy = (clusterBounds.minY + clusterBounds.maxY) / 2;
+    const tx = LAYOUT_WIDTH / 2 - cx;
+    const ty = LAYOUT_HEIGHT / 2 - cy;
+    for (const n of positionedConnected) {
+      n.position.x += tx;
+      n.position.y += ty;
+    }
+    clusterBounds.minX += tx;
+    clusterBounds.maxX += tx;
+    clusterBounds.minY += ty;
+    clusterBounds.maxY += ty;
+  }
+  const hasCluster = positionedConnected.length > 0 && Number.isFinite(clusterBounds.minX);
+  const orphanMargin = 160;
+  const bandWidth = 220;
+  const clusterMinX = hasCluster ? clusterBounds.minX - orphanMargin : 0;
+  const clusterMaxX = hasCluster ? clusterBounds.maxX + orphanMargin : LAYOUT_WIDTH;
+  const clusterMinY = hasCluster ? clusterBounds.minY - orphanMargin : 0;
+  const clusterMaxY = hasCluster ? clusterBounds.maxY + orphanMargin : LAYOUT_HEIGHT;
+  const defaultBand = { minX: -200, maxX: LAYOUT_WIDTH + 400, minY: -150, maxY: LAYOUT_HEIGHT + 350 };
+  const clusterBands = hasCluster
+    ? [
+        { minX: -800, maxX: clusterMinX - bandWidth, minY: clusterMinY - 400, maxY: clusterMaxY + 400 },
+        { minX: clusterMaxX + bandWidth, maxX: LAYOUT_WIDTH + 600, minY: clusterMinY - 400, maxY: clusterMaxY + 400 },
+        { minX: clusterMinX - 400, maxX: clusterMaxX + 400, minY: -600, maxY: clusterMinY - bandWidth },
+        { minX: clusterMinX - 400, maxX: clusterMaxX + 400, minY: clusterMaxY + bandWidth, maxY: LAYOUT_HEIGHT + 500 },
+      ].filter((b) => b.minX < b.maxX && b.minY < b.maxY)
+    : [];
+  const bands = clusterBands.length > 0 ? clusterBands : [defaultBand];
+
+  const positionedUnconnected = unconnectedNodesData.map((n, i) => {
+    const band = bands[i % bands.length];
+    const x = band.minX + Math.random() * (band.maxX - band.minX);
+    const y = band.minY + Math.random() * (band.maxY - band.minY);
+    return {
+      id: n.id,
+      data: { label: n.label, ...n },
+      position: { x, y },
+      type: 'fileNode',
+    };
+  });
+
+  const positioned = [...positionedConnected, ...positionedUnconnected];
   const posById = Object.fromEntries(positioned.map((n) => [n.id, n.position]));
   const edges = mergedEdges.map((e, i) => {
     const srcPos = posById[e.source] || { x: 0, y: 0 };
@@ -161,9 +293,25 @@ function FileNode({ data, selected }) {
 
 const nodeTypes = { fileNode: FileNode };
 
-function GraphCanvas({ nodes: initialNodes, edges: initialEdges, onNodeClick, searchFilter, theme }) {
+function computeEdgeHandles(nodes, baseEdges) {
+  const posById = Object.fromEntries(
+    nodes.map((n) => [n.id, n.position ?? { x: 0, y: 0 }])
+  );
+  return baseEdges.map((e) => {
+    const srcPos = posById[e.source] || { x: 0, y: 0 };
+    const tgtPos = posById[e.target] || { x: 0, y: 0 };
+    const angleToTarget = Math.atan2(tgtPos.y - srcPos.y, tgtPos.x - srcPos.x);
+    const angleToSource = Math.atan2(srcPos.y - tgtPos.y, srcPos.x - tgtPos.x);
+    return {
+      ...e,
+      sourceHandle: `source-${getHandleForAngle(angleToTarget)}`,
+      targetHandle: `target-${getHandleForAngle(angleToSource)}`,
+    };
+  });
+}
+
+function GraphCanvas({ nodes: initialNodes, edges: initialEdges, onNodeClick, searchFilter, theme, initialViewport, onViewportChange }) {
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
-  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const palette = theme?.palette || {};
   const edgeStroke = palette.primary?.main ?? '#5c6bc0';
   const background = palette.background?.default ?? '#fafafa';
@@ -177,21 +325,50 @@ function GraphCanvas({ nodes: initialNodes, edges: initialEdges, onNodeClick, se
 
   useEffect(() => {
     setNodes(initialNodes);
-    setEdges(initialEdges);
-  }, [initialNodes, initialEdges, setNodes, setEdges]);
+  }, [initialNodes, setNodes]);
+
+  const baseEdges = useMemo(
+    () =>
+      (initialEdges || []).map((e) => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        style: e.style,
+        markerEnd: e.markerEnd,
+        markerStart: e.markerStart,
+      })),
+    [initialEdges]
+  );
+
+  const computedEdges = useMemo(
+    () => computeEdgeHandles(nodes, baseEdges),
+    [nodes, baseEdges]
+  );
 
   const { visibleNodes, visibleEdges } = useMemo(() => {
-    if (!searchFilter?.trim()) return { visibleNodes: nodes, visibleEdges: edges };
+    if (!searchFilter?.trim()) return { visibleNodes: nodes, visibleEdges: computedEdges };
     const q = searchFilter.trim().toLowerCase();
-    const visibleIds = new Set(
+    const matchingIds = new Set(
       nodes.filter((n) => (n.data?.label || '').toLowerCase().includes(q)).map((n) => n.id)
     );
+    const visibleIds = new Set(matchingIds);
+    for (const e of computedEdges) {
+      if (matchingIds.has(e.source) || matchingIds.has(e.target)) {
+        visibleIds.add(e.source);
+        visibleIds.add(e.target);
+      }
+    }
     const visibleNodes = nodes.filter((n) => visibleIds.has(n.id));
-    const visibleEdges = edges.filter(
+    const visibleEdges = computedEdges.filter(
       (e) => visibleIds.has(e.source) && visibleIds.has(e.target)
     );
     return { visibleNodes, visibleEdges };
-  }, [nodes, edges, searchFilter]);
+  }, [nodes, computedEdges, searchFilter]);
+
+  const defaultViewport = initialViewport && typeof initialViewport.zoom === 'number'
+    ? { x: initialViewport.x ?? 0, y: initialViewport.y ?? 0, zoom: initialViewport.zoom }
+    : { x: 0, y: 0, zoom: 0.8 };
+  const hasSavedViewport = initialViewport && typeof initialViewport.zoom === 'number';
 
   return (
     <Box sx={{ width: '100%', height: '100%', minHeight: 400 }}>
@@ -201,14 +378,15 @@ function GraphCanvas({ nodes: initialNodes, edges: initialEdges, onNodeClick, se
         nodeTypes={nodeTypes}
         defaultEdgeOptions={{ style: { stroke: edgeStroke, strokeWidth: 2 } }}
         onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
+        onEdgesChange={() => {}}
         onNodeClick={(_, node) => {
           const docId = node.id;
           const docName = node.data?.label || docId;
           onNodeClick?.(docId, docName);
         }}
-        fitView
-        defaultViewport={{ x: 0, y: 0, zoom: 0.8 }}
+        fitView={!hasSavedViewport}
+        defaultViewport={defaultViewport}
+        onMoveEnd={(_, viewport) => onViewportChange?.(viewport)}
         nodesDraggable
         nodesConnectable={false}
         elementsSelectable
@@ -232,17 +410,18 @@ function GraphCanvas({ nodes: initialNodes, edges: initialEdges, onNodeClick, se
   );
 }
 
-function FileRelationGraphInner({ scope: initialScope, folderId, onOpenDocument }) {
+function FileRelationGraphInner({ scope: initialScope, folderId, onOpenDocument, persistedState, onStateChange }) {
   const theme = useTheme();
-  const [scope, setScope] = useState(initialScope || 'all');
-  const [folderIdState, setFolderIdState] = useState(folderId || '');
+  const [scope, setScope] = useState(persistedState?.scope ?? initialScope ?? 'all');
+  const [folderIdState, setFolderIdState] = useState(persistedState?.folderId ?? folderId ?? '');
   const [data, setData] = useState({ nodes: [], edges: [], unresolved_targets: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [searchFilter, setSearchFilter] = useState('');
+  const [searchFilter, setSearchFilter] = useState(persistedState?.searchFilter ?? '');
   const [fullscreen, setFullscreen] = useState(false);
   const [layoutResult, setLayoutResult] = useState({ nodes: [], edges: [] });
   const [layoutPending, setLayoutPending] = useState(false);
+  const lastViewportRef = React.useRef(persistedState?.viewport ?? null);
 
   const fetchGraph = useCallback(async () => {
     setLoading(true);
@@ -275,6 +454,27 @@ function FileRelationGraphInner({ scope: initialScope, folderId, onOpenDocument 
   useEffect(() => {
     fetchGraph();
   }, [fetchGraph]);
+
+  const onStateChangeRef = React.useRef(onStateChange);
+  onStateChangeRef.current = onStateChange;
+  useEffect(() => {
+    const fn = onStateChangeRef.current;
+    if (typeof fn !== 'function') return;
+    fn({
+      scope,
+      folderId: folderIdState,
+      searchFilter,
+      viewport: lastViewportRef.current ?? undefined,
+    });
+  }, [scope, folderIdState, searchFilter]);
+
+  const handleViewportChange = useCallback(
+    (viewport) => {
+      lastViewportRef.current = viewport;
+      onStateChange?.({ viewport });
+    },
+    [onStateChange]
+  );
 
   useEffect(() => {
     if (!data.nodes?.length) {
@@ -390,14 +590,6 @@ function FileRelationGraphInner({ scope: initialScope, folderId, onOpenDocument 
           {fullscreen ? <FullscreenExitIcon /> : <FullscreenIcon />}
         </IconButton>
       </Tooltip>
-      <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-        {data.nodes.length} nodes, {layoutResult.edges.length} connections
-        {data.unresolved_targets?.length > 0 &&
-          `, ${data.unresolved_targets.length} unresolved`}
-      </Typography>
-      <Typography variant="caption" color="text.secondary" sx={{ ml: 1 }}>
-        Edges: blue = into most-linked file, pink = out from it, gray = other
-      </Typography>
     </Box>
   );
 
@@ -460,6 +652,8 @@ function FileRelationGraphInner({ scope: initialScope, folderId, onOpenDocument 
           onNodeClick={handleNodeClick}
           searchFilter={searchFilter}
           theme={theme}
+          initialViewport={persistedState?.viewport}
+          onViewportChange={handleViewportChange}
         />
       )}
     </Box>

@@ -26,15 +26,6 @@ SKILL_CONFIGS: Dict[str, Dict[str, Any]] = {
         "round2": True,
         "synthesis_style": "comprehensive",
     },
-    "content_analysis": {
-        "skip_quick_answer": True,
-        "local_search": True,
-        "web_search": False,
-        "gap_analysis": False,
-        "full_doc_analysis": True,
-        "round2": False,
-        "synthesis_style": "analytical",
-    },
     "knowledge_builder": {
         "skip_quick_answer": True,
         "local_search": True,
