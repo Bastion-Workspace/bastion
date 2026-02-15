@@ -416,36 +416,24 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             for collection_name in collections_to_search:
                 try:
                     # Search with document_id filter via Vector Service
-                    filter_json = {
-                        "must": [
-                            {
-                                "key": "document_id",
-                                "match": {"value": request.document_id}
-                            }
-                        ]
-                    }
+                    filters = [
+                        {
+                            "field": "document_id",
+                            "value": request.document_id,
+                            "operator": "equals",
+                        }
+                    ]
                     
                     search_result = await vector_store.vector_service_client.search_vectors(
                         collection_name=collection_name,
                         query_vector=dummy_vector,
                         limit=1000,  # Get up to 1000 chunks per document
-                        filter_dict=filter_json,
                         score_threshold=0.0,  # No threshold, we want all matches
-                        with_payload=True,
-                        with_vector=False
+                        filters=filters,
                     )
                     
-                    if not search_result.get("success"):
-                        error_msg = search_result.get('error', 'Unknown error')
-                        # Collection not found is expected for user/team collections
-                        if "doesn't exist" in error_msg or "not found" in error_msg:
-                            logger.debug(f"Collection {collection_name} doesn't exist, skipping")
-                        else:
-                            logger.warning(f"Search failed for {collection_name}: {error_msg}")
-                        continue
-                    
-                    # Extract chunks from search result
-                    points = search_result.get("results", [])
+                    # search_vectors returns a list of dicts with id, score, payload
+                    points = search_result if isinstance(search_result, list) else []
                     for point in points:
                         payload = point.get("payload", {})
                         chunk_data = {

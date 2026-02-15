@@ -7,8 +7,12 @@ class FolderService extends ApiServiceBase {
     return this.get(`/api/folders/tree?collection_type=${collectionType}`);
   }
 
-  getFolderContents = async (folderId) => {
-    return this.get(`/api/folders/${folderId}/contents`);
+  getFolderContents = async (folderId, limit = 250, offset = 0) => {
+    const params = new URLSearchParams();
+    if (limit != null) params.set('limit', String(limit));
+    if (offset != null && offset > 0) params.set('offset', String(offset));
+    const qs = params.toString();
+    return this.get(`/api/folders/${folderId}/contents${qs ? `?${qs}` : ''}`);
   }
 
   createFolder = async (folderData) => {

@@ -609,19 +609,18 @@ class FolderService:
             logger.error(f"❌ Failed to get folder tree: {e}")
             return []
     
-    async def get_folder_contents(self, folder_id: str, user_id: str = None) -> Optional[FolderContentsResponse]:
-        """Get contents of a specific folder"""
+    async def get_folder_contents(
+        self, folder_id: str, user_id: str = None, limit: int = 250, offset: int = 0
+    ) -> Optional[FolderContentsResponse]:
+        """Get contents of a specific folder. Uses limit/offset for documents to scale with large folders."""
         try:
-            logger.debug(f"📁 Getting contents for folder {folder_id} (user: {user_id})")
+            logger.debug(f"📁 Getting contents for folder {folder_id} (user: {user_id}, limit: {limit}, offset: {offset})")
             
-            # Handle virtual RSS feed folders
             if folder_id in ["rss_feeds_virtual", "global_rss_feeds_virtual"]:
                 return await self._get_virtual_rss_folder_contents(folder_id, user_id)
             
-            # **ROOSEVELT FIX:** Handle virtual root folders (My Documents, Global Documents)
-            # These need to show documents at the root level (folder_id IS NULL)
             if folder_id in ["my_documents_root", "global_documents_root"]:
-                return await self._get_virtual_root_contents(folder_id, user_id)
+                return await self._get_virtual_root_contents(folder_id, user_id, limit=limit, offset=offset)
             
             # Virtual web sources folders have been removed - only RSS Feeds virtual folders remain
             
@@ -641,16 +640,15 @@ class FolderService:
             # Add debug logging for folder query
             logger.debug(f"🔍 Folder {folder_id} collection_type: {folder.collection_type}, query_user_id: {query_user_id}")
             
-            documents = await self.document_repository.get_documents_by_folder(folder_id, query_user_id)
-            logger.debug(f"📄 Found {len(documents)} documents in folder {folder_id} (collection_type: {folder.collection_type})")
+            documents, total_doc_count = await self.document_repository.get_documents_by_folder(
+                folder_id, query_user_id, limit=limit, offset=offset
+            )
+            logger.debug(f"📄 Found {len(documents)} documents in folder {folder_id} (total={total_doc_count}, collection_type: {folder.collection_type})")
             
-            # Only log warnings for zero documents (potential issues)
-            if len(documents) == 0:
+            if len(documents) == 0 and total_doc_count == 0:
                 logger.warning(f"⚠️ ZERO DOCUMENTS returned for folder {folder_id}!")
                 logger.warning(f"⚠️ Query context: folder_id={folder_id}, query_user_id={query_user_id}, collection_type={folder.collection_type}")
             
-            # Get subfolders with RLS context
-            # Use 'user' role for normal folder access, 'admin' for global folders
             user_role = 'admin' if folder.collection_type == 'global' else 'user'
             subfolders_data = await self.document_repository.get_subfolders(folder_id, query_user_id, user_role)
             subfolders = [DocumentFolder(**subfolder_data) for subfolder_data in subfolders_data]
@@ -660,7 +658,7 @@ class FolderService:
                 folder=folder,
                 documents=documents,
                 subfolders=subfolders,
-                total_documents=len(documents),
+                total_documents=total_doc_count,
                 total_subfolders=len(subfolders)
             )
             
@@ -671,29 +669,22 @@ class FolderService:
             logger.error(f"❌ Failed to get folder contents: {e}")
             return None
 
-    async def _get_virtual_root_contents(self, folder_id: str, user_id: str = None) -> Optional[FolderContentsResponse]:
-        """Get contents for virtual root folders (My Documents, Global Documents)
-        
-        **ROOSEVELT FIX:** Virtual roots need to show:
-        1. Documents at root level (folder_id IS NULL)
-        2. Top-level real folders
-        3. Virtual source folders (RSS Feeds)
-        """
+    async def _get_virtual_root_contents(
+        self, folder_id: str, user_id: str = None, limit: int = 250, offset: int = 0
+    ) -> Optional[FolderContentsResponse]:
+        """Get contents for virtual root folders (My Documents, Global Documents). Documents are paginated."""
         try:
-            logger.info(f"📁 Getting virtual root contents for {folder_id} (user: {user_id})")
+            logger.info(f"📁 Getting virtual root contents for {folder_id} (user: {user_id}, limit: {limit}, offset: {offset})")
             
-            # Determine collection type
             if folder_id == "my_documents_root":
                 collection_type = "user"
                 folder_name = "My Documents"
                 query_user_id = user_id
-            else:  # global_documents_root
+            else:
                 collection_type = "global"
                 folder_name = "Global Documents"
-                # Use user_id for RLS context - RLS policy allows global docs for all users
                 query_user_id = user_id
             
-            # Create virtual folder object
             virtual_folder = DocumentFolder(
                 folder_id=folder_id,
                 name=folder_name,
@@ -707,21 +698,13 @@ class FolderService:
                 children=[]
             )
             
-            # **BULLY!** Get documents at root level (folder_id IS NULL)
-            # Need to query with collection_type filter
-            # For global documents, use user_id for RLS context (RLS allows global docs for all users)
-            # For user documents, use user_id
-            document_query_user_id = user_id  # Always use user_id for documents so RLS allows access
-            logger.info(f"🔍 Querying root-level documents for {collection_type} collection (user_id: {document_query_user_id})")
-            documents = await self.document_repository.get_root_documents_by_collection(collection_type, document_query_user_id)
-            logger.info(f"📄 Found {len(documents)} root-level {collection_type} documents")
+            documents, total_documents = await self.document_repository.get_root_documents_by_collection(
+                collection_type, query_user_id, limit=limit, offset=offset
+            )
+            logger.info(f"📄 Found {len(documents)} root-level {collection_type} documents (total: {total_documents})")
             
-            # Get top-level real folders (parent_folder_id IS NULL)
-            # For global folders, use None to get all global folders
-            # For user folders, use user_id
             folder_query_user_id = None if collection_type == "global" else user_id
             folders_data = await self.document_repository.get_folders_by_user(folder_query_user_id, collection_type)
-            # Filter to only root-level folders
             root_folders_data = [f for f in folders_data if f.get('parent_folder_id') is None]
             subfolders = [DocumentFolder(**folder_data) for folder_data in root_folders_data]
             logger.info(f"📁 Found {len(subfolders)} root-level folders")
@@ -730,11 +713,11 @@ class FolderService:
                 folder=virtual_folder,
                 documents=documents,
                 subfolders=subfolders,
-                total_documents=len(documents),
+                total_documents=total_documents,
                 total_subfolders=len(subfolders)
             )
             
-            logger.info(f"✅ Virtual root contents for {folder_id}: {len(documents)} docs, {len(subfolders)} folders")
+            logger.info(f"✅ Virtual root contents for {folder_id}: {len(documents)} docs (total {total_documents}), {len(subfolders)} folders")
             return result
             
         except Exception as e:
@@ -930,9 +913,8 @@ class FolderService:
 
             logger.info(f"🔍 DEBUG: get_folder_descendants returned {len(descendant_folder_ids)} folders and {len(descendant_document_ids)} documents")
 
-            # Also get documents directly in this folder (not just descendants)
-            # Note: get_documents_by_folder returns DocumentInfo objects
-            direct_documents = await self.document_repository.get_documents_by_folder(folder_id, user_id)
+            # Also get documents directly in this folder (not just descendants). No limit so we get all for exemption.
+            direct_documents, _ = await self.document_repository.get_documents_by_folder(folder_id, user_id)
             direct_document_ids = [doc.document_id for doc in direct_documents]
 
             logger.info(f"🔍 DEBUG: get_documents_by_folder returned {len(direct_documents)} documents: {[doc.document_id for doc in direct_documents]}")

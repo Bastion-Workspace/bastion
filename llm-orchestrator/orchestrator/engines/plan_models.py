@@ -14,10 +14,21 @@ class PlanStep(BaseModel):
     """A single step in a compound execution plan."""
 
     step_id: int
-    skill_name: str
+    skill_name: str = Field(
+        default="",
+        description="Skill name (mutually exclusive with fragment_name)",
+    )
+    fragment_name: str = Field(
+        default="",
+        description="Subgraph fragment name",
+    )
     sub_query: str = Field(description="Focused query for this skill")
     depends_on: List[int] = Field(default_factory=list)
     context_keys: List[str] = Field(default_factory=list)
+    tool_packs: List[str] = Field(
+        default_factory=list,
+        description="Optional tool packs to augment this step",
+    )
 
 
 class ExecutionPlan(BaseModel):

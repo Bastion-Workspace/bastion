@@ -260,7 +260,6 @@ k8s-*.yml
 # IDE
 .vscode/
 .idea/
-.cursor/
 *.swp
 *.swo
 *~
@@ -302,7 +301,3 @@ build/
 
 # Processed files storage (app-generated content)
 processed/
-
-# Development notes (not for version control)
-dev-notes/
-Dev-notes/

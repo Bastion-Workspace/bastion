@@ -1,0 +1,620 @@
+# Agent Response Contract - Standardized Response Structure
+
+## Overview
+
+ALL agents MUST return responses following the standard `AgentResponse` contract defined in [`llm-orchestrator/orchestrator/models/agent_response_contract.py`](llm-orchestrator/orchestrator/models/agent_response_contract.py).
+
+This contract ensures:
+- **Consistent parsing** in grpc_service (single extraction path)
+- **Predictable frontend integration** (standard chunk ordering)
+- **Easier debugging** (know where to find any field)
+- **Simpler agent development** (clear contract to follow)
+
+## Required Fields (All Agents)
+
+Every agent MUST provide these four fields:
+
+```python
+{
+    "response": str,              # Natural language text for chat sidebar
+    "task_status": str,            # "complete" | "error" | "incomplete" | "permission_required"
+    "agent_type": str,             # Agent identifier (e.g., "fiction_editing_agent")
+    "timestamp": str               # ISO timestamp (e.g., "2026-01-26T17:42:25.347")
+}
+```
+
+## Optional Fields by Agent Category
+
+### Editing Agents (Workspace Interactions)
+
+Editing agents that modify documents should include:
+
+```python
+{
+    "editor_operations": List[Dict],      # Operations to apply (insert, replace, delete)
+    "manuscript_edit": {                   # Edit metadata
+        "target_filename": str,
+        "scope": str,                       # "chapter" | "document" | "section"
+        "summary": str,
+        "chapter_index": int | None,
+        "safety": str | None                # "safe" | "review_recommended"
+    },
+    "failed_operations": List[Dict] | None # Operations requiring manual placement
+}
+```
+
+**Example - Fiction Editing Agent:**
+```python
+from orchestrator.models.agent_response_contract import AgentResponse, ManuscriptEditMetadata
+from datetime import datetime
+
+standard_response = AgentResponse(
+    response="Added 3 paragraphs to Chapter 5 expanding character motivation.",
+    task_status="complete",
+    agent_type="fiction_editing_agent",
+    timestamp=datetime.now().isoformat(),
+    editor_operations=editor_operations,
+    manuscript_edit=ManuscriptEditMetadata(
+        target_filename="chapter_05.md",
+        scope="chapter",
+        summary="Expanded character motivation",
+        chapter_index=5,
+        safety="safe"
+    ) if structured_edit else None,
+    failed_operations=failed_operations if failed_operations else None,
+    warnings=consistency_warnings + reference_warnings if any warnings else None
+)
+```
+
+### Analysis Agents (Structured Data)
+
+Analysis agents that extract patterns, insights, or calculations should include:
+
+```python
+{
+    "structured_data": {                   # Formatted for display in response text
+        "patterns": List[Dict],
+        "frequencies": Dict,
+        "temporal_trends": List[str],
+        "correlations": List[str],
+        "insights": List[Dict],
+        "key_trends": List[str],
+        "anomalies": List[str],
+        "recommendations": List[str]
+    },
+    "confidence": float,                   # 0.0-1.0 confidence score
+    "sources": List[str] | None            # Source identifiers
+}
+```
+
+**IMPORTANT**: Structured data should ALSO be formatted into the `response` text for chat sidebar display. The `structured_data` field is for programmatic access, but users see the formatted text.
+
+**Example - Reference Agent (Pattern Analysis):**
+```python
+standard_response = AgentResponse(
+    response=formatted_response_text,  # Includes formatted patterns, frequencies, etc.
+    task_status="complete",
+    agent_type="reference_agent",
+    timestamp=datetime.now().isoformat(),
+    structured_data={
+        "patterns": patterns,
+        "frequencies": frequencies,
+        "temporal_trends": temporal_trends,
+        "correlations": correlations
+    } if query_complexity == "pattern_analysis" else None,
+    confidence=confidence_level
+)
+```
+
+### Visualization Agents
+
+Agents that generate charts, diagrams, or images should include:
+
+```python
+{
+    "static_visualization_data": str,      # Chart HTML, base64 image, etc.
+    "static_format": str,                  # "html" | "base64_png" | "mermaid_code" | "svg"
+    "diagram_result": Dict | None,         # Diagram generation results
+    "chart_result": Dict | None             # Chart generation results
+}
+```
+
+**Example - Technical Hyperspace Agent:**
+```python
+standard_response = AgentResponse(
+    response="System analysis complete. Generated architecture diagram and performance chart.",
+    task_status="complete",
+    agent_type="technical_hyperspace_agent",
+    timestamp=datetime.now().isoformat(),
+    diagram_result={
+        "success": True,
+        "output_format": "mermaid_code",
+        "data": "graph TD\nA[Component] --> B[Dependency]"
+    },
+    chart_result={
+        "success": True,
+        "output_format": "html",
+        "data": "{...vega_lite_json...}"
+    }
+)
+```
+
+### Image Agents
+
+**ALL agents that return images MUST use the standardized image emission pattern.**
+
+Agents that generate or return images should include:
+
+```python
+{
+    "images": List[Dict],                   # Structured image data
+    # Each image dict should have:
+    #   "url": str,                        # Image URL (API endpoint, HTTP URL, or data URI)
+    #   "alt_text": str | None,            # Alt text for accessibility
+    #   "type": str | None,                # "generated" | "search_result" | "attachment" | "reference"
+    #   "metadata": Dict | None            # Additional metadata (model used, prompt, etc.)
+}
+```
+
+**CRITICAL - Standardized Image Emission Pattern:**
+
+Images should be provided using **EITHER/OR pattern** (not both):
+1. **Structured `images` field** (preferred) - For rich metadata and programmatic access
+2. **Markdown in `response` text** (fallback) - Only when NO structured images available
+
+**Frontend Behavior** (`ChatMessage.js`):
+```javascript
+// Frontend uses EITHER structured OR markdown, never both
+const imageUrls = structuredImages.length > 0 
+  ? structuredImages.map(img => img.url)   // Use structured (with rich metadata)
+  : extractImageUrls(message.content);      // ELSE extract from markdown
+```
+
+**Why EITHER/OR (Not Both)?**
+- **Structured images** (when available): Provides title, series, date, tags for rich UI
+- **Markdown fallback** (when unavailable): Backward compatibility for basic image display
+- **Never both**: Prevents duplicate image display (preview block + markdown rendering)
+
+**MANDATORY Pattern for All Image-Emitting Agents:**
+```python
+# 1. Collect structured image data
+structured_images = [
+    {
+        "url": image_url_or_data_uri,
+        "alt_text": "Descriptive alt text",
+        "type": "generated" | "search_result" | "attachment",
+        "metadata": {
+            # Agent-specific metadata (model, prompt, source, date, tags, etc.)
+        }
+    }
+    for each_image
+]
+
+# 2. Format images as markdown (ONLY if NO structured images)
+images_markdown = "\n".join([f"![]({img['url']})" for img in structured_images])
+
+# 3. Use EITHER structured OR markdown (not both)
+standard_response = AgentResponse(
+    response=f"Your text response here",  # NO markdown if structured exists
+    task_status="complete",
+    agent_type="your_agent",
+    timestamp=datetime.now().isoformat(),
+    images=structured_images if structured_images else None  # Structured data (preferred)
+)
+
+# OR if no structured images available (fallback):
+standard_response = AgentResponse(
+    response=f"Your text response here.\n\n{images_markdown}",  # Markdown fallback
+    task_status="complete",
+    agent_type="your_agent",
+    timestamp=datetime.now().isoformat(),
+    images=None  # No structured data
+)
+```
+
+**Example - Image Generation Agent:**
+```python
+# Prefer structured images (NO markdown in response)
+structured_images = [
+    {
+        "url": img.get("url"),
+        "alt_text": f"Generated image {i+1}",
+        "type": "generated",
+        "metadata": {
+            "model": tool_result.get("model"),
+            "prompt": prompt,
+            "size": generation_params.get("size")
+        }
+    }
+    for i, img in enumerate(images)
+]
+
+standard_response = AgentResponse(
+    response=f"Generated {len(image_urls)} image(s).",  # NO markdown
+    task_status="complete",
+    agent_type="image_generation_agent",
+    timestamp=datetime.now().isoformat(),
+    images=structured_images  # Frontend displays from structured data
+)
+```
+
+**Example - Image Search (Research Agent Subgraph):**
+```python
+# Image search tools return structured data
+image_search_result = await search_images_tool(...)
+# Returns: {"images_markdown": "...", "metadata": [...], "images": [structured_images]}
+
+# Extract structured images
+structured_images = image_search_result.get("images", [])
+images_markdown = image_search_result.get("images_markdown", "")
+
+# Use EITHER structured OR markdown (not both)
+standard_response = AgentResponse(
+    response=f"{research_findings}",  # NO markdown if structured exists
+    task_status="complete",
+    agent_type="research_agent",
+    timestamp=datetime.now().isoformat(),
+    images=structured_images if structured_images else None,  # Structured (preferred)
+    citations=citations,
+    sources=sources_used
+)
+
+# OR if no structured images (fallback):
+if not structured_images and images_markdown:
+    standard_response = AgentResponse(
+        response=f"{research_findings}\n\n{images_markdown}",  # Markdown fallback
+        task_status="complete",
+        agent_type="research_agent",
+        timestamp=datetime.now().isoformat(),
+        images=None,  # No structured data
+        citations=citations,
+        sources=sources_used
+    )
+```
+
+**Example - Image Search Subgraph:**
+```python
+# In image_search_subgraph or intelligent_document_retrieval_subgraph
+# Pass through structured images from image_search_tools
+return {
+    "image_search_results": images_markdown,  # Markdown for backward compatibility
+    "structured_images": structured_images,   # Structured data for AgentResponse
+    # ... other fields ...
+}
+```
+
+**Example - Research Workflow Subgraph:**
+```python
+# Collect structured images from parallel searches
+all_structured_images = []
+for result in search_results:
+    structured_images = result.get("structured_images")
+    if structured_images:
+        all_structured_images.extend(structured_images)
+
+# Pass through in round1_results
+return {
+    "round1_results": {
+        "search_results": combined_results,
+        "image_search_results": combined_image_markdown,  # Markdown
+        "structured_images": all_structured_images        # Structured data
+    }
+}
+```
+
+**Image URL Formats Supported:**
+- **API endpoints**: `/api/images/{filename}` (preferred for generated images)
+- **Comics API**: `/api/comics/{series}/{year}/{month}/{filename}` (for comic images)
+- **Data URIs**: `data:image/{type};base64,{data}` (for embedded base64 images - preferred for search results)
+- **HTTP/HTTPS URLs**: `https://example.com/image.png` (for external images)
+- **Static paths**: `/static/images/{filename}` (converted to `/api/images/` by frontend)
+
+**Image Type Values:**
+- `"generated"` - Images generated by image generation agent
+- `"search_result"` - Images found via image search (comics, documents, etc.)
+- `"attachment"` - Images attached by user
+- `"reference"` - Images from reference documents
+
+**Subgraph Image Flow:**
+1. **Image Search Tools** (`backend/services/langgraph_tools/image_search_tools.py`) return:
+   ```python
+   {
+       "images_markdown": "![]({data_uri})\n![]({data_uri})...",
+       "metadata": [{title, date, series, author, ...}],
+       "images": [{url, alt_text, type, metadata}]
+   }
+   ```
+
+2. **Document Retrieval Subgraph** extracts and passes through:
+   ```python
+   {
+       "image_search_results": images_markdown,  # For backward compatibility
+       "structured_images": structured_images     # For AgentResponse contract
+   }
+   ```
+
+3. **Research Workflow Subgraph** collects from parallel searches:
+   ```python
+   {
+       "round1_results": {
+           "image_search_results": combined_markdown,
+           "structured_images": all_structured_images
+       }
+   }
+   ```
+
+4. **Research Agent** includes in final AgentResponse:
+   ```python
+   AgentResponse(
+       response=f"{text}\n\n{images_markdown}",
+       images=structured_images
+   )
+   ```
+
+### Research Agents
+
+Agents that perform research or cite sources should include:
+
+```python
+{
+    "citations": List[Dict],                # Citation sources with metadata
+    "sources": List[str],                   # Source identifiers or URLs
+    "images": List[Dict] | None             # Images found during research (from image search)
+}
+```
+
+**Example - Full Research Agent (with Image Search):**
+```python
+# Collect structured images from round1_results (image search subgraph)
+structured_images = round1_results.get("structured_images")
+image_search_results = round1_results.get("image_search_results")  # Markdown
+
+# Append images to response text
+final_response = f"{research_findings}"
+if image_search_results:
+    final_response = f"{final_response}\n\n{image_search_results}"
+
+standard_response = AgentResponse(
+    response=final_response,  # Text + markdown images
+    task_status="complete",
+    agent_type="research_agent",
+    timestamp=datetime.now().isoformat(),
+    images=structured_images if structured_images else None,  # Structured image data
+    citations=[
+        {
+            "id": 1,
+            "title": "Source Title",
+            "type": "webpage",
+            "url": "https://...",
+            "author": "Author Name",
+            "excerpt": "Relevant excerpt"
+        }
+    ],
+    sources=["url1", "url2", "document_id_123"]
+)
+```
+
+**Research Agent Image Flow:**
+1. Image search subgraph finds images and returns structured data
+2. Research workflow subgraph collects structured images from parallel searches
+3. Research agent synthesis node preserves structured images through state
+4. Research agent includes both markdown (in response text) and structured data (in `images` field)
+5. Frontend extracts images from markdown for display
+6. Structured data available for future enhancements (image galleries, metadata tooltips)
+
+### Error Handling
+
+All agents should include error information when `task_status == "error"`:
+
+```python
+{
+    "error": str,                          # Error message
+    "warnings": List[str] | None,          # Warning messages
+    "validation_notices": List[str] | None # Validation issues
+}
+```
+
+## Response Formatting Rules
+
+### 1. Flat Structure (No Nested response.response)
+
+**❌ WRONG:**
+```python
+{
+    "response": {
+        "response": "Actual text here"  # Nested!
+    }
+}
+```
+
+**✅ CORRECT:**
+```python
+{
+    "response": "Actual text here"  # Direct string
+}
+```
+
+### 2. Format Structured Data for Display
+
+When you extract structured data (patterns, insights, frequencies), **ALWAYS format it into the `response` text** so users see it in the chat sidebar:
+
+**❌ WRONG:**
+```python
+{
+    "response": "Pattern analysis complete.",  # Too generic!
+    "structured_data": {
+        "patterns": [...],
+        "frequencies": {...}
+    }
+}
+```
+
+**✅ CORRECT:**
+```python
+{
+    "response": """Pattern analysis complete.
+
+**Patterns Found**:
+- Frequency pattern: Found 12 times
+  Examples: item1, item2, item3
+
+**Frequency Analysis**:
+- Design: 12
+- Pipeline: 8
+- Capabilities: 5
+""",
+    "structured_data": {
+        "patterns": [...],
+        "frequencies": {...}
+    }
+}
+```
+
+### 3. Preserve LangGraph State
+
+When returning from `_format_response_node`, preserve LangGraph state fields:
+
+```python
+return {
+    **standard_response.dict(exclude_none=True),  # Standard fields
+    # Preserve LangGraph state
+    "metadata": state.get("metadata", {}),
+    "user_id": state.get("user_id", "system"),
+    "shared_memory": state.get("shared_memory", {}),
+    "messages": state.get("messages", []),
+    "query": state.get("query", "")
+}
+```
+
+### 4. Use AgentResponse Model
+
+**Always use the Pydantic model** for type safety and validation:
+
+```python
+from orchestrator.models.agent_response_contract import AgentResponse, ManuscriptEditMetadata
+
+# Build response
+standard_response = AgentResponse(
+    response=response_text,
+    task_status=task_status,
+    agent_type="your_agent_name",
+    timestamp=datetime.now().isoformat(),
+    # ... optional fields ...
+)
+
+# Return as dict (exclude None values)
+return {
+    **standard_response.dict(exclude_none=True),
+    # ... LangGraph state ...
+}
+```
+
+## Migration Guidelines
+
+### For Existing Agents
+
+1. **Import the contract models:**
+   ```python
+   from orchestrator.models.agent_response_contract import AgentResponse, ManuscriptEditMetadata
+   ```
+
+2. **Update `_format_response_node`** to build `AgentResponse`:
+   ```python
+   standard_response = AgentResponse(
+       response=response_text,
+       task_status=task_status,
+       agent_type="your_agent",
+       timestamp=datetime.now().isoformat(),
+       # ... map existing fields to contract fields ...
+   )
+   ```
+
+3. **Return standard response + LangGraph state:**
+   ```python
+   return {
+       **standard_response.dict(exclude_none=True),
+       "metadata": state.get("metadata", {}),
+       "user_id": state.get("user_id", "system"),
+       "shared_memory": state.get("shared_memory", {}),
+       "messages": state.get("messages", []),
+       "query": state.get("query", "")
+   }
+   ```
+
+4. **Test thoroughly:**
+   - Verify chat sidebar displays response text correctly
+   - Verify editor operations apply correctly (for editing agents)
+   - Verify structured data displays correctly (for analysis agents)
+   - Verify visualizations render correctly (for visualization agents)
+
+### For New Agents
+
+**Always use the standard contract from the start!** Don't create new response formats.
+
+## Common Pitfalls
+
+### ❌ DON'T: Nest response inside response
+```python
+# WRONG
+{"response": {"response": "text"}}
+```
+
+### ❌ DON'T: Put editor_operations in agent_results only
+```python
+# WRONG - grpc_service has to check multiple locations
+{"agent_results": {"editor_operations": [...]}}
+```
+
+### ❌ DON'T: Store structured data but not format it for display
+```python
+# WRONG - Users won't see the data!
+{
+    "response": "Analysis complete.",
+    "structured_data": {"patterns": [...]}  # Not shown to user!
+}
+```
+
+### ❌ DON'T: Use different field names
+```python
+# WRONG - Use standard field names
+{"editor_ops": [...]}  # Should be "editor_operations"
+{"status": "complete"}  # Should be "task_status"
+```
+
+### ✅ DO: Use standard field names
+```python
+# CORRECT
+{
+    "editor_operations": [...],
+    "task_status": "complete",
+    "agent_type": "your_agent"
+}
+```
+
+## Benefits
+
+### For Developers
+- **Single source of truth** - One contract, clear expectations
+- **Type safety** - Pydantic validation catches errors early
+- **Easier debugging** - Know exactly where to find any field
+- **Faster development** - Clear pattern to follow for new agents
+
+### For Codebase
+- **Reduced complexity** - Single extraction path in grpc_service
+- **Consistent behavior** - All agents work the same way
+- **Easier maintenance** - Change contract once, all agents benefit
+- **Better testing** - Standard structure easier to test
+
+### For Features
+- **Easy to extend** - Add new fields to contract, all agents inherit
+- **Consistent visualizations** - Standard fields for all visualization types
+- **Unified error handling** - Standard error/warning fields
+- **Better frontend integration** - Predictable structure
+
+## Reference
+
+- **Contract Models**: [`llm-orchestrator/orchestrator/models/agent_response_contract.py`](llm-orchestrator/orchestrator/models/agent_response_contract.py)
+- **Unified Extractors**: [`llm-orchestrator/orchestrator/grpc_service.py`](llm-orchestrator/orchestrator/grpc_service.py) (methods: `_extract_response_unified`, `_extract_editor_operations_unified`, `_extract_manuscript_edit_unified`)
+- **Example Migrations**: See reference_agent, fiction_editing_agent for examples
+
+**Remember: A well-structured response ensures every agent knows its role and executes it perfectly!**

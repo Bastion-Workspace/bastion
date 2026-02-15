@@ -26,6 +26,10 @@ from orchestrator.skills import get_skill_registry
 logger = logging.getLogger(__name__)
 
 
+OUT_OF_SCOPE_SIGNAL = "[OUT_OF_SCOPE]"
+SKILLS_CAN_REJECT = frozenset({"help"})
+
+
 class AutomationEngineState(TypedDict, total=False):
     """State for Automation Engine LangGraph workflow.
     Store only tool names (strings) in state so the checkpointer can serialize it.
@@ -60,11 +64,13 @@ class AutomationEngine(BaseAgent):
         workflow.add_node("load_skill", self._load_skill_node)
         workflow.add_node("prepare_context", self._prepare_context_node)
         workflow.add_node("execute_with_tools", self._execute_with_tools_node)
+        workflow.add_node("check_rejection", self._check_rejection_node)
         workflow.add_node("format_response", self._format_response_node)
         workflow.set_entry_point("load_skill")
         workflow.add_edge("load_skill", "prepare_context")
         workflow.add_edge("prepare_context", "execute_with_tools")
-        workflow.add_edge("execute_with_tools", "format_response")
+        workflow.add_edge("execute_with_tools", "check_rejection")
+        workflow.add_edge("check_rejection", "format_response")
         workflow.add_edge("format_response", END)
         return workflow.compile(checkpointer=checkpointer)
 
@@ -111,6 +117,19 @@ class AutomationEngine(BaseAgent):
                             logger.debug("Tool not found in orchestrator.tools: %s", tool_name)
                 except Exception as e:
                     logger.warning("Resolving tools failed: %s", e)
+            pack_names = state.get("metadata", {}).get("tool_packs") or []
+            if pack_names:
+                try:
+                    import orchestrator.tools as tools_module
+                    from orchestrator.tools.tool_pack_registry import resolve_pack_tools
+                    pack_tool_names = resolve_pack_tools(pack_names)
+                    for tool_name in pack_tool_names:
+                        if tool_name not in resolved_tool_names:
+                            fn = getattr(tools_module, tool_name, None)
+                            if callable(fn):
+                                resolved_tool_names.append(tool_name)
+                except Exception as e:
+                    logger.warning("Resolving tool pack tools failed: %s", e)
             return {
                 **self._preserve_state(state),
                 "skill_config": skill_config,
@@ -161,6 +180,41 @@ class AutomationEngine(BaseAgent):
                     parts.append(val.strip())
         return "\n\n".join(parts) if parts else ""
 
+    def _build_scoped_capture_messages(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        messages_list: List[Any],
+        state: Optional[Dict[str, Any]] = None,
+        look_back_limit: int = 6,
+    ) -> List[Any]:
+        """Build messages for org_capture with history consolidated as context-only."""
+        messages: List[Any] = [
+            SystemMessage(content=system_prompt),
+            SystemMessage(content=self._get_datetime_context(state)),
+        ]
+
+        if messages_list and look_back_limit > 0:
+            history = self._extract_conversation_history(messages_list, limit=look_back_limit)
+            if history:
+                history_lines: List[str] = []
+                for msg in history:
+                    role_label = "User" if msg.get("role") == "user" else "Assistant"
+                    history_lines.append(f"{role_label}: {msg.get('content', '')}")
+                messages.append(
+                    SystemMessage(
+                        content=(
+                            "CONVERSATION HISTORY (for context only — do NOT capture items from this history unless the "
+                            "current request explicitly asks you to):\n\n"
+                            + "\n\n".join(history_lines)
+                            + "\n\n---\nEND OF HISTORY. Only act on the current user message below."
+                        )
+                    )
+                )
+
+        messages.append(HumanMessage(content=user_prompt))
+        return messages
+
     async def _prepare_context_node(self, state: AutomationEngineState) -> Dict[str, Any]:
         """Build LLM messages with skill system prompt and optional conversation history."""
         try:
@@ -179,14 +233,23 @@ class AutomationEngine(BaseAgent):
                         f"{prior_content}\n\n"
                         f"User request: {query}"
                     )
-            look_back_limit = 0 if skill_config.get("stateless", False) else 6
-            llm_messages = self._build_conversational_agent_messages(
-                system_prompt=system_prompt,
-                user_prompt=user_prompt,
-                messages_list=messages_list,
-                look_back_limit=look_back_limit,
-                state=state,
-            )
+            if skill_name == "org_capture":
+                llm_messages = self._build_scoped_capture_messages(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    messages_list=messages_list,
+                    state=state,
+                    look_back_limit=6,
+                )
+            else:
+                look_back_limit = 0 if skill_config.get("stateless", False) else 6
+                llm_messages = self._build_conversational_agent_messages(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    messages_list=messages_list,
+                    look_back_limit=look_back_limit,
+                    state=state,
+                )
             if skill_config.get("requires_image_context"):
                 image_base64 = self._extract_image_base64(state)
                 if image_base64:
@@ -363,6 +426,54 @@ class AutomationEngine(BaseAgent):
             logger.error("execute_with_tools node failed: %s", e)
             return self._handle_node_error(e, state, "execute_with_tools")
 
+    async def _check_rejection_node(self, state: AutomationEngineState) -> Dict[str, Any]:
+        """Check if response contains out-of-scope signal; set task_status=rejected for orchestration retry."""
+        try:
+            skill_name = state.get("skill_name", "")
+            if skill_name not in SKILLS_CAN_REJECT:
+                return {
+                    **self._preserve_state(state),
+                    "response": state.get("response", {}),
+                    "task_status": state.get("task_status", "complete"),
+                }
+            resp = state.get("response", {})
+            if not isinstance(resp, dict):
+                return {
+                    **self._preserve_state(state),
+                    "response": state.get("response", {}),
+                    "task_status": state.get("task_status", "complete"),
+                }
+            response_text = (resp.get("response") or "") if isinstance(resp.get("response"), str) else ""
+            if isinstance(response_text, str) and response_text.strip().startswith(OUT_OF_SCOPE_SIGNAL):
+                logger.info(
+                    "Automation engine: skill %s signaled out-of-scope, task_status=rejected for: %s...",
+                    skill_name,
+                    (state.get("query") or "")[:60],
+                )
+                stripped = response_text.strip()
+                if stripped.startswith(OUT_OF_SCOPE_SIGNAL):
+                    stripped = stripped[len(OUT_OF_SCOPE_SIGNAL):].strip()
+                updated_resp = dict(resp)
+                updated_resp["response"] = stripped
+                updated_resp["task_status"] = "rejected"
+                return {
+                    **self._preserve_state(state),
+                    "response": updated_resp,
+                    "task_status": "rejected",
+                }
+            return {
+                **self._preserve_state(state),
+                "response": state.get("response", {}),
+                "task_status": state.get("task_status", "complete"),
+            }
+        except Exception as e:
+            logger.error("check_rejection node failed: %s", e)
+            return {
+                **self._preserve_state(state),
+                "response": state.get("response", {}),
+                "task_status": state.get("task_status", "complete"),
+            }
+
     async def _format_response_node(self, state: AutomationEngineState) -> Dict[str, Any]:
         """Build AgentResponse from state."""
         try:
@@ -374,7 +485,10 @@ class AutomationEngine(BaseAgent):
             except ValueError:
                 task_status_enum = ResponseTaskStatus.COMPLETE
             skill_name = state.get("skill_name", "automation_engine")
-            agent_type = f"{skill_name}_agent" if skill_name and not skill_name.endswith("_agent") else skill_name or "automation_engine"
+            if isinstance(resp, dict) and resp.get("agent_type"):
+                agent_type = resp["agent_type"]
+            else:
+                agent_type = f"{skill_name}_agent" if skill_name and not skill_name.endswith("_agent") else skill_name or "automation_engine"
             agent_response = AgentResponse(
                 response=response_text,
                 task_status=task_status_enum,

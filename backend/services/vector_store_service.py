@@ -446,8 +446,27 @@ class VectorStoreService:
             # Sort by score (descending)
             combined_results.sort(key=lambda x: x.get('score', 0), reverse=True)
             
-            # Limit final results
-            final_results = combined_results[:limit]
+            # Document-level diversity: round-robin across unique documents
+            # so multiple chunks from one doc cannot crowd out other docs
+            max_per_document = 3
+            doc_buckets = {}
+            for result in combined_results:
+                doc_id = result.get('document_id', result.get('chunk_id'))
+                doc_buckets.setdefault(doc_id, []).append(result)
+            diversified = []
+            round_num = 0
+            while len(diversified) < limit:
+                added_this_round = False
+                for doc_id, chunks in doc_buckets.items():
+                    if round_num < len(chunks) and round_num < max_per_document:
+                        diversified.append(chunks[round_num])
+                        added_this_round = True
+                    if len(diversified) >= limit:
+                        break
+                if not added_this_round:
+                    break
+                round_num += 1
+            final_results = diversified[:limit]
             
             # Log search results summary
             global_count = len(results_dict.get("global", []))

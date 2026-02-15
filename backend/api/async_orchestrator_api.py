@@ -1,6 +1,6 @@
 """
 Enhanced Async Orchestrator API
-Background processing endpoints for Roosevelt's "Big Stick" Enhanced Orchestrator
+Background processing endpoints for the Enhanced Orchestrator
 Now with multi-operation state management and context-aware routing!
 """
 

@@ -459,6 +459,21 @@ class DocumentRepository:
             logger.error(f"❌ Failed to list user documents: {e}")
             return []
 
+    async def user_has_org_documents(self, user_id: str) -> bool:
+        """Lightweight check: does the user have any .org documents? Uses EXISTS for performance."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            rls_context = {'user_id': user_id, 'user_role': 'user'}
+            row = await fetch_one("""
+                SELECT 1 FROM document_metadata
+                WHERE user_id = $1 AND LOWER(filename) LIKE '%.org'
+                LIMIT 1
+            """, user_id, rls_context=rls_context)
+            return row is not None
+        except Exception as e:
+            logger.debug(f"user_has_org_documents failed: {e}")
+            return False
+
     async def list_global_documents(self, skip: int = 0, limit: int = 100) -> List[DocumentInfo]:
         """List global/admin documents (user_id is NULL or collection_type is 'global')"""
         try:
@@ -1817,10 +1832,12 @@ class DocumentRepository:
             logger.error(f"❌ Failed to get subfolders for {parent_folder_id}: {e}")
             return []
     
-    async def get_documents_by_folder(self, folder_id: str, user_id: str = None) -> List[Dict[str, Any]]:
-        """Get documents in a folder"""
+    async def get_documents_by_folder(
+        self, folder_id: str, user_id: str = None, limit: int = None, offset: int = 0
+    ) -> tuple:
+        """Get documents in a folder. Returns (documents, total_count). When limit is None, returns all (no pagination)."""
         try:
-            logger.debug(f"🔍 Repository: Getting documents for folder {folder_id}")
+            logger.debug(f"🔍 Repository: Getting documents for folder {folder_id} limit={limit} offset={offset}")
             
             from services.database_manager.database_helpers import fetch_all, fetch_one
             
@@ -1832,68 +1849,96 @@ class DocumentRepository:
                 rls_context = {'user_id': '', 'user_role': 'admin'}
                 logger.debug(f"🔍 Repository: Using admin context for folder query")
             
-            # Log RLS context being used
-            logger.debug(f"🔍 Using RLS context - user_id: {rls_context.get('user_id', '')}, role: {rls_context.get('user_role', '')}")
-            
-            # **ROOSEVELT FIX:** Handle NULL folder_id (root-level documents)
-            # In SQL, folder_id = NULL doesn't work - we need IS NULL
             if folder_id is None:
-                logger.info(f"🔍 Repository: Querying ROOT-LEVEL documents (folder_id IS NULL)")
-                rows = await fetch_all("""
-                    SELECT document_id, filename, title, category, tags, description, author, language,
-                           publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
-                           quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
-                           submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
-                           reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
-                    FROM document_metadata 
-                    WHERE folder_id IS NULL
-                    ORDER BY filename
+                count_row = await fetch_one("""
+                    SELECT COUNT(*) AS c FROM document_metadata WHERE folder_id IS NULL
                 """, rls_context=rls_context)
+                if limit is not None:
+                    rows = await fetch_all("""
+                        SELECT document_id, filename, title, category, tags, description, author, language,
+                               publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
+                               quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
+                               submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
+                               reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
+                        FROM document_metadata 
+                        WHERE folder_id IS NULL
+                        ORDER BY filename
+                        LIMIT $1 OFFSET $2
+                    """, limit, offset, rls_context=rls_context)
+                else:
+                    rows = await fetch_all("""
+                        SELECT document_id, filename, title, category, tags, description, author, language,
+                               publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
+                               quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
+                               submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
+                               reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
+                        FROM document_metadata 
+                        WHERE folder_id IS NULL
+                        ORDER BY filename
+                    """, rls_context=rls_context)
             else:
-                # Query documents in specific folder with RLS context
-                rows = await fetch_all("""
-                    SELECT document_id, filename, title, category, tags, description, author, language,
-                           publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
-                           quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
-                           submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
-                           reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
-                    FROM document_metadata 
-                    WHERE folder_id = $1
-                    ORDER BY filename
+                count_row = await fetch_one("""
+                    SELECT COUNT(*) AS c FROM document_metadata WHERE folder_id = $1
                 """, folder_id, rls_context=rls_context)
+                if limit is not None:
+                    rows = await fetch_all("""
+                        SELECT document_id, filename, title, category, tags, description, author, language,
+                               publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
+                               quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
+                               submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
+                               reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
+                        FROM document_metadata 
+                        WHERE folder_id = $1
+                        ORDER BY filename
+                        LIMIT $2 OFFSET $3
+                    """, folder_id, limit, offset, rls_context=rls_context)
+                else:
+                    rows = await fetch_all("""
+                        SELECT document_id, filename, title, category, tags, description, author, language,
+                               publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
+                               quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
+                               submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
+                               reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
+                        FROM document_metadata 
+                        WHERE folder_id = $1
+                        ORDER BY filename
+                    """, folder_id, rls_context=rls_context)
             
-            logger.debug(f"🔍 Raw query found {len(rows)} documents in folder {folder_id}")
-            for row in rows:
-                logger.debug(f"🔍 Document {row['document_id']}: title='{row['title']}', user_id={row['user_id']}, collection_type='{row['collection_type']}', status='{row['processing_status']}'")
-            
+            total = int(count_row['c']) if count_row else len(rows)
             documents = [self._row_to_document_info(row) for row in rows]
-            logger.debug(f"✅ Repository: Found {len(documents)} documents in folder {folder_id}")
-            return documents
+            logger.debug(f"✅ Repository: Found {len(documents)} documents in folder {folder_id} (total={total})")
+            return (documents, total)
         except Exception as e:
             logger.error(f"❌ Failed to get documents in folder {folder_id}: {e}")
-            return []
+            return ([], 0)
     
-    async def get_root_documents_by_collection(self, collection_type: str, user_id: str = None) -> List[Dict[str, Any]]:
-        """Get documents at root level (folder_id IS NULL) for a specific collection type
-        
-        **ROOSEVELT FIX:** Root-level documents need collection_type filter!
-        """
+    async def get_root_documents_by_collection(
+        self, collection_type: str, user_id: str = None, limit: int = None, offset: int = 0
+    ) -> tuple:
+        """Get documents at root level (folder_id IS NULL) for a collection type.
+        Returns (documents, total_count). When limit is None, returns all."""
         try:
-            logger.debug(f"🔍 Repository: Getting root-level documents for collection_type: {collection_type}")
+            logger.debug(f"🔍 Repository: Getting root-level documents for collection_type: {collection_type} limit={limit} offset={offset}")
             
-            from services.database_manager.database_helpers import fetch_all
+            from services.database_manager.database_helpers import fetch_all, fetch_one
             
-            # Set RLS context based on user_id
-            # For global documents, use user context so RLS allows read access (RLS policy allows global docs for all users)
             if user_id:
                 rls_context = {'user_id': user_id, 'user_role': 'user'}
-                logger.debug(f"🔍 Repository: Using user context - user_id: {user_id}, collection_type: {collection_type}")
             else:
-                # Only use admin context if no user_id provided (shouldn't happen for regular users)
                 rls_context = {'user_id': '', 'user_role': 'admin'}
-                logger.debug(f"🔍 Repository: Using admin context (no user_id provided)")
             
-            # Query root-level documents for this collection type
+            count_row = await fetch_one("""
+                SELECT COUNT(*) AS c FROM document_metadata
+                WHERE folder_id IS NULL AND collection_type = $1
+            """, collection_type, rls_context=rls_context)
+            total = int(count_row['c']) if count_row else 0
+            
+            suffix = ""
+            args = [collection_type]
+            if limit is not None:
+                suffix = " LIMIT $2 OFFSET $3"
+                args.extend([limit, offset])
+            
             rows = await fetch_all("""
                 SELECT document_id, filename, title, category, tags, description, author, language,
                        publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
@@ -1903,20 +1948,16 @@ class DocumentRepository:
                 FROM document_metadata 
                 WHERE folder_id IS NULL AND collection_type = $1
                 ORDER BY filename
-            """, collection_type, rls_context=rls_context)
-            
-            logger.debug(f"🔍 Raw query found {len(rows)} root-level {collection_type} documents")
-            for row in rows:
-                logger.debug(f"🔍 Document {row['document_id']}: title='{row['title']}', user_id={row['user_id']}, collection_type='{row['collection_type']}', status='{row['processing_status']}'")
+            """ + suffix, *args, rls_context=rls_context)
             
             documents = [self._row_to_document_info(row) for row in rows]
-            logger.debug(f"✅ Repository: Found {len(documents)} root-level {collection_type} documents")
-            return documents
+            logger.debug(f"✅ Repository: Found {len(documents)} root-level {collection_type} documents (total={total})")
+            return (documents, total)
         except Exception as e:
             logger.error(f"❌ Failed to get root-level documents for {collection_type}: {e}")
             import traceback
             traceback.print_exc()
-            return []
+            return ([], 0)
     
     async def get_document_count_in_folder(self, folder_id: str, user_id: str = None, user_role: str = 'user') -> int:
         """Get count of documents in a folder"""

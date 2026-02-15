@@ -35,6 +35,8 @@ from orchestrator.utils.anchor_correction import (
     auto_correct_operation_anchor,
     batch_correct_operations,
 )
+from orchestrator.utils.paragraph_numbering import number_paragraphs
+from orchestrator.utils.writing_subgraph_utilities import sanitize_ai_response_for_history
 
 logger = logging.getLogger(__name__)
 
@@ -218,8 +220,13 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         
         section_header = f"=== MANUSCRIPT TEXT: {current_chapter_label.upper()} (CURRENT - EDITABLE, USE FOR ANCHORS) ===\n"
         context_parts.append(section_header)
-        # CRITICAL: Send FULL chapter text - NO TRUNCATION
-        context_parts.append(f"{current_chapter_text}\n\n")
+        # Number paragraphs for two-phase editing; store map for paragraph-edit path
+        paragraph_map: List[Any] = []
+        if current_chapter_text.strip():
+            numbered_current, paragraph_map = number_paragraphs(current_chapter_text)
+            context_parts.append(f"{numbered_current}\n\n")
+        else:
+            context_parts.append(f"{current_chapter_text}\n\n")
         context_structure["sections"].append({
             "type": "manuscript_current_chapter",
             "heading": section_header.strip(),
@@ -671,6 +678,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         return {
             "generation_context_parts": context_parts,
             "generation_context_structure": context_structure,
+            "paragraph_map": paragraph_map,
             "is_empty_file": is_empty_file,
             "target_chapter_number": target_chapter_number,
             "current_chapter_label": current_chapter_label,
@@ -711,6 +719,7 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {
             "generation_context_parts": [],
+            "paragraph_map": [],
             "error": str(e),
             "task_status": "error",
             "prev_chapter_last_line": None,
@@ -827,9 +836,8 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     if len(user_query) < 500:  # User queries are short
                         conversation_history.append(HumanMessage(content=user_query))
                 elif isinstance(msg, AIMessage):
-                    # Include the assistant's text response (the summary, not the operations)
-                    # This is the conversational response the LLM provided
-                    assistant_response = msg.content
+                    # Strip ManuscriptEdit JSON so LLM does not recycle stale original_text anchors
+                    assistant_response = sanitize_ai_response_for_history(msg.content)
                     if assistant_response and len(assistant_response) < 5000:  # Summaries are concise
                         conversation_history.append(AIMessage(content=assistant_response))
         
@@ -1135,22 +1143,24 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "These sections contain the ACTUAL text from the manuscript file.\n\n"
                 "**STEP 2: FIND THE EXACT TEXT TO EDIT IN THE MANUSCRIPT**\n"
                 "Find the sentence or paragraph in the MANUSCRIPT TEXT sections that matches the user's request.\n"
-                "Copy 20-40 words of EXACT, VERBATIM text from that MANUSCRIPT section.\n\n"
+                "Copy 10-20 words of EXACT, VERBATIM text (minimum for uniqueness; only more if needed).\n\n"
                 "**STEP 3: DO NOT USE OUTLINE TEXT**\n"
                 "The OUTLINE sections (below '=== END OF MANUSCRIPT CONTEXT ===') contain story beats.\n"
                 "These words DO NOT EXIST in the manuscript file!\n"
                 "If you copy outline text into 'original_text', the system will fail to find it!\n\n"
+                "**STEP 4: CROSS-CHAPTER EDITS FORBIDDEN**\n"
+                "original_text and anchor_text must NEVER span a chapter boundary. Each operation targets ONE chapter only (the CURRENT - EDITABLE chapter).\n"
+                "If editing near the end of a chapter, do NOT include the next chapter's heading (## Chapter N) or any text from the next chapter in original_text.\n"
+                "If editing near the start of a chapter, do NOT include the previous chapter's last line. Stay strictly within the chapter you are editing.\n\n"
                 "**CRITICAL: ALL OPERATIONS MUST HAVE ANCHORS**\n\n"
                 "**FOR replace_range/delete_range:**\n"
                 "- **MANDATORY**: You MUST provide 'original_text' with EXACT text from the manuscript\n"
                 "- **CRITICAL**: If you don't provide 'original_text', the operation will FAIL completely\n"
                 "- **NEVER** create a replace_range operation without 'original_text' - it will fail!\n"
-                "- **REPLACEMENT TEXT MUST BE COMPLETE**: The 'text' field is the FULL replacement - everything in 'original_text' will be replaced with ONLY what's in 'text'\n"
-                "  - Example: If original_text = \"caught Walter's eye and smiled\" and text = \"caught his eye\"\n"
-                "  - Result: \"caught Walter's eye and smiled\" → \"caught his eye\" (loses \"Walter's\" unless included in text)\n"
-                "  - **USE MINIMAL MATCHES**: Only include the portion you're actually changing in 'original_text'\n"
-                "  - BAD: original_text=\"John Smith walked\" + text=\"walked\" → Result: \"John Smith walked\" becomes just \"walked\"\n"
-                "  - GOOD: original_text=\"walked\" + text=\"ran\" → Result: \"John Smith walked\" becomes \"John Smith ran\"\n\n"
+                "- **USE MINIMAL MATCHES (10-20 words when possible)**: Only include in 'original_text' the exact span you are changing. Smaller = more precise.\n"
+                "  - GOOD: original_text=\"walked\" + text=\"ran\" → \"John Smith walked\" becomes \"John Smith ran\"\n"
+                "  - BAD: original_text=\"John Smith walked\" + text=\"walked\" → entire phrase becomes just \"walked\"\n"
+                "- **REPLACEMENT MUST BE SYNACTICALLY COMPLETE**: The 'text' field replaces the whole 'original_text' span. So 'text' must be a complete phrase/sentence if the change would otherwise leave broken grammar (e.g. if you replace a clause, the new clause must read correctly in context). Do NOT use large original_text to \"be safe\"—use the smallest unique match.\n\n"
                 "**FOR insert_after_heading (NEW TEXT):**\n"
                 "- Use this when adding NEW content that doesn't exist in the manuscript\n"
                 "- **MANDATORY**: You MUST provide 'anchor_text' with EXACT text from the manuscript to insert after\n"
@@ -1203,7 +1213,8 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 "☐ For insert_after_heading: I verified my 'anchor_text' exists in the MANUSCRIPT TEXT section above\n"
                 "☐ I did a mental Ctrl+F search and confirmed I can find my anchor_text/original_text in the manuscript sections above\n"
                 "☐ I did NOT invent, paraphrase, or generate anchor text - I COPIED it EXACTLY from what's shown\n"
-                "☐ I did NOT use outline text, chapter headers (except '## Chapter N'), or any text that doesn't appear in the manuscript\n\n" +
+                "☐ I did NOT use outline text, chapter headers (except '## Chapter N'), or any text that doesn't appear in the manuscript\n"
+                "☐ My original_text/anchor_text does NOT span across a chapter boundary (stays within one chapter only)\n\n" +
                 ("="*80) + "\n" +
                 "NOW GENERATE YOUR JSON RESPONSE:\n" +
                 ("="*80) + "\n\n" +
@@ -1427,16 +1438,31 @@ async def call_generation_llm_node(state: Dict[str, Any], llm_factory) -> Dict[s
         start_time = datetime.now()
         response = await llm.ainvoke(generation_messages)
         
-        content = response.content if hasattr(response, 'content') else str(response)
-        
-        content = _unwrap_json_response(content)
+        raw_content = response.content if hasattr(response, 'content') else str(response)
+        content = _unwrap_json_response(raw_content)
         
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info(f"LLM generation completed in {elapsed:.2f}s")
+        logger.info(
+            "LLM response debug: raw_len=%s, unwrapped_len=%s",
+            len(raw_content),
+            len(content),
+        )
+        logger.debug(
+            "LLM response preview: raw=%s, unwrapped=%s",
+            (raw_content[:300] + "..." if len(raw_content) > 300 else raw_content),
+            (content[:300] + "..." if len(content) > 300 else content),
+        )
+        if len(content) == 0 and len(raw_content) > 0:
+            logger.warning(
+                "Unwrap produced empty content from %s chars of raw response; raw preview: %s",
+                len(raw_content),
+                raw_content[:500] + "..." if len(raw_content) > 500 else raw_content,
+            )
         
         return {
             "llm_response": content,
-            "llm_response_raw": content,
+            "llm_response_raw": raw_content,
             # CRITICAL: Preserve state for subsequent nodes
             "system_prompt": state.get("system_prompt", ""),
             "datetime_context": state.get("datetime_context", ""),
@@ -1499,6 +1525,11 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
         filename = state.get("filename", "manuscript.md")
         
         if not content:
+            raw_preview = (state.get("llm_response_raw") or "")[:500]
+            logger.error(
+                "No LLM response to validate (content empty or missing). llm_response_raw preview: %s",
+                raw_preview + "..." if len(raw_preview) >= 500 else raw_preview,
+            )
             return {
                 "structured_edit": None,
                 "error": "No LLM response to validate",
@@ -1679,7 +1710,7 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                 }
                 
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON: {e}")
+            logger.error("Failed to parse JSON: %s. Content preview (first 500 chars): %s", e, content[:500] if content else "(empty)")
             return {
                 "llm_response": content,
                 "structured_edit": None,
@@ -1705,9 +1736,9 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
                 "requested_chapter_number": state.get("requested_chapter_number"),
             }
         except Exception as e:
-            logger.error(f"Failed to parse structured edit: {e}")
+            logger.error("Failed to parse structured edit: %s. Content preview (first 500 chars): %s", e, content[:500] if content else "(empty)")
             import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.error("Traceback: %s", traceback.format_exc())
             return {
                 "llm_response": content,
                 "structured_edit": None,
@@ -1734,6 +1765,11 @@ async def validate_generated_output_node(state: Dict[str, Any]) -> Dict[str, Any
             }
         
         if structured_edit is None:
+            logger.error(
+                "Structured edit is None after parse (no JSON/ValidationError path taken). Content len=%s, preview: %s",
+                len(content),
+                content[:500] + "..." if len(content) > 500 else content,
+            )
             return {
                 "llm_response": content,
                 "structured_edit": None,
@@ -1848,7 +1884,9 @@ async def validate_anchors_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Handle both dict and Pydantic object
         if not structured_edit:
-            logger.info("No structured_edit to validate")
+            logger.warning(
+                "No structured_edit to validate (validate_output did not produce a ManuscriptEdit; check logs above for parse/validation errors)"
+            )
             return {
                 "validated_operations": [],
                 "invalid_operations": [],
@@ -2023,6 +2061,12 @@ async def validate_anchors_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if not validation_passed:
             logger.warning(f"⚠️ Anchor validation FAILED - {len(invalid_operations)} operations have invalid anchors")
         
+        # Store invalid_operations in shared_memory so downstream nodes (self_heal, merge) can
+        # read them even if top-level state key is dropped (LangGraph/subgraph state merge bug).
+        shared_memory = dict(state.get("shared_memory", {}))
+        if invalid_operations:
+            shared_memory["_invalid_anchor_operations"] = invalid_operations
+        
         return {
             "validated_operations": validated_operations,
             "invalid_operations": invalid_operations,
@@ -2030,7 +2074,7 @@ async def validate_anchors_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "anchor_validation_report": validation_report,
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
-            "shared_memory": state.get("shared_memory", {}),
+            "shared_memory": shared_memory,
             "messages": state.get("messages", []),
             "query": state.get("query", ""),
             "manuscript": state.get("manuscript", ""),
@@ -2081,7 +2125,10 @@ async def self_heal_anchors_node(state: Dict[str, Any], llm_factory) -> Dict[str
     try:
         logger.info("Self-healing invalid anchor texts...")
         
-        invalid_operations = state.get("invalid_operations", [])
+        # Prefer top-level state; fallback to shared_memory in case state key was dropped (subgraph bug).
+        invalid_operations = state.get("invalid_operations") or (
+            state.get("shared_memory") or {}
+        ).get("_invalid_anchor_operations", [])
         validated_operations = state.get("validated_operations", [])
         generation_context_parts = state.get("generation_context_parts", [])
         system_prompt = state.get("system_prompt", "")
@@ -2263,7 +2310,10 @@ async def merge_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         validated_operations = state.get("validated_operations", [])
         healed_operations = state.get("healed_operations", [])
-        invalid_operations = state.get("invalid_operations", [])
+        # Prefer top-level state; fallback to shared_memory in case state key was dropped (subgraph bug).
+        invalid_operations = state.get("invalid_operations") or (
+            state.get("shared_memory") or {}
+        ).get("_invalid_anchor_operations", [])
         healing_successful = state.get("healing_successful", True)
         structured_edit = state.get("structured_edit")
         
@@ -2322,6 +2372,12 @@ async def merge_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
         else:
             updated_structured_edit = None
         
+        # Strip internal anchor key from shared_memory before returning to parent
+        shared_memory_out = {
+            k: v
+            for k, v in (state.get("shared_memory") or {}).items()
+            if k != "_invalid_anchor_operations"
+        }
         return {
             "structured_edit": updated_structured_edit,
             "validated_operations": final_operations,  # CRITICAL: Pass operations for resolution subgraph!
@@ -2329,7 +2385,7 @@ async def merge_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "generation_context_parts": state.get("generation_context_parts", []),
             "metadata": state.get("metadata", {}),
             "user_id": state.get("user_id", "system"),
-            "shared_memory": state.get("shared_memory", {}),
+            "shared_memory": shared_memory_out,
             "messages": state.get("messages", []),
             "query": state.get("query", ""),
             "manuscript": state.get("manuscript", ""),
@@ -2417,14 +2473,17 @@ def build_generation_subgraph(checkpointer, llm_factory, get_datetime_context):
     def route_after_anchor_validation(state: Dict[str, Any]) -> str:
         """Route based on anchor validation results"""
         anchor_validation_passed = state.get("anchor_validation_passed", True)
-        
-        if anchor_validation_passed:
-            # All anchors valid - skip healing, go straight to merge (which will just use validated ops)
+        # Use shared_memory fallback in case top-level invalid_operations was dropped (subgraph bug)
+        invalid_ops = state.get("invalid_operations") or (
+            (state.get("shared_memory") or {}).get("_invalid_anchor_operations", [])
+        )
+        invalid_count = len(invalid_ops)
+        if anchor_validation_passed and invalid_count == 0:
+            # All anchors valid - skip healing, go straight to merge
             logger.debug("✅ All anchor validations passed - proceeding to merge")
             return "merge_operations"
         else:
             # Some anchors invalid - attempt self-healing
-            invalid_count = len(state.get("invalid_operations", []))
             logger.info(f"⚠️ {invalid_count} invalid anchors detected - routing to self-healing")
             return "self_heal_anchors"
     

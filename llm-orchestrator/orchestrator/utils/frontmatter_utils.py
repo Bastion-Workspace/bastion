@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 
 
 def strip_frontmatter_block(text: str) -> str:
-    """Strip YAML frontmatter from text."""
+    """Strip only the leading YAML frontmatter block from text. Uses \\A so scene breaks (---) in the body are never stripped."""
     try:
-        return re.sub(r'^---\s*\n[\s\S]*?\n---\s*\n', '', text, flags=re.MULTILINE)
+        return re.sub(r'\A---\s*\n[\s\S]*?\n---\s*\n', '', text)
     except Exception:
         return text
 

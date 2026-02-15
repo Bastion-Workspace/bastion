@@ -7,6 +7,9 @@ from orchestrator.tools.document_tools import (
     search_documents_structured,
     get_document_content_tool,
     search_within_document_tool,
+    append_to_document_tool,
+    get_document_metadata_tool,
+    create_document_tool,
     DOCUMENT_TOOLS
 )
 
@@ -116,6 +119,9 @@ from orchestrator.tools.image_generation_tools import (
 from orchestrator.tools.text_transform_tools import (
     summarize_text_tool,
     extract_structured_data_tool,
+    transform_format_tool,
+    merge_texts_tool,
+    compare_texts_tool,
 )
 from orchestrator.tools.session_memory_tools import (
     clipboard_store_tool,
@@ -133,6 +139,9 @@ __all__ = [
     'search_documents_structured',
     'get_document_content_tool',
     'search_within_document_tool',
+    'append_to_document_tool',
+    'get_document_metadata_tool',
+    'create_document_tool',
     'DOCUMENT_TOOLS',
     # Web tools
     'search_web_tool',
@@ -210,6 +219,9 @@ __all__ = [
     # Bridging tools (plan steps)
     'summarize_text_tool',
     'extract_structured_data_tool',
+    'transform_format_tool',
+    'merge_texts_tool',
+    'compare_texts_tool',
     'clipboard_store_tool',
     'clipboard_get_tool',
     # File creation tools

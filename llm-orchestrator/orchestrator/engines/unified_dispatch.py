@@ -125,6 +125,15 @@ class UnifiedDispatcher:
                     agent_name="system",
                 )
                 return
+            result_status = result.get("task_status") or (result.get("response", {}) or {}).get("task_status", "")
+            if result_status == "rejected":
+                yield orchestrator_pb2.ChatChunk(
+                    type="rejected",
+                    message="Skill rejected this query",
+                    timestamp=datetime.now().isoformat(),
+                    agent_name=agent_label,
+                )
+                return
             response_text = result.get("response", "") if isinstance(result.get("response"), str) else (result.get("response", {}) or {}).get("response", "")
             if not response_text and isinstance(result.get("response"), dict):
                 response_text = result.get("response", {}).get("response", "")
@@ -348,6 +357,15 @@ class UnifiedDispatcher:
                     agent_name="system",
                 )
                 return
+            result_status = result.get("task_status") or (result.get("response", {}) or {}).get("task_status", "")
+            if result_status == "rejected":
+                yield orchestrator_pb2.ChatChunk(
+                    type="rejected",
+                    message="Skill rejected this query",
+                    timestamp=datetime.now().isoformat(),
+                    agent_name=agent_label,
+                )
+                return
             # ChatAgent returns result with "response" key (AgentResponse dict or handoff data)
             response = result.get("response", "")
             if isinstance(response, dict):
@@ -360,11 +378,22 @@ class UnifiedDispatcher:
                 timestamp=datetime.now().isoformat(),
                 agent_name=agent_label,
             )
+            # Include images and other metadata when chat handed off to research (same as RESEARCH path)
+            images = result.get("images") or result.get("structured_images")
+            chunk_metadata = {}
+            if images:
+                chunk_metadata["images"] = json.dumps(images)
+                logger.info("Chat dispatch: including %d image(s) in complete metadata (handoff)", len(images))
+            for key in ("citations", "sources", "static_visualization_data", "static_format", "chart_result"):
+                val = result.get(key)
+                if val is not None:
+                    chunk_metadata[key] = json.dumps(val) if not isinstance(val, str) else val
             yield orchestrator_pb2.ChatChunk(
                 type="complete",
                 message="Complete",
                 timestamp=datetime.now().isoformat(),
                 agent_name="system",
+                metadata=chunk_metadata if chunk_metadata else None,
             )
             return
 

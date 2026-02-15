@@ -1,6 +1,6 @@
 {
   "name": "bastion-frontend",
-  "version": "0.16.1",
+  "version": "0.20.0",
   "description": "Bastion AI Workspace - React Frontend",
   "private": true,
   "dependencies": {

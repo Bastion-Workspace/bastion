@@ -1041,31 +1041,18 @@ const FileTreeSidebar = ({
     return { status: false, source: 'default' };
   }, [getEffectiveFolderExemption]);
 
-  // **ROOSEVELT FIX**: Check for org files ANYWHERE, not just in loaded folders!
-  // This makes Org Tools appear immediately if ANY .org files exist
+  // Lightweight check for org files (dedicated API avoids loading document list on refresh)
   useEffect(() => {
     const checkForOrgFilesAnywhere = async () => {
       try {
-        // Quick check: do ANY of our documents have .org extension?
-        // This queries the backend directly instead of relying on loaded folder contents
-        const response = await apiService.getUserDocuments(0, 1000); // Get all user docs
-        
-        console.log('🔍 Checking for org files, response:', response);
-        
-        // **TRUST BUST!** The API returns {documents: [...], total: N}, not a direct array!
-        const documents = response?.documents || [];
-        
-        if (Array.isArray(documents)) {
-          const hasOrg = documents.some(doc => doc.filename?.toLowerCase().endsWith('.org'));
-          setHasOrgFiles(hasOrg);
-          console.log(`📋 Found org files? ${hasOrg} (checked ${documents.length} documents)`);
-        } else {
-          console.warn('⚠️ ROOSEVELT: Response.documents is not an array:', documents);
-          setHasOrgFiles(false);
+        const response = await apiService.getHasOrgDocuments();
+        const hasOrg = response?.has_org === true;
+        setHasOrgFiles(hasOrg);
+        if (response != null) {
+          console.log('📋 Found org files?', hasOrg);
         }
       } catch (error) {
         console.error('❌ Failed to check for org files:', error);
-        // Fallback to old logic if API fails
         checkForOrgFilesLocal();
       }
     };

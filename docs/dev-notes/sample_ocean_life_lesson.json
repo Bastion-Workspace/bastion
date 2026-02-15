@@ -1,0 +1,57 @@
+{
+  "lesson_id": "ocean_life_001",
+  "title": "Atlantic Ocean Creatures",
+  "description": "Learn about fascinating creatures that live in the Atlantic Ocean",
+  "difficulty": "medium",
+  "category": "lesson",
+  "tags": ["lesson", "education", "ocean", "marine biology", "Atlantic"],
+  "introduction": "The Atlantic Ocean is home to thousands of unique species, from tiny plankton to massive whales. This lesson will test your knowledge of some of the most interesting creatures that call the Atlantic their home. Get ready to dive into the deep blue!",
+  "time_limit_default": 30,
+  "questions": [
+    {
+      "id": 1,
+      "type": "text",
+      "question": "Which is the largest animal in the Atlantic Ocean?",
+      "options": ["Great White Shark", "Blue Whale", "Giant Squid", "Orca"],
+      "correct_answer": "Blue Whale",
+      "explanation": "The Blue Whale is not only the largest animal in the Atlantic Ocean, but the largest animal to have ever existed on Earth! They can reach lengths of up to 100 feet and weigh as much as 200 tons.",
+      "time_limit": 30
+    },
+    {
+      "id": 2,
+      "type": "text",
+      "question": "What unique feature does the Atlantic Puffin have?",
+      "options": ["Bioluminescence", "Colorful beak", "Eight tentacles", "Echolocation"],
+      "correct_answer": "Colorful beak",
+      "explanation": "Atlantic Puffins are known for their distinctive colorful beaks, which turn bright orange and yellow during breeding season. These 'sea parrots' use their beaks to attract mates and can carry multiple fish at once when feeding their young.",
+      "time_limit": 30
+    },
+    {
+      "id": 3,
+      "type": "text",
+      "question": "Which predator is known as the 'apex predator' of the Atlantic?",
+      "options": ["Barracuda", "Great White Shark", "Swordfish", "Manta Ray"],
+      "correct_answer": "Great White Shark",
+      "explanation": "The Great White Shark is considered an apex predator, meaning it has no natural predators in the Atlantic Ocean. They can grow up to 20 feet long and have powerful jaws with rows of razor-sharp teeth.",
+      "time_limit": 30
+    },
+    {
+      "id": 4,
+      "type": "text",
+      "question": "What adaptation helps the Atlantic Cod survive in cold waters?",
+      "options": ["Antifreeze proteins", "Thick blubber layer", "Warm blood", "Migration to warm waters"],
+      "correct_answer": "Antifreeze proteins",
+      "explanation": "Atlantic Cod produce special antifreeze proteins in their blood that prevent ice crystals from forming in their bodies, allowing them to survive in extremely cold waters near the Arctic.",
+      "time_limit": 30
+    },
+    {
+      "id": 5,
+      "type": "text",
+      "question": "How do Atlantic Dolphins communicate?",
+      "options": ["Bioluminescent patterns", "Electrical signals", "Clicks and whistles", "Color changes"],
+      "correct_answer": "Clicks and whistles",
+      "explanation": "Atlantic Dolphins use a complex system of clicks, whistles, and body language to communicate with each other. Each dolphin has a unique signature whistle that acts like a name, allowing them to identify and call to specific individuals.",
+      "time_limit": 30
+    }
+  ]
+}

@@ -18,9 +18,24 @@ sys.path.insert(0, '/app')
 from protos import vector_service_pb2, vector_service_pb2_grpc
 
 from config.settings import settings
-from orchestrator.tools.tool_pack_registry import ToolMetadata, get_all_tools
+from orchestrator.tools.tool_pack_registry import TOOL_PACKS
 
 logger = logging.getLogger(__name__)
+
+
+def _get_tool_description(tool_name: str) -> str:
+    """Resolve tool description from orchestrator.tools function docstring."""
+    try:
+        import orchestrator.tools as tools_module
+        fn = getattr(tools_module, tool_name, None)
+        if callable(fn) and getattr(fn, "__doc__", None):
+            doc = (fn.__doc__ or "").strip()
+            if doc:
+                first_line = doc.split("\n")[0].strip()
+                return first_line[:500]
+    except Exception:
+        pass
+    return tool_name
 
 
 class ToolVectorStore:
@@ -48,70 +63,63 @@ class ToolVectorStore:
             logger.error(f"Failed to initialize Tool Vector Store client: {e}")
             raise
     
-    async def vectorize_tool(self, tool: ToolMetadata) -> bool:
+    async def vectorize_tool(self, name: str, description: str, pack: str, keywords: Optional[List[str]] = None) -> bool:
         """
-        Order the Knowledge Hub to vectorize and store a tool
+        Vectorize and store a single tool in the Knowledge Hub.
         """
         if not self._initialized:
             await self.initialize()
-        
         try:
             request = vector_service_pb2.UpsertToolsRequest(
                 tools=[vector_service_pb2.ToolDefinition(
-                    name=tool.name,
-                    description=tool.description,
-                    pack=tool.pack.value,
-                    keywords=tool.semantic_keywords
+                    name=name,
+                    description=description,
+                    pack=pack,
+                    keywords=keywords or []
                 )]
             )
-            
-            response = await self.vector_service_stub.UpsertTools(
-                request, timeout=30.0
-            )
-            
+            response = await self.vector_service_stub.UpsertTools(request, timeout=30.0)
             if response.success:
-                logger.debug(f"Vectorized tool via Knowledge Hub: {tool.name}")
+                logger.debug("Vectorized tool via Knowledge Hub: %s", name)
             else:
-                logger.error(f"Knowledge Hub failed to vectorize tool {tool.name}: {response.error}")
-                
+                logger.error("Knowledge Hub failed to vectorize tool %s: %s", name, response.error)
             return response.success
-            
         except Exception as e:
-            logger.error(f"gRPC error vectorizing tool {tool.name}: {e}")
+            logger.error("gRPC error vectorizing tool %s: %s", name, e)
             return False
-    
+
     async def vectorize_all_tools(self) -> Dict[str, Any]:
         """
-        Vectorize all tools from the registry via the Knowledge Hub
+        Vectorize all tools from the tool pack registry via the Knowledge Hub.
+        Iterates TOOL_PACKS; for each tool, description is resolved from orchestrator.tools docstring.
         """
         if not self._initialized:
             await self.initialize()
-        
-        all_tools = get_all_tools()
-        
+        proto_tools = []
+        tool_names = []
+        for pack_name, pack in TOOL_PACKS.items():
+            for tool_name in pack.tools:
+                description = _get_tool_description(tool_name)
+                proto_tools.append(
+                    vector_service_pb2.ToolDefinition(
+                        name=tool_name,
+                        description=description,
+                        pack=pack_name,
+                        keywords=[]
+                    )
+                )
+                tool_names.append(tool_name)
         try:
-            # Convert all tools to proto definitions
-            proto_tools = [
-                vector_service_pb2.ToolDefinition(
-                    name=tool.name,
-                    description=tool.description,
-                    pack=tool.pack.value,
-                    keywords=tool.semantic_keywords
-                ) for tool in all_tools
-            ]
-            
             request = vector_service_pb2.UpsertToolsRequest(tools=proto_tools)
             response = await self.vector_service_stub.UpsertTools(request, timeout=60.0)
-            
             return {
-                "total": len(all_tools),
+                "total": len(proto_tools),
                 "success": response.count if response.success else 0,
-                "failures": [] if response.success else [t.name for t in all_tools]
+                "failures": [] if response.success else tool_names
             }
-            
         except Exception as e:
-            logger.error(f"Bulk vectorization via Knowledge Hub failed: {e}")
-            return {"total": len(all_tools), "success": 0, "failures": [t.name for t in all_tools]}
+            logger.error("Bulk vectorization via Knowledge Hub failed: %s", e)
+            return {"total": len(proto_tools), "success": 0, "failures": tool_names}
     
     async def search_tools(
         self,

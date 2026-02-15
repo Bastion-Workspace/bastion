@@ -454,6 +454,123 @@ async def search_within_document_tool(
         }
 
 
+async def append_to_document_tool(
+    document_id: str,
+    content: str,
+    user_id: str = "system"
+) -> str:
+    """
+    Append content to an existing document without replacing existing content.
+
+    Args:
+        document_id: Document ID to append to
+        content: Content to append
+        user_id: User ID for access control
+
+    Returns:
+        Human-readable success or error message
+    """
+    try:
+        logger.info("Appending to document: %s", document_id)
+        client = await get_backend_tool_client()
+        result = await client.update_document_content(
+            document_id=document_id,
+            content=content,
+            user_id=user_id,
+            append=True
+        )
+        if result.get("success"):
+            return f"Appended {result.get('content_length', len(content))} characters to document {document_id}."
+        return f"Error appending to document: {result.get('error', result.get('message', 'Unknown error'))}"
+    except Exception as e:
+        logger.error("Append to document tool error: %s", e)
+        return f"Error appending to document: {str(e)}"
+
+
+async def get_document_metadata_tool(
+    document_id: str,
+    user_id: str = "system"
+) -> str:
+    """
+    Get document metadata (title, filename, content type, tags) by ID.
+
+    Args:
+        document_id: Document ID
+        user_id: User ID for access control
+
+    Returns:
+        Human-readable metadata summary or error message
+    """
+    try:
+        logger.info("Getting document metadata: %s", document_id)
+        client = await get_backend_tool_client()
+        doc = await client.get_document(document_id=document_id, user_id=user_id)
+        if doc is None:
+            return f"Document not found: {document_id}"
+        parts = [
+            f"Document ID: {doc.get('document_id', '')}",
+            f"Title: {doc.get('title', '')}",
+            f"Filename: {doc.get('filename', '')}",
+            f"Content type: {doc.get('content_type', '')}",
+        ]
+        meta = doc.get("metadata") or {}
+        if meta:
+            parts.append("Metadata: " + ", ".join(f"{k}={v}" for k, v in meta.items()))
+        return "\n".join(parts)
+    except Exception as e:
+        logger.error("Get document metadata tool error: %s", e)
+        return f"Error getting document metadata: {str(e)}"
+
+
+def _slugify_title(title: str) -> str:
+    """Convert title to a safe filename (lowercase, spaces to underscores, strip non-alnum)."""
+    import re
+    s = title.strip().lower().replace(" ", "_")
+    return re.sub(r"[^a-z0-9_.-]", "", s) or "document"
+
+
+async def create_document_tool(
+    title: str,
+    content: str,
+    user_id: str = "system",
+    filename: str = "",
+    folder_path: str = "",
+    tags: Optional[List[str]] = None
+) -> str:
+    """
+    Create a new document in the user's space. LLM-friendly wrapper around create_user_file.
+
+    Args:
+        title: Document title (used for display and, if filename empty, to generate filename)
+        content: Full document content
+        user_id: User ID for access control
+        filename: Optional filename (default: derived from title with .md)
+        folder_path: Optional folder path (e.g. "Projects/Notes"). Empty = root.
+        tags: Optional list of tags
+
+    Returns:
+        Human-readable success message with document_id or error message
+    """
+    try:
+        logger.info("Creating document: title=%s", title[:80] if title else "")
+        client = await get_backend_tool_client()
+        fname = filename.strip() if filename else (_slugify_title(title) + ".md")
+        result = await client.create_user_file(
+            filename=fname,
+            content=content,
+            user_id=user_id,
+            folder_path=folder_path if folder_path else None,
+            title=title or fname,
+            tags=tags,
+        )
+        if result.get("success"):
+            return f"Created document '{title or fname}' (ID: {result.get('document_id', '')})."
+        return f"Error creating document: {result.get('error', result.get('message', 'Unknown error'))}"
+    except Exception as e:
+        logger.error("Create document tool error: %s", e)
+        return f"Error creating document: {str(e)}"
+
+
 # Tool registry for LangGraph
 DOCUMENT_TOOLS = {
     'search_documents': search_documents_tool,
@@ -461,6 +578,9 @@ DOCUMENT_TOOLS = {
     'search_by_tags': search_by_tags_tool,
     'find_documents_by_tags': find_documents_by_tags_tool,
     'get_document_content': get_document_content_tool,
-    'search_within_document': search_within_document_tool
+    'search_within_document': search_within_document_tool,
+    'append_to_document': append_to_document_tool,
+    'get_document_metadata': get_document_metadata_tool,
+    'create_document': create_document_tool,
 }
 

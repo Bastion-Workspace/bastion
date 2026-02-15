@@ -282,6 +282,21 @@ async def _vector_search_node(state: DocumentRetrievalState) -> Dict[str, Any]:
         boosted_results.sort(key=lambda x: x.get('relevance_score', 0.0), reverse=True)
         final_results = boosted_results[:max_results]
         
+        # Deduplicate by document_id, keeping highest-scoring entry per document
+        seen_doc_ids = {}
+        unique_results = []
+        for result in final_results:
+            doc_id = (
+                result.get('document_id')
+                or (result.get('document', {}) or {}).get('document_id')
+            )
+            if doc_id and doc_id not in seen_doc_ids:
+                seen_doc_ids[doc_id] = True
+                unique_results.append(result)
+            elif not doc_id:
+                unique_results.append(result)
+        final_results = unique_results[:max_results]
+        
         # Log boosting info
         if boosted_results and any(r.get('recency_boost', 0) > 0 for r in final_results):
             boosted_count = sum(1 for r in final_results if r.get('recency_boost', 0) > 0)

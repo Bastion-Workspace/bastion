@@ -319,7 +319,7 @@ const OrgContactCapture = ({ open, onClose }) => {
               onBlur={handleNameBlur}
               fullWidth
               required
-              placeholder="John"
+              placeholder="First name"
             />
             <TextField
               label="Last Name"
@@ -327,7 +327,7 @@ const OrgContactCapture = ({ open, onClose }) => {
               onChange={(e) => setLastName(e.target.value)}
               onBlur={handleNameBlur}
               fullWidth
-              placeholder="Smith"
+              placeholder="Last name"
             />
           </Box>
 

@@ -598,6 +598,20 @@ async def search_user_and_global_documents(
         logger.error(f"❌ User search failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/api/user/documents/has-org")
+async def user_has_org_documents(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Lightweight check: does the user have any .org documents? Avoids loading document list."""
+    document_service = await _get_document_service()
+    try:
+        has_org = await document_service.document_repository.user_has_org_documents(current_user.user_id)
+        return {"has_org": has_org}
+    except Exception as e:
+        logger.debug(f"has-org check failed: {e}")
+        return {"has_org": False}
+
+
 @router.get("/api/user/documents", response_model=DocumentListResponse)
 async def list_user_documents(
     skip: int = 0, 
@@ -2224,6 +2238,8 @@ async def update_document_content(
         new_content = body.get("content")
         if new_content is None:
             raise HTTPException(status_code=400, detail="Missing 'content' in request body")
+        if not isinstance(new_content, str):
+            raise HTTPException(status_code=400, detail="'content' must be a string")
 
         # Fetch document metadata
         doc_info = await document_service.get_document(doc_id)
@@ -2288,6 +2304,25 @@ async def update_document_content(
             
             if file_path is None or not file_path.exists():
                 raise HTTPException(status_code=404, detail="Original file not found on disk")
+
+        # If content is unchanged, skip disk write and background re-indexing.
+        # This avoids unnecessary chunk deletion + re-embedding for no-op saves.
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                existing_content = f.read()
+            if existing_content == new_content:
+                logger.info(f"📝 No-op save detected for {doc_id}; skipping re-indexing")
+                return {
+                    "status": "success",
+                    "message": "No changes detected. Skipping re-indexing.",
+                    "document_id": doc_id,
+                }
+        except UnicodeDecodeError:
+            # If the file isn't valid UTF-8, fall back to the existing behavior
+            # (write + reprocess) rather than rejecting or guessing.
+            logger.warning(f"⚠️ Unable to read existing content as UTF-8 for {doc_id}; proceeding with save")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to compare existing content for {doc_id}; proceeding with save: {e}")
 
         # Write content to disk
         try:

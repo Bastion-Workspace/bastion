@@ -342,7 +342,7 @@ services:
       - "0.0.0.0:3051:80"
     environment:
       - REACT_APP_APP_NAME=Bastion
-      - REACT_APP_VERSION=1.0.0
+      - REACT_APP_VERSION=0.20.0
       - REACT_APP_MAP_TILE_URL=${REACT_APP_MAP_TILE_URL:-http://localhost:8080}
     restart: unless-stopped
 
@@ -538,7 +538,7 @@ services:
     environment:
       - SERVICE_NAME=image-vision-service
       - GRPC_PORT=50056
-      - SERVICE_VERSION=1.0.0
+      - SERVICE_VERSION=0.20.0
       - LOG_LEVEL=${IMAGE_VISION_SERVICE_LOG_LEVEL:-INFO}
       - DEVICE=${IMAGE_VISION_DEVICE:-auto}
       - MAX_WORKERS=4

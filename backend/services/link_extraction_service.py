@@ -19,6 +19,7 @@ from services.folder_service import FolderService
 logger = logging.getLogger(__name__)
 
 # Frontmatter keys that reference other files (path or document_id). List keys (e.g. components, characters) hold multiple refs.
+# Any other key whose value looks like a path or document_id is also tracked (e.g. character_amanda, character_tom).
 _FRONTMATTER_FILE_REF_KEYS = frozenset({
     "outline", "style", "rules", "pr_outline", "pr_req_document_id", "pr_style_document_id",
     "company_knowledge_id", "components", "characters",
@@ -164,23 +165,15 @@ def _extract_frontmatter_refs(content: str) -> List[Tuple[str, str]]:
 
 
 def _normalize_path_segments(raw_path: str) -> Tuple[List[str], str]:
-    """Normalize relative path to list of folder segments and filename. Returns (segment_list, filename)."""
+    """Normalize relative path to list of folder segments and filename. Returns (segment_list, filename).
+    Preserves '..' in segments so _resolve_target_folder can walk up from source folder (e.g. ../Characters/File.md).
+    """
     raw = raw_path.replace('\\', '/').strip()
     parts = [p for p in raw.split('/') if p and p != '.']
     if not parts:
         return [], ''
-    # Resolve ..
-    resolved = []
-    for p in parts:
-        if p == '..':
-            if resolved:
-                resolved.pop()
-            continue
-        resolved.append(p)
-    if not resolved:
-        return [], ''
-    filename = resolved[-1]
-    folder_segments = resolved[:-1]
+    filename = parts[-1]
+    folder_segments = parts[:-1]
     return folder_segments, filename
 
 

@@ -319,7 +319,7 @@ def build_data_formatting_subgraph(checkpointer) -> StateGraph:
     - data_sources_used: List[str] - Sources of data used
     - formatting_notes: str - Optional notes about the formatting process
     """
-    subgraph = StateGraph(Dict[str, Any])
+    subgraph = StateGraph(dict)
     
     # Add nodes
     subgraph.add_node("prepare_context", prepare_formatting_context_node)

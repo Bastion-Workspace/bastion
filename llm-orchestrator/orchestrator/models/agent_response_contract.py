@@ -20,6 +20,7 @@ class TaskStatus(str, Enum):
     INCOMPLETE = "incomplete"
     PERMISSION_REQUIRED = "permission_required"
     ERROR = "error"
+    REJECTED = "rejected"  # skill cannot handle this query; orchestration may retry with fallback
 
 
 class ManuscriptEditMetadata(BaseModel):

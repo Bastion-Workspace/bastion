@@ -133,6 +133,7 @@ class FictionEditingState(TypedDict):
     outline_needs_sync: bool  # Whether manuscript needs updates to match outline
     # Question answering
     request_type: str  # "question" | "edit_request" | "hybrid" | "unknown"
+    analysis_scope: str  # "chapter" | "manuscript" - scope of analysis for questions
     # Explicit chapter detection from user query
     explicit_primary_chapter: Optional[int]  # Primary chapter to edit (from query)
 
@@ -497,6 +498,10 @@ class FictionEditingAgent(BaseAgent):
             "=== CHAPTER BOUNDARIES ARE SACRED ===\n\n"
             "Chapters are marked by \"## Chapter N\" headings.\n"
             "CRITICAL: NEVER include the next chapter's heading in your operation!\n\n"
+            "**CROSS-CHAPTER EDITS FORBIDDEN:**\n"
+            "original_text and anchor_text must NEVER span from one chapter into another. Each operation targets ONE chapter only.\n"
+            "If editing near the end of a chapter, do NOT include the next chapter's heading or any text from the next chapter.\n"
+            "If editing near the start of a chapter, do NOT include the previous chapter's last line. Stay strictly within the chapter you are editing.\n\n"
             "**CRITICAL TEXT PRECISION REQUIREMENTS:**\n"
             "For 'original_text' and 'anchor_text' fields:\n"
             "- Must be EXACT, COMPLETE, and VERBATIM from the current manuscript text (not from outline, not from any reference documents)\n"
@@ -939,7 +944,8 @@ class FictionEditingAgent(BaseAgent):
                 "6. For deletions: use 'delete_range' with original_text\n"
                 "7. Match the established voice and style from the manuscript\n"
                 "8. Complete sentences with proper grammar\n"
-                "9. **FOR CONTINUATIONS**: Generate COMPLETE continuations that cover ALL material provided by the user\n"
+                "9. **CROSS-CHAPTER EDITS FORBIDDEN**: original_text and anchor_text must NEVER span from one chapter into another. Stay within a single chapter.\n"
+                "10. **FOR CONTINUATIONS**: Generate COMPLETE continuations that cover ALL material provided by the user\n"
                 "   - If the user provides multiple points/events/material to cover, address ALL of them\n"
                 "   - Use multiple operations if needed to ensure comprehensive coverage\n"
                 "   - Do NOT truncate or stop early - ensure all requested material is generated\n"
@@ -1233,6 +1239,7 @@ class FictionEditingAgent(BaseAgent):
                 logger.warning("No current request found - defaulting to edit_request")
                 return {
                     "request_type": "edit_request",
+                    "analysis_scope": "chapter",
                     # ✅ CRITICAL: Preserve metadata even in early return!
                     "metadata": state.get("metadata", {}),
                     "user_id": state.get("user_id", "system"),
@@ -1258,30 +1265,39 @@ class FictionEditingAgent(BaseAgent):
 - Has {len(characters_bodies)} character reference(s)
 
 **INTENT DETECTION**:
-- QUESTIONS (including pure questions and conditional edits): User is asking a question - may or may not want edits
-  - Pure questions: "How old is Tom here?", "What style is this?", "Does this follow our style guide?"
-  - Conditional edits: "Is Tom 23? We want him to be 24", "Are we using enough description? Revise if necessary"
-  - Questions often start with: "How", "Why", "What", "Does", "Is", "Can you", "Where", "Are we"
-  - **Key insight**: Questions can be answered, and IF edits are needed based on the answer, they can be made
-  - Route ALL questions to edit path - LLM can decide if edits are needed
-  
-- EDIT REQUESTS: User wants to create, modify, or generate content - NO question asked
-  - Examples: "Add a scene", "Revise Chapter 2", "Generate prose for this chapter", "Change the dialogue"
-  - Edit requests are action-oriented: "add", "create", "update", "generate", "change", "replace", "revise", "write"
-  - Edit requests specify what content to create or modify
-  - **Key indicator**: Action verbs present, no question asked
+- EDIT REQUESTS (user wants changes applied to the manuscript): Classify as "edit_request" when the user wants you to *do* something to the text, not just answer. This includes:
+  - Explicit action: "Revise Chapter 2", "Edit for repetitiveness", "Fix the dialogue", "Add a scene", "Tighten this section", "Remove redundancy"
+  - **Question form but action intent**: If the request is phrased as a question but contains action-oriented words, treat as edit_request so the agent will produce editor operations. Examples: "Is there any revision to this chapter for repetitiveness?" (has "revision" → user wants revisions applied), "Can you fix the discrepancies?", "Should we edit out the redundancy?" (has "edit" → user wants edits)
+  - Action words/phrases: revise, revision, edit, fix, improve, tighten, remove redundancy, cut, change, replace, add, rewrite, rework, trim, simplify, rephrase
+  - **Result**: Agent will analyze AND apply suggested edits to the document.
+
+- QUESTIONS (informational only, no edits applied): Classify as "question" when the user is asking for information or analysis only, with no action words implying they want changes made. Answer will be conversational; no editor operations.
+  - Pure informational: "Is there any discrepancies?" (no action word — user wants to know, not necessarily to fix), "What style is this?", "How old is Tom here?", "Does this follow our style guide?"
+  - No revise/edit/fix/improve etc.: If the user is only asking "is there X?" or "what/where/how" without implying "then fix it" or "revise for it", use "question"
+  - **Result**: Agent will answer in natural language only; no edits to the document.
+
+**DISTINCTION**:
+- "Is there any revision to this chapter for repetitiveness?" → edit_request (contains "revision"; user wants revisions suggested/applied)
+- "Is there any discrepancies?" → question (informational; no action word)
+- "Revise to fix any discrepancies" → edit_request (explicit action)
+
+**ANALYSIS SCOPE** (only when request_type is "question"):
+- "manuscript": Whole-story / whole-book analysis. The user wants to analyze the entire manuscript, not just the current chapter. Indicators: "the story", "the book", "the manuscript", "overall", "across chapters", "character arcs", "narrative arc", "thematic consistency", "pacing across", "story structure", no specific chapter mentioned. Examples: "Analyze the story", "How's the pacing across the book?", "Review the manuscript"
+- "chapter": Chapter-specific analysis (default). The user is asking about the current chapter or a specific chapter. Indicators: "this chapter", "chapter N", "this scene", "here", cursor-specific, or any chapter-scoped question. Examples: "How's this chapter?", "Review chapter 7", "What style is used here?"
 
 **OUTPUT**: Return ONLY valid JSON:
 {{
   "request_type": "question" | "edit_request",
+  "analysis_scope": "chapter" | "manuscript",
   "confidence": 0.0-1.0,
   "reasoning": "Brief explanation of why this classification"
 }}
 
-**CRITICAL**: 
-- If request contains a question (even with action verbs) → "question" (will route to edit path, LLM decides if edits needed)
-- If request is ONLY action verbs with NO question → "edit_request"
-- Trust your semantic understanding - questions go to edit path where LLM can analyze and optionally edit"""
+**CRITICAL**:
+- If the request contains action words (revise, edit, fix, improve, tighten, revision, redundancy, etc.) — even in question form — → "edit_request" (user wants edits; agent will produce editor operations)
+- If the request is purely informational (no action words) → "question" (agent will answer only; no editor operations)
+- For "question", set analysis_scope to "manuscript" when the user asks about the whole story/book; otherwise "chapter"
+"""
             
             # Call LLM with structured output
             llm = self._get_llm(temperature=0.1, state=state)  # Low temperature for consistent classification
@@ -1300,16 +1316,31 @@ class FictionEditingAgent(BaseAgent):
             try:
                 result = json.loads(content)
                 request_type = result.get("request_type", "edit_request")
+                analysis_scope = (result.get("analysis_scope") or "chapter").strip().lower()
+                if analysis_scope not in ("chapter", "manuscript"):
+                    analysis_scope = "chapter"
+                if request_type != "question":
+                    analysis_scope = "chapter"
+                # Preserve early whole-manuscript detection from context subgraph
+                if state.get("analysis_scope") == "manuscript":
+                    analysis_scope = "manuscript"
                 confidence = result.get("confidence", 0.5)
                 reasoning = result.get("reasoning", "")
-                
+                logger.info(
+                    "Request type detection: request_type=%s, analysis_scope=%s, confidence=%.2f",
+                    request_type,
+                    analysis_scope,
+                    confidence,
+                )
                 # Default to edit_request if confidence is low
                 if confidence < 0.6:
                     logger.warning(f"Low confidence ({confidence:.0%}) - defaulting to edit_request")
                     request_type = "edit_request"
+                    analysis_scope = "chapter"
                 
                 return {
                     "request_type": request_type,
+                    "analysis_scope": analysis_scope,
                     # ✅ CRITICAL: Preserve manuscript context!
                     "current_chapter_text": state.get("current_chapter_text", ""),
                     "current_chapter_number": state.get("current_chapter_number"),
@@ -1343,6 +1374,7 @@ class FictionEditingAgent(BaseAgent):
                 logger.warning("Defaulting to edit_request due to parse error")
                 return {
                     "request_type": "edit_request",
+                    "analysis_scope": "chapter",
                     # ✅ CRITICAL: Preserve even on error!
                     "current_chapter_text": state.get("current_chapter_text", ""),
                     "current_chapter_number": state.get("current_chapter_number"),
@@ -1363,6 +1395,7 @@ class FictionEditingAgent(BaseAgent):
             # Default to edit_request on error
             return {
                 "request_type": "edit_request",
+                "analysis_scope": "chapter",
                 # ✅ CRITICAL: Preserve even on error!
                 "current_chapter_text": state.get("current_chapter_text", ""),
                 "current_chapter_number": state.get("current_chapter_number"),
@@ -1388,6 +1421,8 @@ class FictionEditingAgent(BaseAgent):
         try:
             logger.info("Answering user question...")
             
+            analysis_scope = state.get("analysis_scope", "chapter")
+            logger.info("Answering question with analysis_scope=%s", analysis_scope)
             current_request = state.get("current_request", "")
             manuscript = state.get("manuscript", "")
             current_chapter_text = state.get("current_chapter_text", "")
@@ -1400,8 +1435,7 @@ class FictionEditingAgent(BaseAgent):
             outline_body = state.get("outline_body")
             outline_current_chapter_text = state.get("outline_current_chapter_text")
             
-            # ALWAYS use cursor-based chapter detection (from _analyze_scope_node)
-            # This ensures we show the chapter where the cursor actually is
+            # ALWAYS use cursor-based chapter detection (from _analyze_scope_node) for chapter scope
             chapter_text_to_show = current_chapter_text
             chapter_number_to_show = current_chapter_number
             prev_chapter_text = state.get("prev_chapter_text")
@@ -1410,72 +1444,109 @@ class FictionEditingAgent(BaseAgent):
             # Build context for answering
             context_parts = []
             
-            # Chapter context - show current, previous, and next chapters (cursor-based)
-            if prev_chapter_text:
-                prev_chapter_num = chapter_number_to_show - 1 if chapter_number_to_show else None
-                context_parts.append(f"=== PREVIOUS CHAPTER {prev_chapter_num or 'N'} (FOR CONTEXT) ===\n")
-                context_parts.append(f"{prev_chapter_text}\n\n")
+            if analysis_scope == "manuscript":
+                # Full-manuscript context: full text only; no summarization
+                MANUSCRIPT_CHAR_LIMIT = 750_000
+                if len(manuscript) > MANUSCRIPT_CHAR_LIMIT:
+                    logger.warning(
+                        "Whole-story analysis skipped: manuscript %d chars exceeds limit %d",
+                        len(manuscript),
+                        MANUSCRIPT_CHAR_LIMIT,
+                    )
+                    limit_mb = MANUSCRIPT_CHAR_LIMIT / 1_000_000
+                    user_msg = (
+                        f"**Whole-story analysis** — I'm looking at the entire manuscript.\n\n"
+                        f"Whole-story analysis isn't available for this request. The manuscript has **{len(manuscript):,} characters**, "
+                        f"which exceeds the limit of **{MANUSCRIPT_CHAR_LIMIT:,}** characters (~{limit_mb:.1f}M) for full-manuscript analysis. "
+                        f"I don't summarize by chapter; I either analyze the full text or explain why I can't.\n\n"
+                        f"**What you can do:** Ask about specific chapters (e.g. \"How does Chapter 5 work?\") or narrow your question to a section of the book."
+                    )
+                    return {
+                        "response": {
+                            "response": user_msg,
+                            "task_status": "complete",
+                            "agent_type": "fiction_editing_agent",
+                            "timestamp": datetime.now().isoformat(),
+                        },
+                        "task_status": "complete",
+                        "editor_operations": [],
+                        "metadata": state.get("metadata", {}),
+                        "user_id": state.get("user_id", "system"),
+                        "shared_memory": state.get("shared_memory", {}),
+                        "messages": state.get("messages", []),
+                        "query": state.get("query", ""),
+                    }
+                logger.info("Manuscript scope: full text (%d chars)", len(manuscript))
+                context_parts.append("=== FULL MANUSCRIPT ===\n")
+                context_parts.append(f"{_strip_frontmatter_block(manuscript)}\n\n")
+            else:
+                # Chapter context - show current, previous, and next chapters (cursor-based)
+                if prev_chapter_text:
+                    prev_chapter_num = chapter_number_to_show - 1 if chapter_number_to_show else None
+                    context_parts.append(f"=== PREVIOUS CHAPTER {prev_chapter_num or 'N'} (FOR CONTEXT) ===\n")
+                    context_parts.append(f"{prev_chapter_text}\n\n")
+                
+                if chapter_text_to_show:
+                    context_parts.append(f"=== CURRENT CHAPTER {chapter_number_to_show or 'N'} (CURSOR LOCATION) ===\n")
+                    context_parts.append(f"{chapter_text_to_show}\n\n")
+                elif manuscript:
+                    context_parts.append("=== MANUSCRIPT (NO CHAPTER DETECTED) ===\n")
+                    context_parts.append(f"{manuscript[:2000]}\n\n")
+                
+                if next_chapter_text:
+                    next_chapter_num = chapter_number_to_show + 1 if chapter_number_to_show else None
+                    context_parts.append(f"=== NEXT CHAPTER {next_chapter_num or 'N'} (FOR CONTEXT) ===\n")
+                    context_parts.append(f"{next_chapter_text}\n\n")
             
-            if chapter_text_to_show:
-                context_parts.append(f"=== CURRENT CHAPTER {chapter_number_to_show or 'N'} (CURSOR LOCATION) ===\n")
-                # Show FULL chapter for questions (not truncated) - this is the chapter where cursor is
-                context_parts.append(f"{chapter_text_to_show}\n\n")
-            elif manuscript:
-                context_parts.append("=== MANUSCRIPT (NO CHAPTER DETECTED) ===\n")
-                context_parts.append(f"{manuscript[:2000]}\n\n")
+            # Reference information: omit for whole-story analysis (analyze on its own merits); include for chapter scope
+            if analysis_scope != "manuscript":
+                if style_body:
+                    context_parts.append("=== STYLE GUIDE (SUMMARY) ===\n")
+                    style_summary = style_body[:1000] + "..." if len(style_body) > 1000 else style_body
+                    context_parts.append(f"{style_summary}\n\n")
+                if rules_body:
+                    context_parts.append("=== UNIVERSE RULES (SUMMARY) ===\n")
+                    rules_summary = rules_body[:1000] + "..." if len(rules_body) > 1000 else rules_body
+                    context_parts.append(f"{rules_summary}\n\n")
+                if series_body:
+                    context_parts.append("=== SERIES TIMELINE (SUMMARY) ===\n")
+                    series_summary = series_body[:1000] + "..." if len(series_body) > 1000 else series_body
+                    context_parts.append(f"{series_summary}\n\n")
+                if characters_bodies:
+                    context_parts.append(f"=== CHARACTER PROFILES ({len(characters_bodies)} character(s)) ===\n")
+                    context_parts.append("**NOTE**: Each character profile below is for a DIFFERENT character with distinct traits and dialogue patterns.\n\n")
+                    for i, char_body in enumerate(characters_bodies, 1):
+                        char_name = _extract_character_name(char_body)
+                        char_summary = char_body[:400] + "..." if len(char_body) > 400 else char_body
+                        context_parts.append(f"**Character {i}: {char_name}**\n{char_summary}\n\n")
+                if outline_current_chapter_text or (outline_body and chapter_number_to_show):
+                    outline_text_for_question = outline_current_chapter_text
+                    if not outline_text_for_question and outline_body and chapter_number_to_show:
+                        outline_text_for_question = extract_chapter_outline(outline_body, chapter_number_to_show)
+                    if outline_text_for_question:
+                        context_parts.append("=== STORY OUTLINE: PLOT STRUCTURE & STORY BEATS ===\n")
+                        context_parts.append("This section contains planned story structure including plot points and beats to achieve.\n")
+                        context_parts.append("USE AS CREATIVE GOALS TO ACHIEVE, NOT TEXT TO EXPAND OR COPY.\n\n")
+                        context_parts.append("DO NOT:\n")
+                        context_parts.append("- Copy outline bullet points into prose or answers\n")
+                        context_parts.append("- Expand outline text directly into paragraphs\n")
+                        context_parts.append("- Reuse outline phrasing as the basis for sentences\n\n")
+                        context_parts.append("INSTEAD DO:\n")
+                        context_parts.append("- Use outline as guidance for future scenes and planned events\n")
+                        context_parts.append("- Reference manuscript text for what's actually written\n")
+                        context_parts.append("- Provide original analysis in your own words\n\n")
+                        context_parts.append(f"{outline_text_for_question[:1500]}\n\n")
             
-            if next_chapter_text:
-                next_chapter_num = chapter_number_to_show + 1 if chapter_number_to_show else None
-                context_parts.append(f"=== NEXT CHAPTER {next_chapter_num or 'N'} (FOR CONTEXT) ===\n")
-                context_parts.append(f"{next_chapter_text}\n\n")
-            
-            # Reference information
-            if style_body:
-                context_parts.append("=== STYLE GUIDE (SUMMARY) ===\n")
-                style_summary = style_body[:1000] + "..." if len(style_body) > 1000 else style_body
-                context_parts.append(f"{style_summary}\n\n")
-            
-            if rules_body:
-                context_parts.append("=== UNIVERSE RULES (SUMMARY) ===\n")
-                rules_summary = rules_body[:1000] + "..." if len(rules_body) > 1000 else rules_body
-                context_parts.append(f"{rules_summary}\n\n")
-            
-            if series_body:
-                context_parts.append("=== SERIES TIMELINE (SUMMARY) ===\n")
-                series_summary = series_body[:1000] + "..." if len(series_body) > 1000 else series_body
-                context_parts.append(f"{series_summary}\n\n")
-            
-            if characters_bodies:
-                context_parts.append(f"=== CHARACTER PROFILES ({len(characters_bodies)} character(s)) ===\n")
-                context_parts.append("**NOTE**: Each character profile below is for a DIFFERENT character with distinct traits and dialogue patterns.\n\n")
-                for i, char_body in enumerate(characters_bodies, 1):
-                    char_name = _extract_character_name(char_body)
-                    char_summary = char_body[:400] + "..." if len(char_body) > 400 else char_body
-                    context_parts.append(f"**Character {i}: {char_name}**\n{char_summary}\n\n")
-            
-            # Outline context for questions:
-            # Frame as objectives, not source text, to reduce accidental copying in answers.
-            if outline_current_chapter_text or (outline_body and chapter_number_to_show):
-                outline_text_for_question = outline_current_chapter_text
-                if not outline_text_for_question and outline_body and chapter_number_to_show:
-                    outline_text_for_question = extract_chapter_outline(outline_body, chapter_number_to_show)
+            # Build request with instructions (manuscript vs chapter framing)
+            if analysis_scope == "manuscript":
+                request_with_instructions = f"""=== USER QUESTION ===
+{current_request}
 
-                if outline_text_for_question:
-                    context_parts.append("=== STORY OUTLINE: PLOT STRUCTURE & STORY BEATS ===\n")
-                    context_parts.append("This section contains planned story structure including plot points and beats to achieve.\n")
-                    context_parts.append("USE AS CREATIVE GOALS TO ACHIEVE, NOT TEXT TO EXPAND OR COPY.\n\n")
-                    context_parts.append("DO NOT:\n")
-                    context_parts.append("- Copy outline bullet points into prose or answers\n")
-                    context_parts.append("- Expand outline text directly into paragraphs\n")
-                    context_parts.append("- Reuse outline phrasing as the basis for sentences\n\n")
-                    context_parts.append("INSTEAD DO:\n")
-                    context_parts.append("- Use outline as guidance for future scenes and planned events\n")
-                    context_parts.append("- Reference manuscript text for what's actually written\n")
-                    context_parts.append("- Provide original analysis in your own words\n\n")
-                    context_parts.append(f"{outline_text_for_question[:1500]}\n\n")
-            
-            # Build request with instructions
-            request_with_instructions = f"""=== USER QUESTION ===
+**YOUR TASK**: Perform a whole-manuscript analysis using ONLY the manuscript text provided. Analyze the story on its own merits: structure, pacing, character arcs, thematic consistency, and narrative quality as they appear in the prose. Do not compare to outline, style guide, or other reference documents — you have only the manuscript. Reference specific chapters and passages to support your observations. Be thorough and specific.
+
+**OUTPUT**: Provide a natural, conversational answer. Do NOT generate JSON or editor operations."""
+            else:
+                request_with_instructions = f"""=== USER QUESTION ===
 {current_request}
 
 **YOUR TASK**: Answer the user's question clearly and helpfully.
@@ -1493,7 +1564,16 @@ class FictionEditingAgent(BaseAgent):
             
             # Use standardized helper for message construction with conversation history
             messages_list = state.get("messages", [])
-            system_prompt = "You are a helpful fiction editing assistant. Answer user questions about the manuscript, style, references, and related information. Be conversational and helpful."
+            if analysis_scope == "manuscript":
+                system_prompt = (
+                    "You are a professional fiction editor performing a whole-manuscript analysis. "
+                    "You have access ONLY to the manuscript text (no outline, style guide, or character notes). "
+                    "Analyze the story on its own merits: structure, pacing, character arcs, "
+                    "thematic consistency, and narrative quality as they appear in the prose. "
+                    "Reference specific chapters and passages to support your observations."
+                )
+            else:
+                system_prompt = "You are a helpful fiction editing assistant. Answer user questions about the manuscript, style, references, and related information. Be conversational and helpful."
             messages = self._build_editing_agent_messages(
                 system_prompt=system_prompt,
                 context_parts=context_parts,
@@ -1651,6 +1731,10 @@ class FictionEditingAgent(BaseAgent):
                 else:
                     # Pure question with no operations
                     logger.info("Returning question response (no editor operations)")
+                # Mention whole-story mode when applicable
+                if state.get("analysis_scope") == "manuscript":
+                    prefix = "**Whole-story analysis** — I'm looking at the entire manuscript.\n\n"
+                    existing_response["response"] = prefix + (existing_response.get("response") or "")
                 return {
                     "response": existing_response,
                     "task_status": existing_response.get("task_status", "complete")
@@ -1685,9 +1769,12 @@ class FictionEditingAgent(BaseAgent):
                         else:
                             # Pure question with no operations at all - return summary as response
                             logger.info("Question request with no operations - using summary as response")
+                            response_content = summary
+                            if state.get("analysis_scope") == "manuscript":
+                                response_content = "**Whole-story analysis** — I'm looking at the entire manuscript.\n\n" + response_content
                             return {
                                 "response": {
-                                    "response": summary,
+                                    "response": response_content,
                                     "task_status": "complete",
                                     "agent_type": "fiction_editing_agent"
                                 },
@@ -1810,6 +1897,10 @@ class FictionEditingAgent(BaseAgent):
                     failed_section += "---\n"
                 
                 response_text = response_text + failed_section
+            
+            # Mention whole-story mode when applicable
+            if state.get("analysis_scope") == "manuscript":
+                response_text = "**Whole-story analysis** — I'm looking at the entire manuscript.\n\n" + response_text
             
             # Build response with editor operations
             response = {

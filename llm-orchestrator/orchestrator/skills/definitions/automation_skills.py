@@ -49,7 +49,17 @@ AUTOMATION_SKILLS = [
         ],
         priority=85,
         tools=[],
-        system_prompt="You are a helpful assistant for this application. Answer questions about features, agents, and how to use the system. Be concise and accurate.",
+        system_prompt=(
+            "You are a helpful assistant for THIS APPLICATION ONLY. Your scope is: features, agents, "
+            "usage, documentation, and how to use this system. Be concise and accurate.\n\n"
+            "OUT-OF-SCOPE: If the user's question is about general knowledge, domain-specific topics "
+            "(electronics, cooking, history, science, equipment, procedures outside this app, etc.), "
+            "or factual how-to questions about the world (not about this application), you MUST NOT answer. "
+            "Instead, begin your entire response with exactly: [OUT_OF_SCOPE]\n\n"
+            "When you use [OUT_OF_SCOPE], follow it with a brief friendly message such as: "
+            "'That question is about external knowledge, not this application. Ask your question again "
+            "without the /help prefix and I will look it up for you.' Do not invent answers for out-of-scope questions."
+        ),
     ),
     Skill(
         name="email",
@@ -114,7 +124,7 @@ AUTOMATION_SKILLS = [
     ),
     Skill(
         name="rss",
-        description="Manage RSS feeds, list feeds, and fetch recent articles.",
+        description="Subscribe to and manage RSS feeds; list feeds and fetch recent items from them. Not for finding articles on the web (use research).",
         engine=EngineType.AUTOMATION,
         domains=["general", "rss", "news"],
         actions=["query", "management"],
@@ -142,7 +152,10 @@ AUTOMATION_SKILLS = [
     ),
     Skill(
         name="org_capture",
-        description="Quick capture items to the org-mode inbox.",
+        description=(
+            "Quick capture items to the org-mode inbox. "
+            "Use for 'capture to inbox', 'add to inbox', 'quick capture' — captures ideas and reminders as notes without researching."
+        ),
         engine=EngineType.AUTOMATION,
         domains=["general", "management"],
         actions=["generation", "management"],
@@ -153,6 +166,11 @@ AUTOMATION_SKILLS = [
         system_prompt=(
             "You help capture items to the user's org-mode inbox. "
             "ALWAYS call add_org_inbox_item_tool to add each item - never just describe what you would do. "
+            "\n\n"
+            "SCOPE: Only capture items requested in the CURRENT user message (the last message). "
+            "You may see conversation history for context — it helps interpret references like 'capture that' "
+            "or 'add what you just said'. NEVER independently scan history for additional items to capture. "
+            "If the current message does not ask to capture something, do not capture anything from history."
             "\n\n"
             "PRIOR STEP CONTENT: When the user message includes 'Content to capture (from a previous step):', "
             "that content is the main text to capture. Use it as the inbox item: use a concise title/summary for the heading "
@@ -181,8 +199,11 @@ AUTOMATION_SKILLS = [
             "Use kind='checkbox' for '- [ ] Item' or checklist items; kind='event' for calendar; kind='contact' for contacts. "
             "Org headlines: '* TODO Title' or '* Title' (note); extract title as text. Strip prefixes like 'capture to inbox:', 'add to inbox:'. "
             "\n\n"
+            "TAGS: If the user asks to tag the item (e.g. 'tag with work', 'with tag urgent', 'add tag @project'), "
+            "pass those tags in the tags parameter (comma-separated string or list). Honor any tag names the user specifies. "
+            "\n\n"
             "Parameters: text (required), kind ('todo', 'note', 'checkbox', 'event', 'contact'; default 'todo'), "
-            "schedule (optional org timestamp like '<2026-02-05 Thu>'), tags (optional comma-separated)."
+            "schedule (optional org timestamp like '<2026-02-05 Thu>'), tags (optional; use when user specifies tags)."
         ),
     ),
     Skill(
@@ -192,6 +213,8 @@ AUTOMATION_SKILLS = [
         domains=["general"],
         actions=["query", "observation"],
         editor_types=["org"],
+        requires_editor=True,
+        editor_preference="require",
         context_boost=15,
         keywords=[
             "org", "org-mode", "orgmode", "todo", "task",
@@ -216,7 +239,7 @@ AUTOMATION_SKILLS = [
     ),
     Skill(
         name="image_generation",
-        description="Generate images from text descriptions.",
+        description="Generate images from text descriptions. Use for 'draw', 'create image', 'make a picture'.",
         engine=EngineType.AUTOMATION,
         domains=["general", "image", "visual", "art"],
         actions=["generation"],
@@ -272,7 +295,7 @@ AUTOMATION_SKILLS = [
     ),
     Skill(
         name="document_creator",
-        description="Create new documents or reference files and place them in a specific folder.",
+        description="Create new files or documents in a folder (not for editing the current open document; use editor skills for that).",
         engine=EngineType.AUTOMATION,
         domains=["general", "documents", "files", "management"],
         actions=["generation", "management"],

@@ -573,7 +573,7 @@ class FullResearchAgent(BaseAgent):
             if "user_chat_model" in state_metadata and "user_chat_model" not in shared_memory:
                 shared_memory["user_chat_model"] = state_metadata["user_chat_model"]
 
-            # Skill config: gates node behavior for content_analysis, knowledge_builder, etc.
+            # Skill config: gates node behavior for knowledge_builder, security_analysis, etc.
             skill_name = state_metadata.get("skill_name", "research")
             skill_config = get_research_skill_config(skill_name)
             skip_quick_answer = skip_quick_answer or skill_config.get("skip_quick_answer", False)

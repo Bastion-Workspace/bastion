@@ -80,13 +80,15 @@ async def get_folder_tree(
 @router.get("/api/folders/{folder_id}/contents", response_model=FolderContentsResponse)
 async def get_folder_contents(
     folder_id: str,
+    limit: int = 250,
+    offset: int = 0,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Get contents of a specific folder"""
+    """Get contents of a specific folder. Paginated for large folders (default limit 250)."""
     folder_service = await _get_folder_service()
     try:
-        logger.debug(f"🔍 API: Getting folder contents for {folder_id} (user: {current_user.user_id})")
-        contents = await folder_service.get_folder_contents(folder_id, current_user.user_id)
+        logger.debug(f"🔍 API: Getting folder contents for {folder_id} (user: {current_user.user_id}, limit: {limit}, offset: {offset})")
+        contents = await folder_service.get_folder_contents(folder_id, current_user.user_id, limit=limit, offset=offset)
         if not contents:
             logger.warning(f"⚠️ API: Folder {folder_id} not found or access denied for user {current_user.user_id}")
             raise HTTPException(status_code=404, detail="Folder not found or access denied")

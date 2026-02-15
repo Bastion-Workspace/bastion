@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 _DOCUMENT_FILE_URL_PATTERN = re.compile(
     r"^/api/documents/([a-f0-9-]{36})/file$", re.IGNORECASE
 )
+_API_IMAGES_PREFIX = "/api/images/"
 
 
 def _model_display_name(model_id: str) -> str:
@@ -213,6 +214,45 @@ async def _get_document_file_bytes(
     return (data, mime)
 
 
+def _get_image_file_bytes_from_url(url: str) -> Optional[Tuple[bytes, str]]:
+    """
+    Resolve /api/images/... URL to bytes for external chat (Telegram/Discord).
+    Serves from UPLOAD_DIR/web_sources/images (and subdirs). Returns (bytes, mime) or None.
+    """
+    if not url or not url.strip().startswith(_API_IMAGES_PREFIX):
+        return None
+    from urllib.parse import unquote
+
+    try:
+        relative = unquote(url.strip()[len(_API_IMAGES_PREFIX) :].lstrip("/"))
+        if not relative:
+            return None
+        parts = Path(relative).parts
+        if not parts or any(p in (".", "..") for p in parts):
+            return None
+        images_base = Path(settings.UPLOAD_DIR) / "web_sources" / "images"
+        image_file_path = (images_base / relative).resolve()
+        if not str(image_file_path).startswith(str(images_base.resolve())):
+            return None
+        if not image_file_path.is_file():
+            for subdir in images_base.iterdir() if images_base.exists() else []:
+                if subdir.is_dir():
+                    candidate = subdir / Path(relative).name
+                    if candidate.is_file():
+                        image_file_path = candidate
+                        break
+            else:
+                return None
+        data = image_file_path.read_bytes()
+        mime, _ = mimetypes.guess_type(str(image_file_path))
+        if not mime or not mime.startswith("image/"):
+            mime = "image/png"
+        return (data, mime)
+    except Exception as e:
+        logger.debug("Internal image URL resolve failed for %s: %s", url[:80], e)
+        return None
+
+
 def _strip_resolved_image_refs(text: str, resolved_urls: List[str]) -> str:
     """Remove markdown image refs whose URLs are in resolved_urls (so Telegram gets clean text)."""
     if not resolved_urls:
@@ -277,6 +317,7 @@ async def external_chat(body: ExternalChatRequest) -> Dict[str, Any]:
         metadata = (lifecycle_info or {}).get("metadata_json") or {}
         selected_model_id = metadata.get("external_chat_selected_model_id")
         request_context: Dict[str, Any] = {}
+        request_context["editor_preference"] = "ignore"
         if selected_model_id:
             request_context["user_chat_model"] = selected_model_id
 
@@ -359,17 +400,26 @@ async def external_chat(body: ExternalChatRequest) -> Dict[str, Any]:
             url = img.get("url")
             if not url or img.get("data"):
                 continue
-            match = _DOCUMENT_FILE_URL_PATTERN.match(url.strip())
-            if not match:
+            url_stripped = url.strip()
+            match = _DOCUMENT_FILE_URL_PATTERN.match(url_stripped)
+            if match:
+                doc_id = match.group(1)
+                result = await _get_document_file_bytes(body.user_id, doc_id)
+                if result:
+                    data_bytes, mime = result
+                    img["data"] = base64.b64encode(data_bytes).decode("utf-8")
+                    img["mime"] = mime
+                    resolved_urls.append(url)
+                    del img["url"]
                 continue
-            doc_id = match.group(1)
-            result = await _get_document_file_bytes(body.user_id, doc_id)
-            if result:
-                data_bytes, mime = result
-                img["data"] = base64.b64encode(data_bytes).decode("utf-8")
-                img["mime"] = mime
-                resolved_urls.append(url)
-                del img["url"]
+            if url_stripped.startswith(_API_IMAGES_PREFIX):
+                result = _get_image_file_bytes_from_url(url_stripped)
+                if result:
+                    data_bytes, mime = result
+                    img["data"] = base64.b64encode(data_bytes).decode("utf-8")
+                    img["mime"] = mime
+                    resolved_urls.append(url)
+                    del img["url"]
 
         for img in images:
             meta = img.get("metadata")

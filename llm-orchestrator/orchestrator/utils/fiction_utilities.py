@@ -84,9 +84,9 @@ def slice_hash(text: str) -> str:
 
 
 def strip_frontmatter_block(text: str) -> str:
-    """Strip YAML frontmatter from text."""
+    """Strip only the leading YAML frontmatter block from text. Uses \\A so scene breaks (---) in the body are never stripped."""
     try:
-        return re.sub(r'^---\s*\n[\s\S]*?\n---\s*\n', '', text, flags=re.MULTILINE)
+        return re.sub(r'\A---\s*\n[\s\S]*?\n---\s*\n', '', text)
     except Exception:
         return text
 
@@ -507,7 +507,7 @@ def format_status_block(status_items: List[dict]) -> str:
     
     Args:
         status_items: List of dicts with keys 'item' and 'status'
-        Example: [{"item": "Clarissa", "status": "Went home in chapter 2"}]
+        Example: [{"item": "Alex", "status": "Went home in chapter 2"}]
         
     Returns:
         Formatted status block text (with "### Status" header)

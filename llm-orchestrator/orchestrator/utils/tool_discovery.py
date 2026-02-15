@@ -9,7 +9,6 @@ import logging
 from typing import List, Dict, Any, Optional
 
 from orchestrator.utils.tool_vector_store import get_tool_vector_store
-from orchestrator.tools.tool_pack_registry import ToolPack, get_tool_by_name
 
 logger = logging.getLogger(__name__)
 
@@ -31,24 +30,23 @@ class ToolDiscoveryService:
         query: str,
         top_k: int = 5,
         min_confidence: float = 0.6,
-        pack_filter: Optional[ToolPack] = None
+        pack_filter: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
-        Discover tools semantically based on query intent
-        
+        Discover tools semantically based on query intent.
+
         Args:
             query: User query string
             top_k: Maximum number of tools to return
             min_confidence: Minimum similarity score (0.0-1.0)
-            pack_filter: Optional pack to filter by
-            
+            pack_filter: Optional pack name to filter by (e.g. "discovery", "text_transforms")
+
         Returns:
             List of discovered tools with metadata and confidence scores
         """
         try:
             vector_store = await self._get_vector_store()
-            
-            pack_filter_str = pack_filter.value if pack_filter else None
+            pack_filter_str = pack_filter
             results = await vector_store.search_tools(
                 query=query,
                 top_k=top_k,
@@ -76,17 +74,17 @@ class ToolDiscoveryService:
     async def discover_tools_by_pack(
         self,
         query: str,
-        pack: ToolPack,
+        pack: str,
         top_k: int = 3
     ) -> List[Dict[str, Any]]:
         """
-        Discover tools within a specific pack
-        
+        Discover tools within a specific pack.
+
         Args:
             query: User query string
-            pack: Tool pack to search within
+            pack: Pack name to search within (e.g. "discovery", "text_transforms")
             top_k: Maximum number of tools to return
-            
+
         Returns:
             List of discovered tools from the specified pack
         """

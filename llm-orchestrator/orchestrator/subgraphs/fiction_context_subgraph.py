@@ -99,6 +99,45 @@ async def prepare_context_node(state: Dict[str, Any]) -> Dict[str, Any]:
         else:
             logger.info(f"🔍 PREPARE CONTEXT: Used state['query'], current_request = {repr(current_request)}")
         
+        # Early whole-story intent detection: skip chapter resolution when user wants full-manuscript analysis.
+        # Negative guards override: edit/revise or "this chapter/scene" => keep chapter scope.
+        analysis_scope = "chapter"
+        if current_request:
+            q = current_request.lower().strip()
+            # Negative guards: any match forces chapter scope (user is editing/revising a specific part).
+            chapter_scope_phrases = [
+                "this chapter", "this scene", "this paragraph", "this section",
+                "edit this", "revise this", "edit the chapter", "revise the chapter",
+                "edit this chapter", "revise this chapter",
+            ]
+            if any(p in q for p in chapter_scope_phrases):
+                analysis_scope = "chapter"
+            elif re.search(r"\b(edit|revise|rewrite)\b", q):
+                # Whole-word edit/revise/rewrite => actionable edit, not whole-story analysis.
+                analysis_scope = "chapter"
+            elif any(p in q for p in (
+                "the outline", "in the outline", "in our outline", "our outline",
+                "the style guide", "style guide", "in the style",
+                "the rules", "our rules", "in the rules",
+                "character sheet", "character notes", "in the character",
+            )):
+                # Reference-document query: user wants outline/rules/style/characters. Manuscript scope excludes these.
+                analysis_scope = "chapter"
+            else:
+                # Only explicit whole-story / analysis phrases (no generic words like "discrepancies").
+                whole_story_phrases = [
+                    "whole story", "entire story", "full story", "our story", "the story so far",
+                    "whole manuscript", "entire manuscript", "full manuscript",
+                    "whole book", "entire book", "full book", "the book",
+                    "analyze the story", "analyze our story", "analyze the book", "analyze the manuscript",
+                    "across the book", "across chapters", "across the manuscript",
+                    "character arcs", "narrative arc", "thematic consistency", "pacing across",
+                    "review the manuscript", "review the story", "review the book",
+                ]
+                if any(p in q for p in whole_story_phrases):
+                    analysis_scope = "manuscript"
+                    logger.info("Whole-story intent detected early: analysis_scope=manuscript (skipping chapter resolution)")
+        
         return preserve_fiction_state(state, {
             "active_editor": active_editor,
             "manuscript": manuscript,
@@ -109,6 +148,7 @@ async def prepare_context_node(state: Dict[str, Any]) -> Dict[str, Any]:
             "selection_start": selection_start,
             "selection_end": selection_end,
             "current_request": current_request,
+            "analysis_scope": analysis_scope,
         })
         
     except Exception as e:
@@ -122,6 +162,14 @@ async def prepare_context_node(state: Dict[str, Any]) -> Dict[str, Any]:
 async def detect_chapter_mentions_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Parse user query for explicit chapter mentions with intent-aware prioritization"""
     try:
+        # Skip chapter detection when whole-manuscript analysis was detected early
+        if state.get("analysis_scope") == "manuscript":
+            logger.info("Skipping chapter detection (analysis_scope=manuscript)")
+            return preserve_fiction_state(state, {
+                "explicit_primary_chapter": None,
+                "mentioned_chapters": [],
+                "wants_next_chapter": False,
+            })
         logger.info("Detecting chapter mentions in user query...")
         
         # DEBUG: Log what we received from prepare_context
@@ -271,6 +319,28 @@ async def detect_chapter_mentions_node(state: Dict[str, Any]) -> Dict[str, Any]:
 async def analyze_scope_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Analyze chapter scope: find chapters, determine current/prev/next"""
     try:
+        # Whole-manuscript analysis: skip cursor/chapter resolution, only compute chapter_ranges
+        if state.get("analysis_scope") == "manuscript":
+            manuscript = state.get("manuscript_content") or state.get("manuscript", "")
+            chapter_ranges = find_chapter_ranges(manuscript)
+            logger.info(
+                "Skipping chapter resolution (analysis_scope=manuscript); chapter_ranges=%d chapters",
+                len(chapter_ranges),
+            )
+            return preserve_fiction_state(state, {
+                "chapter_ranges": chapter_ranges,
+                "active_chapter_idx": -1,
+                "working_chapter_index": -1,
+                "current_chapter_text": "",
+                "current_chapter_number": None,
+                "requested_chapter_number": None,
+                "prev_chapter_text": None,
+                "prev_chapter_number": None,
+                "next_chapter_text": None,
+                "next_chapter_number": None,
+                "reference_chapter_numbers": [],
+                "reference_chapter_texts": {},
+            })
         logger.info("Analyzing chapter scope...")
         
         # Support both manuscript_content (from subgraph) and manuscript (from main agent)

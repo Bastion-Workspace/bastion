@@ -722,8 +722,8 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     // Update ref with latest content
     editContentRef.current = editContent;
 
-    // BULLY! Compare against ACTUAL server content, not the current state's content key
-    // This prevents premature clearing when we restore from localStorage on mount!
+    // Compare against serverContent (disk) rather than document.content.
+    // This prevents premature clearing when restoring from localStorage on mount.
     if (editContent === serverContent) {
       // Content matches server version, clear unsaved content
       clearUnsavedContent(documentId);
@@ -738,8 +738,8 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     return () => {
       clearTimeout(timeoutId);
       
-      // BULLY! Only save in the cleanup if we are ACTUALLY unmounting
-      // This prevents saving on every single keystroke (which was causing race conditions)
+      // Only save in the cleanup if we are actually unmounting.
+      // This prevents saving on every keystroke (which was causing race conditions).
       // We rely on the unmount tracker effect (defined below) to set this flag.
       if (!isUnmountingRef.current) return;
 
@@ -748,13 +748,13 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       const currentSavedContent = serverContent; // Use serverContent for final check
       const latestContent = editContentRef.current;
       
-      // BULLY! Only save if we actually have content and it differs from what's on disk
+      // Only save if content differs from what's on disk
       if (latestContent && latestContent !== currentSavedContent) {
         // EXTRA PROTECTION: Don't overwrite unsaved changes with the original content 
         // if the original content is significantly shorter (prevents accidental wipes during crashes)
         const existingUnsaved = getUnsavedContent(documentId);
         if (existingUnsaved && latestContent.length < existingUnsaved.length * 0.5 && latestContent.length < 500) {
-          console.warn('⚠️ ROOSEVELT: Refusing to overwrite longer unsaved content with much shorter content during unmount - possible race condition!');
+          console.warn('⚠️ Refusing to overwrite longer unsaved content with much shorter content during unmount (possible race condition)');
           return;
         }
         
@@ -764,7 +764,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     };
   }, [documentId, isEditing, editContent, serverContent]);
 
-  // Track unmounting state - BULLY! Define this AFTER the save effect 
+  // Track unmounting state. Define this AFTER the save effect
   // so its cleanup runs BEFORE the save effect's cleanup!
   useEffect(() => {
     return () => {
@@ -1091,7 +1091,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       if (scrollToHeading && contentBoxRef.current) {
         // Scroll to heading in preview pane (for non-edit mode)
         // Edit mode scrolling is handled by OrgCMEditor
-        console.log('📍 ROOSEVELT: Scrolling preview to heading:', scrollToHeading);
+        console.log('📍 Scrolling preview to heading:', scrollToHeading);
         try {
           const headingText = scrollToHeading.toLowerCase().trim();
           const allHeadings = contentBoxRef.current.querySelectorAll('[id^="org-heading-"]');
@@ -1115,7 +1115,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         }
       } else if (scrollToLine !== null && contentBoxRef.current) {
         // Scroll to specific line number (approximate)
-        console.log('📍 ROOSEVELT: Scrolling to line:', scrollToLine);
+        console.log('📍 Scrolling to line:', scrollToLine);
         const contentBox = contentBoxRef.current;
         const lineHeight = 20; // Approximate line height
         const targetY = scrollToLine * lineHeight;
@@ -1136,13 +1136,13 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       
       try {
         setLoadingBacklinks(true);
-        console.log('🔗 ROOSEVELT: Fetching backlinks for', document.filename);
+        console.log('🔗 Fetching backlinks for', document.filename);
         
         const response = await apiService.get(`/api/org/backlinks?filename=${encodeURIComponent(document.filename)}`);
         
         if (response.success && response.backlinks) {
           setBacklinks(response.backlinks);
-          console.log(`✅ ROOSEVELT: Found ${response.backlinks.length} backlinks`);
+          console.log(`✅ Found ${response.backlinks.length} backlinks`);
         }
       } catch (err) {
         console.error('Failed to fetch backlinks:', err);
@@ -1155,7 +1155,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     fetchBacklinks();
   }, [document]);
 
-  // **ROOSEVELT REFILE HOTKEY!** Ctrl+Shift+M to refile current heading
+  // Refile hotkey: Ctrl+Shift+M to refile current heading
   useEffect(() => {
     const handleKeyDown = (event) => {
       // Check for Ctrl+Shift+M (or Cmd+Shift+M on Mac)
@@ -1166,13 +1166,13 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         if (!fname.endsWith('.org')) return;
         
         // Open refile dialog with current position
-        console.log('📦 ROOSEVELT: Refile hotkey triggered!');
+        console.log('📦 Refile hotkey triggered');
         
         // Get current cursor position from editor (dynamic!)
         const currentLine = orgEditorRef.current?.getCurrentLine() || scrollToLine || 1;
         const currentHeading = orgEditorRef.current?.getCurrentHeading() || scrollToHeading || 'Current entry';
         
-        console.log('📦 ROOSEVELT: Current cursor at line:', currentLine, 'heading:', currentHeading);
+        console.log('📦 Current cursor at line:', currentLine, 'heading:', currentHeading);
         
         // Get relative file path from document
         // Try to construct proper path with folder
@@ -1186,7 +1186,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           filePath = `OrgMode/${document.filename}`;
         }
         
-        console.log('📦 ROOSEVELT: Refile source file path:', filePath);
+        console.log('📦 Refile source file path:', filePath);
         
         setRefileSourceFile(filePath);
         setRefileSourceLine(currentLine);
@@ -1201,7 +1201,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     }
   }, [isEditing, document, scrollToLine, scrollToHeading]);
 
-  // **ROOSEVELT ARCHIVE HOTKEY!** Ctrl+Shift+A to archive current heading
+  // Archive hotkey: Ctrl+Shift+A to archive current heading
   useEffect(() => {
     const handleKeyDown = (event) => {
       // Check for Ctrl+Shift+A (or Cmd+Shift+A on Mac)
@@ -1212,13 +1212,13 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         if (!fname.endsWith('.org')) return;
         
         // Open archive dialog with current position
-        console.log('📦 ROOSEVELT: Archive hotkey triggered!');
+        console.log('📦 Archive hotkey triggered');
         
         // Get current cursor position from editor (dynamic!)
         const currentLine = orgEditorRef.current?.getCurrentLine() || scrollToLine || 1;
         const currentHeading = orgEditorRef.current?.getCurrentHeading() || scrollToHeading || 'Current entry';
         
-        console.log('📦 ROOSEVELT: Current cursor at line:', currentLine, 'heading:', currentHeading);
+        console.log('📦 Current cursor at line:', currentLine, 'heading:', currentHeading);
         
         // Get relative file path from document
         let filePath = document.filename;
@@ -1231,7 +1231,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           filePath = `OrgMode/${document.filename}`;
         }
         
-        console.log('📦 ROOSEVELT: Archive source file path:', filePath);
+        console.log('📦 Archive source file path:', filePath);
         
         setArchiveSourceFile(filePath);
         setArchiveSourceLine(currentLine);
@@ -1246,7 +1246,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     }
   }, [isEditing, document, scrollToLine, scrollToHeading]);
 
-  // **ROOSEVELT CLOCKING HOTKEYS!** Ctrl+Shift+I (clock in) and Ctrl+Shift+O (clock out)
+  // Clocking hotkeys: Ctrl+Shift+I (clock in) and Ctrl+Shift+O (clock out)
   useEffect(() => {
     const handleKeyDown = async (event) => {
       const fname = (document?.filename || '').toLowerCase();
@@ -1256,7 +1256,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === 'I') {
         event.preventDefault();
         
-        console.log('⏰ ROOSEVELT: Clock in hotkey triggered!');
+        console.log('⏰ Clock in hotkey triggered');
         
         const currentLine = orgEditorRef.current?.getCurrentLine() || scrollToLine || 1;
         const currentHeading = orgEditorRef.current?.getCurrentHeading() || scrollToHeading || 'Current entry';
@@ -1292,7 +1292,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
       if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key === 'O') {
         event.preventDefault();
         
-        console.log('⏰ ROOSEVELT: Clock out hotkey triggered!');
+        console.log('⏰ Clock out hotkey triggered');
         
         try {
           const response = await apiService.post('/api/org/clock/out');
@@ -1373,7 +1373,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     
     if (result?.success) {
       // Refresh the document after successful refile
-      console.log('✅ ROOSEVELT: Refile completed, refreshing...');
+      console.log('✅ Refile completed, refreshing...');
       fetchDocument();
     }
   };
@@ -1451,12 +1451,14 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isEditing, editContent, document?.filename, document?.document_id]);
 
-  // **ROOSEVELT'S CLEANUP**: Clear editor state when component unmounts (tab closes)
-  // Note: Diffs are intentionally NOT cleared here - they persist in documentDiffStore
-  // so they can be restored when the tab is reopened
+  // Clear React editor state when this tab unmounts (e.g. user switched to another tab).
+  // Do NOT clear localStorage editor_ctx_cache here: chat sends messages with the last
+  // open document context, and we only have one cache. Clearing on unmount caused
+  // has_active_editor=false after switching tabs (e.g. outline open, switch to RSS, send
+  // from chat). Cache is cleared when leaving /documents (App.js) so Chat page doesn't
+  // send stale context. Diffs persist in documentDiffStore for when the tab reopens.
   useEffect(() => {
     return () => {
-      console.log('🧹 ROOSEVELT: DocumentViewer unmounting - clearing editor state');
       setEditorState({
         isEditable: false,
         filename: null,
@@ -1471,14 +1473,6 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         documentId: null,
         folderId: null,
       });
-      // Also clear the localStorage cache to prevent stale data
-      try {
-        localStorage.removeItem('editor_ctx_cache');
-      } catch (e) {
-        console.error('Failed to clear editor_ctx_cache:', e);
-      }
-      // Diffs persist in documentDiffStore - they will be restored when tab reopens
-      // To manually clear diffs, use: documentDiffStore.clearDiffs(document?.document_id)
     };
   }, [setEditorState]);
 
@@ -1840,7 +1834,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     );
   }
 
-  // **BULLY!** PDF files get special full-screen viewer treatment!
+  // PDF files get special full-screen viewer treatment
   if (fnameLower.endsWith('.pdf')) {
     return (
       <PDFDocumentViewer 
@@ -2093,7 +2087,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
             )}
           </Box>
 
-          {/* **ROOSEVELT ACTIVE CLOCK INDICATOR!** */}
+          {/* Active clock indicator */}
           {activeClock && (
             <Box sx={{ 
               display: 'flex', 
@@ -2142,7 +2136,13 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                       try {
                         setSaving(true);
                         
-                        // **ROOSEVELT RECURRING TASKS!** Check for TODO->DONE changes
+                        // Skip no-op saves (prevents unnecessary re-indexing)
+                        if (editContent === serverContent) {
+                          clearUnsavedContent(documentId);
+                          return;
+                        }
+
+                        // Check for TODO->DONE changes (recurring tasks)
                         const isOrgFile = (document?.filename || '').toLowerCase().endsWith('.org');
                         let recurringHandled = false;
                         
@@ -2160,7 +2160,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                             const isDone = /^\*+\s+(DONE|CANCELED|CANCELLED)\s+/.test(newLine);
                             
                             if (wasTodo && isDone) {
-                              console.log('🔁 ROOSEVELT: Detected TODO->DONE at line', i + 1);
+                              console.log('Detected TODO->DONE at line', i + 1);
                               
                               // Build file path
                               let filePath = document.filename;
@@ -2197,7 +2197,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                         const now = new Date().toISOString();
                         setDocument((prev) => prev ? { ...prev, content: editContent, updated_at: now } : prev);
                         
-                        // BULLY! Update serverContent too, as it's now officially on disk!
+                        // Update serverContent as it's now on disk
                         setServerContent(editContent);
                         
                         // Clear unsaved content after successful save
@@ -2210,7 +2210,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                           }, 500);
                         }
                         
-                        // BULLY! Don't automatically switch out of edit mode - let the user continue working!
+                        // Keep the user in edit mode after saving
                       } catch (e) {
                         console.error('Save failed', e);
                         alert('Save failed');
@@ -2319,10 +2319,10 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                           content={editContent}
                           onNavigate={async (navInfo) => {
                             if (navInfo.type === 'file') {
-                              console.log('🔗 ROOSEVELT: Navigating to file:', navInfo.path);
+                              console.log('🔗 Navigating to file:', navInfo.path);
                               alert(`File navigation coming soon!\nTarget: ${navInfo.path}`);
                             } else if (navInfo.type === 'id') {
-                              console.log('🔗 ROOSEVELT: Navigating to ID:', navInfo.id);
+                              console.log('🔗 Navigating to ID:', navInfo.id);
                               alert(`ID navigation coming soon!\nTarget ID: ${navInfo.id}`);
                             }
                           }}
@@ -2524,7 +2524,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                       if (navInfo.type === 'file') {
                         // Handle file links - search for document by filename
                         try {
-                          console.log('🔗 ROOSEVELT: Navigating to file:', navInfo.path);
+                          console.log('🔗 Navigating to file:', navInfo.path);
                           // TODO: Implement file navigation by searching for document
                           // For now, just log the intent
                           alert(`File navigation coming soon!\nTarget: ${navInfo.path}\n\nThis will search for and open the document.`);
@@ -2533,7 +2533,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                         }
                       } else if (navInfo.type === 'id') {
                         // Handle ID-based links
-                        console.log('🔗 ROOSEVELT: Navigating to ID:', navInfo.id);
+                        console.log('🔗 Navigating to ID:', navInfo.id);
                         alert(`ID navigation coming soon!\nTarget ID: ${navInfo.id}\n\nThis will navigate to the heading with this ID property.`);
                       }
                     }}
@@ -2565,7 +2565,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                             }
                           }}
                           onClick={async () => {
-                            console.log('🔗 ROOSEVELT: Navigating to backlink:', backlink.filename);
+                            console.log('🔗 Navigating to backlink:', backlink.filename);
                             try {
                               // Look up document by filename
                               const response = await apiService.get(`/api/org/lookup-document?filename=${encodeURIComponent(backlink.filename)}`);

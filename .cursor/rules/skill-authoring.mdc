@@ -1,0 +1,32 @@
+---
+alwaysApply: false
+description: Standards for automation engine skill definitions and tool authoring
+globs: llm-orchestrator/orchestrator/skills/**/*.py,llm-orchestrator/orchestrator/tools/**/*.py,llm-orchestrator/orchestrator/engines/automation_engine.py
+---
+
+# Skill Authoring for Automation Engine
+
+Standards for defining skills that run via the automation engine (system prompt + optional tools + LLM response). Skills are declared in [orchestrator/skills/definitions/](mdc:llm-orchestrator/orchestrator/skills/definitions/) and tools in [orchestrator/tools/](mdc:llm-orchestrator/orchestrator/tools/).
+
+## Tool Functions
+
+- **Typed parameters and docstrings**: Tool functions MUST have type-annotated parameters and a docstring. The automation engine infers the LLM-facing argument schema from the function signature and docstring.
+- **`user_id` is engine-injected**: Tools that need the current user MUST accept a `user_id` parameter (default `"system"`). The engine excludes `user_id` from the schema sent to the LLM and injects it at execution time. Do not document `user_id` as something the LLM should pass.
+- **Tool names**: Use `snake_case` (e.g. `add_org_inbox_item_tool`). The engine normalizes names for model compatibility (some models strip underscores).
+
+## Skill System Prompts
+
+- **Always call the tool**: System prompts MUST instruct the LLM to actually call the tool(s), not just describe what it would do. Include phrasing like "ALWAYS call add_org_inbox_item_tool to add the item".
+- **Document parameters**: System prompts MUST document parameter names and valid values (e.g. kind: todo/checkbox/event/contact, date_str: YYYY-MM-DD for history).
+- **Edge cases**: Include instructions for missing inputs (e.g. "If the user does not specify a location, ask them for one before calling the tool") and for parsing user phrasing (e.g. strip "capture to inbox:" prefixes, parse org-mode syntax).
+
+## When to Use Automation Engine vs Dedicated Agents
+
+- **Use the automation engine** for skills that are: one-shot or single-round tool use, simple prompt + tool binding, no complex pre/post-processing.
+- **Use a dedicated agent** when the skill needs: multi-round tool calling, domain-specific request analysis (e.g. weather location extraction, historical date parsing), custom response formatting, or LLM-based recommendations after tool results.
+
+## References
+
+- Skill schema: [orchestrator/skills/skill_schema.py](mdc:llm-orchestrator/orchestrator/skills/skill_schema.py)
+- Automation engine tool wrapping: [orchestrator/engines/automation_engine.py](mdc:llm-orchestrator/orchestrator/engines/automation_engine.py) (`_wrap_async_tool`, `_normalize_tool_name`)
+- Example skills: [orchestrator/skills/definitions/automation_skills.py](mdc:llm-orchestrator/orchestrator/skills/definitions/automation_skills.py)
