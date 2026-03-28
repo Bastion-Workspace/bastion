@@ -5,6 +5,13 @@
 
 import apiService from './apiService';
 
+/** Notify listeners (e.g. React Query) that per-feed unread counts changed on the server. */
+function notifyRssUnreadCountsChanged() {
+    if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('rss-unread-counts-updated'));
+    }
+}
+
 class RSSService {
     constructor() {
         this.baseUrl = '/api/rss';
@@ -79,8 +86,7 @@ class RSSService {
             // Refresh unread counts
             await this.getUnreadCounts();
 
-            // After creation, the backend immediately triggers a background poll.
-            // Start a short watcher to detect new articles and notify listeners.
+            // Backend enqueues an initial Celery poll for new feeds; watch for articles to land.
             try {
                 await this.watchFeedRefresh(newFeed.feed_id);
             } catch (e) {
@@ -95,6 +101,14 @@ class RSSService {
         } finally {
             this.loading = false;
         }
+    }
+
+    /**
+     * Validate RSS feed URL and return preview metadata (authenticated).
+     */
+    async validateFeedUrl(feedUrl) {
+        const q = new URLSearchParams({ feed_url: feedUrl });
+        return apiService.get(`${this.baseUrl}/feeds/validate?${q.toString()}`);
     }
 
     async deleteFeed(feedId, deleteArticles = false) {
@@ -134,6 +148,21 @@ class RSSService {
         } finally {
             this.loading = false;
         }
+    }
+
+    async toggleFeedActive(feedId, isActive) {
+        const feed = (this.feeds || []).find((f) => f.feed_id === feedId);
+        if (!feed) {
+            throw new Error('Feed not found in local cache; refresh the list');
+        }
+        return this.updateFeedMetadata(feedId, {
+            feed_url: feed.feed_url,
+            feed_name: feed.feed_name,
+            category: feed.category,
+            tags: Array.isArray(feed.tags) ? feed.tags : [],
+            check_interval: feed.check_interval,
+            is_active: isActive,
+        });
     }
 
     async updateFeedMetadata(feedId, feedData) {
@@ -193,10 +222,11 @@ class RSSService {
         try {
             this.loading = true;
             this.error = null;
-            
-            const response = await apiService.get(`${this.baseUrl}/feeds/${feedId}/articles`, {
-                params: { limit }
-            });
+
+            const q = new URLSearchParams({ limit: String(limit) });
+            const response = await apiService.get(
+                `${this.baseUrl}/feeds/${encodeURIComponent(feedId)}/articles?${q.toString()}`
+            );
             
             this.articles = response;
             this.currentFeed = this.feeds.find(f => f.feed_id === feedId);
@@ -241,7 +271,9 @@ class RSSService {
 
                 // As a fallback, fetch a small page of articles to compare top id
                 try {
-                    const recent = await apiService.get(`${this.baseUrl}/feeds/${feedId}/articles`, { params: { limit: 1 } });
+                    const recent = await apiService.get(
+                        `${this.baseUrl}/feeds/${encodeURIComponent(feedId)}/articles?limit=1`
+                    );
                     const topId = Array.isArray(recent) && recent.length > 0 ? recent[0].article_id : null;
                     if (topId && topId !== beforeTopArticleId) {
                         window.dispatchEvent(new CustomEvent('rss-feed-refresh-complete', { detail: { feedId } }));
@@ -261,6 +293,23 @@ class RSSService {
         }
     }
 
+    async toggleArticleStar(articleId) {
+        try {
+            const response = await apiService.put(
+                `${this.baseUrl}/articles/${encodeURIComponent(articleId)}/star`
+            );
+            const isStarred = response?.is_starred === true;
+            const article = this.articles.find((a) => a.article_id === articleId);
+            if (article) {
+                article.is_starred = isStarred;
+            }
+            return response;
+        } catch (error) {
+            console.error('❌ RSS SERVICE ERROR: Failed to toggle article star:', error);
+            throw error;
+        }
+    }
+
     async markArticleRead(articleId) {
         try {
             await apiService.put(`${this.baseUrl}/articles/${articleId}/read`);
@@ -273,7 +322,8 @@ class RSSService {
             
             // Refresh unread counts
             await this.getUnreadCounts();
-            
+            notifyRssUnreadCountsChanged();
+
             return true;
         } catch (error) {
             console.error('❌ RSS SERVICE ERROR: Failed to mark article read:', error);
@@ -285,20 +335,13 @@ class RSSService {
         try {
             this.loading = true;
             this.error = null;
-            
-            // Get all unread articles for this feed
-            const articles = await this.getFeedArticles(feedId, 1000);
-            const unreadArticles = articles.filter(article => !article.is_read);
-            
-            // Mark all unread articles as read
-            for (const article of unreadArticles) {
-                await this.markArticleRead(article.article_id);
-            }
-            
-            // Refresh unread counts
+
+            const response = await apiService.post(
+                `${this.baseUrl}/feeds/${encodeURIComponent(feedId)}/mark-all-read`
+            );
             await this.getUnreadCounts();
-            
-            return true;
+            notifyRssUnreadCountsChanged();
+            return response?.count ?? 0;
         } catch (error) {
             this.error = error.message;
             console.error('❌ RSS SERVICE ERROR: Failed to mark all articles read:', error);
@@ -317,7 +360,8 @@ class RSSService {
             
             // Refresh unread counts
             await this.getUnreadCounts();
-            
+            notifyRssUnreadCountsChanged();
+
             return true;
         } catch (error) {
             console.error('❌ RSS SERVICE ERROR: Failed to delete article:', error);
@@ -329,19 +373,13 @@ class RSSService {
         try {
             this.loading = true;
             this.error = null;
-            
-            // Get all read (non-imported) articles for this feed
-            const articles = await this.getFeedArticles(feedId, 1000);
-            const readNonImportedArticles = articles.filter(
-                article => article.is_read && !article.is_processed
+
+            const response = await apiService.delete(
+                `${this.baseUrl}/feeds/${encodeURIComponent(feedId)}/read-articles`
             );
-            
-            // Delete all read non-imported articles
-            for (const article of readNonImportedArticles) {
-                await this.deleteArticle(article.article_id);
-            }
-            
-            return true;
+            await this.getUnreadCounts();
+            notifyRssUnreadCountsChanged();
+            return response?.count ?? 0;
         } catch (error) {
             this.error = error.message;
             console.error('❌ RSS SERVICE ERROR: Failed to delete all read articles:', error);
@@ -351,38 +389,31 @@ class RSSService {
         }
     }
 
-    async extractFullContent(articleId = null) {
-        try {
-            this.loading = true;
-            this.error = null;
-            
-            const payload = {};
-            if (articleId) {
-                payload.article_ids = [articleId];
-            }
-            
-            const response = await apiService.post(`${this.baseUrl}/articles/extract-full-content`, payload);
-            
-            return response;
-        } catch (error) {
-            this.error = error.message;
-            console.error('❌ RSS SERVICE ERROR: Failed to extract full content:', error);
-            throw error;
-        } finally {
-            this.loading = false;
-        }
+    async getImportLocation() {
+        return apiService.get(`${this.baseUrl}/settings/import-location`);
     }
 
-    async importArticle(articleId, collectionName = null) {
+    async setImportLocation(folderId) {
+        return apiService.put(`${this.baseUrl}/settings/import-location`, {
+            folder_id: folderId || null,
+        });
+    }
+
+    async importArticle(articleId, collectionName = null, targetFolderId = undefined) {
         try {
             this.loading = true;
             this.error = null;
-            
-            const response = await apiService.post(`${this.baseUrl}/articles/${articleId}/import`, {
+
+            const payload = {
                 article_id: articleId,
                 collection_name: collectionName,
-                user_id: 'current_user' // Will be set by backend
-            });
+                user_id: 'current_user',
+            };
+            if (targetFolderId !== undefined && targetFolderId !== null && targetFolderId !== '') {
+                payload.target_folder_id = targetFolderId;
+            }
+
+            const response = await apiService.post(`${this.baseUrl}/articles/${articleId}/import`, payload);
             
             // Update local state
             const article = this.articles.find(a => a.article_id === articleId);
@@ -423,15 +454,18 @@ class RSSService {
 
     // Article Filtering and Sorting
     filterArticles(articles, filter = 'unread') {
+        const isUnread = (article) => article.is_read !== true;
         switch (filter) {
             case 'unread':
-                return articles.filter(article => !article.is_read);
+                return articles.filter(isUnread);
             case 'all':
                 return articles;
             case 'imported':
                 return articles.filter(article => article.is_processed);
+            case 'starred':
+                return articles.filter((article) => article.is_starred === true);
             default:
-                return articles.filter(article => !article.is_read);
+                return articles.filter(isUnread);
         }
     }
 

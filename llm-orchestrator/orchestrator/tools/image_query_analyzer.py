@@ -8,10 +8,29 @@ from typing import Dict, Any, Optional
 from datetime import datetime
 import re
 
-from orchestrator.agents.base_agent import BaseAgent
+from pydantic import BaseModel, Field
+
+from orchestrator.utils.action_io_registry import register_action
 from langchain_core.messages import SystemMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
+
+
+# ── I/O models for analyze_image_query ─────────────────────────────────────
+
+class AnalyzeImageQueryInputs(BaseModel):
+    """Required inputs for analyze_image_query."""
+    query: str = Field(description="Natural language image search query")
+
+
+class AnalyzeImageQueryOutputs(BaseModel):
+    """Outputs for analyze_image_query."""
+    query: str = Field(description="Cleaned search query for vector search")
+    series: Optional[str] = Field(default=None, description="Comic/series name if detected")
+    author: Optional[str] = Field(default=None, description="Author/creator name if mentioned")
+    date: Optional[str] = Field(default=None, description="Date in YYYY-MM-DD format if found")
+    image_type: Optional[str] = Field(default=None, description="Image type: comic, artwork, meme, etc.")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
 
 
 async def analyze_image_query(
@@ -39,8 +58,8 @@ async def analyze_image_query(
     """
     try:
         logger.info(f"Analyzing image query with LLM: {query[:100]}")
-        
-        # Use BaseAgent for LLM access
+        # Lazy import to avoid circular import: tools -> base_agent -> agents -> subgraphs -> image_query_analyzer
+        from orchestrator.agents.base_agent import BaseAgent
         base_agent = BaseAgent("image_query_analyzer")
         
         # Merge user_chat_model from shared_memory into metadata if not already in metadata
@@ -141,20 +160,38 @@ Return ONLY valid JSON matching this schema:
             result_dict["query"] = query  # Fallback to original query
         
         logger.info(f"Query analyzed: series={result_dict.get('series')}, author={result_dict.get('author')}, date={result_dict.get('date')}, type={result_dict.get('image_type')}")
-        
-        return result_dict
-        
+
+        parts = [f"Search query: {result_dict.get('query', query)}"]
+        if result_dict.get("series"):
+            parts.append(f"Series: {result_dict['series']}")
+        if result_dict.get("author"):
+            parts.append(f"Author: {result_dict['author']}")
+        if result_dict.get("date"):
+            parts.append(f"Date: {result_dict['date']}")
+        if result_dict.get("image_type"):
+            parts.append(f"Image type: {result_dict['image_type']}")
+        formatted = "; ".join(parts)
+
+        return {
+            "query": result_dict.get("query", query),
+            "series": result_dict.get("series"),
+            "author": result_dict.get("author"),
+            "date": result_dict.get("date"),
+            "image_type": result_dict.get("image_type"),
+            "formatted": formatted,
+        }
+
     except Exception as e:
         logger.error(f"Image query analysis failed: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
-        # Return safe defaults
         return {
             "query": query,
             "series": None,
             "author": None,
             "date": None,
-            "image_type": None
+            "image_type": None,
+            "formatted": f"Image query analysis failed: {str(e)}",
         }
 
 
@@ -236,3 +273,13 @@ def _parse_flexible_date(date_str: str) -> Optional[datetime]:
                     continue
     
     return None
+
+
+register_action(
+    name="analyze_image_query",
+    category="image",
+    description="Use LLM to parse an image search query and extract structured parameters (series, author, date, image type)",
+    inputs_model=AnalyzeImageQueryInputs,
+    outputs_model=AnalyzeImageQueryOutputs,
+    tool_function=analyze_image_query,
+)

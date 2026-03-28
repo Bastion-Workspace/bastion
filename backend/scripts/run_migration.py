@@ -136,13 +136,89 @@ async def run_migration(migration_name: str):
         sql_file = "005_add_messaging_system.sql"
     elif migration_name in ("039", "message_attachments"):
         sql_file = "039_add_message_attachments.sql"
+    elif migration_name == "042":
+        sql_file = "042_add_agent_factory_tables.sql"
+    elif migration_name == "043":
+        sql_file = "043_add_agent_schedules.sql"
+    elif migration_name == "044":
+        sql_file = "044_add_agent_plugin_configs.sql"
+    elif migration_name == "047":
+        sql_file = "047_add_agent_team_watches.sql"
+    elif migration_name == "048":
+        sql_file = "048_add_agent_event_watches.sql"
+    elif migration_name == "050":
+        sql_file = "050_add_agent_service_bindings.sql"
+    elif migration_name == "051":
+        sql_file = "051_add_chat_history_config.sql"
+    elif migration_name == "052":
+        sql_file = "052_add_persona_enabled.sql"
+    elif migration_name == "053":
+        sql_file = "053_add_auto_routable.sql"
+    elif migration_name == "054":
+        sql_file = "054_add_document_edit_proposals.sql"
+    elif migration_name == "055":
+        sql_file = "055_add_user_llm_providers.sql"
+    elif migration_name == "056":
+        sql_file = "056_playbook_delete_set_null.sql"
+    elif migration_name in ("058", "058_add_user_lock"):
+        sql_file = "058_add_user_lock.sql"
+    elif migration_name == "060":
+        sql_file = "060_add_include_user_context.sql"
+    elif migration_name == "061":
+        sql_file = "061_add_include_datetime_context.sql"
+    elif migration_name == "062":
+        sql_file = "062_add_execution_steps_and_playbook_versions.sql"
+    elif migration_name == "063":
+        sql_file = "063_add_tool_call_trace_to_execution_steps.sql"
+    elif migration_name == "064":
+        sql_file = "064_add_user_facts.sql"
+    elif migration_name == "065":
+        sql_file = "065_add_include_user_facts.sql"
+    elif migration_name == "066":
+        sql_file = "066_enhance_user_facts.sql"
+    elif migration_name == "067":
+        sql_file = "067_add_episodic_memory_and_fact_history.sql"
+    elif migration_name == "068":
+        sql_file = "068_add_agent_skills.sql"
+    elif migration_name == "069":
+        sql_file = "069_add_document_versions.sql"
+    elif migration_name == "072":
+        sql_file = "072_add_user_control_panes.sql"
+    elif migration_name == "074":
+        sql_file = "074_add_control_pane_refresh_interval.sql"
+    elif migration_name == "076":
+        sql_file = "076_builtin_agent_profiles.sql"
+    elif migration_name == "077":
+        sql_file = "077_default_playbook_step_type.sql"
+    elif migration_name in ("078", "078_add_device_tokens", "device_tokens"):
+        sql_file = "078_add_device_tokens.sql"
+    elif migration_name in ("080", "080_add_groq_provider_type"):
+        sql_file = "080_add_groq_provider_type.sql"
+    elif migration_name in ("081", "081_add_agent_profile_model_source"):
+        sql_file = "081_add_agent_profile_model_source.sql"
+    elif migration_name in ("082", "082_add_document_chunks_fulltext", "document_chunks"):
+        sql_file = "082_add_document_chunks_fulltext.sql"
+    elif migration_name in ("082_data_workspace", "082_add_data_workspace_config", "data_workspace_config"):
+        sql_file = "082_add_data_workspace_config.sql"
+    elif migration_name in ("083", "083_add_chunk_page_columns", "chunk_page_columns"):
+        sql_file = "083_add_chunk_page_columns.sql"
+    elif migration_name in ("083_budgets", "083_agent_budgets_and_execution_cost"):
+        sql_file = "083_agent_budgets_and_execution_cost.sql"
+    elif migration_name in ("084", "084_agent_approval_queue"):
+        sql_file = "084_agent_approval_queue.sql"
+    elif migration_name in ("085", "085_agent_memory"):
+        sql_file = "085_agent_memory.sql"
+    elif migration_name in ("097", "097_agent_profile_chat_visible"):
+        sql_file = "097_agent_profile_chat_visible.sql"
+    elif migration_name in ("098", "098_drop_agent_profile_icon"):
+        sql_file = "098_drop_agent_profile_icon.sql"
     else:
         candidate = migrations_dir / f"{migration_name}.sql"
         if candidate.exists():
             sql_file = candidate.name
         else:
             logger.error(f"Unknown migration: {migration_name}")
-            logger.info("Available: messaging, 039, message_attachments, or <nnn_name>.sql")
+            logger.info("Available: messaging, 039, 042, 043, 044, 047, 048, or <nnn_name>.sql (e.g. 069, 072, 074)")
             return False
 
     try:

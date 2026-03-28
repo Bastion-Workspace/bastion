@@ -7,17 +7,28 @@ import { history, defaultKeymap, historyKeymap } from '@codemirror/commands';
 import { searchKeymap, getSearchQuery, setSearchQuery, openSearchPanel, closeSearchPanel } from '@codemirror/search';
 import { useEditor } from '../contexts/EditorContext';
 import { useTheme } from '../contexts/ThemeContext';
+import { ACCENT_PALETTES } from '../theme/themeConfig';
 import { parseFrontmatter as parseMarkdownFrontmatter } from '../utils/frontmatterUtils';
-import { Box, TextField, Button, Tooltip, Drawer, IconButton, Typography, Stack, Switch, FormControlLabel } from '@mui/material';
-import { Add, Delete, ArrowUpward, ArrowDownward } from '@mui/icons-material';
+import { Box, TextField, Button, Tooltip, IconButton, Typography, Stack, Switch, FormControlLabel, Menu, MenuItem, ListItemIcon, ListItemText } from '@mui/material';
+import { Add, Delete, ArrowUpward, ArrowDownward, ArrowDropDown, Article, TableChart } from '@mui/icons-material';
 import { createGhostTextExtension } from './editor/extensions/ghostTextExtension';
 import { createInlineEditSuggestionsExtension } from './editor/extensions/inlineEditSuggestionsExtension';
 import { createLiveEditDiffExtension, getLiveEditDiffPlugin } from './editor/extensions/liveEditDiffExtension';
+import ProposalSplitView from './editor/ProposalSplitView';
 import { editorSuggestionService } from '../services/editor/EditorSuggestionService';
 import { documentDiffStore } from '../services/documentDiffStore';
 import OrgFileLinkDialog from './OrgFileLinkDialog';
+import DictationButton from './editor/DictationButton';
+import MarkdownTableEditor from './editor/MarkdownTableEditor';
+import ResizableRightDrawer from './editor/ResizableRightDrawer';
+import { detectTableAtCursor, parseMarkdownTable, emptyTableModel } from '../utils/markdownTableUtils';
 
-const createMdTheme = (darkMode) => EditorView.baseTheme({
+const createMdTheme = (darkMode, accentId = 'blue') => {
+  const palette = ACCENT_PALETTES[accentId] || ACCENT_PALETTES.blue;
+  const accent = darkMode ? palette.dark : palette.light;
+  const primaryMain = accent?.primary?.main ?? (darkMode ? '#90caf9' : '#1976d2');
+  const selectionBg = darkMode ? '#264f78' : '#b3d7ff';
+  return EditorView.baseTheme({
   '&': {
     backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
     color: darkMode ? '#d4d4d4' : '#212121',
@@ -60,19 +71,18 @@ const createMdTheme = (darkMode) => EditorView.baseTheme({
     backgroundColor: darkMode ? '#2d2d2d' : '#f0f8ff'
   },
   '.cm-selectionBackground, ::selection': {
-    backgroundColor: darkMode ? '#264f78' : '#b3d7ff'
+    backgroundColor: selectionBg
   },
   '.cm-cursor': {
     borderLeftColor: darkMode ? '#ffffff' : '#000000'
   },
   '&.cm-focused .cm-selectionBackground, &.cm-focused ::selection': {
-    backgroundColor: darkMode ? '#264f78' : '#b3d7ff'
+    backgroundColor: selectionBg
   },
   '.cm-line.cm-fm-hidden': { display: 'none' },
   '.cm-line': {
     caretColor: darkMode ? '#ffffff' : '#000000'
   },
-  // Markdown syntax highlighting adjustments for dark mode
   '.cm-content .cm-meta': {
     color: darkMode ? '#808080' : '#999999'
   },
@@ -89,12 +99,13 @@ const createMdTheme = (darkMode) => EditorView.baseTheme({
     fontStyle: 'italic'
   },
   '.cm-content .cm-link': {
-    color: darkMode ? '#90caf9' : '#1976d2'
+    color: primaryMain
   },
   '.cm-content .cm-url': {
-    color: darkMode ? '#90caf9' : '#1976d2'
+    color: primaryMain
   }
 });
+};
 
 function parseFrontmatter(text) {
   try {
@@ -197,12 +208,25 @@ function buildFrontmatter(data) {
   return `---\n${lines.join('\n')}\n---\n`;
 }
 
-const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath, documentId, initialScrollPosition = 0, onScrollChange, onCurrentSectionChange }, ref) => {
-  const { darkMode } = useTheme();
+const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath, documentId, initialScrollPosition = 0, restoreScrollAfterRefresh = null, onScrollRestored, onScrollChange, onCurrentSectionChange }, ref) => {
+  const { darkMode, accentId } = useTheme();
+  const themeSignature = `${darkMode ? 'dark' : 'light'}-${accentId}`;
+  const [themeRemountNonce, setThemeRemountNonce] = useState(0);
+  const hasMountedRef = useRef(false);
   
   const [diffCount, setDiffCount] = useState(0);
+  const [showSplitView, setShowSplitView] = useState(false);
 
   // Track diff count for UI visibility
+  useEffect(() => {
+    if (!hasMountedRef.current) {
+      hasMountedRef.current = true;
+      return;
+    }
+    // Force CodeMirror remount so mode/accent updates are applied immediately.
+    setThemeRemountNonce((prev) => prev + 1);
+  }, [themeSignature]);
+
   useEffect(() => {
     if (!documentId) {
       setDiffCount(0);
@@ -227,6 +251,11 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
   const scrollCallbackTimeoutRef = useRef(null);
   const hasRestoredInitialScrollRef = useRef(false);
   const [fileLinkDialogOpen, setFileLinkDialogOpen] = useState(false);
+  const [toolsMenuAnchorEl, setToolsMenuAnchorEl] = useState(null);
+  const [tableEditorOpen, setTableEditorOpen] = useState(false);
+  const [tableEditorModel, setTableEditorModel] = useState(() => emptyTableModel());
+  const [tableEditorIsEditing, setTableEditorIsEditing] = useState(false);
+  const tableReplaceRangeRef = useRef(null);
 
   const insertTextAtCursor = React.useCallback((text) => {
     const view = editorViewRef.current;
@@ -245,8 +274,73 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     insertTextAtCursor(linkText);
   }, [insertTextAtCursor]);
 
-  // Expose scrollToLine method to parent via ref
+  const handleOpenTableEditor = React.useCallback(() => {
+    const view = editorViewRef.current;
+    tableReplaceRangeRef.current = null;
+    if (!view) {
+      setTableEditorModel(emptyTableModel());
+      setTableEditorIsEditing(false);
+      setTableEditorOpen(true);
+      return;
+    }
+    const doc = view.state.doc;
+    const pos = view.state.selection.main.head;
+    const detected = detectTableAtCursor(doc, pos);
+    if (detected) {
+      const parsed = parseMarkdownTable(detected.text);
+      if (parsed) {
+        setTableEditorModel(parsed);
+        setTableEditorIsEditing(true);
+        tableReplaceRangeRef.current = { from: detected.from, to: detected.to };
+      } else {
+        setTableEditorModel(emptyTableModel());
+        setTableEditorIsEditing(false);
+      }
+    } else {
+      setTableEditorModel(emptyTableModel());
+      setTableEditorIsEditing(false);
+    }
+    setTableEditorOpen(true);
+  }, []);
+
+  const handleApplyTableMarkdown = React.useCallback((md) => {
+    const view = editorViewRef.current;
+    if (!view) return;
+    const range = tableReplaceRangeRef.current;
+    if (range && typeof range.from === 'number' && typeof range.to === 'number') {
+      view.dispatch({
+        changes: { from: range.from, to: range.to, insert: md },
+        selection: { anchor: range.from + md.length },
+      });
+    } else {
+      const pos = view.state.selection.main.head;
+      let insert = md;
+      if (pos > 0) {
+        const chBefore = view.state.doc.sliceString(pos - 1, pos);
+        if (chBefore !== '\n') insert = `\n${insert}`;
+      }
+      if (!insert.endsWith('\n')) insert += '\n';
+      view.dispatch({
+        changes: { from: pos, to: pos, insert },
+        selection: { anchor: pos + insert.length },
+      });
+    }
+    tableReplaceRangeRef.current = null;
+  }, []);
+
+  // Expose scrollToLine and getScrollPosition to parent via ref
   useImperativeHandle(ref, () => ({
+    getScrollPosition: () => {
+      if (!editorViewRef.current?.scrollDOM) return 0;
+      return editorViewRef.current.scrollDOM.scrollTop;
+    },
+    getSelectedText: () => {
+      const view = editorViewRef.current;
+      if (!view) return null;
+      const selection = view.state.selection.main;
+      if (selection.from === selection.to) return null;
+      return view.state.sliceDoc(selection.from, selection.to);
+    },
     scrollToLine: (lineNum) => {
       if (!editorViewRef.current || !lineNum || lineNum < 1) return;
       try {
@@ -306,7 +400,7 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
       return suggestion || '';
     } catch { return ''; }
   }, { debounceMs: 350 }) : [], [suggestionsEnabled]);
-  const mdTheme = useMemo(() => createMdTheme(darkMode), [darkMode]);
+  const mdTheme = useMemo(() => createMdTheme(darkMode, accentId), [darkMode, accentId]);
   const inlineEditExt = useMemo(() => createInlineEditSuggestionsExtension(), []);
   
   // ✅ documentId comes from props, passed down from DocumentViewer
@@ -318,15 +412,6 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     
     const ext = createLiveEditDiffExtension(documentId);
     console.log('🔍 MarkdownCMEditor: Created liveEditDiffExt for document:', documentId, 'items:', ext?.length);
-    // Test event listener to verify events are firing
-    const testListener = (e) => {
-      console.log('🔍 TEST: MarkdownCMEditor received editorOperationsLive event:', e.detail);
-    };
-    window.addEventListener('editorOperationsLive', testListener);
-    // Clean up after 30 seconds
-    setTimeout(() => {
-      window.removeEventListener('editorOperationsLive', testListener);
-    }, 30000);
     return ext;
   }, [documentId]);
   // Persistent search configuration
@@ -461,17 +546,22 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     { key: 'Mod-Alt-l', run: () => { setFileLinkDialogOpen(true); return true; } }
   ]), []);
 
+  const tableEditorKeymap = useMemo(() => keymap.of([
+    { key: 'Mod-Shift-t', run: () => { handleOpenTableEditor(); return true; } }
+  ]), [handleOpenTableEditor]);
+
   const extensions = useMemo(() => [
     history(),
     keymap.of([...defaultKeymap, ...historyKeymap, ...searchKeymap]),
     fileLinkKeymap,
+    tableEditorKeymap,
     markdown({ base: markdownLanguage }),
     EditorView.lineWrapping,
     mdTheme,
     inlineEditExt,
     liveEditDiffExt,
     ...persistentSearchExt
-  ], [mdTheme, inlineEditExt, liveEditDiffExt, persistentSearchExt, fileLinkKeymap]);
+  ], [mdTheme, inlineEditExt, liveEditDiffExt, persistentSearchExt, fileLinkKeymap, tableEditorKeymap]);
 
   const { setEditorState } = useEditor();
   const [fmOpen, setFmOpen] = useState(false);
@@ -515,7 +605,8 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     setFmOrder(initialOrder || []);
   }, [initialData, initialLists, initialRaw, initialOrder, baseTitle]);
 
-  // Restore scroll position after value changes (from diff accept/reject)
+  // Restore scroll position after value changes (from diff accept/reject, or from full-document refresh after Accept All)
+  const prevValueForScrollRestoreRef = useRef(value);
   useEffect(() => {
     if (shouldRestoreScrollRef.current && savedScrollPosRef.current !== null && editorViewRef.current) {
       // Use requestAnimationFrame to ensure DOM has updated
@@ -530,23 +621,51 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
           }
         }
       });
+      return;
     }
-  }, [value]);
-  
-  // Restore initial scroll position on mount (for tab switching and page reload)
-  useEffect(() => {
-    if (!hasRestoredInitialScrollRef.current && editorViewRef.current && initialScrollPosition > 0) {
+    // Full-document refresh (e.g. Accept All): parent set restoreScrollAfterRefresh; restore when content updates
+    const valueChanged = prevValueForScrollRestoreRef.current !== value;
+    prevValueForScrollRestoreRef.current = value;
+    if (valueChanged && typeof restoreScrollAfterRefresh === 'number' && restoreScrollAfterRefresh > 0 && editorViewRef.current) {
       requestAnimationFrame(() => {
-        if (editorViewRef.current) {
-          const scrollDOM = editorViewRef.current.scrollDOM;
-          if (scrollDOM) {
-            scrollDOM.scrollTop = initialScrollPosition;
-            console.log('📜 Restored initial scroll position:', initialScrollPosition);
-            hasRestoredInitialScrollRef.current = true;
-          }
+        if (editorViewRef.current && editorViewRef.current.scrollDOM) {
+          editorViewRef.current.scrollDOM.scrollTop = restoreScrollAfterRefresh;
+          console.log('📜 Restored scroll after refresh:', restoreScrollAfterRefresh);
+          if (typeof onScrollRestored === 'function') onScrollRestored();
         }
       });
     }
+  }, [value, restoreScrollAfterRefresh, onScrollRestored]);
+  
+  // Restore initial scroll position on mount (for tab switching and page reload).
+  // Editor view ref is set asynchronously by CodeMirror, so retry until the view exists.
+  useEffect(() => {
+    if (hasRestoredInitialScrollRef.current || initialScrollPosition <= 0) return;
+
+    const tryRestore = () => {
+      if (!editorViewRef.current?.scrollDOM) return false;
+      editorViewRef.current.scrollDOM.scrollTop = initialScrollPosition;
+      hasRestoredInitialScrollRef.current = true;
+      return true;
+    };
+
+    let rafId = null;
+    let t1 = null;
+    let t2 = null;
+
+    rafId = requestAnimationFrame(() => {
+      if (tryRestore()) return;
+      t1 = setTimeout(() => {
+        if (tryRestore()) return;
+        t2 = setTimeout(tryRestore, 100);
+      }, 50);
+    });
+
+    return () => {
+      if (rafId != null) cancelAnimationFrame(rafId);
+      if (t1 != null) clearTimeout(t1);
+      if (t2 != null) clearTimeout(t2);
+    };
   }, [initialScrollPosition]);
   
   // Track scroll changes and notify parent (debounced)
@@ -896,6 +1015,11 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
             } catch (err) {
               console.error('Failed to update cache after operation apply:', err);
             }
+            if (detail.emitLiveEditApplied && documentId) {
+              window.dispatchEvent(new CustomEvent('liveEditApplied', {
+                detail: { documentId, content: nextText }
+              }));
+            }
           } else {
             console.warn('⚠️ onChange callback is not defined');
           }
@@ -918,92 +1042,6 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     }
     window.addEventListener('codexApplyEditorOps', applyOperations);
     
-    // Handle live edit acceptance (single operation from inline diff)
-    function handleLiveEditAccepted(e) {
-      try {
-        const { operationId, operation } = e.detail || {};
-        if (!operation) {
-          console.warn('⚠️ No operation in liveEditAccepted event');
-          return;
-        }
-        
-        console.log('✅ Accepting live edit:', { 
-          operationId, 
-          operation: { 
-            op_type: operation.op_type,
-            start: operation.start,
-            end: operation.end,
-            textLength: operation.text?.length,
-            textPreview: operation.text?.substring(0, 50) + '...' 
-          } 
-        });
-        
-        // Ensure operation has all required fields
-        const normalizedOp = {
-          op_type: operation.op_type || 'replace_range',
-          start: Number(operation.start || 0),
-          end: Number(operation.end !== undefined ? operation.end : operation.start || 0),
-          text: operation.text || ''
-        };
-        
-        console.log('✅ Normalized operation for apply:', normalizedOp);
-        
-        const ops = [normalizedOp];
-        applyOperations({ detail: { operations: ops } });
-        
-        // Remove from pending diffs (handled by plugin, but dispatch for consistency)
-        window.dispatchEvent(new CustomEvent('removeLiveDiff', { 
-          detail: { operationId } 
-        }));
-      } catch (err) {
-        console.error('❌ Failed to handle live edit acceptance:', err);
-      }
-    }
-    
-    // Handle live edit rejection (just remove visualization)
-    function handleLiveEditRejected(e) {
-      try {
-        const { operationId } = e.detail || {};
-        if (!operationId) return;
-        
-        // Save scroll position before removing decoration (DOM changes can cause scroll jump)
-        let savedScrollPos = null;
-        if (editorViewRef.current) {
-          const scrollDOM = editorViewRef.current.scrollDOM;
-          if (scrollDOM) {
-            savedScrollPos = scrollDOM.scrollTop;
-            console.log('💾 Saved scroll position for reject:', savedScrollPos);
-          }
-        }
-        
-        // Remove visualization
-        window.dispatchEvent(new CustomEvent('removeLiveDiff', { 
-          detail: { operationId } 
-        }));
-        
-        // Restore scroll position after decoration removal
-        // Use double RAF to ensure decoration removal has completed
-        if (savedScrollPos !== null && editorViewRef.current) {
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              if (editorViewRef.current) {
-                const scrollDOM = editorViewRef.current.scrollDOM;
-                if (scrollDOM) {
-                  scrollDOM.scrollTop = savedScrollPos;
-                  console.log('📜 Restored scroll position after reject:', savedScrollPos);
-                }
-              }
-            });
-          });
-        }
-      } catch (err) {
-        console.error('Failed to handle live edit rejection:', err);
-      }
-    }
-    
-    window.addEventListener('liveEditAccepted', handleLiveEditAccepted);
-    window.addEventListener('liveEditRejected', handleLiveEditRejected);
-    
     // Provide current editor content on request for diff previews
     function provideEditorContent() {
       try {
@@ -1015,8 +1053,6 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
     
     return () => {
       window.removeEventListener('codexApplyEditorOps', applyOperations);
-      window.removeEventListener('liveEditAccepted', handleLiveEditAccepted);
-      window.removeEventListener('liveEditRejected', handleLiveEditRejected);
     };
   }, [value, onChange]);
 
@@ -1054,23 +1090,121 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
   const removeEntry = (idx) => setFmEntries(prev => prev.filter((_, i) => i !== idx));
   const updateEntry = (idx, field, val) => setFmEntries(prev => prev.map((e, i) => i === idx ? { ...e, [field]: val } : e));
 
+  // Memoize CodeMirror to avoid reconfiguring extensions on every render. Must be called unconditionally (rules of hooks).
+  const codeMirrorEditor = useMemo(() => (
+    <CodeMirror
+      key={`${documentId || 'no-doc'}-${themeSignature}-${themeRemountNonce}`}
+      value={value}
+      height="100%"
+      basicSetup={false}
+      extensions={[...extensions, frontmatterHider, ...(ghostExt || []), EditorView.updateListener.of((update) => {
+        try {
+          if (!update.view) return;
+          if (!editorViewRef.current) editorViewRef.current = update.view;
+          const sel = update.state.selection.main;
+          const cursorOffset = sel.head;
+          const selectionStart = sel.from;
+          const selectionEnd = sel.to;
+          const docText = update.state.doc.toString();
+          if (onCurrentSectionChange && (update.selectionSet || update.docChanged)) {
+            onCurrentSectionChange(docText, cursorOffset);
+          }
+          const mergedFrontmatter = window.__last_editor_frontmatter || {};
+          const payload = {
+            isEditable: true,
+            filename: filename || 'untitled.md',
+            language: 'markdown',
+            content: docText,
+            contentLength: docText.length,
+            frontmatter: mergedFrontmatter,
+            cursorOffset,
+            selectionStart,
+            selectionEnd,
+            canonicalPath: canonicalPath || null,
+            documentId: documentId || null,
+          };
+          if (!window.__editor_ctx_write_ts || Date.now() - window.__editor_ctx_write_ts > 500) {
+            window.__editor_ctx_write_ts = Date.now();
+            localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
+          }
+        } catch {}
+      })]}
+      onChange={(val) => onChange && onChange(val)}
+      style={{ height: '100%' }}
+    />
+  ), [value, filename, canonicalPath, extensions, frontmatterHider, ghostExt, liveEditDiffExt, setEditorState, onCurrentSectionChange, documentId, darkMode, accentId, themeSignature, themeRemountNonce]);
+
   return (
-    <Box sx={{ bgcolor: darkMode ? '#1e1e1e' : '#ffffff', p: 2, borderRadius: 1 }}>
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+    <Box sx={{ bgcolor: 'background.paper', p: 1, borderRadius: 1, display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
         <FormControlLabel control={<Switch size="small" checked={suggestionsEnabled} onChange={(e) => setSuggestionsEnabled(!!e.target.checked)} />} label={<Typography variant="caption">Predictive Suggestions</Typography>} />
-        <Tooltip title="Edit frontmatter (stored invisibly at top as YAML)">
-          <Button variant="outlined" size="small" onClick={() => {
-            // Refresh frontmatter cache when opening drawer
-            refreshEditorCacheWithFrontmatter();
-            setFmOpen(true);
-          }}>
-            Frontmatter
-          </Button>
-        </Tooltip>
+        <Box sx={{ display: 'flex', gap: 1 }}>
+          <DictationButton insertText={insertTextAtCursor} />
+          <Tooltip title="Frontmatter, markdown table (Mod+Shift+T), and more">
+            <Button
+              variant="outlined"
+              size="small"
+              endIcon={<ArrowDropDown />}
+              onClick={(e) => setToolsMenuAnchorEl(e.currentTarget)}
+            >
+              Tools
+            </Button>
+          </Tooltip>
+          <Menu
+            anchorEl={toolsMenuAnchorEl}
+            open={Boolean(toolsMenuAnchorEl)}
+            onClose={() => setToolsMenuAnchorEl(null)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+            PaperProps={{ sx: { minWidth: 200 } }}
+          >
+            <MenuItem
+              onClick={() => {
+                setToolsMenuAnchorEl(null);
+                refreshEditorCacheWithFrontmatter();
+                setFmOpen(true);
+              }}
+            >
+              <ListItemIcon>
+                <Article fontSize="small" />
+              </ListItemIcon>
+              <ListItemText primary="Frontmatter" primaryTypographyProps={{ fontSize: '0.875rem' }} />
+            </MenuItem>
+            <MenuItem
+              onClick={() => {
+                setToolsMenuAnchorEl(null);
+                handleOpenTableEditor();
+              }}
+            >
+              <ListItemIcon>
+                <TableChart fontSize="small" />
+              </ListItemIcon>
+              <ListItemText
+                primary={
+                  editorViewRef.current &&
+                  detectTableAtCursor(
+                    editorViewRef.current.state.doc,
+                    editorViewRef.current.state.selection.main.head
+                  )
+                    ? 'Edit table'
+                    : 'Insert table'
+                }
+                primaryTypographyProps={{ fontSize: '0.875rem' }}
+              />
+            </MenuItem>
+          </Menu>
+        </Box>
       </Box>
 
-      <Drawer anchor="right" open={fmOpen} onClose={() => setFmOpen(false)} ModalProps={{ keepMounted: true }}>
-        <Box sx={{ width: 360, p: 2, maxHeight: '100vh', overflow: 'auto' }} role="presentation">
+      <ResizableRightDrawer
+        open={fmOpen}
+        onClose={() => setFmOpen(false)}
+        defaultWidth={360}
+        minWidth={280}
+        storageKey="markdownEditor_frontmatterDrawerWidth"
+        ModalProps={{ keepMounted: true }}
+      >
+        <Box sx={{ p: 2, maxHeight: '100vh', boxSizing: 'border-box' }} role="presentation">
           <Typography variant="h6" sx={{ mb: 1 }}>Frontmatter</Typography>
           <Typography variant="caption" color="text.secondary" sx={{ mb: 2, display: 'block' }}>
             Key: value pairs. This panel writes YAML at the very top of the file.
@@ -1135,75 +1269,56 @@ const MarkdownCMEditor = forwardRef(({ value, onChange, filename, canonicalPath,
             <Button variant="contained" size="small" onClick={() => { applyFrontmatter(); setFmOpen(false); }}>Apply</Button>
           </Box>
         </Box>
-      </Drawer>
-      {/* Memoize update listener to avoid reconfiguring extensions on every render. Key includes darkMode so editor remounts when theme changes (CodeMirror applies theme at mount only). */}
-        {useMemo(() => (
-        <CodeMirror
-        key={`${documentId || 'no-doc'}-${darkMode ? 'dark' : 'light'}`}
-        value={value}
-        height="100%"
-        basicSetup={false}
-        extensions={[...extensions, frontmatterHider, ...(ghostExt || []), EditorView.updateListener.of((update) => {
-          try {
-            if (!update.view) return;
-            
-            // Capture editor view reference for scroll position management
-            if (!editorViewRef.current) {
-              editorViewRef.current = update.view;
+      </ResizableRightDrawer>
+      <MarkdownTableEditor
+        open={tableEditorOpen}
+        onClose={() => setTableEditorOpen(false)}
+        initialModel={tableEditorModel}
+        isEditing={tableEditorIsEditing}
+        onApply={handleApplyTableMarkdown}
+      />
+      <Box sx={{ flex: 1, minHeight: 0 }}>
+      {showSplitView && documentId ? (
+        <ProposalSplitView
+          content={value}
+          operations={documentDiffStore.getDiffs(documentId)?.operations ?? []}
+          onAcceptAll={() => {
+            try {
+              const plugin = getLiveEditDiffPlugin(documentId);
+              if (plugin?.acceptAllOperations) plugin.acceptAllOperations();
+              setShowSplitView(false);
+            } catch (err) {
+              console.error('Failed to accept all:', err);
             }
-            
-            const sel = update.state.selection.main;
-            const cursorOffset = sel.head;
-            const selectionStart = sel.from;
-            const selectionEnd = sel.to;
-            const docText = update.state.doc.toString();
-            
-            // Update current section if callback provided
-            if (onCurrentSectionChange && (update.selectionSet || update.docChanged)) {
-              onCurrentSectionChange(docText, cursorOffset);
+          }}
+          onRejectAll={() => {
+            try {
+              const plugin = getLiveEditDiffPlugin(documentId);
+              if (plugin?.rejectAllOperations) plugin.rejectAllOperations();
+              setShowSplitView(false);
+            } catch (err) {
+              console.error('Failed to reject all:', err);
             }
-            
-            // **CRITICAL FIX**: NEVER re-parse frontmatter after mount!
-            // The mount effect already parsed it correctly. Re-parsing during typing often fails
-            // because CodeMirror update events fire before document is fully initialized.
-            // Always use the cached frontmatter from mount.
-            const needsContentUpdate = update.docChanged;
-            const mergedFrontmatter = window.__last_editor_frontmatter || {};
-            
-            const payload = {
-              isEditable: true,
-              filename: filename || 'untitled.md',
-              language: 'markdown',
-              content: docText,
-              contentLength: docText.length,
-              frontmatter: mergedFrontmatter,
-              cursorOffset,
-              selectionStart,
-              selectionEnd,
-              canonicalPath: canonicalPath || null,
-              documentId: documentId || null, // ✅ CRITICAL: Include documentId for diff persistence
-            };
-            
-            // **PERFORMANCE FIX**: Don't update React context during typing!
-            // ChatSidebar only checks if editor is open (already set on mount via useEffect)
-            // When sending messages, chat reads from localStorage, not React context
-            // So we ONLY write to localStorage, not to React state
-            
-            // Throttle localStorage writes for chat to read when sending messages
-            if (!window.__editor_ctx_write_ts || Date.now() - window.__editor_ctx_write_ts > 500) {
-              window.__editor_ctx_write_ts = Date.now();
-              localStorage.setItem('editor_ctx_cache', JSON.stringify(payload));
-            }
-          } catch {}
-        })]}
-        onChange={(val) => onChange && onChange(val)}
-        style={{ height: '60vh' }}
-      />), [value, filename, canonicalPath, extensions, frontmatterHider, ghostExt, liveEditDiffExt, setEditorState, onCurrentSectionChange, documentId, darkMode])}
+          }}
+          onClose={() => setShowSplitView(false)}
+          height="100%"
+        />
+      ) : (
+        codeMirrorEditor
+      )}
+      </Box>
       {/* Removed floating Accept/Dismiss UI */}
       {/* Diff navigation and batch operations */}
-      {diffCount > 0 && (
+      {diffCount > 0 && !showSplitView && (
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1, mt: 1 }}>
           <Box sx={{ display: 'flex', gap: 1 }}>
+            <Button 
+              size="small" 
+              variant="outlined" 
+              onClick={() => setShowSplitView(true)}
+            >
+              Compare
+            </Button>
             <Button 
               size="small" 
               variant="outlined" 

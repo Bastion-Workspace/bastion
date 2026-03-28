@@ -63,13 +63,13 @@ const OrgRefileDialog = ({ open, onClose, sourceFile, sourceLine, sourceHeading 
       setLoading(true);
       setError(null);
       
-      console.log('🎯 ROOSEVELT: Discovering refile targets...');
+      console.log('Discovering refile targets');
       const response = await apiService.get('/api/org/discover-targets');
       
       if (response.success) {
         setTargets(response.targets);
         setFilteredTargets(response.targets);
-        console.log(`✅ ROOSEVELT: Found ${response.count} refile targets`);
+        console.log(`Found ${response.count} refile targets`);
       } else {
         setError('Failed to load refile targets');
       }
@@ -88,7 +88,7 @@ const OrgRefileDialog = ({ open, onClose, sourceFile, sourceLine, sourceHeading 
       setRefiling(true);
       setError(null);
       
-      console.log('📦 ROOSEVELT: Refiling to:', selectedTarget);
+      console.log('Refiling to:', selectedTarget);
       
       const response = await apiService.post('/api/org/refile', {
         source_file: sourceFile,
@@ -98,7 +98,7 @@ const OrgRefileDialog = ({ open, onClose, sourceFile, sourceLine, sourceHeading 
       });
       
       if (response.success) {
-        console.log('✅ ROOSEVELT: Refile successful!');
+        console.log('Refile successful');
         onClose({ success: true, target: selectedTarget });
       } else {
         setError(response.error || 'Refile failed');

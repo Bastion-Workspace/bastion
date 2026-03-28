@@ -15,6 +15,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 from pydantic import ValidationError, BaseModel, Field
 
 from .base_agent import BaseAgent, TaskStatus
+from orchestrator.middleware.message_preprocessor import MessagePreprocessor
 from orchestrator.models.editor_models import EditorOperation, ManuscriptEdit
 from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
 # build_context_preparation_subgraph and build_resolution_subgraph removed; fiction flow uses flat fiction_editing_subgraph
@@ -308,10 +309,13 @@ class FictionEditingAgent(BaseAgent):
             "   before sitting down to write. You are NOT converting an outline into prose.\n"
             "   You are writing a chapter of a novel, and you happen to know what needs to happen.\n\n"
             "**3. WRITE IN SCENES** — Think like a novelist, not a summarizer.\n"
-            "   Combine related beats into cohesive scenes with natural flow.\n"
-            "   Not every beat needs its own scene or paragraph. Some beats are a single line\n"
-            "   of dialogue; others deserve a full page. Let the Style Guide's pacing sensibility\n"
-            "   determine how much space each moment gets.\n"
+            "   **BEAT SYNTHESIS (CRITICAL):** A beat is a STORY EVENT, not a paragraph unit.\n"
+            "   ANTI-PATTERN: One beat = one paragraph. If your draft has the same number\n"
+            "   of paragraphs as beats, you have produced a formatted outline, not fiction.\n"
+            "   RULE: Group 2-5 related beats into a single scene/paragraph cluster.\n"
+            "   A chapter with 8 beats should produce ~3-5 prose paragraphs, not 8.\n"
+            "   Some beats are a single line of dialogue; others deserve a full page. Let the\n"
+            "   Style Guide's pacing sensibility determine how much space each moment gets.\n"
             "   Build tension, create atmosphere, develop character through action and dialogue.\n"
             "   The reader should never feel they are reading an expanded outline.\n\n"
             "=== REFERENCE HIERARCHY ===\n\n"
@@ -726,6 +730,7 @@ class FictionEditingAgent(BaseAgent):
                 "characters_bodies": state.get("characters_bodies", []),
                 "series_body": state.get("series_body"),
                 "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+                "has_references": state.get("has_references", False),
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
@@ -744,6 +749,7 @@ class FictionEditingAgent(BaseAgent):
                 "manuscript": state.get("manuscript", ""),
                 "filename": state.get("filename", ""),
                 "chapter_ranges": state.get("chapter_ranges", []),
+                "has_references": state.get("has_references", False),
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
@@ -777,14 +783,31 @@ class FictionEditingAgent(BaseAgent):
             return "proofreading"
         
         # Not proofreading - continue with normal routing
+        # Use flag and/or any loaded reference content so routing is correct even if flag was dropped
         has_references = state.get("has_references", False)
-        
-        # If no references, use simple fast path
-        if not has_references:
+        outline_body = state.get("outline_body") or ""
+        rules_body = state.get("rules_body") or ""
+        style_body = state.get("style_body") or ""
+        characters_bodies = state.get("characters_bodies") or []
+        any_ref_content = (
+            has_references
+            or bool(outline_body)
+            or bool(rules_body)
+            or bool(style_body)
+            or (len(characters_bodies) > 0)
+        )
+        logger.info(
+            "Route after context: has_references=%s, outline=%s chars, rules=%s chars, style=%s chars, chars=%s; any_ref=%s",
+            has_references,
+            len(outline_body) if outline_body else 0,
+            len(rules_body) if rules_body else 0,
+            len(style_body) if style_body else 0,
+            len(characters_bodies),
+            any_ref_content,
+        )
+        if not any_ref_content:
             state["is_simple_request"] = True
             return "simple_path"
-        
-        # References exist - use full path
         return "full_path"
     
     async def _check_simple_request_node(self, state: FictionEditingState) -> Dict[str, Any]:
@@ -1201,6 +1224,7 @@ class FictionEditingAgent(BaseAgent):
                 "characters_bodies": state.get("characters_bodies", []),
                 "series_body": state.get("series_body"),
                 "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+                "has_references": state.get("has_references", False),
                 # ✅ CRITICAL: Preserve critical 5 keys!
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
@@ -1222,6 +1246,7 @@ class FictionEditingAgent(BaseAgent):
                 "manuscript": state.get("manuscript", ""),
                 "filename": state.get("filename", ""),
                 "chapter_ranges": state.get("chapter_ranges", []),
+                "has_references": state.get("has_references", False),
                 "metadata": state.get("metadata", {}),
                 "user_id": state.get("user_id", "system"),
                 "shared_memory": state.get("shared_memory", {}),
@@ -1574,12 +1599,14 @@ class FictionEditingAgent(BaseAgent):
                 )
             else:
                 system_prompt = "You are a helpful fiction editing assistant. Answer user questions about the manuscript, style, references, and related information. Be conversational and helpful."
-            messages = self._build_editing_agent_messages(
+            messages = MessagePreprocessor.build_editing_messages(
                 system_prompt=system_prompt,
                 context_parts=context_parts,
                 current_request=request_with_instructions,
                 messages_list=messages_list,
-                look_back_limit=6
+                look_back_limit=6,
+                datetime_context=self._get_datetime_context(state),
+                sanitize_ai_responses=True,
             )
             
             # Call LLM for conversational response

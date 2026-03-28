@@ -19,6 +19,7 @@ import {
   Menu as MenuIcon,
   SmartToy,
 } from '@mui/icons-material';
+import { getSelectableChatModels } from '../../utils/chatSelectableModels';
 
 const ChatHeader = ({
   sidebarCollapsed,
@@ -32,10 +33,7 @@ const ChatHeader = ({
   onClearChat,
   onOpenSettings,
 }) => {
-  // Chat dropdown excludes image generation model (used only for image creation)
-  const chatModels = (enabledModels?.enabled_models || []).filter(
-    (m) => m !== (enabledModels?.image_generation_model || '')
-  );
+  const chatModels = getSelectableChatModels(enabledModels);
 
   // Format cost for display (per 1M tokens by default)
   const formatCost = (cost) => {

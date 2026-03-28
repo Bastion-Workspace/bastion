@@ -42,6 +42,7 @@ import {
   LockOpen,
   Share,
   People,
+  SmartToy,
 } from '@mui/icons-material';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
@@ -49,6 +50,8 @@ import { DragDropContext, Droppable, Draggable } from 'react-beautiful-dnd';
 import apiService from '../services/apiService';
 import conversationService from '../services/conversation/ConversationService';
 import ConversationShareDialog from './ConversationShareDialog';
+import { useNotifications } from '../contexts/NotificationContext';
+import { useTeamExecution } from '../contexts/TeamExecutionContext';
 
 const ConversationSidebar = ({ 
   currentConversationId, 
@@ -70,6 +73,8 @@ const ConversationSidebar = ({
   const [isDragging, setIsDragging] = useState(false);
   
   const queryClient = useQueryClient();
+  const { addNotification, clearNotifications } = useNotifications();
+  const { setTeamExecutionStatus } = useTeamExecution();
 
   // Fetch conversations with search and filtering
   const { data: conversationsData, isLoading, error } = useQuery(
@@ -128,11 +133,21 @@ const ConversationSidebar = ({
         try {
           const update = JSON.parse(event.data);
           
-          if (update.type === 'conversation_created' || 
-              update.type === 'conversation_updated' || 
+          if (update.type === 'agent_notification') {
+            addNotification(update);
+          }
+          if (update.type === 'team_execution_status' && update.team_id) {
+            setTeamExecutionStatus(update.team_id, {
+              status: update.status,
+              team_name: update.team_name,
+              agent_id: update.agent_id,
+              timestamp: update.timestamp,
+            });
+          }
+          if (update.type === 'conversation_created' ||
+              update.type === 'conversation_updated' ||
               update.type === 'conversation_deleted') {
             console.log('🔄 Received conversation update, refreshing list');
-            // Invalidate queries to trigger refresh
             queryClient.invalidateQueries(['conversations']);
           }
         } catch (error) {
@@ -163,7 +178,7 @@ const ConversationSidebar = ({
         ws.close();
       }
     };
-  }, [queryClient]);
+  }, [queryClient, addNotification, setTeamExecutionStatus]);
 
   // Update conversation mutation
   const updateConversationMutation = useMutation(
@@ -235,6 +250,7 @@ const ConversationSidebar = ({
         console.log('✅ All conversations deleted successfully:', data);
         queryClient.invalidateQueries(['conversations']);
         setDeleteAllDialog({ open: false });
+        clearNotifications();
         if (!data?.keptCurrentEmpty) {
           if (onClearCurrentConversation) onClearCurrentConversation();
           if (onNewConversation) onNewConversation();
@@ -408,7 +424,7 @@ const ConversationSidebar = ({
         animate={{ width: getSidebarWidth() }}
         transition={{ duration: 0.3, ease: "easeInOut" }}
         sx={{
-          height: { xs: 'calc(var(--appvh, 100vh) - 59px)', md: 'calc(100dvh - 59px)' },
+          height: { xs: 'calc(var(--appvh, 100vh) - var(--app-nav-height, 59px))', md: 'calc(100dvh - var(--app-nav-height, 59px))' },
           display: 'flex',
           flexDirection: 'column',
           borderRadius: 0,
@@ -416,7 +432,7 @@ const ConversationSidebar = ({
           overflow: 'hidden',
           position: 'fixed',
           left: 0,
-          top: '59px',
+          top: 'var(--app-nav-height, 59px)',
           zIndex: 1200,
         }}
       >
@@ -441,7 +457,6 @@ const ConversationSidebar = ({
                 <Button
                   variant="contained"
                   size="small"
-                  startIcon={<Add />}
                   onClick={() => onNewConversation()}
                   disabled={isCreatingConversation}
                   sx={{ minWidth: 'auto' }}
@@ -545,7 +560,6 @@ const ConversationSidebar = ({
                       variant="outlined"
                       size="small"
                       color="error"
-                      startIcon={<Delete />}
                       onClick={handleDeleteAllConversations}
                       sx={{ 
                         minWidth: 'auto',
@@ -637,9 +651,11 @@ const ConversationSidebar = ({
                                     <Box sx={{ display: 'flex', alignItems: 'center', mb: 0.5 }}>
                                       <Chat sx={{ fontSize: 16, mr: 1, color: 'text.secondary' }} />
                                       <Typography 
-                                        variant="subtitle2" 
+                                        variant="body2" 
                                         sx={{ 
+                                          fontSize: '0.8125rem',
                                           fontWeight: 500,
+                                          lineHeight: 1.35,
                                           overflow: 'hidden',
                                           textOverflow: 'ellipsis',
                                           whiteSpace: 'nowrap',
@@ -653,6 +669,11 @@ const ConversationSidebar = ({
                                       )}
                                       {conversation.is_shared && (
                                         <People sx={{ fontSize: 14, color: 'secondary.main', ml: 0.5 }} />
+                                      )}
+                                      {conversation.metadata_json?.initiated_by === 'agent' && (
+                                        <Tooltip title={conversation.metadata_json?.agent_name || 'Agent'} arrow>
+                                          <SmartToy sx={{ fontSize: 14, color: 'info.main', ml: 0.5 }} />
+                                        </Tooltip>
                                       )}
                                     </Box>
                                     

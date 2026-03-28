@@ -2,6 +2,7 @@
 Internal API for service-to-service calls (connections-service -> backend).
 Authenticated by X-Internal-Service-Key. Handles external-chat: create/find conversation,
 store messages, call orchestrator, return response and images.
+Also: agent-initiated conversations and outbound chat_id persistence.
 """
 
 import base64
@@ -10,17 +11,21 @@ import logging
 import mimetypes
 import os
 import re
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import grpc
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from config import settings
 from services.conversation_service import ConversationService
 from services.grpc_context_gatherer import get_context_gatherer
 from services.settings_service import settings_service
+from services.user_settings_kv_service import get_user_setting
+from services.user_llm_provider_service import user_llm_provider_service
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +59,7 @@ class ExternalChatRequest(BaseModel):
 class ExternalChatModelsRequest(BaseModel):
     """Request for listing enabled models (for /model command)."""
     user_id: str
+    conversation_id: Optional[str] = None  # when set, response includes current_model_id for this conversation
 
 
 class ExternalChatSetModelRequest(BaseModel):
@@ -316,8 +322,13 @@ async def external_chat(body: ExternalChatRequest) -> Dict[str, Any]:
         )
         metadata = (lifecycle_info or {}).get("metadata_json") or {}
         selected_model_id = metadata.get("external_chat_selected_model_id")
+        agent_profile_id = metadata.get("agent_profile_id")
         request_context: Dict[str, Any] = {}
         request_context["editor_preference"] = "ignore"
+        if agent_profile_id:
+            request_context["agent_profile_id"] = str(agent_profile_id)
+        else:
+            request_context["context_window_size"] = 30
         if selected_model_id:
             request_context["user_chat_model"] = selected_model_id
 
@@ -341,6 +352,7 @@ async def external_chat(body: ExternalChatRequest) -> Dict[str, Any]:
         ]
         accumulated_response = ""
         metadata_received: Dict[str, Any] = {}
+        agent_name_used: Optional[str] = None
 
         async with grpc.aio.insecure_channel(
             f"{orchestrator_host}:{orchestrator_port}", options=options
@@ -348,18 +360,44 @@ async def external_chat(body: ExternalChatRequest) -> Dict[str, Any]:
             from protos import orchestrator_pb2_grpc
             stub = orchestrator_pb2_grpc.OrchestratorServiceStub(channel)
             async for chunk in stub.StreamChat(grpc_request):
+                if chunk.agent_name and chunk.agent_name not in ("orchestrator", "system"):
+                    agent_name_used = chunk.agent_name
                 if chunk.type == "content" and chunk.message:
                     accumulated_response += chunk.message
                 if chunk.metadata:
                     metadata_received.update(dict(chunk.metadata))
 
+        from utils.history_metadata import filter_history_safe_metadata
+        save_metadata: Dict[str, Any] = {
+            "orchestrator_system": True,
+            "streaming": False,
+            "source_platform": body.platform,
+            "platform_chat_id": body.platform_chat_id,
+            "sender_name": body.sender_name,
+        }
+        save_metadata.update(filter_history_safe_metadata(metadata_received))
         await conversation_service.add_message(
             conversation_id=body.conversation_id,
             user_id=body.user_id,
             role="assistant",
             content=accumulated_response,
-            metadata={"orchestrator_system": True},
+            metadata=save_metadata,
         )
+
+        agent_for_metadata = agent_name_used or metadata_received.get("delegated_agent") or metadata_received.get("agent_name")
+        if agent_for_metadata:
+            try:
+                agent_profile_id_saved = metadata_received.get("agent_profile_id")
+                await conversation_service.update_agent_metadata(
+                    conversation_id=body.conversation_id,
+                    user_id=body.user_id,
+                    primary_agent_selected=agent_for_metadata,
+                    last_agent=agent_for_metadata,
+                    agent_profile_id=agent_profile_id_saved,
+                )
+                logger.debug("Saved agent metadata for external chat: primary_agent=%s", agent_for_metadata)
+            except Exception as agent_save_err:
+                logger.warning("Failed to save agent metadata for external chat: %s", agent_save_err)
 
         title_received = bool(metadata_received.get("title"))
         if not title_received and body.query:
@@ -442,19 +480,44 @@ async def external_chat(body: ExternalChatRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(e))
 
 
+async def _get_external_chat_enabled_models_for_user(user_id: str) -> List[Dict[str, Any]]:
+    """
+    Return chat-selectable models for this user for external chat (Telegram/Discord).
+    Omits models removed from the provider catalog and the image-generation-only model.
+    Each item is {"model_id": str, "display_name": str}.
+    """
+    from services.model_source_resolver import get_chat_selectable_model_ids_for_user
+
+    model_ids = await get_chat_selectable_model_ids_for_user(user_id)
+    return [{"model_id": mid, "display_name": _model_display_name(mid)} for mid in model_ids]
+
+
 @router.post("/external-chat-models", dependencies=[Depends(verify_internal_service_key)])
 async def external_chat_models(body: ExternalChatModelsRequest) -> Dict[str, Any]:
     """
     Return a numbered list of enabled models for the user (for /model command).
-    Returns: {"models": [{"index": 1, "id": "...", "name": "..."}, ...]}.
+    When the user uses their own API keys (use_admin_models=false), returns their
+    enabled models; otherwise returns org-enabled models.
+    If conversation_id is provided, also returns current_model_id for that conversation.
+    Returns: {"models": [{"index": 1, "id": "...", "name": "..."}, ...], "current_model_id": "..." or null}.
     """
     try:
-        model_ids = await settings_service.get_enabled_models()
+        enabled = await _get_external_chat_enabled_models_for_user(body.user_id)
         models = [
-            {"index": i + 1, "id": mid, "name": _model_display_name(mid)}
-            for i, mid in enumerate(model_ids)
+            {"index": i + 1, "id": m["model_id"], "name": m["display_name"]}
+            for i, m in enumerate(enabled)
         ]
-        return {"models": models}
+        out: Dict[str, Any] = {"models": models}
+        if body.conversation_id:
+            conversation_service = ConversationService()
+            conversation_service.set_current_user(body.user_id)
+            await conversation_service.ensure_conversation_exists(body.conversation_id, body.user_id)
+            lifecycle_info = await conversation_service.lifecycle_manager.get_conversation_lifecycle(
+                body.conversation_id, body.user_id
+            )
+            metadata = (lifecycle_info or {}).get("metadata_json") or {}
+            out["current_model_id"] = metadata.get("external_chat_selected_model_id")
+        return out
     except Exception as e:
         logger.exception("external-chat-models failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -464,21 +527,22 @@ async def external_chat_models(body: ExternalChatModelsRequest) -> Dict[str, Any
 async def external_chat_set_model(body: ExternalChatSetModelRequest) -> Dict[str, Any]:
     """
     Set the selected model for a conversation (e.g. /model 3).
+    Uses the same user-specific model list as /model (user's models when use_admin_models=false).
     Ensures conversation exists, stores model in conversation metadata, returns confirmation.
     """
     try:
         if body.model_index < 1:
             raise HTTPException(status_code=400, detail="model_index must be at least 1")
-        model_ids = await settings_service.get_enabled_models()
-        if not model_ids:
+        enabled = await _get_external_chat_enabled_models_for_user(body.user_id)
+        if not enabled:
             raise HTTPException(status_code=400, detail="No enabled models configured")
-        if body.model_index > len(model_ids):
+        if body.model_index > len(enabled):
             raise HTTPException(
                 status_code=400,
-                detail=f"model_index must be between 1 and {len(model_ids)}",
+                detail=f"model_index must be between 1 and {len(enabled)}",
             )
-        model_id = model_ids[body.model_index - 1]
-        model_name = _model_display_name(model_id)
+        model_id = enabled[body.model_index - 1]["model_id"]
+        model_name = enabled[body.model_index - 1]["display_name"]
 
         conversation_service = ConversationService()
         conversation_service.set_current_user(body.user_id)
@@ -497,4 +561,468 @@ async def external_chat_set_model(body: ExternalChatSetModelRequest) -> Dict[str
         raise
     except Exception as e:
         logger.exception("external-chat-set-model failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Agent-Initiated Conversations
+# ============================================================================
+
+
+class AgentConversationRequest(BaseModel):
+    """Create or append to an agent-initiated conversation."""
+    user_id: str
+    message: str
+    agent_name: str = ""
+    agent_profile_id: str = ""
+    title: str = ""
+    conversation_id: str = ""  # empty = create new
+
+
+@router.post("/agent-conversation", dependencies=[Depends(verify_internal_service_key)])
+async def create_agent_conversation(body: AgentConversationRequest) -> Dict[str, Any]:
+    """
+    Create (or append to) an agent-initiated conversation and add an assistant message.
+    Always returns {conversation_id, message_id}. The conversation is tagged with
+    initiated_by=agent so the frontend can display a badge.
+    """
+    try:
+        conversation_service = ConversationService()
+        conversation_service.set_current_user(body.user_id)
+
+        conversation_id = body.conversation_id or str(uuid.uuid4())
+        title = body.title or (body.message[:60].strip() + ("..." if len(body.message) > 60 else "")) or "Agent Notification"
+
+        await conversation_service.ensure_conversation_exists(conversation_id, body.user_id)
+        await conversation_service.update_conversation_metadata(
+            conversation_id,
+            body.user_id,
+            {
+                "title": title,
+                "initiated_by": "agent",
+                "agent_name": body.agent_name or "Agent",
+                "agent_profile_id": body.agent_profile_id or None,
+            },
+        )
+
+        message_id = str(uuid.uuid4())
+        await conversation_service.add_message(
+            conversation_id=conversation_id,
+            user_id=body.user_id,
+            role="assistant",
+            content=body.message,
+            metadata={
+                "orchestrator_system": True,
+                "agent_initiated": True,
+                "agent_name": body.agent_name or "Agent",
+                "message_id": message_id,
+            },
+        )
+
+        from utils.websocket_manager import get_websocket_manager
+        ws_manager = get_websocket_manager()
+        if ws_manager:
+            await ws_manager.send_to_session(
+                {
+                    "type": "agent_notification",
+                    "conversation_id": conversation_id,
+                    "agent_name": body.agent_name or "Agent",
+                    "title": title,
+                    "preview": body.message[:150] if body.message else "",
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                },
+                body.user_id,
+            )
+            await ws_manager.send_to_session(
+                {"type": "conversation_created", "conversation_id": conversation_id},
+                body.user_id,
+            )
+
+        return {"conversation_id": conversation_id, "message_id": message_id}
+    except Exception as e:
+        logger.exception("agent-conversation failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Device proxy (Bastion Local Proxy) - tools-service bridges here for device tool invocations
+# ============================================================================
+
+
+class InvokeDeviceToolRequest(BaseModel):
+    """Request to invoke a tool on a user's connected local proxy device."""
+    user_id: str
+    device_id: Optional[str] = None
+    tool: str
+    args: Dict[str, Any] = {}
+    timeout_seconds: int = 30
+
+
+@router.post("/invoke-device-tool", dependencies=[Depends(verify_internal_service_key)])
+async def invoke_device_tool_internal(body: InvokeDeviceToolRequest) -> Dict[str, Any]:
+    """
+    Invoke a tool on a connected Bastion Local Proxy device.
+    Used by tools-service gRPC handler; device WebSocket connections live in this process.
+    Returns: {success, result_json, error, formatted}.
+    """
+    try:
+        from utils.websocket_manager import get_websocket_manager
+
+        ws_manager = get_websocket_manager()
+        result = await ws_manager.invoke_device_tool(
+            user_id=body.user_id,
+            tool=body.tool,
+            args=body.args,
+            device_id=body.device_id or None,
+            timeout=body.timeout_seconds,
+        )
+        out = {
+            "success": result.get("success", False),
+            "result_json": result.get("result_json", "{}"),
+            "error": result.get("error", ""),
+            "formatted": result.get("formatted", ""),
+        }
+        if not out["result_json"] and result.get("result") is not None:
+            out["result_json"] = json.dumps(result["result"])
+        return out
+    except Exception as e:
+        logger.exception("invoke_device_tool_internal failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/device-list", dependencies=[Depends(verify_internal_service_key)])
+async def get_device_list_internal(user_id: str = Query(...)) -> Dict[str, Any]:
+    """
+    Return connected Bastion Local Proxy devices for a user.
+    Used by tools-service or orchestrator to check capabilities before invoking.
+    Returns: {"devices": [{"device_id": "...", "capabilities": ["local_screenshot", ...]}, ...]}.
+    """
+    try:
+        from utils.websocket_manager import get_websocket_manager
+
+        ws_manager = get_websocket_manager()
+        devices = ws_manager.get_user_devices(user_id)
+        return {"devices": devices}
+    except Exception as e:
+        logger.exception("get_device_list_internal failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Outbound Chat ID Persistence (for proactive messaging via bots)
+# ============================================================================
+
+
+class UpdateOutboundChatIdRequest(BaseModel):
+    """Persist the outbound chat_id for a messaging bot connection."""
+    connection_id: str
+    outbound_chat_id: str
+    sender_name: str = ""
+
+
+@router.post("/connection-outbound-chat-id", dependencies=[Depends(verify_internal_service_key)])
+async def update_outbound_chat_id(body: UpdateOutboundChatIdRequest) -> Dict[str, Any]:
+    """Store outbound_chat_id in external_connections.provider_metadata for future proactive messaging."""
+    try:
+        from services.external_connections_service import external_connections_service
+
+        conn = await external_connections_service.get_connection_by_id(int(body.connection_id))
+        if not conn:
+            raise HTTPException(status_code=404, detail="Connection not found")
+
+        existing_metadata = external_connections_service._parse_provider_metadata(conn.get("provider_metadata"))
+        existing_metadata["outbound_chat_id"] = body.outbound_chat_id
+        if body.sender_name:
+            existing_metadata["outbound_sender_name"] = body.sender_name
+
+        await external_connections_service.update_provider_metadata(
+            int(body.connection_id), existing_metadata
+        )
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("update outbound_chat_id failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/connection-outbound-chat-id", dependencies=[Depends(verify_internal_service_key)])
+async def get_outbound_chat_id(connection_id: str = Query(...)) -> Dict[str, Any]:
+    """Retrieve the stored outbound_chat_id for a messaging bot connection."""
+    try:
+        from services.external_connections_service import external_connections_service
+
+        conn = await external_connections_service.get_connection_by_id(int(connection_id))
+        if not conn:
+            raise HTTPException(status_code=404, detail="Connection not found")
+
+        metadata = external_connections_service._parse_provider_metadata(conn.get("provider_metadata"))
+        return {"outbound_chat_id": metadata.get("outbound_chat_id", "")}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get outbound_chat_id failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/active-chat-bots", dependencies=[Depends(verify_internal_service_key)])
+async def get_active_chat_bots() -> Dict[str, Any]:
+    """
+    Return all active chat_bot connections with decrypted tokens and config.
+    Used by connections-service on startup to self-restore bot listeners.
+    Returns: {"bots": [{connection_id, user_id, provider, bot_token, display_name, config}, ...]}.
+    """
+    try:
+        from services.database_manager.database_helpers import fetch_all
+        from services.external_connections_service import external_connections_service
+
+        rows = await fetch_all("SELECT user_id FROM users")
+        user_ids = [r["user_id"] for r in rows] if rows else []
+        bots = []
+        for uid in user_ids:
+            conns = await external_connections_service.get_user_connections(
+                uid,
+                connection_type="chat_bot",
+                active_only=True,
+                rls_context={"user_id": uid},
+            )
+            for conn in conns:
+                token = await external_connections_service.get_valid_access_token(
+                    conn["id"], rls_context={"user_id": uid}
+                )
+                if not token:
+                    continue
+                raw_meta = conn.get("provider_metadata") or {}
+                if isinstance(raw_meta, str):
+                    try:
+                        meta = json.loads(raw_meta) if raw_meta.strip() else {}
+                    except Exception:
+                        meta = {}
+                else:
+                    meta = raw_meta if isinstance(raw_meta, dict) else {}
+                config = {k: str(v) for k, v in meta.items() if v is not None}
+                bots.append({
+                    "connection_id": str(conn["id"]),
+                    "user_id": uid,
+                    "provider": conn.get("provider", ""),
+                    "bot_token": token,
+                    "display_name": (conn.get("display_name") or conn.get("account_identifier") or ""),
+                    "config": config,
+                })
+        return {"bots": bots}
+    except Exception as e:
+        logger.exception("get_active_chat_bots failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# User conversations list and validation (for /chats and /loadchat bot commands)
+# ============================================================================
+
+
+@router.get("/user-conversations", dependencies=[Depends(verify_internal_service_key)])
+async def list_user_conversations(
+    user_id: str = Query(...),
+    limit: int = Query(10, ge=1, le=50),
+) -> Dict[str, Any]:
+    """Return recent conversations for a user (for bot /chats command)."""
+    try:
+        import asyncpg
+
+        connection_string = (
+            f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}"
+            f"@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+        )
+        conn = await asyncpg.connect(connection_string)
+        try:
+            await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+            rows = await conn.fetch(
+                """
+                SELECT
+                    conv.conversation_id,
+                    conv.title,
+                    conv.updated_at,
+                    COALESCE(
+                        (SELECT COUNT(*) FROM conversation_messages cm
+                         WHERE cm.conversation_id = conv.conversation_id
+                         AND (cm.is_deleted IS NULL OR cm.is_deleted = FALSE)),
+                        conv.message_count,
+                        0
+                    ) AS message_count
+                FROM conversations conv
+                WHERE conv.user_id = $1
+                ORDER BY conv.updated_at DESC NULLS LAST, conv.created_at DESC
+                LIMIT $2
+                """,
+                user_id,
+                limit,
+            )
+            conversations = []
+            for row in rows:
+                if row["conversation_id"]:
+                    conversations.append({
+                        "conversation_id": row["conversation_id"],
+                        "title": (row["title"] or "Untitled Conversation").strip(),
+                        "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+                        "message_count": row["message_count"] or 0,
+                    })
+            return {"conversations": conversations}
+        finally:
+            await conn.close()
+    except Exception as e:
+        logger.exception("list_user_conversations failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/validate-conversation", dependencies=[Depends(verify_internal_service_key)])
+async def validate_conversation(
+    user_id: str = Query(...),
+    conversation_id: str = Query(...),
+) -> Dict[str, Any]:
+    """Confirm a conversation exists and belongs to the user (for bot /loadchat)."""
+    try:
+        import asyncpg
+
+        connection_string = (
+            f"postgresql://{settings.POSTGRES_USER}:{settings.POSTGRES_PASSWORD}"
+            f"@{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}/{settings.POSTGRES_DB}"
+        )
+        conn = await asyncpg.connect(connection_string)
+        try:
+            row = await conn.fetchrow(
+                """
+                SELECT title FROM conversations
+                WHERE conversation_id = $1 AND user_id = $2
+                """,
+                conversation_id,
+                user_id,
+            )
+            if not row:
+                return {"valid": False, "title": ""}
+            return {
+                "valid": True,
+                "title": (row["title"] or "Untitled Conversation").strip(),
+            }
+        finally:
+            await conn.close()
+    except Exception as e:
+        logger.exception("validate_conversation failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Active conversation per chat (persist /loadchat selection across restarts)
+# ============================================================================
+
+
+class SetActiveConversationRequest(BaseModel):
+    """Set the active conversation for a (connection_id, chat_id) for bot /loadchat."""
+
+    connection_id: str
+    chat_id: str
+    conversation_id: str
+
+
+@router.post("/connection-active-conversation", dependencies=[Depends(verify_internal_service_key)])
+async def set_active_conversation(body: SetActiveConversationRequest) -> Dict[str, Any]:
+    """Store active_conversation_id in provider_metadata.active_conversations[chat_id]."""
+    try:
+        from services.external_connections_service import external_connections_service
+
+        conn = await external_connections_service.get_connection_by_id(int(body.connection_id))
+        if not conn:
+            raise HTTPException(status_code=404, detail="Connection not found")
+
+        existing_metadata = external_connections_service._parse_provider_metadata(conn.get("provider_metadata"))
+        active = existing_metadata.get("active_conversations")
+        if not isinstance(active, dict):
+            active = {}
+        active[str(body.chat_id)] = body.conversation_id
+        existing_metadata["active_conversations"] = active
+
+        await external_connections_service.update_provider_metadata(
+            int(body.connection_id), existing_metadata
+        )
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("set_active_conversation failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/connection-active-conversation", dependencies=[Depends(verify_internal_service_key)])
+async def get_active_conversation(
+    connection_id: str = Query(...),
+    chat_id: str = Query(...),
+) -> Dict[str, Any]:
+    """Retrieve the stored active conversation_id for a (connection_id, chat_id)."""
+    try:
+        from services.external_connections_service import external_connections_service
+
+        conn = await external_connections_service.get_connection_by_id(int(connection_id))
+        if not conn:
+            raise HTTPException(status_code=404, detail="Connection not found")
+
+        metadata = external_connections_service._parse_provider_metadata(conn.get("provider_metadata"))
+        active = metadata.get("active_conversations")
+        if not isinstance(active, dict):
+            return {"conversation_id": ""}
+        cid = active.get(str(chat_id), "")
+        return {"conversation_id": cid if cid else ""}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("get_active_conversation failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Known chats (recipient dropdown)
+# ============================================================================
+
+
+class AddKnownChatRequest(BaseModel):
+    """Add or update a chat in known_chats for a connection (recipient dropdown)."""
+
+    connection_id: str
+    chat_id: str
+    chat_title: str = ""
+    chat_username: str = ""
+    chat_type: str = ""
+
+
+KNOWN_CHATS_MAX = 50
+
+
+@router.post("/connection-known-chat", dependencies=[Depends(verify_internal_service_key)])
+async def add_known_chat(body: AddKnownChatRequest) -> Dict[str, Any]:
+    """Add or update a chat in external_connections.provider_metadata.known_chats (for recipient dropdown)."""
+    try:
+        from services.external_connections_service import external_connections_service
+
+        conn = await external_connections_service.get_connection_by_id(int(body.connection_id))
+        if not conn:
+            raise HTTPException(status_code=404, detail="Connection not found")
+
+        existing_metadata = external_connections_service._parse_provider_metadata(conn.get("provider_metadata"))
+        known_chats: list = existing_metadata.get("known_chats") or []
+        if not isinstance(known_chats, list):
+            known_chats = []
+        entry = {
+            "chat_id": body.chat_id,
+            "chat_title": (body.chat_title or "").strip(),
+            "chat_username": (body.chat_username or "").strip(),
+            "chat_type": (body.chat_type or "").strip(),
+        }
+        known_chats = [c for c in known_chats if isinstance(c, dict) and c.get("chat_id") != body.chat_id]
+        known_chats.insert(0, entry)
+        known_chats = known_chats[:KNOWN_CHATS_MAX]
+        existing_metadata["known_chats"] = known_chats
+        await external_connections_service.update_provider_metadata(int(body.connection_id), existing_metadata)
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("add known_chat failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))

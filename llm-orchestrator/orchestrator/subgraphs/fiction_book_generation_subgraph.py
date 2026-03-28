@@ -25,7 +25,7 @@ from orchestrator.utils.fiction_utilities import (
 from orchestrator.subgraphs.fiction_generation_subgraph import build_generation_subgraph
 from orchestrator.subgraphs.fiction_validation_subgraph import build_validation_subgraph
 from orchestrator.tools.document_editing_tools import update_document_content_tool
-from orchestrator.tools.document_tools import get_document_content_tool, search_documents_structured
+from orchestrator.tools.document_tools import get_document_content_tool, search_documents_tool
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +202,7 @@ async def prepare_generation_state_node(state: Dict[str, Any], get_datetime_cont
             "  - CRITICAL: Outline text does NOT exist in manuscript - NEVER use for anchors/original_text!\n"
             "  - ABSOLUTE PROHIBITION: DO NOT copy, paraphrase, or reuse outline synopsis/beat text in your narrative prose\n"
             "  - DO creatively interpret outline beats into original narrative scenes with full prose\n"
+            "  - Beats may include optional guidance (visual/atmosphere/staging, or internal thoughts/realizations/perception shifts); use it when crafting prose\n"
             "  - Follow story structure and plot beats as GUIDANCE, not as SOURCE TEXT to copy\n"
             "  - Achieve outline's story goals through natural storytelling (don't convert beats mechanically)\n"
             "  - For all text matching (anchors), use MANUSCRIPT text only, never outline text\n\n"
@@ -251,9 +252,10 @@ async def prepare_generation_state_node(state: Dict[str, Any], get_datetime_cont
             "   - Build tension gradually through scene development\n"
             "   - Quiet moments matter as much as action sequences\n\n"
             "**OUTLINE BEATS ARE GOALS, NOT SCRIPTS:**\n"
-            "- If outline says 'Character discovers secret' → Write the full discovery scene:\n"
+            "- Beats state events and may include optional prose guidance (visuals, atmosphere, staging; internal thoughts or perception shifts when the outline specifies them). Use that guidance when writing.\n"
+            "- If outline says 'Character discovers secret' (or adds e.g. '— dim room, papers scattered') → Write the full discovery scene:\n"
             "  * Lead-up: What brings character to this moment?\n"
-            "  * Discovery: Show the moment of realization through action and reaction\n"
+            "  * Discovery: Show the moment of realization through action and reaction; incorporate any visual/atmosphere hints from the beat\n"
             "  * Aftermath: How does character process this? What do they do next?\n"
             "- ONE outline beat can easily become 500-1000+ words of immersive scene\n\n"
             "**DEPTH INDICATORS (Use These as Quality Checks):**\n"

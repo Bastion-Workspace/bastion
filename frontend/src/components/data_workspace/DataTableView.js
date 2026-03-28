@@ -43,8 +43,10 @@ import FormulaBar from './FormulaBar';
 
 const DataTableView = ({ 
   tableId, 
+  databaseId = null,
   schema, 
   onDataChange,
+  onRowsLoaded,
   readOnly = false 
 }) => {
   const [rows, setRows] = useState([]);
@@ -69,7 +71,7 @@ const DataTableView = ({
     if (tableId) {
       loadData();
     }
-  }, [tableId, page]);
+  }, [tableId, databaseId, page]);
 
   const loadData = async () => {
     try {
@@ -77,7 +79,7 @@ const DataTableView = ({
       setError(null);
       
       const offset = (page - 1) * rowsPerPage;
-      const response = await dataWorkspaceService.getTableData(tableId, offset, rowsPerPage);
+      const response = await dataWorkspaceService.getTableData(tableId, offset, rowsPerPage, databaseId);
       
       let loadedRows = response.rows || [];
       
@@ -94,6 +96,9 @@ const DataTableView = ({
       
       setRows(loadedRows);
       setTotalRows(response.total_rows || 0);
+      if (typeof onRowsLoaded === 'function') {
+        onRowsLoaded(loadedRows, response.total_rows || 0);
+      }
     } catch (err) {
       console.error('Failed to load table data:', err);
       setError(err.message || 'Failed to load data');
@@ -302,8 +307,10 @@ const DataTableView = ({
   const handleAddRow = async () => {
     try {
       const newRowData = schema.columns.reduce((acc, col) => {
-        if (col.defaultValue) acc[col.name] = col.defaultValue;
-        else if (col.type === 'INTEGER' || col.type === 'REAL') acc[col.name] = 0;
+        const def = col.default_value ?? col.defaultValue;
+        if (def !== undefined && def !== null && String(def).trim() !== '') {
+          acc[col.name] = def;
+        } else if (col.type === 'INTEGER' || col.type === 'REAL') acc[col.name] = 0;
         else if (col.type === 'BOOLEAN') acc[col.name] = false;
         else if (col.type === 'TIMESTAMP') acc[col.name] = new Date().toISOString();
         else acc[col.name] = '';
@@ -640,6 +647,11 @@ const DataTableView = ({
                     <span>
                       {column.name}
                       {!column.nullable && <span style={{ color: 'red' }}> *</span>}
+                      {(column.default_value ?? column.defaultValue) && (
+                        <Typography component="span" variant="caption" display="block" color="text.secondary" sx={{ fontWeight: 400 }}>
+                          default: {String(column.default_value ?? column.defaultValue)}
+                        </Typography>
+                      )}
                     </span>
                     {sortColumn === column.name && (
                       sortDirection === 'asc' 

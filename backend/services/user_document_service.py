@@ -370,7 +370,7 @@ class DocumentServiceWithUserIsolation(DocumentService):
             
             # Store entities in knowledge graph (if enabled)
             if result.entities and self.kg_service:
-                await self.kg_service.store_entities(result.entities, document_id)
+                await self.kg_service.store_entities(result.entities, document_id, result.chunks)
             
             # Update final status
             await self.document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)

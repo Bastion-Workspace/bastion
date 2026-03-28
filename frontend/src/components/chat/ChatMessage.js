@@ -14,6 +14,7 @@ import {
 } from '@mui/material';
 import {
   Person,
+  Groups,
 } from '@mui/icons-material';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
@@ -22,6 +23,7 @@ import rehypeRaw from 'rehype-raw';
 import rehypeSanitize from 'rehype-sanitize';
 import { renderCitations } from '../../utils/chatUtils';
 import ExportButton from './ExportButton';
+import ReadAloudButton from './ReadAloudButton';
 import LessonPreviewCard from '../LessonPreviewCard';
 import ChartRenderer from './ChartRenderer';
 
@@ -70,6 +72,29 @@ const formatSkillLabel = (name) => {
     .filter(Boolean)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(' ');
+};
+
+const TOOL_CATEGORY_LABELS = {
+  search: 'Search',
+  knowledge: 'Knowledge',
+  email: 'Email',
+  calendar: 'Calendar',
+  org: 'Org Mode',
+  image: 'Image',
+  math: 'Math',
+  navigation: 'Navigation',
+  data_workspace: 'Data',
+  utility: 'Utility',
+  file: 'Documents',
+  document: 'Documents',
+  agent: 'Agent',
+  teams: 'Teams',
+  analysis: 'Analysis',
+};
+
+const formatCategoryLabel = (cat) => {
+  if (!cat || typeof cat !== 'string') return '';
+  return TOOL_CATEGORY_LABELS[cat] || cat.charAt(0).toUpperCase() + cat.slice(1);
 };
 
 /**
@@ -164,7 +189,6 @@ const ChatMessage = React.memo(({
   extractImageUrls,
   getImageApiUrl,
   openLightbox,
-  setPreviewOpenFor,
   currentConversationId,
   copiedMessageId,
   savingNoteFor,
@@ -242,15 +266,30 @@ const ChatMessage = React.memo(({
         sx={{
           p: 2,
           maxWidth: '85%',
-          backgroundColor: message.role === 'user' 
-            ? (theme.palette.mode === 'dark' 
-                ? 'rgba(25, 118, 210, 0.4)' 
-                : 'primary.light')
-            : message.isError 
-              ? 'error.light'
-              : message.isToolStatus
-                ? 'action.hover'
-                : 'background.paper',
+          backgroundColor: (() => {
+            const lineRole = (message.metadata?.line_role || '').toLowerCase();
+            const isLine =
+              Boolean(message.metadata?.line_id) ||
+              Boolean(message.metadata?.line_dispatch_sub_agent);
+            if (message.role !== 'user' && isLine) {
+              if (lineRole === 'ceo' || lineRole === 'root')
+                return theme.palette.mode === 'dark'
+                  ? 'rgba(156, 39, 176, 0.12)'
+                  : 'rgba(103, 58, 183, 0.06)';
+              return theme.palette.mode === 'dark'
+                ? 'rgba(33, 150, 243, 0.1)'
+                : 'rgba(33, 150, 243, 0.04)';
+            }
+            return message.role === 'user'
+              ? theme.palette.mode === 'dark'
+                ? 'rgba(25, 118, 210, 0.4)'
+                : 'primary.light'
+              : message.isError
+                ? 'error.light'
+                : message.isToolStatus
+                  ? 'action.hover'
+                  : 'background.paper';
+          })(),
           border: message.isError ? '1px solid' : message.isToolStatus ? '1px dashed' : 'none',
           borderColor: message.isError ? 'error.main' : message.isToolStatus ? 'primary.main' : 'transparent',
           cursor: 'context-menu',
@@ -266,12 +305,16 @@ const ChatMessage = React.memo(({
           userSelect: 'none'
         }}>
           {message.role !== 'user' && (
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-              <Box 
-                component="img" 
-                src="/images/favicon.ico" 
-                sx={{ width: 18, height: 18, objectFit: 'contain' }} 
-              />
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+              {message.metadata?.line_id || message.metadata?.line_dispatch_sub_agent ? (
+                <Groups sx={{ width: 18, height: 18, color: 'text.secondary' }} />
+              ) : (
+                <Box
+                  component="img"
+                  src="/images/favicon.ico"
+                  sx={{ width: 18, height: 18, objectFit: 'contain' }}
+                />
+              )}
               <Typography 
                 variant="caption" 
                 color="text.secondary"
@@ -279,10 +322,11 @@ const ChatMessage = React.memo(({
               >
                 {aiName}
               </Typography>
-              {(message.metadata?.agent_type || message.agent_type) && (
+              {(message.metadata?.agent_display_name || message.metadata?.agent_type || message.agent_type) && (
                 <Chip 
                   size="small" 
                   label={
+                    message.metadata?.agent_display_name ||
                     (message.metadata?.agent_type || message.agent_type)
                       .split('_')
                       .map(word => word.charAt(0).toUpperCase() + word.slice(1))
@@ -294,6 +338,18 @@ const ChatMessage = React.memo(({
                     backgroundColor: 'rgba(0, 0, 0, 0.05)',
                     '& .MuiChip-label': { px: 1 }
                   }} 
+                />
+              )}
+              {message.metadata?.line_role && (
+                <Chip
+                  size="small"
+                  label={String(message.metadata.line_role)}
+                  sx={{
+                    height: 16,
+                    fontSize: '0.6rem',
+                    backgroundColor: 'rgba(0, 0, 0, 0.08)',
+                    '& .MuiChip-label': { px: 1, textTransform: 'capitalize' },
+                  }}
                 />
               )}
             </Box>
@@ -492,100 +548,7 @@ const ChatMessage = React.memo(({
           {/* ROOSEVELT'S ENHANCED CITATION DISPLAY: Support new numbered format */}
           {(message.metadata?.citations || message.citations) && renderCitations(message.metadata?.citations || message.citations)}
 
-          {/* Fiction editing HITL controls */}
-          {message.role === 'assistant' && Array.isArray(message.editor_operations) && message.editor_operations.length > 0 && (
-            <Box sx={{ mt: 2 }}>
-              {/* ROOSEVELT'S BEFORE/AFTER EDIT PREVIEW */}
-              <Box sx={{ mb: 2, display: 'flex', flexDirection: 'column', gap: 1.5 }}>
-                {message.editor_operations.slice(0, 3).map((op, idx) => {
-                  const original = op.original_text || op.anchor_text || '';
-                  const newText = op.text || '';
-                  const opType = op.op_type || 'replace_range';
-                  const isInsert = opType === 'insert_after_heading' || opType === 'insert_after';
-                  
-                  return (
-                    <Paper key={idx} variant="outlined" sx={{ p: 1.5, bgcolor: 'background.default' }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                        <Chip 
-                          size="small" 
-                          label={`Edit ${idx + 1}`} 
-                          color="primary" 
-                          variant="outlined"
-                        />
-                        <Chip 
-                          size="small" 
-                          label={isInsert ? 'insert' : 'replace'} 
-                          color={isInsert ? 'success' : 'warning'}
-                        />
-                      </Box>
-                      
-                      {original && (
-                        <Box sx={{ mb: 1 }}>
-                          <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, display: 'block', mb: 0.5 }}>
-                            {isInsert ? 'Insert after:' : 'Replace:'}
-                          </Typography>
-                          <Box sx={{ 
-                            p: 1, 
-                            bgcolor: 'rgba(211, 47, 47, 0.08)', 
-                            border: '1px solid rgba(211, 47, 47, 0.2)',
-                            borderRadius: 1,
-                            fontFamily: 'monospace',
-                            fontSize: '0.875rem',
-                            whiteSpace: 'pre-wrap',
-                            maxHeight: '80px',
-                            overflow: 'hidden',
-                            position: 'relative'
-                          }}>
-                            {original.length > 150 ? original.substring(0, 150) + '...' : original}
-                          </Box>
-                        </Box>
-                      )}
-                      
-                      <Box>
-                        <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 600, display: 'block', mb: 0.5 }}>
-                          {isInsert ? 'New text:' : 'With:'}
-                        </Typography>
-                        <Box sx={{ 
-                          p: 1, 
-                          bgcolor: 'rgba(46, 125, 50, 0.08)', 
-                          border: '1px solid rgba(46, 125, 50, 0.2)',
-                          borderRadius: 1,
-                          fontFamily: 'monospace',
-                          fontSize: '0.875rem',
-                          whiteSpace: 'pre-wrap',
-                          maxHeight: '80px',
-                          overflow: 'hidden'
-                        }}>
-                          {newText.length > 150 ? newText.substring(0, 150) + '...' : newText}
-                        </Box>
-                      </Box>
-                    </Paper>
-                  );
-                })}
-                
-                {message.editor_operations.length > 3 && (
-                  <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'center', fontStyle: 'italic' }}>
-                    ... and {message.editor_operations.length - 3} more edit{message.editor_operations.length - 3 > 1 ? 's' : ''}
-                  </Typography>
-                )}
-              </Box>
-              
-              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-                <Chip size="small" color="primary" label={`${message.editor_operations.length} edit${message.editor_operations.length > 1 ? 's' : ''} ready`} />
-                <Button size="small" variant="outlined" onClick={() => setPreviewOpenFor(message.id || message.timestamp || Date.now())}>Review all edits</Button>
-                <Button size="small" variant="contained" onClick={() => {
-                  try {
-                    const ops = Array.isArray(message.editor_operations) ? message.editor_operations : [];
-                    const mEdit = message.manuscript_edit || null;
-                    window.dispatchEvent(new CustomEvent('codexApplyEditorOps', { detail: { operations: ops, manuscript_edit: mEdit } }));
-                  } catch (e) {
-                    console.error('Failed to dispatch editor operations apply event:', e);
-                  }
-                }}>Apply all</Button>
-              </Box>
-            </Box>
-          )}
-
+          {/* Editor proposals are shown as inline diffs in DocumentViewer (DB-only path) */}
           {/* News results rendering */}
           {message.role === 'assistant' && (isAdmin || has('feature.news.view')) && Array.isArray(message.news_results) && message.news_results.length > 0 && (
             <Box sx={{ mt: 1.5, display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: 1 }}>
@@ -938,6 +901,8 @@ const ChatMessage = React.memo(({
               message.role !== 'user' ? formatDurationMs(message.metadata?.duration_ms) : '';
             const skillsUsed =
               message.role !== 'user' ? parseJsonStringArray(message.metadata?.skills_used) : [];
+            const toolCategories =
+              message.role !== 'user' ? parseJsonStringArray(message.metadata?.tools_used_categories) : [];
 
             return (
               <Box
@@ -976,11 +941,32 @@ const ChatMessage = React.memo(({
                     ))}
                   </Box>
                 )}
+
+                {toolCategories.length > 0 && (
+                  <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                    {toolCategories.map((cat) => (
+                      <Chip
+                        key={cat}
+                        size="small"
+                        variant="outlined"
+                        label={formatCategoryLabel(cat)}
+                        sx={{
+                          height: 16,
+                          fontSize: '0.6rem',
+                          '& .MuiChip-label': { px: 1 },
+                        }}
+                      />
+                    ))}
+                  </Box>
+                )}
               </Box>
             );
           })()}
           
           <Box sx={{ display: 'flex', gap: 0.5 }}>
+            {message.role !== 'user' && (
+              <ReadAloudButton content={message.content} isUser={message.role === 'user'} />
+            )}
             <ExportButton
               message={message}
               onCopyMessage={handleCopyMessage}
@@ -1007,10 +993,12 @@ const ChatMessage = React.memo(({
     prevProps.message.isToolStatus === nextProps.message.isToolStatus &&
     JSON.stringify(prevProps.message.metadata?.citations || prevProps.message.citations) === 
     JSON.stringify(nextProps.message.metadata?.citations || nextProps.message.citations) &&
-    JSON.stringify(prevProps.message.editor_operations) === 
-    JSON.stringify(nextProps.message.editor_operations) &&
     (prevProps.message.metadata?.duration_ms || null) === (nextProps.message.metadata?.duration_ms || null) &&
     (prevProps.message.metadata?.skills_used || null) === (nextProps.message.metadata?.skills_used || null) &&
+    (prevProps.message.metadata?.tools_used_categories || null) === (nextProps.message.metadata?.tools_used_categories || null) &&
+    (prevProps.message.metadata?.line_id || null) === (nextProps.message.metadata?.line_id || null) &&
+    (prevProps.message.metadata?.line_role || null) === (nextProps.message.metadata?.line_role || null) &&
+    (prevProps.message.metadata?.agent_display_name || null) === (nextProps.message.metadata?.agent_display_name || null) &&
     prevProps.isLoading === nextProps.isLoading &&
     prevProps.copiedMessageId === nextProps.copiedMessageId &&
     prevProps.savingNoteFor === nextProps.savingNoteFor

@@ -46,7 +46,7 @@ class FileRecoveryService:
             from services.folder_service import FolderService
             from services.service_container import service_container
             
-            logger.info(f"🔍 ROOSEVELT: Scanning for orphaned files for user {user_id}")
+            logger.info("Scanning for orphaned files for user %s", user_id)
             
             # Get username and user directory using FolderService
             user_row = await fetch_one("SELECT username FROM users WHERE user_id = $1", user_id)
@@ -138,7 +138,12 @@ class FileRecoveryService:
                         'error': str(e)
                     })
             
-            logger.info(f"✅ ROOSEVELT: Recovery complete! Recovered: {len(recovered)}, Skipped: {len(skipped)}, Errors: {len(errors)}")
+            logger.info(
+                "Recovery complete: recovered=%s skipped=%s errors=%s",
+                len(recovered),
+                len(skipped),
+                len(errors),
+            )
             
             return {
                 "success": True,

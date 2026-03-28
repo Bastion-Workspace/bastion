@@ -14,12 +14,17 @@ import OrgSearchView from './OrgSearchView';
 import OrgAgendaView from './OrgAgendaView';
 import OrgTodosView from './OrgTodosView';
 import OrgContactsView from './OrgContactsView';
+import OrgTagsView from './OrgTagsView';
 import DataWorkspaceManager from './data_workspace/DataWorkspaceManager';
-import FileRelationGraph from './FileRelationGraph';
+import FileRelationGraph from './graph/FileRelationGraph';
+import EntityRelationGraph from './graph/EntityRelationGraph';
+import UnifiedKnowledgeGraph from './graph/UnifiedKnowledgeGraph';
+import MapViewTabContent from './maps/MapViewTabContent';
 import { documentDiffStore } from '../services/documentDiffStore';
 
 const TabbedContentManager = forwardRef((props, ref) => {
     const theme = useTheme();
+    const darkMode = theme.palette.mode === 'dark';
     const [tabs, setTabs] = useState([]);
     const [activeTabId, setActiveTabId] = useState(null);
     const [showFeedManager, setShowFeedManager] = useState(false);
@@ -195,6 +200,27 @@ const TabbedContentManager = forwardRef((props, ref) => {
         });
     };
 
+    const openRSSCategory = (categoryTitle, feedIds, scope = 'user') => {
+        if (!Array.isArray(feedIds) || feedIds.length === 0) return;
+        const feedIdsKey = [...feedIds].map(String).sort().join('|');
+        const existingTab = tabs.find(
+            (tab) => tab.type === 'rss-category' && tab.feedIdsKey === feedIdsKey
+        );
+        if (existingTab) {
+            setActiveTabId(existingTab.id);
+            return;
+        }
+        const suffix = scope === 'global' ? ' (global)' : '';
+        addTab({
+            type: 'rss-category',
+            title: `${categoryTitle}${suffix}`,
+            feedIds: [...feedIds],
+            feedIdsKey,
+            scope,
+            icon: '📁',
+        });
+    };
+
     const openNewsHeadlines = () => {
         const existingTab = tabs.find(tab => tab.type === 'news-headlines');
         if (existingTab) {
@@ -284,7 +310,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
         });
     };
 
-    const openDataWorkspace = (workspaceId) => {
+    const openDataWorkspace = (workspaceId, workspaceName = null) => {
         // Check if tab already exists for this workspace
         const existingTab = tabs.find(tab => tab.type === 'data-workspace' && tab.workspaceId === workspaceId);
         
@@ -295,7 +321,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
 
         addTab({
             type: 'data-workspace',
-            title: 'Data Workspace',
+            title: workspaceName || 'Data Workspace',
             icon: '📊',
             workspaceId: workspaceId
         });
@@ -313,6 +339,50 @@ const TabbedContentManager = forwardRef((props, ref) => {
             icon: '🔗',
             scope: scope || 'all',
             folderId: folderId || null
+        });
+    };
+
+    const openEntityGraph = () => {
+        const existingTab = tabs.find(tab => tab.type === 'entity-graph');
+        if (existingTab) {
+            setActiveTabId(existingTab.id);
+            return;
+        }
+        addTab({
+            type: 'entity-graph',
+            title: 'Entity Graph',
+            icon: '🕸️'
+        });
+    };
+
+    const openUnifiedGraph = () => {
+        const existingTab = tabs.find(tab => tab.type === 'unified-graph');
+        if (existingTab) {
+            setActiveTabId(existingTab.id);
+            return;
+        }
+        addTab({
+            type: 'unified-graph',
+            title: 'Unified Knowledge Graph',
+            icon: '🕸️'
+        });
+    };
+
+    const openMapView = (config = {}) => {
+        const { title = 'Map', layers = [], style = 'auto', center, zoom } = config;
+        const existingTab = tabs.find(tab => tab.type === 'map-view' && tab.title === title);
+        if (existingTab) {
+            setActiveTabId(existingTab.id);
+            return;
+        }
+        addTab({
+            type: 'map-view',
+            title: title,
+            icon: '🗺️',
+            layers,
+            style,
+            center,
+            zoom
         });
     };
 
@@ -346,6 +416,14 @@ const TabbedContentManager = forwardRef((props, ref) => {
                         onClose={() => closeTab(tab.id)}
                     />
                 );
+            case 'rss-category':
+                return (
+                    <RSSArticleViewer
+                        feedIds={tab.feedIds}
+                        viewerTitle={tab.title}
+                        onClose={() => closeTab(tab.id)}
+                    />
+                );
             case 'document':
                 return (
                     <DocumentViewer
@@ -370,7 +448,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
                 return (
                     <OrgAgendaView
                         onOpenDocument={(result) => {
-                            console.log('📅 ROOSEVELT: Opening document from agenda:', result);
+                            console.log('Opening document from agenda:', result);
                             // Open document with scroll parameters
                             openDocument(result.documentId, result.documentName, {
                                 scrollToLine: result.scrollToLine,
@@ -383,7 +461,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
                 return (
                     <OrgSearchView
                         onOpenDocument={(result) => {
-                            console.log('🔍 ROOSEVELT: Opening document from search:', result);
+                            console.log('Opening document from search:', result);
                             // Open document with scroll parameters
                             openDocument(result.documentId, result.documentName, {
                                 scrollToLine: result.scrollToLine,
@@ -396,7 +474,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
                 return (
                     <OrgTodosView
                         onOpenDocument={(result) => {
-                            console.log('✅ ROOSEVELT: Opening document from TODOs:', result);
+                            console.log('Opening document from TODOs:', result);
                             // Open document with scroll parameters
                             openDocument(result.documentId, result.documentName, {
                                 scrollToLine: result.scrollToLine,
@@ -409,7 +487,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
                 return (
                     <OrgContactsView
                         onOpenDocument={(result) => {
-                            console.log('👤 ROOSEVELT: Opening document from Contacts:', result);
+                            console.log('Opening document from Contacts:', result);
                             // Open document with scroll parameters
                             openDocument(result.documentId, result.documentName, {
                                 scrollToLine: result.scrollToLine,
@@ -420,35 +498,14 @@ const TabbedContentManager = forwardRef((props, ref) => {
                 );
             case 'org-tags':
                 return (
-                    <div style={placeholderStyle}>
-                        <div style={{ maxWidth: 800, margin: '0 auto', textAlign: 'left' }}>
-                            <h2 style={{ display: 'flex', alignItems: 'center', gap: 8, color: theme.palette.text.primary }}>
-                                <span>🏷️</span> Tags Browser
-                            </h2>
-                            <p style={{ color: theme.palette.text.secondary, marginBottom: 24 }}>
-                                Browse and explore content by org-mode tags.
-                            </p>
-                            <div style={{ 
-                                background: theme.palette.mode === 'dark' ? 'rgba(255, 193, 7, 0.15)' : '#fff3cd', 
-                                padding: 16, 
-                                borderRadius: 8, 
-                                border: `1px solid ${theme.palette.mode === 'dark' ? 'rgba(255, 193, 7, 0.5)' : '#ffc107'}`,
-                                marginBottom: 16,
-                                color: theme.palette.text.primary
-                            }}>
-                                <strong>🚧 Coming Soon!</strong>
-                                <p style={{ marginTop: 8, marginBottom: 0 }}>
-                                    This feature is under active development. It will provide:
-                                </p>
-                                <ul style={{ marginTop: 8, marginBottom: 0 }}>
-                                    <li>Tag cloud showing all tags in use</li>
-                                    <li>Click tags to see all items with that tag</li>
-                                    <li>Combine multiple tags for refined filtering</li>
-                                    <li>Tag statistics and usage patterns</li>
-                                </ul>
-                            </div>
-                        </div>
-                    </div>
+                    <OrgTagsView
+                        onOpenDocument={(result) => {
+                            openDocument(result.documentId, result.documentName, {
+                                scrollToLine: result.scrollToLine,
+                                scrollToHeading: result.scrollToHeading
+                            });
+                        }}
+                    />
                 );
             case 'data-workspace':
                 return (
@@ -472,6 +529,34 @@ const TabbedContentManager = forwardRef((props, ref) => {
                         onStateChange={(state) => updateFileGraphTabState(tab.id, state)}
                     />
                 );
+            case 'entity-graph':
+                return (
+                    <EntityRelationGraph
+                        onOpenDocument={(docId, docName) => openDocument(docId, docName)}
+                        persistedState={{
+                            searchFilter: tab.searchFilter,
+                            entityTypeFilter: tab.entityTypeFilter,
+                            entityLimit: tab.entityLimit,
+                            viewport: tab.viewport,
+                        }}
+                        onStateChange={(state) => updateFileGraphTabState(tab.id, state)}
+                    />
+                );
+            case 'unified-graph':
+                return (
+                    <UnifiedKnowledgeGraph
+                        onOpenDocument={(docId, docName) => openDocument(docId, docName)}
+                        persistedState={tab}
+                        onStateChange={(state) => updateFileGraphTabState(tab.id, state)}
+                    />
+                );
+            case 'map-view':
+                return (
+                    <MapViewTabContent
+                        tab={tab}
+                        darkMode={darkMode}
+                    />
+                );
             default:
                 return (
                     <div style={placeholderStyle}>
@@ -485,14 +570,25 @@ const TabbedContentManager = forwardRef((props, ref) => {
     // Expose methods to parent component via ref
     useImperativeHandle(ref, () => ({
         openRSSFeed,
+        openRSSCategory,
         openDocument,
         openNewsHeadlines,
         openOrgView,
         openDataWorkspace,
         openFileGraph,
+        openEntityGraph,
+        openUnifiedGraph,
+        openMapView,
         closeDocumentTab,
         updateDocumentTabTitle
     }), [tabs]);
+
+    // Keep global ref in sync so sidebar always gets latest API (avoids stale closure after closing tabs)
+    useEffect(() => {
+        if (typeof window !== 'undefined' && ref && ref.current) {
+            window.tabbedContentManagerRef = ref.current;
+        }
+    }, [ref, tabs, activeTabId]);
 
     const activeTab = tabs.find(tab => tab.id === activeTabId);
 
@@ -505,6 +601,7 @@ const TabbedContentManager = forwardRef((props, ref) => {
 
     const tabBarStyle = {
         display: 'flex',
+        boxSizing: 'border-box',
         backgroundColor: theme.palette.background.paper,
         borderBottom: `1px solid ${theme.palette.divider}`,
         padding: '0 16px',
@@ -574,10 +671,13 @@ const TabbedContentManager = forwardRef((props, ref) => {
         marginLeft: '16px'
     };
 
+    const isGraphTab = activeTab && ['file-graph', 'entity-graph', 'unified-graph'].includes(activeTab.type);
     const contentStyle = {
         flex: 1,
         overflow: 'hidden',
-        backgroundColor: theme.palette.background.default
+        minWidth: 0,
+        backgroundColor: theme.palette.background.default,
+        ...(isGraphTab ? { display: 'flex', flexDirection: 'column' } : {})
     };
 
     const placeholderStyle = {

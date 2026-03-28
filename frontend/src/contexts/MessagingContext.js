@@ -1,8 +1,5 @@
 /**
- * Roosevelt's Messaging Context
- * Global state management for user-to-user messaging
- * 
- * BULLY! Centralized state for the entire messaging cavalry!
+ * Messaging context: global state for user-to-user messaging.
  */
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
@@ -45,7 +42,7 @@ export const MessagingProvider = ({ children }) => {
   const [error, setError] = useState(null);
   
   const presenceUpdateInterval = useRef(null);
-  const processedMessageIds = useRef(new Set()); // BULLY! De-duplication ledger station!
+  const processedMessageIds = useRef(new Set());
 
   // =====================
   // ROOM OPERATIONS
@@ -59,7 +56,7 @@ export const MessagingProvider = ({ children }) => {
     
     try {
       setIsLoading(true);
-      console.log('🔄 BULLY! Loading messaging rooms...');
+      console.log('Loading messaging rooms...');
       const userRooms = await messagingService.getUserRooms();
       console.log(`✅ Loaded ${userRooms.length} rooms:`, userRooms);
       setRooms(userRooms);
@@ -75,7 +72,7 @@ export const MessagingProvider = ({ children }) => {
       });
       
       if (participantIds.size > 0) {
-        console.log(`🔍 BULLY! Fetching initial presence for ${participantIds.size} participants...`);
+        console.log(`Fetching initial presence for ${participantIds.size} participants...`);
         // We can fetch them individually or if there's a bulk endpoint use that
         // For now, let's fetch them in parallel
         Promise.all(Array.from(participantIds).map(id => messagingService.getUserPresence(id)))

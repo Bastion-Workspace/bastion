@@ -16,7 +16,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from config.settings import settings
-from service.grpc_service import CrawlServiceGRPCImplementation
+from service.grpc_service import CrawlServiceGRPCImplementation, BrowserSessionServiceGRPCImplementation
 
 # Import proto after adding path
 import sys
@@ -26,21 +26,22 @@ from protos import crawl_service_pb2_grpc
 
 class GracefulShutdown:
     """Handle graceful shutdown"""
-    
-    def __init__(self, server, service_impl):
+
+    def __init__(self, server, service_impls):
         self.server = server
-        self.service_impl = service_impl
+        self.service_impls = service_impls if isinstance(service_impls, list) else [service_impls]
         self.shutdown_event = asyncio.Event()
-    
+
     def signal_handler(self, signum, frame):
         """Handle shutdown signal"""
         logger.info(f"Received signal {signum}, initiating graceful shutdown...")
         asyncio.create_task(self.shutdown())
-    
+
     async def shutdown(self):
         """Shutdown server gracefully"""
         logger.info("Stopping server...")
-        await self.service_impl.cleanup()
+        for impl in self.service_impls:
+            await impl.cleanup()
         await self.server.stop(grace=5)
         logger.info("Server shutdown complete")
         self.shutdown_event.set()
@@ -53,15 +54,17 @@ async def serve():
         settings.validate()
         logger.info(f"Starting {settings.SERVICE_NAME} on port {settings.GRPC_PORT}")
         
-        # Create service implementation
-        service_impl = CrawlServiceGRPCImplementation()
-        
-        # Initialize service
+        # Create service implementations
+        crawl_impl = CrawlServiceGRPCImplementation()
+        browser_impl = BrowserSessionServiceGRPCImplementation()
+
+        # Initialize services
         logger.info("Initializing service components...")
-        await service_impl.initialize()
-        
+        await crawl_impl.initialize()
+        await browser_impl.initialize()
+
         # Create gRPC server with increased message size limits
-        # Default is 4MB, increase to 100MB for large crawl responses
+        # Default is 4MB, increase to 100MB for large crawl responses and file downloads
         options = [
             ('grpc.max_send_message_length', 100 * 1024 * 1024),  # 100 MB
             ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100 MB
@@ -70,18 +73,16 @@ async def serve():
             futures.ThreadPoolExecutor(max_workers=settings.MAX_CONCURRENT_CRAWLS),
             options=options
         )
-        
-        # Add service
-        crawl_service_pb2_grpc.add_CrawlServiceServicer_to_server(
-            service_impl,
-            server
-        )
-        
+
+        # Add services
+        crawl_service_pb2_grpc.add_CrawlServiceServicer_to_server(crawl_impl, server)
+        crawl_service_pb2_grpc.add_BrowserSessionServiceServicer_to_server(browser_impl, server)
+
         # Bind to port
         server.add_insecure_port(f'[::]:{settings.GRPC_PORT}')
-        
+
         # Setup graceful shutdown
-        shutdown_handler = GracefulShutdown(server, service_impl)
+        shutdown_handler = GracefulShutdown(server, [crawl_impl, browser_impl])
         signal.signal(signal.SIGINT, shutdown_handler.signal_handler)
         signal.signal(signal.SIGTERM, shutdown_handler.signal_handler)
         

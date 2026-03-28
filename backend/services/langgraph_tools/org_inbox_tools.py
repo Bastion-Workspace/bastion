@@ -1,12 +1,17 @@
 """
-Org Inbox Tools - Utilities to locate, create, and modify the user's org-mode inbox file.
+Org Inbox Tools - Utilities to locate, create, and append to the user's org-mode inbox file.
 Inbox path is resolved via org-mode settings only; no filesystem globbing.
+
+Todo CRUD (list, create, update, toggle, delete, archive) has moved to the
+universal todo API (backend/services/org_todo_service.py). Only inbox path
+resolution and raw append/tag-index utilities remain here.
 """
 
 import glob
 import logging
+import re
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 
 from config import settings
 from services.org_files_service import ensure_user_org_files
@@ -82,7 +87,101 @@ class OrgInboxTools:
         path = await self._find_inbox_path()
         return str(path) if path else None
 
+    async def append_text(self, content: str) -> Dict[str, Any]:
+        path = await self.ensure_inbox()
+        try:
+            to_write = content if content.endswith("\n") else content + "\n"
+            existing = path.read_text(encoding="utf-8")
+            if existing and not existing.endswith("\n"):
+                to_write = "\n" + to_write
+            with path.open("a", encoding="utf-8") as f:
+                f.write(to_write)
+            return {"path": str(path), "appended_chars": len(to_write)}
+        except Exception as e:
+            logger.error(f"Failed to append text: {e}")
+            return {"path": str(path), "error": str(e)}
+
+    async def append_block(self, block: str) -> Dict[str, Any]:
+        """Append a multi-line Org block and return inserted line range."""
+        path = await self.ensure_inbox()
+        try:
+            block_text = block.strip("\n") + "\n"
+            existing_lines = path.read_text(encoding="utf-8").splitlines()
+            start_idx = len(existing_lines)
+            with path.open("a", encoding="utf-8") as f:
+                f.write(block_text)
+            added_count = len(block_text.splitlines())
+            end_idx = start_idx + added_count - 1
+            return {
+                "path": str(path),
+                "line_start_index": start_idx,
+                "line_end_index": end_idx,
+                "written_lines": added_count
+            }
+        except Exception as e:
+            logger.error(f"Failed to append block: {e}")
+            return {"path": str(path), "error": str(e)}
+
+    def _extract_tags_from_headline(self, line: str) -> List[str]:
+        import re
+        m = re.search(r"\s+:([A-Za-z0-9_@:+-]+):\s*$", line)
+        if not m:
+            return []
+        tags = [t for t in m.group(1).split(":") if t]
+        return tags
+
+    async def index_tags(self) -> Dict[str, int]:
+        """Scan .org files under uploads to build a tag frequency index."""
+        base = await self._base_dir()
+        counts: Dict[str, int] = {}
+        try:
+            if not base.exists():
+                return counts
+            for m in glob.glob(str(base / "**" / "*.org"), recursive=True):
+                if "/.versions/" in m or "\\.versions\\" in m:
+                    continue
+                p = Path(m)
+                try:
+                    for line in p.read_text(encoding="utf-8").splitlines():
+                        if line.lstrip().startswith("*"):
+                            for t in self._extract_tags_from_headline(line):
+                                counts[t] = counts.get(t, 0) + 1
+                except Exception:
+                    continue
+            return counts
+        except Exception as e:
+            logger.error(f"Failed to index tags: {e}")
+            return counts
+
+    # ── Internal methods used by gRPC handlers (not exposed to LLM agents) ──
+
+    async def _created_timestamp_line(self) -> str:
+        """Format CREATED timestamp in user's timezone (org-mode style)."""
+        if not self._user_id:
+            return ""
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            from services.settings_service import settings_service
+            user_timezone = await settings_service.get_user_timezone(self._user_id)
+            tz = ZoneInfo(user_timezone)
+            now = datetime.now(tz)
+            ts = now.strftime("%Y-%m-%d %a %H:%M")
+            return f"CREATED: [{ts}]\n"
+        except Exception as e:
+            logger.debug("Could not add CREATED timestamp: %s", e)
+            return ""
+
+    def _set_tags_on_headline(self, line: str, tags: List[str]) -> str:
+        import re
+        base = re.sub(r"\s+:([A-Za-z0-9_@:+-]+):\s*$", "", line)
+        if tags:
+            tag_suffix = ":" + ":".join(sorted(set(t.strip() for t in tags if t.strip()))) + ":"
+            return f"{base} {tag_suffix}"
+        return base
+
     async def list_items(self) -> Dict[str, Any]:
+        """List task-like items from inbox.org. Used internally by gRPC AddOrgInboxItem handler."""
         path = await self.ensure_inbox()
         try:
             content = path.read_text(encoding="utf-8")
@@ -100,29 +199,12 @@ class OrgInboxTools:
                     items.append({"line_index": idx, "done": done, "text": text})
             return {"path": str(path), "items": items}
         except Exception as e:
-            logger.error(f"❌ Failed to list items: {e}")
+            logger.error(f"Failed to list items: {e}")
             return {"path": str(path), "items": [], "error": str(e)}
 
-    async def _created_timestamp_line(self) -> str:
-        """Format CREATED timestamp in user's timezone (org-mode style). Returns empty string if no user_id or on error."""
-        if not self._user_id:
-            return ""
-        try:
-            from datetime import datetime
-            from zoneinfo import ZoneInfo
-            from services.settings_service import settings_service
-            user_timezone = await settings_service.get_user_timezone(self._user_id)
-            tz = ZoneInfo(user_timezone)
-            now = datetime.now(tz)
-            ts = now.strftime("%Y-%m-%d %a %H:%M")
-            return f"CREATED: [{ts}]\n"
-        except Exception as e:
-            logger.debug("Could not add CREATED timestamp: %s", e)
-            return ""
-
-    async def add_item(self, text: str, kind: str = "checkbox") -> Dict[str, Any]:
+    async def add_item(self, text: str, kind: str = "checkbox", body: Optional[str] = None) -> Dict[str, Any]:
+        """Add a checkbox or TODO heading to inbox. Used internally by gRPC AddOrgInboxItem handler."""
         path = await self.ensure_inbox()
-        line = ""
         if kind == "todo":
             line = f"* TODO {text}\n"
         else:
@@ -130,9 +212,15 @@ class OrgInboxTools:
         created_line = await self._created_timestamp_line()
         try:
             with path.open("a", encoding="utf-8") as f:
+                existing = path.read_text(encoding="utf-8")
+                if existing and not existing.endswith("\n"):
+                    f.write("\n")
                 f.write(line)
                 if created_line:
                     f.write(created_line)
+                if kind == "todo" and body and body.strip():
+                    body_text = body.strip()
+                    f.write(body_text + "\n" if not body_text.endswith("\n") else body_text)
             lines = path.read_text(encoding="utf-8").splitlines()
             added_index = len(lines) - 1
             if created_line:
@@ -142,49 +230,8 @@ class OrgInboxTools:
             logger.error("Failed to add item: %s", e)
             return {"path": str(path), "error": str(e)}
 
-    async def append_text(self, content: str) -> Dict[str, Any]:
-        path = await self.ensure_inbox()
-        try:
-            # Ensure newline termination
-            to_write = content if content.endswith("\n") else content + "\n"
-            with path.open("a", encoding="utf-8") as f:
-                f.write(to_write)
-            return {"path": str(path), "appended_chars": len(to_write)}
-        except Exception as e:
-            logger.error(f"❌ Failed to append text: {e}")
-            return {"path": str(path), "error": str(e)}
-
-    async def append_block(self, block: str) -> Dict[str, Any]:
-        """Append a multi-line Org block and return inserted line range.
-
-        Returns {
-          path, line_start_index, line_end_index, written_lines
-        }
-        """
-        path = await self.ensure_inbox()
-        try:
-            # Normalize block boundaries
-            block_text = block.strip("\n") + "\n"
-            # Read current lines to compute start index
-            existing_lines = path.read_text(encoding="utf-8").splitlines()
-            start_idx = len(existing_lines)
-            # Append
-            with path.open("a", encoding="utf-8") as f:
-                f.write(block_text)
-            # Compute end index
-            added_count = len(block_text.splitlines())
-            end_idx = start_idx + added_count - 1
-            return {
-                "path": str(path),
-                "line_start_index": start_idx,
-                "line_end_index": end_idx,
-                "written_lines": added_count
-            }
-        except Exception as e:
-            logger.error(f"❌ Failed to append block: {e}")
-            return {"path": str(path), "error": str(e)}
-
     async def toggle_done(self, line_index: int) -> Dict[str, Any]:
+        """Toggle done state of a task line. Used internally by gRPC ToggleOrgInboxItem handler."""
         path = await self.ensure_inbox()
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -204,15 +251,15 @@ class OrgInboxTools:
             elif line.strip().startswith("** DONE "):
                 lines[line_index] = line.replace("** DONE ", "** TODO ", 1)
             else:
-                # Not a recognized task line
                 return {"path": str(path), "error": "line is not a task"}
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return {"path": str(path), "updated_index": line_index, "new_line": lines[line_index]}
         except Exception as e:
-            logger.error(f"❌ Failed to toggle item: {e}")
+            logger.error(f"Failed to toggle item: {e}")
             return {"path": str(path), "error": str(e)}
 
     async def update_line(self, line_index: int, new_text: str) -> Dict[str, Any]:
+        """Update the text of a task line. Used internally by gRPC UpdateOrgInboxItem handler."""
         path = await self.ensure_inbox()
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -236,51 +283,11 @@ class OrgInboxTools:
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return {"path": str(path), "updated_index": line_index, "new_line": lines[line_index]}
         except Exception as e:
-            logger.error(f"❌ Failed to update line: {e}")
+            logger.error(f"Failed to update line: {e}")
             return {"path": str(path), "error": str(e)}
 
-    # -----------------------
-    # Tag Indexing & Editing
-    # -----------------------
-    def _extract_tags_from_headline(self, line: str) -> List[str]:
-        import re
-        m = re.search(r"\s+:([A-Za-z0-9_:+-]+):\s*$", line)
-        if not m:
-            return []
-        tags = [t for t in m.group(1).split(":") if t]
-        return tags
-
-    def _set_tags_on_headline(self, line: str, tags: List[str]) -> str:
-        import re
-        # Remove existing tag suffix
-        base = re.sub(r"\s+:([A-Za-z0-9_:+-]+):\s*$", "", line)
-        if tags:
-            tag_suffix = ":" + ":".join(sorted(set(t.strip() for t in tags if t.strip()))) + ":"
-            return f"{base} {tag_suffix}"
-        return base
-
-    async def index_tags(self) -> Dict[str, int]:
-        """Scan .org files under uploads to build a tag frequency index."""
-        base = await self._base_dir()
-        counts: Dict[str, int] = {}
-        try:
-            if not base.exists():
-                return counts
-            for m in glob.glob(str(base / "**" / "*.org"), recursive=True):
-                p = Path(m)
-                try:
-                    for line in p.read_text(encoding="utf-8").splitlines():
-                        if line.lstrip().startswith("*"):
-                            for t in self._extract_tags_from_headline(line):
-                                counts[t] = counts.get(t, 0) + 1
-                except Exception:
-                    continue
-            return counts
-        except Exception as e:
-            logger.error(f"❌ Failed to index tags: {e}")
-            return counts
-
     async def apply_tags(self, line_index: int, tags: List[str]) -> Dict[str, Any]:
+        """Apply tags to a specific line. Used internally by gRPC ApplyOrgInboxTags handler."""
         path = await self.ensure_inbox()
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -288,105 +295,19 @@ class OrgInboxTools:
                 return {"path": str(path), "error": "line_index out of range"}
             line = lines[line_index]
             if line.lstrip().startswith("*"):
-                # Headline: append tags suffix
                 new_line = self._set_tags_on_headline(line, tags)
                 lines[line_index] = new_line
             else:
-                # Non-headline (checkbox). Append a tag suffix for visibility
                 tag_suffix = "  :" + ":".join(sorted(set(t.strip() for t in tags if t.strip()))) + ":"
                 lines[line_index] = (line.rstrip() + tag_suffix)
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return {"path": str(path), "updated_index": line_index, "new_line": lines[line_index]}
         except Exception as e:
-            logger.error(f"❌ Failed to apply tags: {e}")
+            logger.error(f"Failed to apply tags: {e}")
             return {"path": str(path), "error": str(e)}
 
-    # -----------------------
-    # State Management
-    # -----------------------
-    def _parse_todo_state(self, line: str) -> Tuple[Optional[str], int]:
-        stripped = line.strip()
-        # Support * STATE and ** STATE
-        if stripped.startswith("* ") or stripped.startswith("** "):
-            parts = stripped.split()
-            if len(parts) >= 2:
-                state = parts[1]
-                return state, len(parts[0])  # level indicator length (* or **)
-        return None, 0
-
-    async def set_state(self, line_index: int, state: str) -> Dict[str, Any]:
-        path = await self.ensure_inbox()
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-            if line_index < 0 or line_index >= len(lines):
-                return {"path": str(path), "error": "line_index out of range"}
-            line = lines[line_index]
-            if not line.lstrip().startswith("*"):
-                return {"path": str(path), "error": "line is not a headline"}
-            # Replace second token with new state
-            parts = line.split()
-            if len(parts) >= 2:
-                parts[1] = state
-                lines[line_index] = " ".join(parts)
-                path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-                return {"path": str(path), "updated_index": line_index, "new_line": lines[line_index]}
-            return {"path": str(path), "error": "unable to set state"}
-        except Exception as e:
-            logger.error(f"❌ Failed to set state: {e}")
-            return {"path": str(path), "error": str(e)}
-
-    async def promote_state(self, line_index: int, sequence: List[str]) -> Dict[str, Any]:
-        path = await self.ensure_inbox()
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-            if line_index < 0 or line_index >= len(lines):
-                return {"path": str(path), "error": "line_index out of range"}
-            line = lines[line_index]
-            if not line.lstrip().startswith("*"):
-                return {"path": str(path), "error": "line is not a headline"}
-            state, _ = self._parse_todo_state(line)
-            if state is None:
-                return {"path": str(path), "error": "no todo state detected"}
-            if state not in sequence:
-                return {"path": str(path), "error": "state not in sequence"}
-            idx = sequence.index(state)
-            if idx + 1 >= len(sequence):
-                return {"path": str(path), "error": "already at final state"}
-            return await self.set_state(line_index, sequence[idx + 1])
-        except Exception as e:
-            logger.error(f"❌ Failed to promote state: {e}")
-            return {"path": str(path), "error": str(e)}
-
-    async def demote_state(self, line_index: int, sequence: List[str]) -> Dict[str, Any]:
-        path = await self.ensure_inbox()
-        try:
-            lines = path.read_text(encoding="utf-8").splitlines()
-            if line_index < 0 or line_index >= len(lines):
-                return {"path": str(path), "error": "line_index out of range"}
-            line = lines[line_index]
-            if not line.lstrip().startswith("*"):
-                return {"path": str(path), "error": "line is not a headline"}
-            state, _ = self._parse_todo_state(line)
-            if state is None:
-                return {"path": str(path), "error": "no todo state detected"}
-            if state not in sequence:
-                return {"path": str(path), "error": "state not in sequence"}
-            idx = sequence.index(state)
-            if idx - 1 < 0:
-                return {"path": str(path), "error": "already at first state"}
-            return await self.set_state(line_index, sequence[idx - 1])
-        except Exception as e:
-            logger.error(f"❌ Failed to demote state: {e}")
-            return {"path": str(path), "error": str(e)}
-
-    # -----------------------
-    # Schedule & Repeater
-    # -----------------------
     async def set_schedule_and_repeater(self, line_index: int, scheduled: Optional[str], repeater: Optional[str]) -> Dict[str, Any]:
-        """Ensure a SCHEDULED line exists beneath the headline and set optional repeater.
-        scheduled should be an org timestamp like <YYYY-MM-DD Dow>.
-        repeater should be something like +1w, .+1w, +1m, etc.
-        """
+        """Set SCHEDULED and optional repeater. Used internally by gRPC SetOrgInboxSchedule handler."""
         path = await self.ensure_inbox()
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
@@ -395,7 +316,6 @@ class OrgInboxTools:
             if not lines[line_index].lstrip().startswith("*"):
                 return {"path": str(path), "error": "line is not a headline"}
             insert_idx = line_index + 1
-            # Find existing SCHEDULED line contiguous below
             sched_idx = None
             for idx in range(line_index + 1, min(line_index + 5, len(lines))):
                 if lines[idx].strip().startswith("SCHEDULED:"):
@@ -405,7 +325,6 @@ class OrgInboxTools:
                     break
             ts = scheduled or ""
             if repeater and ts:
-                # Insert repeater inside timestamp, e.g., <2026-03-30 Mon +1w>
                 import re
                 ts = re.sub(r"^<([^>]+)>$", lambda m: f"<{m.group(1)} {repeater}>", ts)
             content = f"SCHEDULED: {ts}".rstrip()
@@ -416,11 +335,11 @@ class OrgInboxTools:
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return {"path": str(path), "updated_index": line_index, "scheduled_index": (sched_idx or insert_idx), "scheduled_line": content}
         except Exception as e:
-            logger.error(f"❌ Failed to set schedule/repeater: {e}")
+            logger.error(f"Failed to set schedule/repeater: {e}")
             return {"path": str(path), "error": str(e)}
 
 
-# Simple async wrappers for registry functions
+# Simple async wrappers for registry and gRPC handlers
 _org_tools_instances: Dict[str, OrgInboxTools] = {}
 
 
@@ -437,6 +356,23 @@ async def org_inbox_path(user_id: Optional[str] = None) -> str:
     path = await inst.get_inbox_path()
     return path or ""
 
+
+async def org_inbox_append_text(content: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    inst = await _get_instance(user_id)
+    return await inst.append_text(content=content)
+
+
+async def org_inbox_append_block(block: str, user_id: Optional[str] = None) -> Dict[str, Any]:
+    inst = await _get_instance(user_id)
+    return await inst.append_block(block=block)
+
+
+async def org_inbox_index_tags(user_id: Optional[str] = None) -> Dict[str, int]:
+    inst = await _get_instance(user_id)
+    return await inst.index_tags()
+
+
+# ── Internal wrappers used by gRPC handlers (not registered in tool registry) ──
 
 async def org_inbox_list_items(user_id: Optional[str] = None) -> Dict[str, Any]:
     inst = await _get_instance(user_id)
@@ -458,82 +394,124 @@ async def org_inbox_update_line(line_index: int, new_text: str, user_id: Optiona
     return await inst.update_line(line_index=line_index, new_text=new_text)
 
 
-async def org_inbox_append_text(content: str, user_id: Optional[str] = None) -> Dict[str, Any]:
-    inst = await _get_instance(user_id)
-    return await inst.append_text(content=content)
-
-
-async def org_inbox_append_block(block: str, user_id: Optional[str] = None) -> Dict[str, Any]:
-    inst = await _get_instance(user_id)
-    return await inst.append_block(block=block)
-
-
-# New wrappers for extended functionality
-async def org_inbox_index_tags(user_id: Optional[str] = None) -> Dict[str, int]:
-    inst = await _get_instance(user_id)
-    return await inst.index_tags()
-
-
 async def org_inbox_apply_tags(line_index: int, tags: List[str], user_id: Optional[str] = None) -> Dict[str, Any]:
     inst = await _get_instance(user_id)
     return await inst.apply_tags(line_index=line_index, tags=tags)
-
-
-async def org_inbox_set_state(line_index: int, state: str, user_id: Optional[str] = None) -> Dict[str, Any]:
-    inst = await _get_instance(user_id)
-    return await inst.set_state(line_index=line_index, state=state)
-
-
-async def org_inbox_promote_state(line_index: int, sequence: List[str], user_id: Optional[str] = None) -> Dict[str, Any]:
-    inst = await _get_instance(user_id)
-    return await inst.promote_state(line_index=line_index, sequence=sequence)
-
-
-async def org_inbox_demote_state(line_index: int, sequence: List[str], user_id: Optional[str] = None) -> Dict[str, Any]:
-    inst = await _get_instance(user_id)
-    return await inst.demote_state(line_index=line_index, sequence=sequence)
 
 
 async def org_inbox_set_schedule_and_repeater(line_index: int, scheduled: Optional[str], repeater: Optional[str], user_id: Optional[str] = None) -> Dict[str, Any]:
     inst = await _get_instance(user_id)
     return await inst.set_schedule_and_repeater(line_index=line_index, scheduled=scheduled, repeater=repeater)
 
-# Archive helper: move DONE headlines/checkboxes from inbox to archive file
+
 async def org_inbox_archive_done(user_id: str) -> Dict[str, Any]:
+    """
+    Archive closed entries from inbox to global archive. Moves full entries (heading + subtree + properties).
+    Only archives done states (DONE, CANCELLED, etc.) and - [x] checkboxes.
+    """
     try:
+        from services.org_todo_service import _resolve_done_states, OrgTodoService
+        done_states = await _resolve_done_states(user_id)
         inst = await _get_instance(user_id)
-        # Read inbox
         inbox_path = await inst.ensure_inbox()
         lines = inbox_path.read_text(encoding="utf-8").splitlines()
+        entries = _parse_inbox_entries(lines)
+        to_archive: List[List[str]] = []
         remaining: List[str] = []
-        done_items: List[str] = []
-        for line in lines:
-            stripped = line.strip()
-            is_done = (
-                stripped.startswith("- [x]") or
-                stripped.startswith("* DONE ") or
-                stripped.startswith("** DONE ")
-            )
-            if is_done:
-                done_items.append(line)
+        for entry_lines, state in entries:
+            if state == "checkbox_done":
+                to_archive.append(entry_lines)
+            elif state and state.upper() in done_states:
+                to_archive.append(entry_lines)
             else:
-                remaining.append(line)
-        # Write back inbox
-        inbox_path.write_text("\n".join(remaining) + ("\n" if remaining else ""), encoding="utf-8")
-        # Append to archive
+                remaining.extend(entry_lines)
+        if not to_archive:
+            return {
+                "path": str(inbox_path),
+                "archived_to": "",
+                "archived_count": 0,
+            }
         from services.org_files_service import get_user_archive_path
         archive_path = Path(await get_user_archive_path(user_id))
         archive_path.parent.mkdir(parents=True, exist_ok=True)
+        ts = await _format_archive_ts(user_id)
+        source_label = str(inbox_path.name)
         with archive_path.open("a", encoding="utf-8") as f:
-            for item in done_items:
-                f.write(item + "\n")
+            for entry_lines in to_archive:
+                block = OrgTodoService._upsert_properties_entry(entry_lines, "ARCHIVE_TIME", f"[{ts}]")
+                block = OrgTodoService._upsert_properties_entry(block, "ARCHIVE_FILE", source_label)
+                for line in block:
+                    f.write(line + "\n" if not line.endswith("\n") else line)
+        inbox_path.write_text("\n".join(remaining) + ("\n" if remaining else ""), encoding="utf-8")
         return {
             "path": str(inbox_path),
             "archived_to": str(archive_path),
-            "archived_count": len(done_items)
+            "archived_count": len(to_archive),
         }
     except Exception as e:
-        logger.error(f"❌ Failed to archive done items for {user_id}: {e}")
+        logger.error("Failed to archive inbox items for %s: %s", user_id, e)
         return {"error": str(e)}
 
 
+async def _format_archive_ts(user_id: str) -> str:
+    """Format current time in user timezone for ARCHIVE_TIME property."""
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from services.settings_service import settings_service
+        tz = ZoneInfo(await settings_service.get_user_timezone(user_id))
+        return datetime.now(tz).strftime("%Y-%m-%d %a %H:%M")
+    except Exception:
+        from datetime import datetime
+        return datetime.now().strftime("%Y-%m-%d %a %H:%M")
+
+
+def _parse_inbox_entries(lines: List[str]) -> List[tuple]:
+    """
+    Parse lines into (entry_lines, state) tuples. Each entry is either a full headline subtree
+    or a single checkbox line. state = todo state (e.g. DONE, CANCELLED) for headlines,
+    'checkbox_done' / 'checkbox_open' for checkboxes, None for other (e.g. * Inbox).
+    """
+    result: List[tuple] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if re.match(r"^\*+\s+", stripped):
+            level = 0
+            for c in stripped:
+                if c == "*":
+                    level += 1
+                else:
+                    break
+            j = i + 1
+            while j < len(lines):
+                next_line = lines[j]
+                next_stripped = next_line.strip()
+                if re.match(r"^\*+\s+", next_stripped):
+                    next_level = 0
+                    for c in next_stripped:
+                        if c == "*":
+                            next_level += 1
+                        else:
+                            break
+                    if next_level <= level:
+                        break
+                j += 1
+            entry_lines = lines[i:j]
+            state = None
+            m = re.match(r"^\*+\s+(\S+)\s", stripped)
+            if m:
+                state = m.group(1).upper()
+            result.append((entry_lines, state))
+            i = j
+        elif stripped.startswith("- [x]"):
+            result.append(([line], "checkbox_done"))
+            i += 1
+        elif stripped.startswith("- [ ]"):
+            result.append(([line], "checkbox_open"))
+            i += 1
+        else:
+            result.append(([line], None))
+            i += 1
+    return result

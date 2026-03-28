@@ -80,13 +80,24 @@ class MediaService extends ApiServiceBase {
   }
 
   // Streaming
-  getStreamUrl = async (trackId, serviceType = null) => {
-    // Use proxy endpoint for better format support and CORS handling
-    let url = `${window.location.origin}/api/music/stream-proxy/${trackId}`;
-    if (serviceType) {
-      url += `?service_type=${encodeURIComponent(serviceType)}`;
-    }
-    return url;
+  getStreamUrl = (trackId, serviceType = null, parentId = null) => {
+    // Use proxy endpoint for streaming. Include token in query so the HTML5 audio
+    // element can load the URL directly (no fetch + blob), enabling near-gapless playback.
+    // parentId is required for AudioBookShelf podcast episodes (library item id).
+    // Base must match ApiServiceBase (VITE_API_URL); window.location alone breaks when the API
+    // is on another origin or dev proxies JSON but audio used the wrong host.
+    const apiBase = (this.baseURL || '').replace(/\/$/, '');
+    const path = `/api/music/stream-proxy/${trackId}`;
+    const base = apiBase ? `${apiBase}${path}` : path;
+    const params = new URLSearchParams();
+    if (serviceType) params.set('service_type', serviceType);
+    if (parentId) params.set('parent_id', parentId);
+    const token = typeof localStorage !== 'undefined'
+      ? (localStorage.getItem('auth_token') || localStorage.getItem('token'))
+      : null;
+    if (token) params.set('token', token);
+    const query = params.toString();
+    return query ? `${base}?${query}` : base;
   }
 
   // Playlist management

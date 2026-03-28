@@ -33,11 +33,12 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { materialLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { markdownToPlainText, renderCitations, smartCopy } from '../../utils/chatUtils';
 import { useCapabilities } from '../../contexts/CapabilitiesContext';
-import EditorOpsPreviewModal from './EditorOpsPreviewModal';
 import FolderSelectionDialog from './FolderSelectionDialog';
 import { useImageLightbox } from '../common/ImageLightbox';
 import ChatMessage from './ChatMessage';
 import ChartRenderer from './ChartRenderer';
+
+const BOTTOM_SCROLL_THRESHOLD_PX = 100;
 
 const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
   const theme = useTheme();
@@ -50,7 +51,8 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
     replyToMessage,
     setReplyToMessage,
     sendMessage,
-    backgroundJobService
+    backgroundJobService,
+    activeLineRouting,
   } = useChatSidebar();
   const { isAdmin, has } = useCapabilities();
   const { openLightbox } = useImageLightbox();
@@ -124,6 +126,11 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
   const [fullScreenChart, setFullScreenChart] = useState(null);
   const lastMessageCountRef = useRef(0);  // Track actual NEW messages vs updates
   const isScrollingRef = useRef(false);  // Track if user is actively scrolling
+  const messageCountRef = useRef(0);  // Current message count for scroll-up snapshot
+  const messageCountWhenScrolledUpRef = useRef(0);  // Count when user scrolled up (to detect new messages below)
+  const [hasNewMessagesBelow, setHasNewMessagesBelow] = useState(false);
+  /** Updated synchronously on scroll/resize so the "New messages" control hides as soon as the user reaches the bottom */
+  const [isNearBottomState, setIsNearBottomState] = useState(true);
 
   // Track text selection anywhere in the document and scope it to this container
   useEffect(() => {
@@ -165,14 +172,17 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
   const isNearBottom = () => {
     if (!messagesContainerRef.current) return true;
     const container = messagesContainerRef.current;
-    const threshold = 100; // pixels from bottom
-    return container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
+    return container.scrollHeight - container.scrollTop - container.clientHeight < BOTTOM_SCROLL_THRESHOLD_PX;
   };
 
   // Debounced scroll handler to prevent excessive state updates
   const handleScroll = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return;
+
+    const nearBottomNow =
+      container.scrollHeight - container.scrollTop - container.clientHeight < BOTTOM_SCROLL_THRESHOLD_PX;
+    setIsNearBottomState(nearBottomNow);
 
     // Mark that user is actively scrolling
     isScrollingRef.current = true;
@@ -185,21 +195,24 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
     // Detect if user scrolled up manually
     const currentScrollTop = container.scrollTop;
     const hasScrolledUp = currentScrollTop < lastScrollTopRef.current;
-    
+
     if (hasScrolledUp) {
       setUserHasScrolled(true);
+      messageCountWhenScrolledUpRef.current = messageCountRef.current;
     }
-    
+
     lastScrollTopRef.current = currentScrollTop;
 
     // Debounce the auto-scroll decision
     scrollTimeoutRef.current = setTimeout(() => {
       const nearBottom = isNearBottom();
       setShouldAutoScroll(nearBottom);
-      
-      // Reset user scroll flag when back near bottom
+
+      // Reset user scroll flag and "new messages below" when back near bottom
       if (nearBottom) {
         setUserHasScrolled(false);
+        setHasNewMessagesBelow(false);
+        messageCountWhenScrolledUpRef.current = messageCountRef.current;
       }
 
       // Mark scrolling as finished after debounce
@@ -207,13 +220,47 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
     }, 150); // 150ms debounce - slightly longer to be more forgiving
   }, []);
 
+  // Keep current message count in ref for scroll handler
+  useEffect(() => {
+    messageCountRef.current = messages.length;
+  }, [messages]);
+
+  // Reset "new messages below" state when switching conversations
+  useEffect(() => {
+    setHasNewMessagesBelow(false);
+    messageCountWhenScrolledUpRef.current = 0;
+    setIsNearBottomState(true);
+  }, [currentConversationId]);
+
+  // Keep bottom proximity in sync when message list height changes (streaming, images, etc.)
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const sync = () => {
+      const near =
+        el.scrollHeight - el.scrollTop - el.clientHeight < BOTTOM_SCROLL_THRESHOLD_PX;
+      setIsNearBottomState(near);
+    };
+    const ro = new ResizeObserver(() => {
+      requestAnimationFrame(sync);
+    });
+    ro.observe(el);
+    requestAnimationFrame(sync);
+    return () => ro.disconnect();
+  }, [currentConversationId]);
+
   // ROOSEVELT'S ENHANCED AUTO-SCROLL: Only scroll on NEW messages, not updates
   useEffect(() => {
     const currentMessageCount = messages.length;
     const hasNewMessages = currentMessageCount > lastMessageCountRef.current;
-    
+
     // Update the ref for next comparison
     lastMessageCountRef.current = currentMessageCount;
+
+    // If user is scrolled up and new messages arrived below, show "New Messages" button
+    if (userHasScrolled && !isNearBottom() && currentMessageCount > messageCountWhenScrolledUpRef.current) {
+      setHasNewMessagesBelow(true);
+    }
 
     // ROOSEVELT'S STRICT NO-SCROLL CONDITIONS: Don't interrupt the user!
     // 1. User is selecting text
@@ -221,7 +268,7 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
     // 3. User is actively scrolling right now
     // 4. No new messages (just an update to existing message content)
     if (
-      hasTextSelection || 
+      hasTextSelection ||
       (userHasScrolled && !isNearBottom()) ||
       isScrollingRef.current ||
       !hasNewMessages
@@ -266,7 +313,6 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
 
   const [copiedMessageId, setCopiedMessageId] = useState(null);
   const [savingNoteFor, setSavingNoteFor] = useState(null);
-  const [previewOpenFor, setPreviewOpenFor] = useState(null);
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [imageToImport, setImageToImport] = useState(null);
   const [importing, setImporting] = useState(false);
@@ -954,6 +1000,16 @@ ${message.content}
       flexDirection: 'column',
       overflow: 'hidden'
     }}>
+      <Box
+        sx={{
+          flexGrow: 1,
+          minHeight: 0,
+          position: 'relative',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
       {/* Messages Container */}
       <Box 
         ref={messagesContainerRef}
@@ -971,6 +1027,7 @@ ${message.content}
         }}
         sx={{ 
           flexGrow: 1, 
+          minHeight: 0,
           overflow: 'auto',
           p: 2,
           display: 'flex',
@@ -978,6 +1035,16 @@ ${message.content}
           gap: 2
         }}
       >
+        {activeLineRouting?.id && (
+          <Box sx={{ flexShrink: 0 }}>
+            <Chip
+              size="small"
+              color="secondary"
+              variant="outlined"
+              label={`Agent line: ${activeLineRouting.name || activeLineRouting.id.slice(0, 8)}… — type @auto to clear`}
+            />
+          </Box>
+        )}
         {/* ROOSEVELT'S IMPROVED EMPTY STATE: Better feedback during conversation restoration */}
         {messages.length === 0 && !isLoading && !conversationLoading && !messagesLoading && (
           <Box sx={{ 
@@ -1047,7 +1114,6 @@ ${message.content}
               extractImageUrls={extractImageUrls}
               getImageApiUrl={getImageApiUrl}
               openLightbox={openLightbox}
-              setPreviewOpenFor={setPreviewOpenFor}
               currentConversationId={currentConversationId}
               copiedMessageId={copiedMessageId}
               savingNoteFor={savingNoteFor}
@@ -1095,7 +1161,23 @@ ${message.content}
               </Typography>
               {(() => {
                 const lastMessage = messages[messages.length - 1];
+                const displayName = lastMessage?.metadata?.agent_display_name;
                 const agentType = lastMessage?.metadata?.agent_type || lastMessage?.agent_type;
+                if (activeLineRouting?.id) {
+                  return (
+                    <Typography variant="caption" sx={{ color: 'secondary.main', fontSize: '0.65rem', fontWeight: 600 }}>
+                      Agent line
+                      {activeLineRouting.name ? ` (${activeLineRouting.name})` : ''} is working...
+                    </Typography>
+                  );
+                }
+                if (displayName) {
+                  return (
+                    <Typography variant="caption" sx={{ color: 'secondary.main', fontSize: '0.65rem', fontWeight: 600 }}>
+                      {displayName} is chewing on it...
+                    </Typography>
+                  );
+                }
                 if (agentType) {
                   return (
                     <Typography variant="caption" sx={{ color: 'secondary.main', fontSize: '0.65rem', fontWeight: 600 }}>
@@ -1117,30 +1199,50 @@ ${message.content}
         <div ref={messagesEndRef} />
       </Box>
 
-      {/* Editor Operations Preview Modal */}
-      {(() => {
-        const msg = messages.find(m => (m.id || m.timestamp) === previewOpenFor);
-        const open = !!previewOpenFor && msg && Array.isArray(msg.editor_operations) && msg.editor_operations.length > 0;
-        const close = () => setPreviewOpenFor(null);
-        const onApplySelected = (ops, manuscriptEdit) => {
-          try {
-            window.dispatchEvent(new CustomEvent('codexApplyEditorOps', { detail: { operations: ops, manuscript_edit: manuscriptEdit || (msg ? msg.manuscript_edit : null) } }));
-          } catch (e) {
-            console.error('Failed to apply selected operations:', e);
-          }
-        };
-        return (
-          <EditorOpsPreviewModal
-            key={previewOpenFor || 'preview-modal'}
-            open={open}
-            onClose={close}
-            operations={open ? msg.editor_operations : []}
-            manuscriptEdit={open ? (msg.manuscript_edit || null) : null}
-            requestEditorContent={() => window.dispatchEvent(new CustomEvent('codexRequestEditorContent'))}
-            onApplySelected={onApplySelected}
-          />
-        );
-      })()}
+      {userHasScrolled && hasNewMessagesBelow && !isNearBottomState && (
+        <Box
+          sx={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 12,
+            display: 'flex',
+            justifyContent: 'center',
+            pointerEvents: 'none',
+            zIndex: 2,
+          }}
+        >
+          <Button
+            variant="contained"
+            size="small"
+            onClick={() => {
+              setHasNewMessagesBelow(false);
+              messageCountWhenScrolledUpRef.current = messageCountRef.current;
+              setUserHasScrolled(false);
+              setShouldAutoScroll(true);
+              setIsNearBottomState(true);
+              messagesEndRef.current?.scrollIntoView({
+                behavior: 'smooth',
+                block: 'end'
+              });
+            }}
+            sx={{
+              pointerEvents: 'auto',
+              borderRadius: '20px',
+              px: 2,
+              py: 1,
+              backgroundColor: 'primary.main',
+              '&:hover': {
+                backgroundColor: 'primary.dark',
+              },
+              boxShadow: 2,
+            }}
+          >
+            ↓ New Messages
+          </Button>
+        </Box>
+      )}
+      </Box>
 
       {/* Folder Selection Dialog for Image Import */}
       <FolderSelectionDialog
@@ -1187,43 +1289,6 @@ ${message.content}
           </Box>
         </Box>
       </Dialog>
-
-      {/* ROOSEVELT'S "RETURN TO BOTTOM" CAVALRY BUTTON - Show when user has scrolled up */}
-      {userHasScrolled && !shouldAutoScroll && (
-        <Box
-          sx={{
-            position: 'absolute',
-            bottom: 16,
-            right: 16,
-            zIndex: 1000,
-          }}
-        >
-          <Button
-            variant="contained"
-            size="small"
-            onClick={() => {
-              setUserHasScrolled(false);
-              setShouldAutoScroll(true);
-              messagesEndRef.current?.scrollIntoView({ 
-                behavior: 'smooth',
-                block: 'end'
-              });
-            }}
-            sx={{
-              borderRadius: '20px',
-              px: 2,
-              py: 1,
-              backgroundColor: 'primary.main',
-              '&:hover': {
-                backgroundColor: 'primary.dark',
-              },
-              boxShadow: 2,
-            }}
-          >
-            ↓ New Messages
-          </Button>
-        </Box>
-      )}
 
       {/* Context Menu for Reply and React */}
       <Menu

@@ -377,13 +377,15 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
         """Create a new table"""
         try:
             schema = json.loads(request.schema_json) if request.schema_json else {}
+            metadata = json.loads(request.metadata_json) if getattr(request, 'metadata_json', None) else None
             
             table = await self.table_service.create_table(
                 database_id=request.database_id,
                 name=request.name,
                 schema=schema,
                 user_id=request.user_id if request.user_id else None,
-                description=request.description
+                description=request.description,
+                metadata=metadata
             )
             
             # Update database stats (table count)
@@ -409,10 +411,13 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
                 user_team_ids=user_team_ids
             )
             
-            table_responses = [
-                data_service_pb2.TableResponse(**table)
-                for table in tables
-            ]
+            allowed = {'table_id', 'database_id', 'name', 'description', 'row_count', 'schema_json', 'styling_rules_json', 'metadata_json', 'created_at', 'updated_at', 'created_by', 'updated_by', 'storage_type'}
+            table_responses = []
+            for table in tables:
+                filtered = {k: (v if v is not None else '') for k, v in table.items() if k in allowed}
+                if 'row_count' in filtered and filtered['row_count'] is None:
+                    filtered['row_count'] = 0
+                table_responses.append(data_service_pb2.TableResponse(**filtered))
             
             return data_service_pb2.TableListResponse(
                 tables=table_responses,
@@ -434,6 +439,42 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             table = await self.table_service.get_table(
                 request.table_id,
                 user_id=user_id,
+                user_team_ids=user_team_ids,
+                database_id=request.database_id if getattr(request, 'database_id', None) else None
+            )
+            
+            if not table:
+                context.set_code(grpc.StatusCode.NOT_FOUND)
+                context.set_details("Table not found")
+                return data_service_pb2.TableResponse()
+            
+            allowed = {'table_id', 'database_id', 'name', 'description', 'row_count', 'schema_json', 'styling_rules_json', 'metadata_json', 'created_at', 'updated_at', 'created_by', 'updated_by', 'storage_type'}
+            filtered = {k: (v if v is not None else '') for k, v in table.items() if k in allowed}
+            if 'row_count' in filtered and filtered['row_count'] is None:
+                filtered['row_count'] = 0
+            return data_service_pb2.TableResponse(**filtered)
+            
+        except Exception as e:
+            logger.error(f"Failed to get table: {e}")
+            context.set_code(grpc.StatusCode.INTERNAL)
+            context.set_details(str(e))
+            return data_service_pb2.TableResponse()
+    
+    async def UpdateTable(self, request, context):
+        """Update table metadata (name, description, schema/columns, metadata)"""
+        try:
+            user_id = request.user_id if request.user_id else None
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            schema = json.loads(request.schema_json) if request.schema_json else None
+            metadata = json.loads(request.metadata_json) if getattr(request, 'metadata_json', None) and request.metadata_json else None
+            
+            table = await self.table_service.update_table(
+                table_id=request.table_id,
+                user_id=user_id,
+                name=request.name if request.name else None,
+                description=request.description if request.description else None,
+                schema=schema,
+                metadata=metadata,
                 user_team_ids=user_team_ids
             )
             
@@ -445,7 +486,7 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             return data_service_pb2.TableResponse(**table)
             
         except Exception as e:
-            logger.error(f"Failed to get table: {e}")
+            logger.error(f"Failed to update table: {e}")
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return data_service_pb2.TableResponse()
@@ -491,13 +532,27 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             user_id = request.user_id if request.user_id else None
             user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
             
+            prefer_arrow = bool(getattr(request, 'prefer_arrow', False))
             data = await self.table_service.get_table_data(
                 table_id=request.table_id,
                 offset=request.offset,
                 limit=request.limit if request.limit > 0 else 100,
                 user_id=user_id,
-                user_team_ids=user_team_ids
+                user_team_ids=user_team_ids,
+                database_id=request.database_id if getattr(request, 'database_id', None) else None,
+                prefer_arrow=prefer_arrow,
             )
+            
+            if data.get('has_arrow_data'):
+                return data_service_pb2.TableDataResponse(
+                    table_id=data['table_id'],
+                    rows=[],
+                    total_rows=data['total_rows'],
+                    schema_json=json.dumps(data['schema']),
+                    arrow_data=data.get('arrow_data') or b'',
+                    has_arrow_data=True,
+                    native_arrow=bool(data.get('native_arrow')),
+                )
             
             row_responses = [
                 data_service_pb2.RowResponse(
@@ -514,7 +569,10 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
                 table_id=data['table_id'],
                 rows=row_responses,
                 total_rows=data['total_rows'],
-                schema_json=json.dumps(data['schema'])
+                schema_json=json.dumps(data['schema']),
+                arrow_data=b'',
+                has_arrow_data=False,
+                native_arrow=False,
             )
             
         except Exception as e:
@@ -522,7 +580,29 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             context.set_code(grpc.StatusCode.INTERNAL)
             context.set_details(str(e))
             return data_service_pb2.TableDataResponse()
-    
+
+    async def ExportTableData(self, request, context):
+        """Stream table export (CSV, Parquet, or Arrow IPC)."""
+        try:
+            user_id = request.user_id if request.user_id else ''
+            user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
+            fmt = request.format or 'arrow_ipc'
+            db_id = request.database_id if getattr(request, 'database_id', None) else None
+            async for part in self.table_service.export_table_data_stream(
+                table_id=request.table_id,
+                user_id=user_id,
+                fmt=fmt,
+                user_team_ids=user_team_ids,
+                database_id=db_id or None,
+            ):
+                yield data_service_pb2.ExportTableDataChunk(
+                    data=part.get('data') or b'',
+                    is_last=bool(part.get('is_last')),
+                )
+        except Exception as e:
+            logger.error(f"Failed to export table data: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+
     async def InsertRow(self, request, context):
         """Insert a new row"""
         try:
@@ -676,16 +756,39 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
         try:
             user_id = request.user_id if request.user_id else None
             user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
-            
+            params = None
+            if getattr(request, 'params_json', None) and request.params_json.strip():
+                try:
+                    params = json.loads(request.params_json)
+                    if not isinstance(params, list):
+                        params = [params]
+                except json.JSONDecodeError:
+                    params = None
+            read_only = bool(getattr(request, "read_only", False))
+            prefer_arrow = bool(getattr(request, "prefer_arrow", False))
             result = await self.query_service.execute_sql_query(
                 workspace_id=request.workspace_id,
                 sql_query=request.sql_query,
                 user_id=user_id,
                 limit=request.limit if request.limit > 0 else 1000,
-                user_team_ids=user_team_ids
+                user_team_ids=user_team_ids,
+                params=params,
+                read_only=read_only,
+                prefer_arrow=prefer_arrow,
             )
-            
-            return data_service_pb2.QueryResultResponse(**result)
+            return data_service_pb2.QueryResultResponse(
+                query_id=result.get('query_id', ''),
+                column_names=result.get('column_names', []),
+                results_json=result.get('results_json', json.dumps([])),
+                result_count=result.get('result_count', 0),
+                execution_time_ms=result.get('execution_time_ms', 0),
+                generated_sql=result.get('generated_sql', ''),
+                error_message=result.get('error_message') or '',
+                rows_affected=result.get('rows_affected', 0),
+                returning_rows_json=result.get('returning_rows_json') or '',
+                arrow_results=result.get('arrow_results') or b'',
+                has_arrow_data=bool(result.get('has_arrow_data', False)),
+            )
             
         except Exception as e:
             logger.error(f"Failed to execute SQL query: {e}")
@@ -698,7 +801,11 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
                 result_count=0,
                 execution_time_ms=0,
                 generated_sql=request.sql_query if request else "",
-                error_message=str(e)
+                error_message=str(e),
+                rows_affected=0,
+                returning_rows_json="",
+                arrow_results=b"",
+                has_arrow_data=False,
             )
     
     async def ExecuteNaturalLanguageQuery(self, request, context):
@@ -707,13 +814,17 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
             user_id = request.user_id if request.user_id else None
             user_team_ids = list(request.user_team_ids) if request.user_team_ids else None
             
+            read_only = bool(getattr(request, "read_only", False))
+            prefer_arrow = bool(getattr(request, "prefer_arrow", False))
             # Call query service to execute NL query
             result = await self.query_service.execute_nl_query(
                 workspace_id=request.workspace_id,
                 natural_query=request.natural_language_query,
                 user_id=user_id,
                 limit=1000,  # Default limit
-                user_team_ids=user_team_ids
+                user_team_ids=user_team_ids,
+                read_only=read_only,
+                prefer_arrow=prefer_arrow,
             )
             
             return data_service_pb2.QueryResultResponse(
@@ -723,7 +834,11 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
                 result_count=result.get('result_count', 0),
                 execution_time_ms=result.get('execution_time_ms', 0),
                 generated_sql=result.get('generated_sql', ''),
-                error_message=result.get('error_message', '') if result.get('error_message') else None
+                error_message=result.get('error_message', '') if result.get('error_message') else None,
+                rows_affected=result.get('rows_affected', 0),
+                returning_rows_json=result.get('returning_rows_json') or '',
+                arrow_results=result.get('arrow_results') or b'',
+                has_arrow_data=bool(result.get('has_arrow_data', False)),
             )
             
         except Exception as e:
@@ -737,7 +852,11 @@ class DataServiceImplementation(data_service_pb2_grpc.DataServiceServicer):
                 result_count=0,
                 execution_time_ms=0,
                 generated_sql="",
-                error_message=str(e)
+                error_message=str(e),
+                rows_affected=0,
+                returning_rows_json="",
+                arrow_results=b"",
+                has_arrow_data=False,
             )
 
 

@@ -24,6 +24,8 @@ class WebContentTools:
         # ROOSEVELT'S FIX: Get SearXNG URL from environment or default to container name
         import os
         self.searxng_url = os.getenv("SEARXNG_URL", "http://searxng:8080")
+        # duckduckgo often returns CAPTCHA for server-side SearXNG; default avoids it (override via SEARXNG_ENGINES)
+        self.searxng_engines = os.getenv("SEARXNG_ENGINES", "google,bing")
         self.last_request_time = 0
         self.rate_limit = 1.0  # seconds between requests
         logger.info(f"🌐 WebContentTools initialized with SearXNG URL: {self.searxng_url}")
@@ -272,7 +274,7 @@ class WebContentTools:
                 "q": query,
                 "format": "json",
                 "categories": "general",
-                "engines": "google,duckduckgo",  # Use Google and DuckDuckGo only
+                "engines": self.searxng_engines,
                 "lang": "en",
                 "pageno": 1
             }

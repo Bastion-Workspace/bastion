@@ -71,25 +71,26 @@ class ElectronicsSearchNodes:
                                 if filename and filename not in project_context.get("components", []):
                                     project_context.setdefault("components", []).append(filename)
             
-            # Use universal information needs analysis tool
-            from orchestrator.tools.information_analysis_tools import analyze_information_needs_tool
+            # Unified query enhancement (project_aware = analyze needs + generate queries)
+            from orchestrator.tools.enhancement_tools import enhance_query_tool
             
             fast_model = self.agent._get_fast_model(state)
             get_llm_func = lambda: self.agent._get_llm(temperature=0.1, model=fast_model, state=state)
             
-            result_dict = await analyze_information_needs_tool(
+            result_dict = await enhance_query_tool(
                 query=query,
-                query_type=query_type,
-                project_context=project_context,
-                context_keys=["components", "protocols", "architecture"],
-                domain_name="electronics",
                 user_id=user_id,
-                llm_model=fast_model,
-                get_llm_func=get_llm_func
+                project_context=project_context,
+                mode="project_aware",
+                query_type=query_type,
+                get_llm_func=get_llm_func,
+                num_variations=3,
             )
+            info_result = result_dict.get("information_needs") or {}
+            search_queries_from_enhance = result_dict.get("search_queries") or []
             
             # Map generic "relevant_entities" back to electronics-specific fields for backward compatibility
-            relevant_entities = result_dict.get("relevant_entities", [])
+            relevant_entities = info_result.get("relevant_entities", [])
             # Split entities into components and protocols (heuristic)
             relevant_components = []
             relevant_protocols = []
@@ -101,13 +102,15 @@ class ElectronicsSearchNodes:
                     relevant_components.append(entity)
             
             # Merge with existing project context
+            result_dict = dict(info_result)
             result_dict["relevant_components"] = list(set(relevant_components + project_context.get("components", [])))
             result_dict["relevant_protocols"] = list(set(relevant_protocols + project_context.get("protocols", [])))
             
             logger.info(f"🔌 Information needs analyzed: {len(result_dict.get('information_gaps', []))} gaps identified")
             
             return {
-                "information_needs": result_dict
+                "information_needs": result_dict,
+                "search_queries": search_queries_from_enhance,
             }
             
         except Exception as e:
@@ -126,14 +129,23 @@ class ElectronicsSearchNodes:
     
     async def generate_project_aware_queries_node(self, state) -> Dict[str, Any]:
         """
-        Generate project-aware search queries using project context and information needs.
-        
-        Creates targeted queries that:
-        - Include project components/protocols/architecture
-        - Focus on identified information gaps
-        - Are optimized for semantic search
+        Generate project-aware search queries. If search_queries already set by analyze node (via enhance_query_tool), pass through.
         """
         try:
+            search_queries = state.get("search_queries", [])
+            if search_queries and isinstance(search_queries[0], dict):
+                logger.info(f"🔌 Using {len(search_queries)} project-aware queries from enhance_query_tool")
+                return {
+                    "search_queries": search_queries,
+                    "search_retry_count": state.get("search_retry_count", 0),
+                    "metadata": state.get("metadata", {}),
+                    "user_id": state.get("user_id", "system"),
+                    "shared_memory": state.get("shared_memory", {}),
+                    "messages": state.get("messages", []),
+                    "query": state.get("query", ""),
+                    "referenced_context": state.get("referenced_context", {}),
+                    "information_needs": state.get("information_needs", {}),
+                }
             query = state.get("query", "")
             query_type = state.get("query_type", "general")
             information_needs = state.get("information_needs", {})
@@ -141,40 +153,34 @@ class ElectronicsSearchNodes:
             metadata = state.get("metadata", {})
             user_id = state.get("user_id", "")
             
-            # Check if this is a retry (re-search) - increment counter if so
             search_retry_count = state.get("search_retry_count", 0)
             has_previous_quality_assessment = bool(state.get("search_quality_assessment"))
             
             if has_previous_quality_assessment:
-                # This is a retry - increment counter
                 search_retry_count += 1
                 logger.info(f"🔌 Re-search attempt {search_retry_count} - refining queries based on previous results")
             
-            # Extract project context
             shared_memory = metadata.get("shared_memory", {})
             active_editor = shared_memory.get("active_editor", {})
             frontmatter = active_editor.get("frontmatter", {})
             
-            # Build project context dict for tool
             project_components = information_needs.get("relevant_components", [])
             project_protocols = information_needs.get("relevant_protocols", [])
             
             if not project_components and frontmatter:
-                project_components = frontmatter.get("components", [])[:5]  # Top 5
+                project_components = frontmatter.get("components", [])[:5]
             
             project_context = {
                 "components": project_components,
                 "protocols": project_protocols
             }
             
-            # Electronics-specific examples for prompt
             domain_examples = [
                 "ESP32 keyboard matrix scanning circuit design",
                 "I2C sensor communication protocol implementation",
                 "ADW221S relay driver circuit specifications"
             ]
             
-            # Use universal project-aware query generation tool
             from orchestrator.tools.information_analysis_tools import generate_project_aware_queries_tool
             
             fast_model = self.agent._get_fast_model(state)

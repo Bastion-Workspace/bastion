@@ -89,6 +89,8 @@ class OrgCaptureService:
             if user_base_dir.exists():
                 logger.info(f"🔍 Searching for inbox.org in {user_base_dir}")
                 inbox_files = list(user_base_dir.rglob("inbox.org"))
+                # Exclude inbox.org inside .versions (historical snapshots)
+                inbox_files = [p for p in inbox_files if "/.versions/" not in str(p) and "\\.versions\\" not in str(p)]
                 
                 if inbox_files:
                     # Sort by path depth (prefer deeper paths like OrgMode/inbox.org over root inbox.org)
@@ -150,7 +152,28 @@ class OrgCaptureService:
             fallback_path = user_base_dir / "inbox.org"
             logger.warning(f"⚠️ Fallback: Creating inbox at {fallback_path}")
             return fallback_path
-    
+
+    async def _document_id_for_path(
+        self, file_path: Path, user_id: str, username: str
+    ) -> Optional[str]:
+        """Resolve document_id for a file path (inbox or target file)."""
+        try:
+            from services.folder_service import FolderService
+            folder_service = FolderService()
+            user_base_dir = self.upload_dir / "Users" / username
+            parent_dir = file_path.parent
+            folder_id = None
+            if parent_dir != user_base_dir:
+                folder_id = await folder_service.get_folder_id_by_physical_path(
+                    parent_dir, user_id
+                )
+            doc = await folder_service.document_repository.find_by_filename_and_context(
+                file_path.name, user_id, "user", folder_id
+            )
+            return doc.document_id if doc else None
+        except Exception:
+            return None
+
     async def capture_to_inbox(
         self,
         user_id: str,
@@ -193,7 +216,21 @@ class OrgCaptureService:
             
             # Format the entry based on template (with user's timezone)
             entry = await self._format_entry(request, user_id)
-            
+
+            # Snapshot before write for versioning (if document is in DB)
+            doc_id = await self._document_id_for_path(inbox_path, user_id, username)
+            if doc_id:
+                try:
+                    from services.document_version_service import snapshot_before_write
+                    await snapshot_before_write(
+                        doc_id, user_id, "quick_capture_inbox", None, None
+                    )
+                except Exception as verr:
+                    logger.warning(
+                        "Version snapshot before inbox capture failed (non-fatal): %s",
+                        verr,
+                    )
+
             # Append to inbox.org
             with open(inbox_path, 'a', encoding='utf-8') as f:
                 # Add newline if file isn't empty
@@ -261,6 +298,20 @@ class OrgCaptureService:
 
             # Format the entry based on template (with user's timezone)
             entry = await self._format_entry(request, user_id)
+
+            # Snapshot before write for versioning (if document is in DB)
+            doc_id = await self._document_id_for_path(target_path, user_id, username)
+            if doc_id:
+                try:
+                    from services.document_version_service import snapshot_before_write
+                    await snapshot_before_write(
+                        doc_id, user_id, "quick_capture_file", None, None
+                    )
+                except Exception as verr:
+                    logger.warning(
+                        "Version snapshot before capture-to-file failed (non-fatal): %s",
+                        verr,
+                    )
 
             # Append to target file
             with open(target_path, 'a', encoding='utf-8') as f:
@@ -423,7 +474,7 @@ async def get_org_capture_service() -> OrgCaptureService:
     
     if _org_capture_service is None:
         _org_capture_service = OrgCaptureService()
-        logger.info("🚀 ROOSEVELT: Org Capture Service initialized")
+        logger.info("Org Capture Service initialized")
     
     return _org_capture_service
 

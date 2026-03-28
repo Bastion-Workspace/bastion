@@ -6,12 +6,97 @@ Implementation of BaseMusicClient for Audiobookshelf servers
 import logging
 import json
 import asyncio
+from datetime import datetime
 from typing import Dict, Any, List, Optional
+from urllib.parse import quote
 import httpx
 
 from .base_client import BaseMusicClient
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_time_string_to_seconds(value: str) -> Optional[float]:
+    """Parse Audiobookshelf duration strings (e.g. H:MM:SS, MM:SS) or numeric strings to seconds."""
+    s = value.strip()
+    if not s:
+        return None
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            nums = [float(p) for p in parts if p.strip() != ""]
+        except ValueError:
+            return None
+        if len(nums) == 3:
+            return nums[0] * 3600 + nums[1] * 60 + nums[2]
+        if len(nums) == 2:
+            return nums[0] * 60 + nums[1]
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _coerce_positive_seconds(raw: Any) -> Optional[float]:
+    """Convert a scalar duration from the API to seconds (handles ms heuristics)."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, str):
+        return _parse_time_string_to_seconds(raw)
+    try:
+        n = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    # Large integers are often milliseconds (e.g. 3_600_000)
+    if n > 86400 and n == int(n):
+        n = n / 1000.0
+    return n
+
+
+def _episode_duration_seconds(episode: Dict[str, Any]) -> int:
+    """Best-effort episode length for podcast UI (ABS uses several shapes and string durations)."""
+    candidates: List[float] = []
+
+    def consider(val: Any) -> None:
+        sec = _coerce_positive_seconds(val)
+        if sec is not None:
+            candidates.append(sec)
+
+    consider(episode.get("duration"))
+    consider(episode.get("durationS"))
+    consider(episode.get("runtime"))
+
+    audio_file = episode.get("audioFile") or {}
+    if isinstance(audio_file, dict):
+        consider(audio_file.get("duration"))
+        br = audio_file.get("bitRate") or audio_file.get("bitrate")
+        sz = audio_file.get("size")
+        try:
+            if br and sz:
+                br_i, sz_i = int(br), int(sz)
+                if br_i > 0 and sz_i > 0:
+                    candidates.append((sz_i * 8) / br_i)
+        except (TypeError, ValueError):
+            pass
+
+    audio_track = episode.get("audioTrack") or {}
+    if isinstance(audio_track, dict):
+        consider(audio_track.get("duration"))
+        for nested in (audio_track.get("meta"), audio_track.get("metadata")):
+            if isinstance(nested, dict):
+                consider(nested.get("duration"))
+
+    media = episode.get("media") or {}
+    if isinstance(media, dict):
+        consider(media.get("duration"))
+
+    if not candidates:
+        return 0
+    best = max(candidates)
+    return int(round(best)) if best > 0 else 0
 
 
 class AudiobookshelfClient(BaseMusicClient):
@@ -713,18 +798,7 @@ class AudiobookshelfClient(BaseMusicClient):
                 
                 result = []
                 for episode in episodes:
-                    # Extract duration - check multiple locations
-                    duration = (episode.get("duration") or 
-                               episode.get("durationS") or
-                               episode.get("runtime") or
-                               0)
-                    
-                    # AudioBookShelf might store duration in milliseconds
-                    if duration:
-                        if duration > 86400:  # Likely milliseconds if > 1 day in seconds
-                            duration = duration / 1000  # Convert to seconds
-                        elif duration < 1:  # Very small, might be in hours or wrong format
-                            duration = 0
+                    duration = _episode_duration_seconds(episode if isinstance(episode, dict) else {})
                     
                     # Extract published date - check multiple field names
                     published_date = (episode.get("publishedAt") or 
@@ -743,21 +817,35 @@ class AudiobookshelfClient(BaseMusicClient):
                                         metadata.get("pubDate") or
                                         None)
                     
-                    # Store published date in metadata
+                    # Normalize to ISO string for frontend (handle numeric timestamps)
+                    if published_date is not None:
+                        if isinstance(published_date, (int, float)):
+                            if published_date > 1e12:
+                                published_date = published_date / 1000.0
+                            published_date = datetime.utcfromtimestamp(published_date).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+                        elif not isinstance(published_date, str):
+                            published_date = str(published_date)
+                    
+                    # Store published date in metadata (both keys for frontend compatibility)
                     episode_metadata = episode.copy() if isinstance(episode, dict) else {}
                     if published_date:
                         episode_metadata["published_date"] = published_date
+                        episode_metadata["publishedAt"] = published_date
                     
-                    normalized = self.normalize_track({
+                    raw_track = {
                         "id": episode.get("id", ""),
                         "title": episode.get("title", ""),
-                        "artist": podcast_name,  # Podcast name as artist
+                        "artist": podcast_name,
                         "album": podcast_name,
                         "duration": int(duration) if duration else 0,
                         "track_number": episode.get("index", 0),
                         "cover_art_id": podcast_cover,
-                        "metadata": episode_metadata
-                    }, parent_id=playlist_id)
+                        "metadata": episode_metadata,
+                    }
+                    if published_date:
+                        raw_track["published_date"] = published_date
+                        raw_track["publishedAt"] = published_date
+                    normalized = self.normalize_track(raw_track, parent_id=playlist_id)
                     result.append(normalized)
                 
                 return result
@@ -766,37 +854,93 @@ class AudiobookshelfClient(BaseMusicClient):
             return []
     
     async def get_stream_url(self, track_id: str, parent_id: Optional[str] = None) -> Optional[str]:
-        """Generate authenticated stream URL for a track/chapter/episode"""
+        """Generate authenticated stream URL for a track/chapter/episode.
+
+        Uses ABS static file serving (/s/item/...) which returns audio bytes via GET,
+        not the play session endpoint which returns JSON.
+        """
         try:
-            # For Audiobookshelf, we need to use the play endpoint
-            # Format: /api/items/{itemId}/play/{episodeId} for podcast episodes
-            # Format: /api/items/{itemId}/play?index={chapterIndex} for book chapters
-            # Format: /api/items/{itemId}/play for single-file books
-            # Note: Token will be added to headers by the proxy, not in URL
-            
-            # If we have parent_id, use it (preferred)
-            if parent_id:
-                # Check if track_id looks like an episode ID (UUID) or chapter index (number)
-                # Episode IDs are UUIDs, chapter indices are numbers
-                try:
-                    # Try to parse as int (chapter index)
-                    chapter_index = int(track_id)
-                    # It's a chapter index - use query parameter format
-                    stream_url = self._build_url(f"items/{parent_id}/play")
-                    # Include token in URL for proxy to extract (will be moved to header)
-                    return f"{stream_url}?index={chapter_index}&token={self.api_token}"
-                except ValueError:
-                    # Not a number, assume it's an episode ID (UUID)
-                    # Use episode format: /api/items/{podcastId}/play/{episodeId}
-                    stream_url = self._build_url(f"items/{parent_id}/play/{track_id}")
-                    # Include token in URL for proxy to extract (will be moved to header)
-                    return f"{stream_url}?token={self.api_token}"
-            
-            # Fallback: assume track_id is the item ID and try direct play
-            stream_url = self._build_url(f"items/{track_id}/play")
-            return f"{stream_url}?token={self.api_token}"
+            item_id = parent_id or track_id
+            headers = self._get_headers()
+            item_url = self._build_url(f"items/{item_id}?expanded=1&include=metadata")
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(item_url, headers=headers)
+                response.raise_for_status()
+                item_data = response.json()
+
+            media = item_data.get("media") or {}
+            if not isinstance(media, dict):
+                logger.warning("Item has no media object")
+                return None
+
+            base_url = self.server_url.rstrip("/")
+
+            # Book chapter: track_id is chapter index (integer)
+            try:
+                chapter_index = int(track_id)
+                tracks = media.get("tracks", [])
+                if not isinstance(tracks, list):
+                    tracks = [tracks] if tracks else []
+                for track in tracks:
+                    if track.get("index") == chapter_index:
+                        content_url = track.get("contentUrl")
+                        if content_url:
+                            return f"{base_url}{content_url}?token={self.api_token}"
+                # Fallback: use index as 0-based list position
+                if 0 <= chapter_index < len(tracks):
+                    content_url = tracks[chapter_index].get("contentUrl")
+                    if content_url:
+                        return f"{base_url}{content_url}?token={self.api_token}"
+                logger.warning(f"No track found for chapter index {chapter_index}")
+                return None
+            except ValueError:
+                pass
+
+            # Podcast episode: track_id is episode UUID
+            episodes = item_data.get("episodes") or (media.get("episodes") or [])
+            if not isinstance(episodes, list):
+                episodes = [episodes] if episodes else []
+            for episode in episodes:
+                if episode.get("id") == track_id:
+                    # ABS serves podcast files as /s/item/{libraryItemId}/{relPathOrFilename}
+                    # (see audioTrack.contentUrl in API) — never insert episode id in the path.
+                    audio_track = episode.get("audioTrack") or {}
+                    if isinstance(audio_track, dict):
+                        content_url = audio_track.get("contentUrl")
+                        if content_url:
+                            path = (
+                                content_url
+                                if str(content_url).startswith("/")
+                                else f"/{content_url}"
+                            )
+                            return f"{base_url}{path}?token={self.api_token}"
+
+                    audio_file = episode.get("audioFile") or {}
+                    filename = None
+                    if isinstance(audio_file, dict):
+                        meta = audio_file.get("metadata") or {}
+                        filename = meta.get("filename") or meta.get("relPath")
+                    if filename:
+                        filename_encoded = quote(filename, safe="")
+                        return f"{base_url}/s/item/{item_id}/{filename_encoded}?token={self.api_token}"
+                    logger.warning(
+                        "Episode %s has no audioTrack.contentUrl or audio file path",
+                        track_id,
+                    )
+                    return None
+
+            # Fallback: no parent_id and track_id is the item ID — use first track (e.g. single-file book)
+            tracks = media.get("tracks", [])
+            if isinstance(tracks, list) and len(tracks) > 0:
+                content_url = tracks[0].get("contentUrl")
+                if content_url:
+                    return f"{base_url}{content_url}?token={self.api_token}"
+
+            logger.warning(f"No track or episode found for track_id={track_id}, parent_id={parent_id}")
+            return None
         except Exception as e:
-            logger.error(f"Failed to generate stream URL: {e}")
+            logger.error(f"Failed to generate stream URL: {e}", exc_info=True)
             return None
     
     async def get_stream_url_with_parent(self, track_id: str, parent_id: Optional[str] = None) -> Optional[str]:

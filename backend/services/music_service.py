@@ -1027,7 +1027,7 @@ class MusicService:
             albums_raw = await fetch_all(
                 """SELECT item_id as id, title, artist, cover_art_id, metadata_json as metadata
                 FROM music_cache 
-                WHERE user_id = $1 AND service_type = $2 AND cache_type = 'album' AND artist = $3
+                WHERE user_id = $1 AND service_type = $2 AND cache_type = 'album' AND LOWER(artist) = LOWER($3)
                 ORDER BY title""",
                 user_id, service_type, author_name,
                 rls_context=rls_context
@@ -1198,7 +1198,7 @@ class MusicService:
             albums_raw = await fetch_all(
                 """SELECT item_id as id, title, artist, cover_art_id, metadata_json as metadata
                 FROM music_cache 
-                WHERE user_id = $1 AND service_type = $2 AND cache_type = 'album' AND artist = $3
+                WHERE user_id = $1 AND service_type = $2 AND cache_type = 'album' AND LOWER(artist) = LOWER($3)
                 ORDER BY title""",
                 user_id, service_type, author_name,
                 rls_context=rls_context

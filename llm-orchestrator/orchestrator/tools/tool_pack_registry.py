@@ -5,9 +5,25 @@ Tool packs are named groups of tool function names. The planner can attach pack 
 to plan steps; the automation engine merges pack tools with the skill's tools at execution.
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
+
+
+# Tool function names that were renamed in the Action I/O Registry for list/get consistency
+_TOOL_TO_ACTION_RENAMES: Dict[str, str] = {
+    "get_emails_tool": "list_emails",
+    "get_email_folders_tool": "list_email_folders",
+    "get_contacts_tool": "list_contacts",
+    "get_rss_articles_tool": "list_rss_articles",
+}
+
+
+def _tool_name_to_registry_name(tool_name: str) -> str:
+    """Map tool function name to Action I/O Registry action name (strip trailing _tool)."""
+    if tool_name in _TOOL_TO_ACTION_RENAMES:
+        return _TOOL_TO_ACTION_RENAMES[tool_name]
+    return tool_name[:-5] if tool_name.endswith("_tool") else tool_name
 
 
 class ToolPack(BaseModel):
@@ -16,6 +32,41 @@ class ToolPack(BaseModel):
     name: str
     description: str = Field(description="For LLM planner context")
     tools: List[str] = Field(description="Function names in orchestrator.tools")
+    read_tools: Optional[List[str]] = Field(
+        default=None,
+        description="Read-only subset; when mode=read only these are resolved. If None, defaults to tools.",
+    )
+
+    def get_aggregate_outputs(self) -> List[Dict[str, Any]]:
+        """
+        Derive output fields from the Action I/O Registry for all tools in this pack.
+        Returns a list of {name, type, description, source_action} for Workflow Composer.
+        Tools not yet registered are skipped. Duplicate field names are disambiguated with source_action prefix.
+        """
+        from orchestrator.utils.action_io_registry import get_action
+
+        seen: Dict[str, int] = {}
+        fields: List[Dict[str, Any]] = []
+        for tool_name in self.tools:
+            action_name = _tool_name_to_registry_name(tool_name)
+            contract = get_action(action_name)
+            if not contract:
+                continue
+            for f in contract.get_output_fields():
+                name = f.get("name", "")
+                if name in seen:
+                    seen[name] += 1
+                    display_name = f"{action_name}.{name}"
+                else:
+                    seen[name] = 1
+                    display_name = name
+                fields.append({
+                    "name": display_name,
+                    "type": f.get("type", "any"),
+                    "description": f.get("description", ""),
+                    "source_action": action_name,
+                })
+        return fields
 
 
 TOOL_PACKS: Dict[str, ToolPack] = {
@@ -29,62 +80,412 @@ TOOL_PACKS: Dict[str, ToolPack] = {
             "merge_texts_tool",
             "compare_texts_tool",
         ],
+        read_tools=[
+            "summarize_text_tool",
+            "extract_structured_data_tool",
+            "transform_format_tool",
+            "merge_texts_tool",
+            "compare_texts_tool",
+        ],
     ),
     "session_memory": ToolPack(
         name="session_memory",
         description="Ephemeral clipboard for passing data between plan steps",
         tools=["clipboard_store_tool", "clipboard_get_tool"],
+        read_tools=["clipboard_get_tool"],
+    ),
+    "planning": ToolPack(
+        name="planning",
+        description="Self-managed task planning: create, track, and adapt a multi-step plan",
+        tools=[
+            "create_plan_tool",
+            "get_plan_tool",
+            "update_plan_step_tool",
+            "add_plan_step_tool",
+        ],
+        read_tools=["get_plan_tool"],
     ),
     "discovery": ToolPack(
         name="discovery",
-        description="Search documents and web for information",
+        description="Use when you do NOT yet know which document contains the answer. Searches across the knowledge base (semantic), by tags, images, and the web. Use knowledge pack once you have a document_id.",
         tools=[
             "search_documents_tool",
+            "search_by_tags_tool",
+            "search_images_tool",
             "search_web_tool",
-            "expand_query_tool",
+            "enhance_query_tool",
+            "search_conversation_cache_tool",
+        ],
+        read_tools=[
+            "search_documents_tool",
+            "search_by_tags_tool",
+            "search_images_tool",
+            "search_web_tool",
+            "enhance_query_tool",
             "search_conversation_cache_tool",
         ],
     ),
     "knowledge": ToolPack(
         name="knowledge",
-        description="Retrieve and extract content from specific documents",
+        description="Use when you already have a document_id, path, or filename and need to read or search within it. Includes: full content retrieval, path resolution, in-document text search, and multi-document segment search. Use discovery pack first if you don't know where the content lives.",
         tools=[
             "get_document_content_tool",
+            "find_document_by_path_tool",
+            "search_within_document_tool",
+            "search_segments_across_documents_tool",
+        ],
+        read_tools=[
+            "get_document_content_tool",
+            "find_document_by_path_tool",
             "search_within_document_tool",
             "search_segments_across_documents_tool",
         ],
     ),
+    "knowledge_graph": ToolPack(
+        name="knowledge_graph",
+        description="Use when the query is entity-driven: find documents mentioning a person, organisation, or location; traverse entity co-occurrence relationships. Complements discovery and knowledge packs for structured entity queries.",
+        tools=[
+            "find_documents_by_entities_tool",
+            "find_related_documents_by_entities_tool",
+            "find_co_occurring_entities_tool",
+            "search_entities_tool",
+            "get_entity_tool",
+        ],
+        read_tools=[
+            "find_documents_by_entities_tool",
+            "find_related_documents_by_entities_tool",
+            "find_co_occurring_entities_tool",
+            "search_entities_tool",
+            "get_entity_tool",
+        ],
+    ),
+    "rss": ToolPack(
+        name="rss",
+        description="RSS: list feeds (with unread_count), get/search articles (read/star/import flags, unread/starred filters), list starred across all feeds, mark read/unread, set star, refresh, unread counts, pause/resume polling",
+        tools=[
+            "list_rss_feeds_tool",
+            "add_rss_feed_tool",
+            "refresh_rss_feed_tool",
+            "get_rss_articles_tool",
+            "search_rss_tool",
+            "list_starred_rss_articles_tool",
+            "delete_rss_feed_tool",
+            "mark_article_read_tool",
+            "mark_article_unread_tool",
+            "set_article_starred_tool",
+            "get_unread_counts_tool",
+            "toggle_feed_active_tool",
+        ],
+        read_tools=[
+            "list_rss_feeds_tool",
+            "get_rss_articles_tool",
+            "search_rss_tool",
+            "list_starred_rss_articles_tool",
+            "get_unread_counts_tool",
+        ],
+    ),
     "document_management": ToolPack(
         name="document_management",
-        description="Create, append to, and read metadata of documents",
+        description="Create typed documents with frontmatter templates (project, fiction, electronics, outline, character, etc.), update content, and read metadata. For raw/untyped files use the file_management pack.",
         tools=[
-            "create_document_tool",
-            "append_to_document_tool",
+            "create_typed_document_tool",
+            "update_document_content_tool",
             "get_document_metadata_tool",
         ],
+        read_tools=["get_document_metadata_tool"],
     ),
     "file_management": ToolPack(
         name="file_management",
-        description="Create and organize files and folders",
-        tools=["list_folders_tool", "create_user_file_tool", "create_user_folder_tool"],
+        description="Create raw files and organize folders. For typed documents with templates (project, fiction, electronics, etc.) use the document_management pack instead. patch_file and append_to_file propose edits for user approval.",
+        tools=[
+            "list_folders_tool",
+            "create_user_file_tool",
+            "create_user_folder_tool",
+            "patch_file_tool",
+            "append_to_file_tool",
+        ],
+        read_tools=["list_folders_tool"],
     ),
     "org_management": ToolPack(
         name="org_management",
-        description="Org-mode inbox and task management",
+        description="Org-mode file structure parsing and headings search (read-only)",
         tools=[
-            "add_org_inbox_item_tool",
-            "list_org_todos_tool",
             "parse_org_structure_tool",
             "search_org_headings_tool",
+            "get_org_statistics_tool",
         ],
+        read_tools=[
+            "parse_org_structure_tool",
+            "search_org_headings_tool",
+            "get_org_statistics_tool",
+        ],
+    ),
+    "task_management": ToolPack(
+        name="task_management",
+        description="Universal todo list, create, update, toggle, delete, archive, refile across any org file",
+        tools=[
+            "list_todos_tool",
+            "create_todo_tool",
+            "update_todo_tool",
+            "toggle_todo_tool",
+            "delete_todo_tool",
+            "archive_done_tool",
+            "refile_todo_tool",
+            "discover_refile_targets_tool",
+        ],
+        read_tools=["list_todos_tool", "discover_refile_targets_tool"],
     ),
     "math": ToolPack(
         name="math",
-        description="Math calculations, formulas, and unit conversions",
+        description="Math calculations, named formula evaluation (HVAC/electrical/construction), and unit conversions. Formula names are listed in evaluate_formula's description; call list_available_formulas for parameter details.",
         tools=[
             "calculate_expression_tool",
             "evaluate_formula_tool",
             "convert_units_tool",
+            "list_available_formulas_tool",
+        ],
+        read_tools=[
+            "calculate_expression_tool",
+            "evaluate_formula_tool",
+            "convert_units_tool",
+            "list_available_formulas_tool",
+        ],
+    ),
+    "utility": ToolPack(
+        name="utility",
+        description="State management and data manipulation: counters, dates, booleans, lists",
+        tools=[
+            "adjust_number_tool",
+            "adjust_date_tool",
+            "parse_date_tool",
+            "compare_dates_tool",
+            "set_value_tool",
+            "toggle_boolean_tool",
+            "append_to_list_tool",
+            "get_list_length_tool",
+        ],
+        read_tools=["parse_date_tool", "compare_dates_tool", "get_list_length_tool"],
+    ),
+    "contacts": ToolPack(
+        name="contacts",
+        description="O365 and org-mode contacts: list, get by ID, create, update, delete (unified when include_org)",
+        tools=[
+            "get_contacts_tool",
+            "get_contact_by_id_tool",
+            "create_contact_tool",
+            "update_contact_tool",
+            "delete_contact_tool",
+        ],
+        read_tools=["get_contacts_tool", "get_contact_by_id_tool"],
+    ),
+    "notifications": ToolPack(
+        name="notifications",
+        description="Send messages and reminders to the user via in-app, Telegram, Discord, or email. "
+                    "Use notify_user for the high-level path (respects user preferences); "
+                    "use send_channel_message for a specific channel.",
+        tools=["notify_user_tool", "send_channel_message_tool", "schedule_reminder_tool"],
+        read_tools=[],
+    ),
+    "email": ToolPack(
+        name="email",
+        description="Read, search, send, draft, and manage emails via O365/Microsoft Graph. "
+                    "Use list_email_folders to discover folder names before listing.",
+        tools=[
+            "get_emails_tool",
+            "search_emails_tool",
+            "get_email_thread_tool",
+            "read_email_tool",
+            "send_email_tool",
+            "reply_to_email_tool",
+            "create_draft_tool",
+            "move_email_tool",
+            "update_email_tool",
+            "get_email_folders_tool",
+            "get_email_statistics_tool",
+        ],
+        read_tools=[
+            "get_emails_tool",
+            "search_emails_tool",
+            "get_email_thread_tool",
+            "read_email_tool",
+            "get_email_folders_tool",
+            "get_email_statistics_tool",
+        ],
+    ),
+    "calendar": ToolPack(
+        name="calendar",
+        description="Read and manage O365 calendar events. Use list_calendars first to get "
+                    "calendar IDs, then get_calendar_events with ISO 8601 date ranges.",
+        tools=[
+            "list_calendars_tool",
+            "get_calendar_events_tool",
+            "get_event_by_id_tool",
+            "create_event_tool",
+            "update_event_tool",
+            "delete_event_tool",
+        ],
+        read_tools=["list_calendars_tool", "get_calendar_events_tool", "get_event_by_id_tool"],
+    ),
+    "navigation": ToolPack(
+        name="navigation",
+        description="Save and manage named locations; compute and save routes between them.",
+        tools=[
+            "create_location_tool",
+            "list_locations_tool",
+            "delete_location_tool",
+            "compute_route_tool",
+            "save_route_tool",
+            "list_saved_routes_tool",
+        ],
+        read_tools=["list_locations_tool", "compute_route_tool", "list_saved_routes_tool"],
+    ),
+    "data_workspace": ToolPack(
+        name="data_workspace",
+        description="Query tabular data stored in Data Workspaces. Use list_data_workspaces "
+                    "to find workspace IDs, get_workspace_schema to inspect tables, "
+                    "then query_data_workspace with SQL or natural language.",
+        tools=[
+            "list_data_workspaces_tool",
+            "get_workspace_schema_tool",
+            "query_data_workspace_tool",
+        ],
+        read_tools=[
+            "list_data_workspaces_tool",
+            "get_workspace_schema_tool",
+            "query_data_workspace_tool",
+        ],
+    ),
+    "image_generation": ToolPack(
+        name="image_generation",
+        description="Generate images from text descriptions using the configured image model.",
+        tools=["generate_image_tool"],
+        read_tools=[],
+    ),
+    "visualization": ToolPack(
+        name="visualization",
+        description="Create charts (bar, line, pie, scatter) from data. Returns a rendered image or embed code.",
+        tools=["create_chart_tool"],
+        read_tools=[],
+    ),
+    "data_connection_builder": ToolPack(
+        name="data_connection_builder",
+        description="Analyze APIs and websites, build and test data connections, bulk scrape URLs for content and images; build control panes for status bar",
+        tools=[
+            "probe_api_endpoint_tool",
+            "analyze_openapi_spec_tool",
+            "draft_connector_definition_tool",
+            "validate_connector_definition_tool",
+            "test_connector_endpoint_tool",
+            "create_data_connector_tool",
+            "list_data_connectors_tool",
+            "update_data_connector_tool",
+            "bulk_scrape_urls_tool",
+            "get_bulk_scrape_status_tool",
+            "bind_data_source_to_agent_tool",
+            "list_control_panes_tool",
+            "get_connector_endpoints_tool",
+            "create_control_pane_tool",
+            "update_control_pane_tool",
+            "delete_control_pane_tool",
+            "execute_control_action_tool",
+            "crawl_web_content_tool",
+            "search_web_tool",
+        ],
+        read_tools=[
+            "probe_api_endpoint_tool",
+            "analyze_openapi_spec_tool",
+            "validate_connector_definition_tool",
+            "test_connector_endpoint_tool",
+            "list_data_connectors_tool",
+            "get_bulk_scrape_status_tool",
+            "list_control_panes_tool",
+            "get_connector_endpoints_tool",
+            "crawl_web_content_tool",
+            "search_web_tool",
+        ],
+    ),
+    "browser": ToolPack(
+        name="browser",
+        description="Browser automation: open persistent sessions, navigate, click, fill, extract, "
+                    "inspect page structure, screenshot, download files, and close sessions. "
+                    "Use browser_inspect to discover CSS selectors before building click/fill/extract steps.",
+        tools=[
+            "browser_open_session_tool",
+            "browser_navigate_tool",
+            "browser_click_tool",
+            "browser_fill_tool",
+            "browser_wait_tool",
+            "browser_scroll_tool",
+            "browser_extract_tool",
+            "browser_inspect_tool",
+            "browser_screenshot_tool",
+            "browser_download_file_tool",
+            "browser_close_session_tool",
+        ],
+        read_tools=[
+            "browser_wait_tool",
+            "browser_extract_tool",
+            "browser_inspect_tool",
+            "browser_screenshot_tool",
+            "browser_download_file_tool",
+        ],
+    ),
+    "local_device": ToolPack(
+        name="local_device",
+        description="All tools from the user's connected Bastion Local Proxy device. Dynamically filtered at execution time to only include capabilities the device actually provides.",
+        tools=[
+            "local_screenshot_tool",
+            "local_clipboard_read_tool",
+            "local_clipboard_write_tool",
+            "local_system_info_tool",
+            "local_desktop_notify_tool",
+            "local_shell_execute_tool",
+            "local_read_file_tool",
+            "local_list_directory_tool",
+            "local_write_file_tool",
+            "local_list_processes_tool",
+            "local_open_url_tool",
+        ],
+        read_tools=[
+            "local_screenshot_tool",
+            "local_clipboard_read_tool",
+            "local_system_info_tool",
+            "local_read_file_tool",
+            "local_list_directory_tool",
+            "local_list_processes_tool",
+        ],
+    ),
+    "team_tools": ToolPack(
+        name="team_tools",
+        description="Autonomous agent line tools: messaging, tasks, goals, governance. Auto-injected when the agent runs in a team context.",
+        tools=[
+            "send_to_agent",
+            "start_agent_conversation",
+            "halt_agent_conversation",
+            "read_team_timeline",
+            "read_my_messages",
+            "get_team_status_board",
+            "write_to_workspace",
+            "read_workspace",
+            "create_task_for_agent",
+            "check_my_tasks",
+            "update_task_status",
+            "escalate_task",
+            "list_team_goals",
+            "report_goal_progress",
+            "delegate_goal_to_tasks",
+            "propose_hire",
+            "propose_strategy_change",
+            "get_agent_run_history",
+        ],
+        read_tools=[
+            "read_team_timeline",
+            "read_my_messages",
+            "get_team_status_board",
+            "read_workspace",
+            "check_my_tasks",
+            "list_team_goals",
+            "get_agent_run_history",
         ],
     ),
 }
@@ -112,6 +513,41 @@ def resolve_pack_tools(pack_names: List[str]) -> List[str]:
         if not pack:
             continue
         for tool_name in pack.tools:
+            if tool_name not in seen:
+                seen.add(tool_name)
+                result.append(tool_name)
+    return result
+
+
+def resolve_pack_tools_with_mode(
+    pack_entries: List[Union[str, Dict[str, str]]],
+) -> List[str]:
+    """
+    Resolve packs with optional access mode. Each entry is either a string (full access,
+    backward compat) or {"pack": "name", "mode": "read"|"full"}.
+    Returns a deduplicated list of tool names in order.
+    """
+    seen: set = set()
+    result: List[str] = []
+    for entry in pack_entries or []:
+        if isinstance(entry, str):
+            pack_name = entry
+            mode = "full"
+        elif isinstance(entry, dict):
+            pack_name = entry.get("pack") or entry.get("name")
+            mode = (entry.get("mode") or "full").lower()
+            if not pack_name:
+                continue
+        else:
+            continue
+        pack = TOOL_PACKS.get(pack_name)
+        if not pack:
+            continue
+        if mode == "read":
+            tools_to_add = pack.read_tools if pack.read_tools is not None else pack.tools
+        else:
+            tools_to_add = pack.tools
+        for tool_name in tools_to_add:
             if tool_name not in seen:
                 seen.add(tool_name)
                 result.append(tool_name)

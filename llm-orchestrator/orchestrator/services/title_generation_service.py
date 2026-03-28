@@ -81,7 +81,7 @@ class TitleGenerationService:
             # Build prompt with user message and optionally agent response
             if agent_response:
                 # Use both user message and agent response for better context
-                context = f"User: {user_message}\n\nAssistant: {agent_response[:200]}"
+                context = f"USER: {user_message}\n\nASSISTANT: {agent_response[:200]}"
                 user_prompt = f"Generate a title for this conversation:\n\n{context}"
             else:
                 # Just use user message

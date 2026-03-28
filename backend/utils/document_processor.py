@@ -21,7 +21,6 @@ from ebooklib import epub
 from bs4 import BeautifulSoup
 import ocrmypdf
 from PIL import Image
-import spacy
 from langdetect import detect
 import textstat
 from openai import AsyncOpenAI
@@ -29,6 +28,7 @@ from openai import AsyncOpenAI
 from config import settings
 from models.api_models import Chunk, QualityMetrics, ProcessingResult, Entity
 from services.ocr_service import OCRService
+from utils.ocr_in_progress import add as ocr_in_progress_add, remove as ocr_in_progress_remove
 
 logger = logging.getLogger(__name__)
 
@@ -43,10 +43,8 @@ class DocumentProcessor:
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            # Initialize instance variables only once
-            cls._instance.nlp = None
+            cls._instance.document_service_client = None
             cls._instance.ocr_service = None
-            # Note: _initialized is managed at class level, not instance level
         return cls._instance
     
     def __init__(self):
@@ -62,31 +60,17 @@ class DocumentProcessor:
                 return
                 
             try:
-                logger.info("🔧 Initializing DocumentProcessor singleton...")
-                
-                # Try to load spaCy model, but don't fail if not available
+                logger.info("Initializing DocumentProcessor singleton...")
+
+                # Document Service client (entity extraction via spaCy in document-service)
                 try:
-                    import spacy
-                    import spacy.util
-                    
-                    model_name = "en_core_web_lg"
-                    logger.info(f"🔍 Loading spaCy model: {model_name}")
-                    
-                    if spacy.util.is_package(model_name):
-                        self.nlp = spacy.load(model_name)
-                        logger.info(f"✅ spaCy model loaded successfully: {model_name}")
-                    else:
-                        logger.warning(f"⚠️  spaCy model {model_name} not installed")
-                        logger.warning("🔍 Install with: python -m spacy download en_core_web_lg")
-                        self.nlp = None
-                        
-                except ImportError as e:
-                    logger.warning(f"⚠️  spaCy import failed (ImportError): {e}")
-                    self.nlp = None
+                    from clients.document_service_client import DocumentServiceClient
+                    self.document_service_client = DocumentServiceClient()
+                    await self.document_service_client.initialize(required=False)
                 except Exception as e:
-                    logger.warning(f"⚠️  spaCy loading failed (unexpected error): {e}")
-                    self.nlp = None
-                
+                    logger.warning("Document Service client init failed: %s", e)
+                    self.document_service_client = None
+
                 # Initialize OCR service
                 try:
                     self.ocr_service = OCRService()
@@ -123,12 +107,14 @@ class DocumentProcessor:
         """Get the current status of the DocumentProcessor"""
         return {
             "initialized": self._initialized,
-            "spacy_loaded": self.nlp is not None,
+            "document_service_available": self.document_service_client is not None and getattr(
+                self.document_service_client, "_initialized", False
+            ),
+            "spacy_model": None,
             "ocr_service_loaded": self.ocr_service is not None,
             "instance_id": id(self),
-            "spacy_model": "en_core_web_lg" if self.nlp else None
         }
-    
+
     async def process_document(self, file_path: str, doc_type: str, document_id: str = None) -> ProcessingResult:
         """Process a document and return chunks with quality metrics
         
@@ -149,7 +135,7 @@ class DocumentProcessor:
             
             # ROOSEVELT DOCTRINE: Org Mode files use structured mechanisms, not vectorization!
             if doc_type == 'org':
-                logger.info(f"⏭️  BULLY! Skipping vectorization for Org Mode file (structured data, not prose)")
+                logger.info("Skipping vectorization for Org Mode file (structured data, not prose)")
                 logger.info(f"📋 Org file will be handled by llm-orchestrator (OrgInboxAgent and OrgProjectAgent migrated)")
                 
                 # Return empty processing result - file is stored but not vectorized
@@ -192,10 +178,14 @@ class DocumentProcessor:
                 return result
             
             # Extract text based on document type
+            page_boundaries: list[tuple[int, int]] = []
+            doc_type_hint: str | None = None
             if doc_type == 'pdf':
-                text, ocr_confidence = await self._process_pdf(file_path, document_id)
+                text, ocr_confidence, page_boundaries, doc_type_hint = await self._process_pdf(file_path, document_id)
             elif doc_type == 'docx':
                 text, ocr_confidence = await self._process_docx(file_path), 1.0
+            elif doc_type == 'pptx':
+                text, ocr_confidence = await self._process_pptx(file_path), 1.0
             elif doc_type == 'epub':
                 text, ocr_confidence = await self._process_epub(file_path), 1.0
             elif doc_type == 'txt':
@@ -216,8 +206,8 @@ class DocumentProcessor:
             # Assess text quality
             quality_metrics = await self._assess_quality(text, ocr_confidence)
             
-            # Chunk the text
-            chunks = await self._chunk_text(text, file_path, document_id)
+            # Chunk the text (pass page boundaries for PDF so chunks get page_start/page_end)
+            chunks = await self._chunk_text(text, file_path, document_id, page_boundaries=page_boundaries, doc_type_hint=doc_type_hint)
             
             # Extract entities from the text
             entities = await self._extract_entities(text, chunks)
@@ -238,78 +228,154 @@ class DocumentProcessor:
             logger.error(f"❌ Document processing failed: {e}")
             raise
     
-    async def _process_pdf(self, file_path: str, document_id: str) -> tuple[str, float]:
-        """Process PDF document with automated fallback to OCR
-        
-        Args:
-            file_path: Path to the PDF file
-            document_id: UUID of the document
+    def _detect_newspaper_pdf(self, file_path: str) -> bool:
+        """Heuristic: True if PDF looks like newspaper/magazine (multi-column or headline-heavy)."""
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                pages_to_check = min(3, len(pdf.pages))
+                if pages_to_check < 1:
+                    return False
+                multi_column_count = 0
+                headline_like_count = 0
+                for i in range(pages_to_check):
+                    page = pdf.pages[i]
+                    w = page.width
+                    words = page.extract_words() or []
+                    if len(words) > 20 and w > 0:
+                        x_positions = [float(wd.get("x0", 0)) for wd in words]
+                        mid = w / 2
+                        left = sum(1 for x in x_positions if x < mid)
+                        right = len(x_positions) - left
+                        if left > 5 and right > 5:
+                            multi_column_count += 1
+                    raw = page.extract_text() or ""
+                    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+                    for line in lines:
+                        if 10 <= len(line) <= 80 and (line.isupper() or (line[0].isupper() and not line.endswith(".") and len(line.split()) <= 12)):
+                            headline_like_count += 1
+                            break
+                if multi_column_count >= 1:
+                    return True
+                if headline_like_count >= 2 and pages_to_check >= 2:
+                    return True
+                return False
+        except Exception:
+            return False
+
+    def _extract_pdf_text_column_order(self, file_path: str) -> tuple[str, list[tuple[int, int]]]:
+        """Extract PDF text in column order (left then right half per page) to avoid cross-column merge."""
+        text = ""
+        page_boundaries: list[tuple[int, int]] = []
+        try:
+            with pdfplumber.open(file_path) as pdf:
+                for i, page in enumerate(pdf.pages):
+                    w = page.width
+                    h = page.height
+                    if w and h:
+                        left = page.crop((0, 0, w / 2, h))
+                        right = page.crop((w / 2, 0, w, h))
+                        left_text = (left.extract_text() or "").strip()
+                        right_text = (right.extract_text() or "").strip()
+                        page_text = left_text + "\n" + right_text if (left_text and right_text) else (left_text or right_text)
+                    else:
+                        page_text = page.extract_text() or ""
+                    if page_text:
+                        page_boundaries.append((i + 1, len(text)))
+                        text += page_text + "\n"
+        except Exception:
+            pass
+        return text, page_boundaries
+
+    async def _process_pdf(self, file_path: str, document_id: str | None = None) -> tuple[str, float, list[tuple[int, int]], str | None]:
+        """Process PDF document with automated fallback to OCR.
+        Returns (text, ocr_confidence, page_boundaries, doc_type_hint).
+        doc_type_hint is 'newspaper' when layout suggests newspaper/magazine, else None.
         """
+        doc_id = document_id or ""
         text = ""
         ocr_confidence = 1.0
-        
+        page_boundaries: list[tuple[int, int]] = []
+        doc_type_hint: str | None = None
+
         try:
-            # Try standard text extraction
+            # Try standard text extraction (page-by-page for boundaries)
             with open(file_path, 'rb') as file:
                 pdf_reader = PyPDF2.PdfReader(file)
-                for page in pdf_reader.pages:
+                for i, page in enumerate(pdf_reader.pages):
                     page_text = page.extract_text()
                     if page_text.strip():
+                        page_boundaries.append((i + 1, len(text)))
                         text += page_text + "\n"
-            
+
             # If no text extracted, try pdfplumber (better for some layouts)
             if not text.strip():
+                page_boundaries = []
                 with pdfplumber.open(file_path) as pdf:
-                    for page in pdf.pages:
+                    for i, page in enumerate(pdf.pages):
                         page_text = page.extract_text()
                         if page_text:
+                            page_boundaries.append((i + 1, len(text)))
                             text += page_text + "\n"
-            
+
             # If still no text, the PDF is likely a scan - trigger OCR fallback
             if not text.strip():
-                logger.info(f"🔍 No text found in {document_id}, triggering OCR fallback...")
-                text, ocr_confidence = await self._ocr_pdf(file_path)
-            
+                logger.info(f"No text found in {doc_id or file_path}, triggering OCR fallback")
+                text, ocr_confidence, page_boundaries = await self._ocr_pdf(file_path)
+
+            # Newspaper/magazine: re-extract in column order and hint chunker
+            if text.strip() and self._detect_newspaper_pdf(file_path):
+                col_text, col_boundaries = self._extract_pdf_text_column_order(file_path)
+                if col_text.strip():
+                    text = col_text
+                    page_boundaries = col_boundaries
+                    doc_type_hint = "newspaper"
+
         except Exception as e:
-            logger.warning(f"⚠️ PDF text extraction failed, trying OCR: {e}")
-            text, ocr_confidence = await self._ocr_pdf(file_path)
-        
-        return text, ocr_confidence
+            logger.warning(f"PDF text extraction failed, trying OCR: {e}")
+            text, ocr_confidence, page_boundaries = await self._ocr_pdf(file_path)
+
+        return text, ocr_confidence, page_boundaries, doc_type_hint
     
-    async def _ocr_pdf(self, file_path: str) -> tuple[str, float]:
-        """Perform OCR on PDF"""
+    async def _ocr_pdf(self, file_path: str) -> tuple[str, float, list[tuple[int, int]]]:
+        """Perform OCR on PDF. Registers path so file watcher skips re-processing during OCR.
+        Returns (text, confidence, page_boundaries) with (page_num_1based, char_start) per page.
+        """
+        ocr_in_progress_add(file_path)
         try:
             with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as temp_file:
                 temp_path = temp_file.name
-            
-            # Run OCR
+
             ocrmypdf.ocr(
-                file_path, 
+                file_path,
                 temp_path,
                 language='+'.join(settings.OCR_LANGUAGES),
                 force_ocr=True,
-                skip_text=True
+                deskew=True,
+                clean=True,
+                optimize=1,
+                output_type='pdf',
             )
-            
-            # Extract text from OCR'd PDF
+
             text = ""
+            page_boundaries: list[tuple[int, int]] = []
             with pdfplumber.open(temp_path) as pdf:
-                for page in pdf.pages:
+                for i, page in enumerate(pdf.pages):
                     page_text = page.extract_text()
                     if page_text:
+                        page_boundaries.append((i + 1, len(text)))
                         text += page_text + "\n"
-            
-            # Clean up
-            os.unlink(temp_path)
-            
-            # Estimate OCR confidence (simplified)
+
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+
             confidence = min(1.0, len([c for c in text if c.isalnum()]) / max(1, len(text)) * 2)
-            
-            return text, confidence
-            
+            return text, confidence, page_boundaries
+
         except Exception as e:
-            logger.error(f"❌ OCR failed: {e}")
-            return "", 0.0
+            logger.error(f"OCR failed: {e}")
+            return "", 0.0, []
+        finally:
+            ocr_in_progress_remove(file_path)
     
     async def _process_docx(self, file_path: str) -> str:
         """Process DOCX document"""
@@ -321,6 +387,42 @@ class DocumentProcessor:
             return text
         except Exception as e:
             logger.error(f"❌ DOCX processing failed: {e}")
+            return ""
+
+    async def _process_pptx(self, file_path: str) -> str:
+        """Process PPTX document: extract text from slides, tables, and speaker notes."""
+        try:
+            from pptx import Presentation
+
+            prs = Presentation(file_path)
+            parts = []
+            for slide_num, slide in enumerate(prs.slides, 1):
+                slide_text = []
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        for para in shape.text_frame.paragraphs:
+                            text = (para.text or "").strip()
+                            if text:
+                                slide_text.append(text)
+                    if shape.has_table:
+                        for row in shape.table.rows:
+                            row_text = " | ".join(
+                                (cell.text or "").strip() for cell in row.cells
+                            )
+                            if row_text.strip():
+                                slide_text.append(row_text)
+                if slide_text:
+                    parts.append(f"## Slide {slide_num}\n" + "\n".join(slide_text))
+                try:
+                    if slide.has_notes_slide and slide.notes_slide.notes_text_frame:
+                        notes = (slide.notes_slide.notes_text_frame.text or "").strip()
+                        if notes:
+                            parts.append(f"*Speaker notes:* {notes}")
+                except Exception:
+                    pass
+            return "\n\n".join(parts) if parts else ""
+        except Exception as e:
+            logger.error(f"PPTX processing failed: {e}")
             return ""
     
     async def _process_epub(self, file_path: str) -> str:
@@ -529,6 +631,7 @@ class DocumentProcessor:
                     '.pdf': 'pdf',
                     '.txt': 'txt',
                     '.docx': 'docx',
+                    '.pptx': 'pptx',
                     '.html': 'html',
                     '.htm': 'html',
                     '.eml': 'eml',
@@ -560,11 +663,13 @@ class DocumentProcessor:
                         logger.debug(f"📄 Processing {file_name} as {doc_type}")
                         
                         if doc_type == 'pdf':
-                            text, _ = await self._process_pdf(temp_path)
+                            text, _, _, _ = await self._process_pdf(temp_path)
                         elif doc_type == 'txt':
                             text = await self._process_text(temp_path)
                         elif doc_type == 'docx':
                             text = await self._process_docx(temp_path)
+                        elif doc_type == 'pptx':
+                            text = await self._process_pptx(temp_path)
                         elif doc_type == 'html':
                             text = await self._process_html(temp_path)
                         elif doc_type == 'eml':
@@ -650,19 +755,148 @@ class DocumentProcessor:
                 overall_score=0.5
             )
     
-    async def _chunk_text(self, text: str, file_path: str, document_id: str) -> List[Chunk]:
-        """Universal chunking system that adapts to document type and structure"""
+    def _assign_page_range(
+        self,
+        chunk: Chunk,
+        full_text: str,
+        page_boundaries: list[tuple[int, int]],
+    ) -> None:
+        """Set chunk.metadata page_start and page_end from character offsets.
+        page_boundaries is list of (page_num_1based, char_start). Mutates chunk in place.
+        """
+        if not page_boundaries:
+            return
+        content = chunk.content.strip()
+        if not content:
+            return
+        start = full_text.find(content)
+        if start < 0:
+            return
+        end = start + len(content)
+        page_start = None
+        page_end = None
+        for i, (page_num, char_start) in enumerate(page_boundaries):
+            if char_start <= start:
+                page_start = page_num
+            if char_start <= end:
+                page_end = page_num
+        if page_start is not None:
+            chunk.metadata["page_start"] = page_start
+            chunk.metadata["page_end"] = page_end if page_end is not None else page_start
+
+    def _chunk_newspaper_content(self, text: str, file_path: str, document_id: str) -> List[Chunk]:
+        """Chunk newspaper/magazine content by article boundaries (headline + body)."""
+        chunks = []
+        lines = text.splitlines()
+        article_index = 0
+        chunk_index = 0
+        i = 0
+        stem = Path(file_path).stem
+
+        def is_headline(line: str) -> bool:
+            line = line.strip()
+            if not line or len(line) > 80:
+                return False
+            if line.isupper() and len(line) >= 10:
+                return True
+            words = line.split()
+            if len(words) > 12:
+                return False
+            if words and words[0][0].isupper() and not line.endswith("."):
+                return True
+            return False
+
+        while i < len(lines):
+            line = lines[i]
+            if not line.strip():
+                i += 1
+                continue
+            if is_headline(line):
+                headline = line.strip()
+                body_lines = []
+                i += 1
+                while i < len(lines):
+                    next_line = lines[i]
+                    if next_line.strip() and is_headline(next_line):
+                        break
+                    body_lines.append(next_line)
+                    i += 1
+                body = "\n".join(body_lines).strip()
+                if body:
+                    paragraphs = [p.strip() for p in body.split("\n\n") if p.strip()]
+                    for pi, para in enumerate(paragraphs):
+                        if len(para) > 30:
+                            chunks.append(self._create_chunk(
+                                f"{stem}_art{article_index}_p{chunk_index}",
+                                document_id,
+                                para,
+                                chunk_index,
+                                "newspaper_paragraph",
+                                {"article_headline": headline, "article_index": article_index, "paragraph_index": pi},
+                            ))
+                            chunk_index += 1
+                else:
+                    chunks.append(self._create_chunk(
+                        f"{stem}_art{article_index}_h",
+                        document_id,
+                        headline,
+                        chunk_index,
+                        "newspaper_headline",
+                        {"article_headline": headline, "article_index": article_index},
+                    ))
+                    chunk_index += 1
+                article_index += 1
+            else:
+                acc = []
+                while i < len(lines):
+                    ln = lines[i]
+                    if ln.strip() and is_headline(ln):
+                        break
+                    acc.append(ln)
+                    i += 1
+                body = "\n".join(acc).strip()
+                if body and len(body) > 30:
+                    chunks.append(self._create_chunk(
+                        f"{stem}_lead_{chunk_index}",
+                        document_id,
+                        body,
+                        chunk_index,
+                        "newspaper_lead",
+                        {"article_index": article_index},
+                    ))
+                    chunk_index += 1
+                    article_index += 1
+
+        return chunks
+
+    async def _chunk_text(
+        self,
+        text: str,
+        file_path: str,
+        document_id: str,
+        *,
+        page_boundaries: list[tuple[int, int]] | None = None,
+        doc_type_hint: str | None = None,
+    ) -> List[Chunk]:
+        """Universal chunking system that adapts to document type and structure.
+        If page_boundaries is provided (e.g. from PDF), each chunk gets page_start/page_end in metadata.
+        If doc_type_hint is 'newspaper', uses newspaper/magazine article-boundary chunking.
+        """
         try:
-            logger.info(f"📝 Text length: {len(text)} characters")
-            logger.info(f"📝 First 200 chars: {text[:200]}...")
-            
-            # Detect document structure and choose appropriate strategy
-            doc_structure = self._analyze_document_structure(text)
-            logger.info(f"📝 Document structure: {doc_structure}")
-            
+            logger.info(f"Text length: {len(text)} characters")
+            logger.info(f"First 200 chars: {text[:200]}...")
+
+            if doc_type_hint == "newspaper":
+                doc_structure = "newspaper"
+            else:
+                doc_structure = self._analyze_document_structure(text)
+            logger.info(f"Document structure: {doc_structure}")
+
             chunks = []
-            
-            if doc_structure == "book":
+
+            if doc_structure == "newspaper":
+                chunks = self._chunk_newspaper_content(text, file_path, document_id)
+            elif doc_structure == "book":
                 chunks = self._chunk_book_content(text, file_path, document_id)
             elif doc_structure == "email":
                 chunks = self._chunk_email_content(text, file_path, document_id)
@@ -673,15 +907,20 @@ class DocumentProcessor:
             else:
                 # Default hierarchical chunking
                 chunks = self._chunk_hierarchical(text, file_path, document_id)
-            
+
             # Post-process: ensure optimal chunk sizes
             final_chunks = self._optimize_chunk_sizes(chunks, file_path, document_id)
-            
-            logger.info(f"📝 Created {len(final_chunks)} total chunks using {doc_structure} strategy")
+
+            # Assign page range to each chunk when we have page boundaries (e.g. PDF)
+            if page_boundaries and final_chunks:
+                for ch in final_chunks:
+                    self._assign_page_range(ch, text, page_boundaries)
+
+            logger.info(f"Created {len(final_chunks)} total chunks using {doc_structure} strategy")
             return final_chunks
-            
+
         except Exception as e:
-            logger.error(f"❌ Text chunking failed: {e}")
+            logger.error(f"Text chunking failed: {e}")
             return []
     
     def _analyze_document_structure(self, text: str) -> str:
@@ -1405,221 +1644,50 @@ class DocumentProcessor:
             except:
                 return str(text)
     
-    async def _extract_entities(self, text: str, chunks: List[Chunk]) -> List[Entity]:
-        """Extract entities from document text using spaCy and pattern-based methods"""
-        try:
-            logger.info("🔍 Starting entity extraction...")
-            
-            entities = []
-            
-            # Method 1: spaCy NER (primary method)
-            if self.nlp:
-                spacy_entities = self._extract_spacy_entities(text)
-                entities.extend(spacy_entities)
-                logger.info(f"🔍 spaCy found {len(spacy_entities)} entities")
-            else:
-                logger.warning("🔍 spaCy not available - install with: python -m spacy download en_core_web_lg")
-            
-            # Method 2: Pattern-based extraction (fallback and supplement)
-            pattern_entities = self._extract_pattern_entities(text)
-            entities.extend(pattern_entities)
-            logger.info(f"🔍 Patterns found {len(pattern_entities)} entities")
-            
-            # Deduplicate and score entities
-            final_entities = self._deduplicate_entities(entities)
-            
-            logger.info(f"🔍 Final entity count: {len(final_entities)} (spaCy + patterns)")
-            return final_entities
-            
-        except Exception as e:
-            logger.error(f"❌ Entity extraction failed: {e}")
-            return []
-    
-    def _extract_spacy_entities(self, text: str) -> List[Entity]:
-        """Extract entities using spaCy NER"""
-        if not self.nlp:
-            return []
-        
-        try:
-            # Process text in chunks to avoid memory issues
-            max_length = 1000000  # 1M characters
-            if len(text) > max_length:
-                text = text[:max_length]
-            
-            doc = self.nlp(text)
-            entities = []
-            
-            for ent in doc.ents:
-                # Map spaCy labels to our entity types
-                entity_type = self._map_spacy_label(ent.label_)
-                if entity_type:
-                    entities.append(Entity(
-                        name=ent.text.strip(),
-                        entity_type=entity_type,
-                        confidence=0.8,  # spaCy confidence
-                        source_chunk="",
-                        metadata={"source": "spacy", "context": ent.sent.text[:200] if ent.sent else ""}
-                    ))
-            
+    def _map_entities_to_chunks(self, entities: List[Entity], chunks: List[Chunk]) -> List[Entity]:
+        """Map each entity to the chunk(s) where its name appears (substring match, case-insensitive)."""
+        if not chunks:
             return entities
-            
-        except Exception as e:
-            logger.error(f"❌ spaCy entity extraction failed: {e}")
-            return []
-    
-    
-    def _extract_pattern_entities(self, text: str) -> List[Entity]:
-        """Extract entities using regex patterns"""
-        entities = []
-        
-        try:
-            # Email addresses
-            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-            for match in re.finditer(email_pattern, text):
-                entities.append(Entity(
-                    name=match.group(),
-                    entity_type="EMAIL",
-                    confidence=0.9,
-                    source_chunk="",
-                    metadata={"source": "pattern", "context": ""}
-                ))
-            
-            # URLs
-            url_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-            for match in re.finditer(url_pattern, text):
-                entities.append(Entity(
-                    name=match.group(),
-                    entity_type="URL",
-                    confidence=0.9,
-                    source_chunk="",
-                    metadata={"source": "pattern", "context": ""}
-                ))
-            
-            # Phone numbers
-            phone_pattern = r'\b(?:\+?1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}\b'
-            for match in re.finditer(phone_pattern, text):
-                entities.append(Entity(
-                    name=match.group(),
-                    entity_type="PHONE",
-                    confidence=0.8,
-                    source_chunk="",
-                    metadata={"source": "pattern", "context": ""}
-                ))
-            
-            # Dates (simple patterns)
-            date_patterns = [
-                r'\b\d{1,2}/\d{1,2}/\d{4}\b',  # MM/DD/YYYY
-                r'\b\d{4}-\d{2}-\d{2}\b',      # YYYY-MM-DD
-                r'\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* \d{1,2},? \d{4}\b'  # Month DD, YYYY
-            ]
-            
-            for pattern in date_patterns:
-                for match in re.finditer(pattern, text, re.IGNORECASE):
-                    entities.append(Entity(
-                        name=match.group(),
-                        entity_type="DATE",
-                        confidence=0.7,
-                        source_chunk="",
-                        metadata={"source": "pattern", "context": ""}
-                    ))
-            
-            # Programming languages and technologies
-            tech_keywords = [
-                'Python', 'JavaScript', 'Java', 'C++', 'C#', 'Ruby', 'PHP', 'Go', 'Rust',
-                'React', 'Vue', 'Angular', 'Node.js', 'Django', 'Flask', 'Spring',
-                'Docker', 'Kubernetes', 'AWS', 'Azure', 'GCP', 'MongoDB', 'PostgreSQL',
-                'MySQL', 'Redis', 'Elasticsearch', 'Apache', 'Nginx', 'Git', 'GitHub'
-            ]
-            
-            for keyword in tech_keywords:
-                pattern = r'\b' + re.escape(keyword) + r'\b'
-                for match in re.finditer(pattern, text, re.IGNORECASE):
-                    entities.append(Entity(
-                        name=match.group(),
-                        entity_type="TECHNOLOGY",
-                        confidence=0.6,
-                        source_chunk="",
-                        metadata={"source": "pattern", "context": ""}
-                    ))
-            
-            return entities
-            
-        except Exception as e:
-            logger.error(f"❌ Pattern entity extraction failed: {e}")
-            return []
-    
-    def _map_spacy_label(self, label: str) -> str:
-        """Map spaCy entity labels to our entity types"""
-        mapping = {
-            'PERSON': 'PERSON',
-            'ORG': 'ORGANIZATION',
-            'GPE': 'LOCATION',  # Geopolitical entity
-            'LOC': 'LOCATION',
-            'DATE': 'DATE',
-            'TIME': 'DATE',
-            'MONEY': 'MONEY',
-            'PERCENT': 'PERCENT',
-            'PRODUCT': 'PRODUCT',
-            'EVENT': 'EVENT',
-            'WORK_OF_ART': 'WORK_OF_ART',
-            'LAW': 'LAW',
-            'LANGUAGE': 'LANGUAGE',
-            'NORP': 'GROUP',  # Nationalities, religious groups
-            'FAC': 'FACILITY',  # Buildings, airports, etc.
-        }
-        
-        return mapping.get(label, None)
-    
-    def _deduplicate_entities(self, entities: List[Entity]) -> List[Entity]:
-        """Remove duplicate entities and merge similar ones"""
-        if not entities:
-            return []
-        
-        # Group entities by normalized name
-        entity_groups = {}
-        
+        result = []
         for entity in entities:
-            # Normalize entity name
-            normalized_name = entity.name.lower().strip()
-            
-            # Skip very short or common entities
-            if len(normalized_name) < 2 or normalized_name in ['the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for']:
-                continue
-            
-            if normalized_name not in entity_groups:
-                entity_groups[normalized_name] = []
-            entity_groups[normalized_name].append(entity)
-        
-        # Select best entity from each group
-        final_entities = []
-        
-        for group in entity_groups.values():
-            if not group:
-                continue
-            
-            # Sort by confidence and source priority
-            source_priority = {'llm': 3, 'spacy': 2, 'pattern': 1}
-            group.sort(key=lambda e: (e.confidence, source_priority.get(e.metadata.get("source", ""), 0)), reverse=True)
-            
-            best_entity = group[0]
-            
-            # Use the most common entity type if there are conflicts
-            type_counts = {}
-            for entity in group:
-                type_counts[entity.entity_type] = type_counts.get(entity.entity_type, 0) + 1
-            
-            most_common_type = max(type_counts.items(), key=lambda x: x[1])[0]
-            best_entity.entity_type = most_common_type
-            
-            # Average confidence across sources
-            avg_confidence = sum(e.confidence for e in group) / len(group)
-            best_entity.confidence = min(0.95, avg_confidence)
-            
-            final_entities.append(best_entity)
-        
-        # Sort by confidence and return top entities
-        final_entities.sort(key=lambda e: e.confidence, reverse=True)
-        return final_entities[:settings.MAX_ENTITY_RESULTS]  # Use configurable entity limit
+            name_lower = entity.name.lower()
+            chunk_ids = [
+                c.chunk_id for c in chunks
+                if name_lower in (c.content or "").lower()
+            ]
+            first_chunk = chunk_ids[0] if chunk_ids else ""
+            meta = dict(entity.metadata or {})
+            meta["chunk_ids"] = chunk_ids
+            result.append(
+                entity.model_copy(
+                    update={
+                        "source_chunk": first_chunk,
+                        "metadata": meta,
+                    }
+                )
+            )
+        return result
+
+    async def _extract_entities(self, text: str, chunks: List[Chunk]) -> List[Entity]:
+        """Extract entities via document-service (spaCy + patterns + dedup all in document-service)."""
+        try:
+            logger.info("Starting entity extraction...")
+            if self.document_service_client and getattr(
+                self.document_service_client, "_initialized", False
+            ):
+                try:
+                    entities = await self.document_service_client.extract_entities(text)
+                    logger.info("Document service returned %s entities", len(entities))
+                    entities = self._map_entities_to_chunks(entities, chunks)
+                    return entities
+                except Exception as e:
+                    logger.warning("Document service entity extraction failed: %s", e)
+            else:
+                logger.warning("Document service not available for entity extraction")
+            return []
+        except Exception as e:
+            logger.error("Entity extraction failed: %s", e)
+            return []
 
     async def process_text_content(self, content: str, document_id: str, metadata: Dict[str, Any] = None) -> List[Chunk]:
         """Process text content directly and return chunks"""

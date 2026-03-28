@@ -11,8 +11,13 @@ import folderService from './folder/FolderService';
 import templateService from './template/TemplateService';
 import integrationService from './integration/IntegrationService';
 import audioService from './audio/AudioService';
+import voiceService from './audio/VoiceService';
 import orgService from './org/OrgService';
+import calendarService from './calendar/CalendarService';
+import contactService from './contacts/ContactService';
 import musicService from './music/MediaService';
+import agentFactoryService from './agentFactoryService';
+import controlPanesService from './controlPanes/ControlPanesService';
 
 class ApiService {
   constructor() {
@@ -27,8 +32,13 @@ class ApiService {
     this.templates = templateService;
     this.integrations = integrationService;
     this.audio = audioService;
+    this.voice = voiceService;
     this.org = orgService;
+    this.calendar = calendarService;
+    this.contacts = contactService;
     this.music = musicService;
+    this.agentFactory = agentFactoryService;
+    this.controlPanes = controlPanesService;
   }
 
   // ===== CORE HTTP METHODS =====
@@ -71,15 +81,33 @@ class ApiService {
   moveDocument = (documentId, newFolderId, userId) => this.documents.moveDocument(documentId, newFolderId, userId);
   getDocumentContent = (documentId) => this.documents.getDocumentContent(documentId);
   updateDocumentContent = (documentId, content) => this.documents.updateDocumentContent(documentId, content);
+  getPendingProposals = (documentId, options) => this.documents.getPendingProposals(documentId, options);
+  applyDocumentEditProposal = (proposalId, selectedOperationIndices) => this.documents.applyDocumentEditProposal(proposalId, selectedOperationIndices);
+  rejectDocumentEditProposal = (proposalId) => this.documents.rejectDocumentEditProposal(proposalId);
+  markDocumentEditProposalApplied = (proposalId) => this.documents.markDocumentEditProposalApplied(proposalId);
   getLinkGraph = (scope = 'all', folderId = null) => {
     const params = new URLSearchParams({ scope: scope === 'folder' && folderId ? 'folder' : 'all' });
     if (folderId) params.set('folder_id', folderId);
     return this.get(`/api/graph/link-graph?${params.toString()}`);
   };
+  getEntityGraph = (entityLimit = 100) => {
+    const params = new URLSearchParams({ entity_limit: String(entityLimit) });
+    return this.get(`/api/graph/entity-graph?${params.toString()}`);
+  };
+  getEntityDetail = (entityName) =>
+    this.get(`/api/graph/entity/${encodeURIComponent(entityName)}`);
+  getUnifiedGraph = (layers = 'files,entities', entityLimit = 100) => {
+    const params = new URLSearchParams({ layers, entity_limit: String(entityLimit) });
+    return this.get(`/api/graph/unified-graph?${params.toString()}`);
+  };
   createDocument = (documentData) => this.documents.createDocument(documentData);
   createDocumentFromContent = (args) => this.documents.createDocumentFromContent(args);
   exemptDocument = (documentId) => this.documents.exemptDocument(documentId);
   removeDocumentExemption = (documentId) => this.documents.removeDocumentExemption(documentId);
+  getDocumentVersions = (documentId, skip, limit) => this.documents.getDocumentVersions(documentId, skip, limit);
+  getVersionContent = (documentId, versionId) => this.documents.getVersionContent(documentId, versionId);
+  diffVersions = (documentId, fromVersionId, toVersionId) => this.documents.diffVersions(documentId, fromVersionId, toVersionId);
+  rollbackToVersion = (documentId, versionId) => this.documents.rollbackToVersion(documentId, versionId);
 
   // ===== CHAT METHODS =====
   queryKnowledgeBase = (query, sessionId, maxResults, conversationId) => 
@@ -142,8 +170,47 @@ class ApiService {
   setEnabledModels = (modelIds) => this.settings.setEnabledModels(modelIds);
   getCurrentModel = () => this.settings.getCurrentModel();
   selectModel = (modelName) => this.settings.selectModel(modelName);
+  invalidateCatalogSlice = () => this.settings.invalidateCatalogSlice();
+
+  // User-level LLM providers (per-user API keys and models)
+  getUserLlmProviders = () => this.get('/api/user/llm-providers');
+  addUserLlmProvider = (body) => this.post('/api/user/llm-providers', body);
+  removeUserLlmProvider = (providerId) => this.delete(`/api/user/llm-providers/${providerId}`);
+  getUserLlmProviderModels = (providerId) => this.get(`/api/user/llm-providers/${providerId}/models`);
+  getUserEnabledModels = () => this.get('/api/user/models/enabled');
+  setUserEnabledModels = (providerId, modelIds) => this.put('/api/user/models/enabled', { provider_id: providerId, model_ids: modelIds });
+  getUseAdminModels = () => this.get('/api/user/settings/use-admin-models');
+  setUseAdminModels = (value) => this.put('/api/user/settings/use-admin-models', { value });
+  getUserModelRoles = () => this.get('/api/user/models/roles');
+  setUserModelRoles = (roles) => this.put('/api/user/models/roles', roles);
+
+  getUserVoiceProviders = () => this.get('/api/user/voice-providers');
+  addUserVoiceProvider = (body) => this.post('/api/user/voice-providers', body);
+  removeUserVoiceProvider = (providerId) => this.delete(`/api/user/voice-providers/${providerId}`);
+  getUserVoiceProviderVoices = (providerId) => this.get(`/api/user/voice-providers/${providerId}/voices`);
+  getUserVoiceSettings = () => this.get('/api/user/voice-settings');
+  setUserVoiceSettings = (body) => this.put('/api/user/voice-settings', body);
+
+  getHomeDashboard = () => this.get('/api/home-dashboard');
+  putHomeDashboard = (body) => this.put('/api/home-dashboard', body);
+
+  listHomeDashboards = () => this.get('/api/home-dashboards');
+  createHomeDashboard = (body) => this.post('/api/home-dashboards', body || {});
+  patchHomeDashboard = (id, body) =>
+    this.patch(`/api/home-dashboards/${encodeURIComponent(id)}`, body);
+  deleteHomeDashboard = (id) =>
+    this.delete(`/api/home-dashboards/${encodeURIComponent(id)}`);
+  getHomeDashboardLayout = (id) =>
+    this.get(`/api/home-dashboards/${encodeURIComponent(id)}/layout`);
+  putHomeDashboardLayout = (id, layout) =>
+    this.put(`/api/home-dashboards/${encodeURIComponent(id)}/layout`, layout);
+
   getUserTimezone = () => this.settings.getUserTimezone();
   setUserTimezone = (timezoneData) => this.settings.setUserTimezone(timezoneData);
+  getUserPhoneNumber = () => this.settings.getUserPhoneNumber();
+  setUserPhoneNumber = (phoneNumberData) => this.settings.setUserPhoneNumber(phoneNumberData);
+  getUserBirthday = () => this.settings.getUserBirthday();
+  setUserBirthday = (birthdayData) => this.settings.setUserBirthday(birthdayData);
   getPromptSettings = () => this.settings.getPromptSettings();
   updatePromptSettings = (settings) => this.settings.updatePromptSettings(settings);
   getPromptOptions = () => this.settings.getPromptOptions();

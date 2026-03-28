@@ -4,7 +4,7 @@ Provides search, agenda, and TODO list functionality for org-mode files
 """
 
 import logging
-from typing import Optional, List
+from typing import Optional, List, Literal
 from fastapi import APIRouter, Depends, Query, HTTPException
 
 from utils.auth_middleware import get_current_user, AuthenticatedUserResponse
@@ -15,45 +15,69 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Org Tools"])
 
 
+@router.get("/api/org/tags")
+async def list_org_tags(
+    include_archives: bool = Query(False, description="Include _archive.org files when scanning"),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """List all org headline tags with usage counts across the user's .org files."""
+    try:
+        search_service = await get_org_search_service()
+        return await search_service.list_org_tags(
+            user_id=current_user.user_id,
+            include_archives=include_archives,
+        )
+    except Exception as e:
+        logger.error("list_org_tags failed: %s", e)
+        return {
+            "success": False,
+            "error": str(e),
+            "tags": [],
+            "files_scanned": 0,
+            "total_distinct_tags": 0,
+        }
+
+
 @router.get("/api/org/search")
 async def search_org_files(
-    query: str = Query(..., description="Search query string"),
+    query: str = Query("", description="Search text; empty string = browse by tag/TODO filters only"),
     tags: Optional[str] = Query(None, description="Comma-separated tags to filter by"),
     todo_states: Optional[str] = Query(None, description="Comma-separated TODO states to filter by"),
     include_content: bool = Query(True, description="Include content in search, not just headings"),
     limit: int = Query(100, ge=1, le=500, description="Maximum number of results"),
     include_archives: bool = Query(False, description="Include _archive.org files in search results"),
+    tags_match: Literal["any", "all"] = Query(
+        "any",
+        description='With multiple tags: "any" = match if heading has any tag; "all" = must have every tag',
+    ),
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """
-    Search across all org files for the current user
-    
-    **BULLY!** Full-text search with filtering by tags and TODO states!
-    
+    Search across all org files for the current user.
+
     **Query Parameters:**
-    - **query**: Search text (required)
+    - **query**: Search text; may be empty to return headings matching tag/TODO filters only
     - **tags**: Filter by tags, e.g., "work,urgent" (optional)
+    - **tags_match**: "any" (OR) or "all" (AND) when multiple tags are given
     - **todo_states**: Filter by states, e.g., "TODO,NEXT" (optional)
     - **include_content**: Search in content or just headings (default: true)
     - **limit**: Max results to return (default: 100)
     - **include_archives**: Include _archive.org files (default: false)
-    
-    **Returns:**
-    - Search results with headings, tags, TODO states, and previews
-    - Click results to open the file at the matching heading
-    - Archives excluded by default - use include_archives=true to search them
     """
     try:
-        # Parse comma-separated filters
-        tags_list = [t.strip() for t in tags.split(',')] if tags else None
-        states_list = [s.strip().upper() for s in todo_states.split(',')] if todo_states else None
-        
-        logger.info(f"🔍 ROOSEVELT: User {current_user.username} searching for '{query}' (archives: {include_archives})")
-        
-        # Get search service
+        tags_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+        states_list = [s.strip().upper() for s in todo_states.split(",") if s.strip()] if todo_states else None
+
+        logger.info(
+            "Org search user=%s query=%r archives=%s tags_match=%s",
+            current_user.username,
+            query,
+            include_archives,
+            tags_match,
+        )
+
         search_service = await get_org_search_service()
-        
-        # Execute search
+
         results = await search_service.search_org_files(
             user_id=current_user.user_id,
             query=query,
@@ -61,7 +85,8 @@ async def search_org_files(
             todo_states=states_list,
             include_content=include_content,
             limit=limit,
-            include_archives=include_archives
+            include_archives=include_archives,
+            tags_match=tags_match,
         )
         
         logger.info(f"✅ Found {results.get('count', 0)} results for '{query}'")
@@ -87,8 +112,10 @@ async def get_all_todos(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """
-    Get all TODO items across org files
-    
+    Get all TODO items across org files.
+
+    DEPRECATED: Prefer GET /api/todos (org_todo_api) with query params scope, states, tags, limit.
+
     **BULLY!** View all your TODOs in one place!
     
     **Query Parameters:**
@@ -108,7 +135,7 @@ async def get_all_todos(
         if not states_list:
             states_list = ['TODO', 'NEXT', 'STARTED', 'WAITING', 'HOLD']
         
-        logger.info(f"✅ ROOSEVELT: User {current_user.username} fetching TODOs")
+        logger.info("User %s fetching TODOs", current_user.username)
         
         # Get search service (reuse search functionality)
         search_service = await get_org_search_service()
@@ -161,7 +188,7 @@ async def get_all_contacts(
     - List of contact entries with properties
     """
     try:
-        logger.info(f"📞 ROOSEVELT: User {current_user.username} fetching contacts")
+        logger.info("User %s fetching contacts", current_user.username)
         
         # Get search service
         search_service = await get_org_search_service()
@@ -217,7 +244,7 @@ async def get_all_contacts(
                 else:
                     contacts.append(item)
         
-        logger.info(f"✅ ROOSEVELT: Found {len(contacts)} contacts")
+        logger.info("Found %s contacts", len(contacts))
         
         return {
             "success": True,
@@ -242,26 +269,30 @@ async def get_agenda(
     include_scheduled: bool = Query(True, description="Include SCHEDULED items"),
     include_deadlines: bool = Query(True, description="Include DEADLINE items"),
     include_appointments: bool = Query(True, description="Include calendar appointments (active timestamps)"),
+    include_org_files: Optional[List[str]] = Query(
+        None,
+        description="Org files to include (e.g. calendar.org). Omit = all; [] = none; ['calendar.org'] = only those",
+    ),
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """
     Get agenda items (scheduled, deadlines, and appointments) for upcoming days
-    
-    **BULLY!** Your org-mode agenda in one view!
-    
+
     **Query Parameters:**
     - **days_ahead**: Number of days to include (default: 7)
     - **include_scheduled**: Include SCHEDULED items (default: true)
     - **include_deadlines**: Include DEADLINE items (default: true)
     - **include_appointments**: Include calendar appointments with active timestamps (default: true)
-    
+    - **include_org_files**: Org filenames to include. Omit = all; [] = none; ['calendar.org'] = only those (show/hide per file).
+
     **Returns:**
     - Agenda items sorted by date
     - Grouped by day for easy viewing
+    - org_files_present: list of org filenames that had items (for calendar checkboxes)
     - Types: SCHEDULED, DEADLINE, APPOINTMENT
     """
     try:
-        logger.info(f"📅 ROOSEVELT: User {current_user.username} fetching agenda")
+        logger.info("User %s fetching agenda", current_user.username)
         
         # Get search service
         search_service = await get_org_search_service()
@@ -420,6 +451,14 @@ async def get_agenda(
                     except Exception as e:
                         logger.warning(f"Failed to parse active timestamp: {timestamp_str}: {e}")
         
+        # Which org filenames had items (for frontend calendar checkboxes)
+        org_files_present = sorted({(i.get("filename") or "").strip() for i in agenda_items if (i.get("filename") or "").strip()})
+
+        # Apply org file filter (show/hide per file, like O365 calendar checkboxes)
+        if include_org_files is not None:
+            allowed = {f.lower().strip() for f in include_org_files if (f or "").strip()}
+            agenda_items = [i for i in agenda_items if (i.get("filename") or "").lower().strip() in allowed]
+
         # Sort by datetime (date + time) for proper chronological ordering
         agenda_items.sort(key=lambda x: x.get('sort_datetime', datetime.combine(x['sort_date'], datetime.min.time())))
         
@@ -441,6 +480,7 @@ async def get_agenda(
             "agenda_items": agenda_items,
             "grouped_by_date": grouped,
             "count": len(agenda_items),
+            "org_files_present": org_files_present,
             "date_range": {
                 "start": today.isoformat(),
                 "end": end_date.isoformat()
@@ -479,7 +519,7 @@ async def get_backlinks(
     then calling `/api/org/backlinks?filename=projects.org` will return "ideas.org" as a backlink.
     """
     try:
-        logger.info(f"🔗 ROOSEVELT: User {current_user.username} finding backlinks for '{filename}'")
+        logger.info("User %s finding backlinks for %r", current_user.username, filename)
         
         # Get search service
         search_service = await get_org_search_service()
@@ -524,7 +564,7 @@ async def lookup_document_by_filename(
     - Document metadata including document_id for opening in DocumentViewer
     """
     try:
-        logger.info(f"🔍 ROOSEVELT: Looking up org file '{filename}' for {current_user.username}")
+        logger.info("Looking up org file %r for %s", filename, current_user.username)
         
         from services.database_manager.database_helpers import fetch_all
         from pathlib import Path
@@ -621,7 +661,7 @@ async def discover_refile_targets(
     - List of refile targets (files and headings)
     """
     try:
-        logger.info(f"🎯 ROOSEVELT: Discovering refile targets for {current_user.username}")
+        logger.info("Discovering refile targets for %s", current_user.username)
         
         from services.org_refile_service import get_org_refile_service
         
@@ -667,7 +707,12 @@ async def refile_entry(
     - Success status and operation details
     """
     try:
-        logger.info(f"📦 ROOSEVELT: Refiling from {request.source_file}:{request.source_line} to {request.target_file}")
+        logger.info(
+            "Refiling from %s:%s to %s",
+            request.source_file,
+            request.source_line,
+            request.target_file,
+        )
         
         from services.org_refile_service import get_org_refile_service
         
@@ -817,7 +862,7 @@ async def archive_entry(
     - Success status and operation details
     """
     try:
-        logger.info(f"📦 ROOSEVELT: Archiving from {request.source_file}:{request.line_number}")
+        logger.info("Archiving from %s:%s", request.source_file, request.line_number)
         
         from services.org_archive_service import get_org_archive_service
         
@@ -864,7 +909,7 @@ async def archive_all_done(
     - Count of archived items and operation details
     """
     try:
-        logger.info(f"📦 ROOSEVELT: Bulk archiving DONE items from {request.source_file}")
+        logger.info("Bulk archiving DONE items from %s", request.source_file)
         
         from services.org_archive_service import get_org_archive_service
         
@@ -873,7 +918,7 @@ async def archive_all_done(
         result = await archive_service.archive_all_done(
             user_id=current_user.user_id,
             source_file=request.source_file,
-            archive_location=request.archive_location
+            archive_location=request.archive_location,
         )
         
         if result['success']:
@@ -917,7 +962,7 @@ async def handle_recurring_task_completion(
     - Success status and next occurrence details
     """
     try:
-        logger.info(f"🔁 ROOSEVELT: Handling task completion at {request.file_path}:{request.line_number}")
+        logger.info("Handling task completion at %s:%s", request.file_path, request.line_number)
         
         from services.org_recurring_service import get_org_recurring_service
         
@@ -971,7 +1016,7 @@ async def get_habit_consistency(
     - Consistency statistics
     """
     try:
-        logger.info(f"📊 ROOSEVELT: Getting consistency for {request.heading_text}")
+        logger.info("Getting consistency for %r", request.heading_text)
         
         from services.org_recurring_service import get_org_recurring_service
         
@@ -1017,7 +1062,7 @@ async def clock_in(
     - Clock start time and details
     """
     try:
-        logger.info(f"⏰ ROOSEVELT: Clock in at {request.file_path}:{request.line_number}")
+        logger.info("Clock in at %s:%s", request.file_path, request.line_number)
         
         from services.org_clocking_service import get_org_clocking_service
         
@@ -1060,7 +1105,7 @@ async def clock_out(
     - Duration worked and CLOCK entry details
     """
     try:
-        logger.info(f"⏰ ROOSEVELT: Clock out for user {current_user.user_id}")
+        logger.info("Clock out for user %s", current_user.user_id)
         
         from services.org_clocking_service import get_org_clocking_service
         
@@ -1141,7 +1186,7 @@ async def get_time_report(
     - Time report with statistics
     """
     try:
-        logger.info(f"📊 ROOSEVELT: Time report for user {current_user.user_id}")
+        logger.info("Time report for user %s", current_user.user_id)
         
         from services.org_clocking_service import get_org_clocking_service
         

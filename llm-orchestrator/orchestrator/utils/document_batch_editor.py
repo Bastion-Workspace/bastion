@@ -76,7 +76,8 @@ class DocumentEditBatch:
             True if content was loaded successfully, False otherwise
         """
         try:
-            self.initial_content = await get_document_content_tool(self.document_id, self.user_id)
+            _r = await get_document_content_tool(self.document_id, self.user_id)
+            self.initial_content = _r.get("content", _r) if isinstance(_r, dict) else _r
             if self.initial_content.startswith("Error"):
                 logger.error(f"Failed to read document {self.document_id}: {self.initial_content}")
                 return False

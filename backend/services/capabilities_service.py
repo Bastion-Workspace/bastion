@@ -1,5 +1,5 @@
 """
-Capabilities Service - Roosevelt's Feature Flags and Permissions
+Capabilities Service - Feature Flags and Permissions
 
 Provides per-user capability flags with role-aware defaults.
 Admins implicitly have all capabilities enabled.
@@ -23,6 +23,8 @@ FEATURE_KEYS = [
     "feature.news.notifications",
     # Maps
     "feature.maps.view",
+    # Games
+    "feature.games.view",
     # Image analysis
     "feature.image.llm_description",
 ]

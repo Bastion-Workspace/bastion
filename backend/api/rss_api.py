@@ -6,7 +6,7 @@ FastAPI endpoints for RSS feed management and article processing
 import logging
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
-from pydantic import ValidationError
+from pydantic import ValidationError, BaseModel, Field
 
 from tools_service.models.rss_models import (
     RSSFeed, RSSArticle, RSSFeedCreate, RSSArticleImport,
@@ -14,12 +14,33 @@ from tools_service.models.rss_models import (
 )
 from models.api_models import AuthenticatedUserResponse
 from tools_service.services.rss_service import get_rss_service
-from services.celery_tasks.rss_tasks import poll_rss_feeds_task, process_rss_article_task, extract_full_content_task
+from services.celery_tasks.rss_tasks import poll_rss_feeds_task, process_rss_article_task
+from services.user_settings_kv_service import get_user_setting, set_user_setting
+from services.database_manager.database_helpers import execute
+from services.rss_import_placement import resolve_rss_import_target_folder_id
 from utils.auth_middleware import get_current_user
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["RSS"])
+
+RSS_IMPORT_TARGET_FOLDER_KEY = "rss_import_target_folder_id"
+
+
+class RSSImportLocationResponse(BaseModel):
+    folder_id: Optional[str] = Field(None, description="My Documents or (admin) global folder ID; null uses default Web Sources placement")
+
+
+class RSSImportLocationUpdate(BaseModel):
+    folder_id: Optional[str] = Field(None, description="Set to null or empty to clear and use default placement")
+
+
+class RSSStarToggleResponse(BaseModel):
+    is_starred: bool = Field(..., description="Starred state after toggle")
+
+
+class RSSBulkCountResponse(BaseModel):
+    count: int = Field(..., description="Number of rows affected")
 
 
 @router.post("/api/rss/feeds", response_model=RSSFeed)
@@ -53,6 +74,19 @@ async def create_rss_feed(
             return feed
         else:
             logger.info(f"✅ RSS API: Created new RSS feed {feed.feed_id}")
+            try:
+                poll_rss_feeds_task.delay(
+                    user_id=current_user.user_id,
+                    feed_ids=[feed.feed_id],
+                    force_poll=True,
+                )
+                logger.info(f"RSS API: Enqueued initial poll for new feed {feed.feed_id}")
+            except Exception as poll_err:
+                logger.warning(
+                    "RSS API: Could not enqueue initial poll for feed %s: %s",
+                    feed.feed_id,
+                    poll_err,
+                )
             return feed
         
     except ValidationError as e:
@@ -88,6 +122,19 @@ async def create_global_rss_feed(
         feed = await rss_service.create_feed(feed_data, update_if_exists=update_if_exists)
         
         logger.info(f"✅ RSS API: Created global RSS feed {feed.feed_id}")
+        try:
+            poll_rss_feeds_task.delay(
+                user_id=current_user.user_id,
+                feed_ids=[feed.feed_id],
+                force_poll=True,
+            )
+            logger.info(f"RSS API: Enqueued initial poll for new global feed {feed.feed_id}")
+        except Exception as poll_err:
+            logger.warning(
+                "RSS API: Could not enqueue initial poll for global feed %s: %s",
+                feed.feed_id,
+                poll_err,
+            )
         return feed
         
     except ValidationError as e:
@@ -163,6 +210,52 @@ async def get_categorized_rss_feeds(
         raise HTTPException(status_code=500, detail="Failed to get categorized RSS feeds")
 
 
+@router.get("/api/rss/feeds/validate")
+async def validate_feed_url(
+    feed_url: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """
+    Validate an RSS feed URL and return feed information
+
+    Registered before /feeds/{feed_id} so "validate" is not captured as a feed_id.
+    """
+    try:
+        logger.info(f"📡 RSS API: Validating RSS feed URL: {feed_url} for user {current_user.user_id}")
+
+        rss_service = await get_rss_service()
+
+        existing_feed = await rss_service.get_feed_by_url(feed_url, current_user.user_id)
+
+        validation_result = {
+            "status": "success",
+            "feed_url": feed_url,
+            "exists_for_user": existing_feed is not None,
+            "data": {
+                "title": "Sample RSS Feed",
+                "description": "This is a sample RSS feed for testing purposes",
+                "articles": [
+                    {"title": "Sample Article 1", "description": "This is a sample article for testing..."},
+                    {"title": "Sample Article 2", "description": "Another sample article for testing..."}
+                ]
+            }
+        }
+
+        if existing_feed:
+            validation_result["existing_feed"] = {
+                "feed_id": existing_feed.feed_id,
+                "feed_name": existing_feed.feed_name,
+                "category": existing_feed.category,
+                "tags": existing_feed.tags
+            }
+
+        return validation_result
+
+    except Exception as e:
+        logger.error(f"❌ RSS API ERROR: Failed to validate feed URL: {e}")
+        raise HTTPException(status_code=500, detail="Failed to validate RSS feed URL")
+
+
 @router.get("/api/rss/feeds/{feed_id}", response_model=RSSFeed)
 async def get_rss_feed(
     feed_id: str,
@@ -194,55 +287,6 @@ async def get_rss_feed(
     except Exception as e:
         logger.error(f"❌ RSS API ERROR: Failed to get RSS feed {feed_id}: {e}")
         raise HTTPException(status_code=500, detail="Failed to get RSS feed")
-
-
-@router.get("/api/rss/feeds/validate")
-async def validate_feed_url(
-    feed_url: str,
-    current_user: AuthenticatedUserResponse = Depends(get_current_user)
-):
-    """
-    Validate an RSS feed URL and return feed information
-    
-    **BULLY!** Test if an RSS feed URL is valid and get its metadata!
-    """
-    try:
-        logger.info(f"📡 RSS API: Validating RSS feed URL: {feed_url} for user {current_user.user_id}")
-        
-        rss_service = await get_rss_service()
-        
-        # Check if feed already exists for this user
-        existing_feed = await rss_service.get_feed_by_url(feed_url, current_user.user_id)
-        
-        # This would validate the RSS feed URL and return feed metadata
-        # For now, return a mock response for testing
-        validation_result = {
-            "status": "success",
-            "feed_url": feed_url,
-            "exists_for_user": existing_feed is not None,
-            "data": {
-                "title": "Sample RSS Feed",
-                "description": "This is a sample RSS feed for testing purposes",
-                "articles": [
-                    {"title": "Sample Article 1", "description": "This is a sample article for testing..."},
-                    {"title": "Sample Article 2", "description": "Another sample article for testing..."}
-                ]
-            }
-        }
-        
-        if existing_feed:
-            validation_result["existing_feed"] = {
-                "feed_id": existing_feed.feed_id,
-                "feed_name": existing_feed.feed_name,
-                "category": existing_feed.category,
-                "tags": existing_feed.tags
-            }
-        
-        return validation_result
-        
-    except Exception as e:
-        logger.error(f"❌ RSS API ERROR: Failed to validate feed URL: {e}")
-        raise HTTPException(status_code=500, detail="Failed to validate RSS feed URL")
 
 
 @router.delete("/api/rss/feeds/{feed_id}")
@@ -347,6 +391,105 @@ async def get_feed_articles(
         raise HTTPException(status_code=500, detail="Failed to get feed articles")
 
 
+async def _require_feed_access(
+    rss_service, feed_id: str, current_user: AuthenticatedUserResponse
+) -> None:
+    feed = await rss_service.get_feed(feed_id)
+    if not feed:
+        raise HTTPException(status_code=404, detail="RSS feed not found")
+    is_admin = current_user.role == "admin"
+    if not is_admin and feed.user_id and feed.user_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied to this RSS feed")
+
+
+@router.post("/api/rss/feeds/{feed_id}/mark-all-read", response_model=RSSBulkCountResponse)
+async def mark_all_feed_articles_read(
+    feed_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Mark all unread articles in this feed as read (single bulk update)."""
+    try:
+        rss_service = await get_rss_service()
+        await _require_feed_access(rss_service, feed_id, current_user)
+        n = await rss_service.mark_all_feed_read(feed_id, current_user.user_id)
+        return RSSBulkCountResponse(count=n)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("RSS API: mark-all-read failed for feed %s: %s", feed_id, e)
+        raise HTTPException(status_code=500, detail="Failed to mark articles read")
+
+
+@router.delete("/api/rss/feeds/{feed_id}/read-articles", response_model=RSSBulkCountResponse)
+async def delete_feed_read_articles(
+    feed_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Delete read, non-imported articles in this feed (starred articles are kept)."""
+    try:
+        rss_service = await get_rss_service()
+        await _require_feed_access(rss_service, feed_id, current_user)
+        n = await rss_service.delete_all_read_articles(feed_id, current_user.user_id)
+        return RSSBulkCountResponse(count=n)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("RSS API: delete read articles failed for feed %s: %s", feed_id, e)
+        raise HTTPException(status_code=500, detail="Failed to delete read articles")
+
+
+@router.get("/api/rss/settings/import-location", response_model=RSSImportLocationResponse)
+async def get_rss_import_location(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Default folder for RSS imports (My Documents). Empty means Web Sources / feed name."""
+    try:
+        fid = await get_user_setting(current_user.user_id, RSS_IMPORT_TARGET_FOLDER_KEY)
+        return RSSImportLocationResponse(folder_id=fid if fid else None)
+    except Exception as e:
+        logger.error("RSS API: get import location failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to load RSS import location")
+
+
+@router.put("/api/rss/settings/import-location", response_model=RSSImportLocationResponse)
+async def put_rss_import_location(
+    body: RSSImportLocationUpdate,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Set or clear the default folder for RSS article imports."""
+    try:
+        role = current_user.role or "user"
+        if body.folder_id is None or (isinstance(body.folder_id, str) and not body.folder_id.strip()):
+            await execute(
+                "DELETE FROM user_settings WHERE user_id = $1 AND key = $2",
+                current_user.user_id,
+                RSS_IMPORT_TARGET_FOLDER_KEY,
+            )
+            return RSSImportLocationResponse(folder_id=None)
+
+        resolved = await resolve_rss_import_target_folder_id(
+            body.folder_id, user_id=current_user.user_id, user_role=role
+        )
+        if not resolved:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid folder_id or you do not have access to this folder",
+            )
+
+        await set_user_setting(
+            current_user.user_id,
+            RSS_IMPORT_TARGET_FOLDER_KEY,
+            resolved,
+            "string",
+        )
+        return RSSImportLocationResponse(folder_id=resolved)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("RSS API: put import location failed: %s", e)
+        raise HTTPException(status_code=500, detail="Failed to save RSS import location")
+
+
 @router.post("/api/rss/articles/{article_id}/import")
 async def import_rss_article(
     article_id: str,
@@ -362,12 +505,35 @@ async def import_rss_article(
     try:
         logger.info(f"📡 RSS API: Importing article {article_id} for user {current_user.user_id}")
         
+        role = current_user.role or "user"
+        resolved_target: Optional[str] = None
+        if import_data.target_folder_id:
+            resolved_target = await resolve_rss_import_target_folder_id(
+                import_data.target_folder_id,
+                user_id=current_user.user_id,
+                user_role=role,
+            )
+            if not resolved_target:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid target_folder_id or access denied",
+                )
+        else:
+            from_setting = await get_user_setting(current_user.user_id, RSS_IMPORT_TARGET_FOLDER_KEY)
+            resolved_target = await resolve_rss_import_target_folder_id(
+                from_setting,
+                user_id=current_user.user_id,
+                user_role=role,
+            )
+
         # Start background task for article processing
         background_tasks.add_task(
             process_rss_article_task.delay,
             article_id=article_id,
             user_id=current_user.user_id,
-            collection_name=import_data.collection_name
+            collection_name=import_data.collection_name,
+            target_folder_id=resolved_target,
+            user_role=role,
         )
         
         logger.info(f"✅ RSS API: Started import task for article {article_id}")
@@ -411,6 +577,31 @@ async def mark_article_read(
     except Exception as e:
         logger.error(f"❌ RSS API ERROR: Failed to mark article {article_id} as read: {e}")
         raise HTTPException(status_code=500, detail="Failed to mark article as read")
+
+
+@router.put("/api/rss/articles/{article_id}/star", response_model=RSSStarToggleResponse)
+async def toggle_rss_article_star(
+    article_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Toggle starred/saved state for an article."""
+    try:
+        rss_service = await get_rss_service()
+        article = await rss_service.get_article(article_id)
+        if not article:
+            raise HTTPException(status_code=404, detail="Article not found")
+        await _require_feed_access(rss_service, article.feed_id, current_user)
+        new_state = await rss_service.toggle_article_starred(
+            article_id, current_user.user_id
+        )
+        if new_state is None:
+            raise HTTPException(status_code=404, detail="Article not found or access denied")
+        return RSSStarToggleResponse(is_starred=new_state)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("RSS API: toggle star failed for %s: %s", article_id, e)
+        raise HTTPException(status_code=500, detail="Failed to toggle star")
 
 
 @router.delete("/api/rss/articles/{article_id}")
@@ -470,75 +661,6 @@ async def poll_rss_feed(
         return {
             "message": "Feed polling started",
             "feed_id": feed_id,
-            "task_status": "processing"
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ RSS API ERROR: Failed to poll feed {feed_id}: {e}")
-        raise HTTPException(status_code=500, detail="Failed to poll RSS feed")
-
-@router.post("/api/rss/articles/extract-full-content")
-async def extract_full_content_for_existing_articles(
-    background_tasks: BackgroundTasks,
-    current_user: AuthenticatedUserResponse = Depends(get_current_user)
-):
-    """
-    Extract full content for existing articles with truncated descriptions
-    
-    **By George!** Use Crawl4AI to extract full content for articles that need it!
-    """
-    try:
-        logger.info(f"📡 RSS API: Starting full content extraction for user {current_user.user_id}")
-        
-        # Get articles that need full content extraction
-        rss_service = await get_rss_service()
-        articles_needing_content = await rss_service.get_articles_needing_full_content(limit=20)
-        
-        if not articles_needing_content:
-            return {
-                "message": "No articles found that need full content extraction",
-                "articles_processed": 0
-            }
-        
-        # Start background task for content extraction
-        background_tasks.add_task(
-            extract_full_content_task.delay,
-            user_id=current_user.user_id,
-            article_ids=[article.article_id for article in articles_needing_content]
-        )
-        
-        logger.info(f"✅ RSS API: Started full content extraction for {len(articles_needing_content)} articles")
-        return {
-            "message": "Full content extraction started",
-            "articles_found": len(articles_needing_content),
-            "task_status": "processing"
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ RSS API ERROR: Failed to start full content extraction: {e}")
-        raise HTTPException(status_code=500, detail="Failed to start full content extraction")
-    """
-    Manually poll an RSS feed for new articles
-    
-    **BULLY!** Force a poll of the RSS feed to check for new articles!
-    """
-    try:
-        logger.info(f"📡 RSS API: Manual poll of feed {feed_id} for user {current_user.user_id}")
-        
-        # Start background task for feed polling
-        if background_tasks:
-            background_tasks.add_task(
-                poll_rss_feeds_task.delay,
-                user_id=current_user.user_id,
-                feed_ids=[feed_id],
-                force_poll=force_poll
-            )
-        
-        logger.info(f"✅ RSS API: Started poll task for feed {feed_id}")
-        return {
-            "message": "RSS feed polling started",
-            "feed_id": feed_id,
-            "force_poll": force_poll,
             "task_status": "processing"
         }
         

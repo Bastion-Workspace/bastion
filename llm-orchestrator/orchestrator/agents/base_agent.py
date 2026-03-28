@@ -15,6 +15,7 @@ from langgraph.graph import StateGraph
 from openai import NotFoundError, APIError, RateLimitError, AuthenticationError
 
 from config.settings import settings
+from orchestrator.middleware.message_preprocessor import MessagePreprocessor
 
 logger = logging.getLogger(__name__)
 
@@ -163,19 +164,19 @@ class BaseAgent:
         workflow: Any, 
         config: Dict[str, Any], 
         new_messages: List[Any],
-        look_back_limit: int = 6
+        look_back_limit: int = 20
     ) -> List[Any]:
         """
         Load checkpointed messages and merge with new messages
-        
+
         This ensures conversation history is preserved across requests.
-        Uses a standardized look-back limit (default 6 messages) to keep context manageable.
-        
+        Uses a standardized look-back limit (default 20 messages) to keep context manageable.
+
         Args:
             workflow: Compiled LangGraph workflow
             config: Checkpoint configuration with thread_id
             new_messages: New messages to add (typically just the current query)
-            look_back_limit: Maximum number of previous messages to keep (default: 6)
+            look_back_limit: Maximum number of previous messages to keep (default: 20)
             
         Returns:
             Merged list of messages with checkpointed history + new messages (limited to look_back_limit)
@@ -189,6 +190,15 @@ class BaseAgent:
                 checkpointed_messages = checkpoint_state.values.get("messages", [])
                 
                 if checkpointed_messages:
+                    # If backend sent a full history that exceeds the lookback,
+                    # trust the DB as source of truth -- skip checkpoint merge.
+                    if len(new_messages) >= look_back_limit:
+                        logger.info(
+                            "Backend sent %d messages (>= lookback %d), using fresh DB history",
+                            len(new_messages), look_back_limit,
+                        )
+                        return new_messages[-look_back_limit:]
+
                     # Apply look-back limit: keep only the last N messages
                     # This ensures we have recent context without overwhelming the LLM
                     if len(checkpointed_messages) > look_back_limit:
@@ -197,23 +207,40 @@ class BaseAgent:
                     else:
                         logger.info(f"📚 Loaded {len(checkpointed_messages)} messages from checkpoint")
                     
-                    # Merge: use checkpointed messages + new messages
-                    # Filter out duplicates by checking if the last checkpointed message matches the first new message
-                    merged_messages = list(checkpointed_messages)
-                    
-                    # Only add new messages that aren't already in checkpoint
-                    for new_msg in new_messages:
-                        # Check if this message is already in checkpoint (simple content comparison)
-                        is_duplicate = False
-                        if merged_messages:
-                            last_msg = merged_messages[-1]
-                            if (hasattr(last_msg, 'content') and hasattr(new_msg, 'content') and 
-                                last_msg.content == new_msg.content):
-                                is_duplicate = True
-                        
-                        if not is_duplicate:
-                            merged_messages.append(new_msg)
-                    
+                    # Find where checkpointed history ends within new_messages so we only append
+                    # genuinely new messages. Prefer sequence_number (stable); fall back to content match.
+                    def _message_seq(msg: Any) -> Optional[int]:
+                        ak = getattr(msg, "additional_kwargs", None) or {}
+                        if "sequence_number" not in ak:
+                            return None
+                        try:
+                            return int(ak["sequence_number"])
+                        except (TypeError, ValueError):
+                            return None
+
+                    last_ckpt = checkpointed_messages[-1]
+                    last_ckpt_seq = _message_seq(last_ckpt)
+                    new_messages_have_seq = any(_message_seq(m) is not None for m in new_messages)
+
+                    if last_ckpt_seq is not None and last_ckpt_seq > 0 and new_messages_have_seq:
+                        start_idx = len(new_messages)
+                        for i, m in enumerate(new_messages):
+                            s = _message_seq(m)
+                            if s is not None and s > last_ckpt_seq:
+                                start_idx = i
+                                break
+                        truly_new = new_messages[start_idx:]
+                    else:
+                        start_idx = 0
+                        last_ckpt_content = getattr(last_ckpt, "content", None)
+                        if last_ckpt_content:
+                            for i in range(len(new_messages) - 1, -1, -1):
+                                if getattr(new_messages[i], "content", None) == last_ckpt_content:
+                                    start_idx = i + 1
+                                    break
+                        truly_new = new_messages[start_idx:]
+                    merged_messages = list(checkpointed_messages) + truly_new
+
                     # Apply look-back limit to final merged messages too
                     if len(merged_messages) > look_back_limit:
                         merged_messages = merged_messages[-look_back_limit:]
@@ -254,27 +281,32 @@ class BaseAgent:
         if max_tokens:
             logger.info(f"🔢 SELECTED MAX_TOKENS: {max_tokens}")
         
-        # Add reasoning support via extra_body
+        # Add reasoning support via extra_body (skip for providers that do not support it, e.g. Groq)
         # Note: LangChain ChatOpenAI passes model_kwargs to the underlying OpenAI client
         # extra_body is a top-level parameter in OpenAI SDK, so we include it in model_kwargs
-        from orchestrator.utils.llm_reasoning_utils import add_reasoning_to_extra_body
-        reasoning_extra_body = add_reasoning_to_extra_body(extra_body=None, model=final_model, use_enabled_flag=True)
-        
-        # Build model_kwargs with reasoning config
-        # extra_body gets passed through to the underlying OpenAI client
+        metadata = state.get("metadata", {}) if state else {}
+        provider_type = metadata.get("user_llm_provider_type") or ""
+        skip_reasoning = provider_type in ("groq",)
         model_kwargs = {}
-        if reasoning_extra_body:
-            # reasoning_extra_body is already in format: {"reasoning": {"enabled": true}}
-            # We need to pass it as extra_body to the OpenAI client
-            model_kwargs["extra_body"] = reasoning_extra_body
-            logger.info(f"🧠 Reasoning enabled for model {final_model}: {reasoning_extra_body}")
+        if not skip_reasoning:
+            from orchestrator.utils.llm_reasoning_utils import add_reasoning_to_extra_body
+            reasoning_extra_body = add_reasoning_to_extra_body(extra_body=None, model=final_model, use_enabled_flag=True)
+            if reasoning_extra_body:
+                model_kwargs["extra_body"] = reasoning_extra_body
+                logger.info(f"Reasoning enabled for model {final_model}: {reasoning_extra_body}")
         else:
-            logger.debug(f"🧠 Reasoning disabled or not available for model {final_model}")
-        
+            logger.debug(f"Reasoning extras skipped for provider_type={provider_type}")
+
+        # User-level LLM providers: use per-user API key and base_url when present
+        user_api_key = metadata.get("user_llm_api_key")
+        user_base_url = metadata.get("user_llm_base_url")
+        api_key = user_api_key if user_api_key else settings.OPENROUTER_API_KEY
+        base_url = user_base_url if user_base_url else settings.OPENROUTER_BASE_URL
+
         return ChatOpenAI(
             model=final_model,
-            openai_api_key=settings.OPENROUTER_API_KEY,
-            openai_api_base=settings.OPENROUTER_BASE_URL,
+            openai_api_key=api_key,
+            openai_api_base=base_url,
             temperature=temperature,
             max_tokens=max_tokens,
             model_kwargs=model_kwargs if model_kwargs else None
@@ -470,133 +502,6 @@ class BaseAgent:
             logger.error(f"❌ {error_context} failed with unexpected error: {e}")
             raise
     
-    def _filter_large_data_from_content(self, content: str) -> str:
-        """
-        Filter out large data URIs and HTML chart code blocks from message content.
-        
-        Removes:
-        - Base64 image data URIs: ![...](data:image/...)
-        - HTML chart code blocks: ```html:chart\n...\n```
-        - Other data URIs that could bloat context
-        
-        Args:
-            content: Message content string
-            
-        Returns:
-            Filtered content with placeholders for removed data
-        """
-        if not content or not isinstance(content, str):
-            return content
-        
-        import re
-        filtered = content
-        
-        # Remove base64 image data URIs (replace with placeholder)
-        # Pattern: ![alt](data:image/type;base64,...)
-        data_image_pattern = r'!\[([^\]]*)\]\(data:image/[^)]+\)'
-        def replace_image(match):
-            alt_text = match.group(1) if match.groups() else "Image"
-            return f"![{alt_text}](<image_removed_from_context>)"
-        filtered = re.sub(data_image_pattern, replace_image, filtered)
-        
-        # Remove HTML chart code blocks (replace with placeholder)
-        # Pattern: ```html:chart\n...\n```
-        html_chart_pattern = r'```html:chart\n.*?\n```'
-        filtered = re.sub(html_chart_pattern, '```html:chart\n<chart_removed_from_context>\n```', filtered, flags=re.DOTALL)
-        
-        # Remove other data URIs (data:text/html, data:application/json, etc.)
-        # Pattern: data:[^)]+
-        other_data_pattern = r'data:[^)]+'
-        filtered = re.sub(other_data_pattern, '<data_uri_removed_from_context>', filtered)
-        
-        return filtered
-    
-    def _extract_conversation_history(self, messages: List[Any], limit: int = 10) -> List[Dict[str, str]]:
-        """Extract conversation history from LangChain messages, filtering out large data URIs.
-        If limit <= 0, returns [] (avoids messages[-0:] giving all messages)."""
-        if not messages or limit <= 0:
-            return []
-        try:
-            history = []
-            for msg in messages[-limit:]:
-                if hasattr(msg, 'content'):
-                    role = "assistant" if hasattr(msg, 'type') and msg.type == "ai" else "user"
-                    # Filter out large data URIs and HTML chart code blocks from content
-                    filtered_content = self._filter_large_data_from_content(msg.content)
-                    history.append({
-                        "role": role,
-                        "content": filtered_content
-                    })
-            return history
-        except Exception as e:
-            logger.error(f"Failed to extract conversation history: {e}")
-            return []
-    
-    def _format_conversation_history_for_prompt(
-        self, 
-        messages: List[Any], 
-        look_back_limit: int = 6,
-        max_message_length: int = 500
-    ) -> str:
-        """
-        Format conversation history as a string for inclusion in prompts
-        
-        **STANDARDIZED METHOD FOR ALL AGENTS** - Use this to include conversation context in prompts.
-        This ensures consistent conversation history handling across all agents with a standardized
-        6-message look-back limit.
-        
-        **Usage in agents:**
-        ```python
-        # In your prompt building code:
-        messages = state.get("messages", [])
-        conversation_history = self._format_conversation_history_for_prompt(messages, look_back_limit=6)
-        if conversation_history:
-            context_parts.append(conversation_history)
-        ```
-        
-        Args:
-            messages: List of LangChain messages from state (typically state.get("messages", []))
-            look_back_limit: Maximum number of messages to include (default: 6, standardized across all agents)
-            max_message_length: Maximum length per message to include (default: 500 chars)
-            
-        Returns:
-            Formatted conversation history string with "=== CONVERSATION HISTORY ===" header,
-            or empty string if no history available. Ready to append to context_parts.
-        """
-        if not messages or len(messages) <= 1:
-            return ""
-        
-        try:
-            # Get last N messages (standardized look-back)
-            recent_messages = messages[-look_back_limit:] if len(messages) > look_back_limit else messages
-            
-            history_parts = ["=== CONVERSATION HISTORY ===\n"]
-            for msg in recent_messages:
-                if hasattr(msg, 'content') and msg.content:
-                    # Determine role
-                    if isinstance(msg, HumanMessage):
-                        role = "USER"
-                    elif isinstance(msg, AIMessage):
-                        role = "ASSISTANT"
-                    elif isinstance(msg, SystemMessage):
-                        role = "SYSTEM"
-                    else:
-                        role = "UNKNOWN"
-                    
-                    # Truncate long messages
-                    content = msg.content
-                    if len(content) > max_message_length:
-                        content = content[:max_message_length] + "..."
-                    
-                    history_parts.append(f"{role}: {content}\n")
-            
-            history_parts.append("\n")
-            return "".join(history_parts)
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to format conversation history: {e}")
-            return ""
-    
     def _prepare_messages_with_query(self, messages: Optional[List[Any]], query: str) -> List[Any]:
         """
         Prepare messages list with current user query for checkpoint persistence
@@ -656,14 +561,139 @@ class BaseAgent:
             Updated state with request-scoped data cleared from shared_memory
         """
         shared_memory = state.get("shared_memory", {})
-        if shared_memory and "active_editor" in shared_memory:
-            # Create a copy to avoid mutating the original
+        to_clear = [k for k in ("active_editor", "active_data_workspace") if k in shared_memory]
+        if shared_memory and to_clear:
             shared_memory = shared_memory.copy()
-            del shared_memory["active_editor"]
-            logger.debug("🧹 Cleared request-scoped active_editor from shared_memory (before checkpoint save)")
+            for key in to_clear:
+                del shared_memory[key]
+            logger.debug("Cleared request-scoped data from shared_memory (before checkpoint save): %s", to_clear)
             state["shared_memory"] = shared_memory
         return state
-    
+
+    PINNED_DOCUMENT_TTL_MINUTES = 30
+
+    def _get_valid_pinned_document(self, shared_memory: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return pinned_document if it exists and hasn't expired. None otherwise."""
+        pin = shared_memory.get("pinned_document")
+        if not pin or not pin.get("document_id"):
+            return None
+        last_active = pin.get("last_active_at") or pin.get("pinned_at")
+        if last_active:
+            from datetime import timezone, timedelta
+            try:
+                dt = datetime.fromisoformat(last_active.replace("Z", "+00:00"))
+                age = datetime.now(timezone.utc) - dt
+                if age > timedelta(minutes=self.PINNED_DOCUMENT_TTL_MINUTES):
+                    return None
+            except Exception:
+                pass
+        return pin
+
+    def _pin_document(
+        self,
+        shared_memory: Dict[str, Any],
+        document_id: str,
+        title: str = "",
+        filename: str = "",
+    ) -> Dict[str, Any]:
+        """Update or set pinned_document in shared_memory."""
+        from datetime import timezone
+        now = datetime.now(timezone.utc).isoformat()
+        existing = shared_memory.get("pinned_document", {})
+        shared_memory["pinned_document"] = {
+            "document_id": document_id,
+            "title": title or existing.get("title", ""),
+            "filename": filename or existing.get("filename", ""),
+            "pinned_at": existing.get("pinned_at", now) if existing.get("document_id") == document_id else now,
+            "last_active_at": now,
+        }
+        return shared_memory
+
+    LAST_TOOL_RESULTS_MAX_BYTES = 8192
+    _BULK_FIELDS = frozenset({"content", "formatted", "body", "text", "html", "geometry", "steps"})
+    _REF_FIELD_SUFFIXES = ("_id", "_url")
+    _REF_FIELD_NAMES = frozenset({"title", "filename", "name", "subject", "label", "success", "count", "applied_count"})
+    _MAX_SINGLE_VALUE_CHARS = 2000
+    _MAX_LIST_ITEM_CHARS = 500
+    _MAX_LIST_ITEMS = 5
+
+    def _extract_persistable_refs(self, typed_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract reference-like fields from a tool result; drop bulk content. Used for last_tool_results."""
+        if not typed_dict or not isinstance(typed_dict, dict):
+            return {}
+        out: Dict[str, Any] = {}
+        for k, v in typed_dict.items():
+            if k in self._BULK_FIELDS:
+                continue
+            if not (k.endswith(self._REF_FIELD_SUFFIXES) or k in self._REF_FIELD_NAMES):
+                continue
+            if v is None:
+                out[k] = None
+                continue
+            if isinstance(v, (str, int, float, bool)):
+                s = str(v)
+                if len(s) > self._MAX_SINGLE_VALUE_CHARS:
+                    out[k] = s[: self._MAX_SINGLE_VALUE_CHARS] + "..."
+                else:
+                    out[k] = v
+                continue
+            if isinstance(v, list):
+                kept = []
+                for i, item in enumerate(v):
+                    if i >= self._MAX_LIST_ITEMS:
+                        kept.append(f"... and {len(v) - self._MAX_LIST_ITEMS} more")
+                        break
+                    if isinstance(item, (str, int, float, bool)):
+                        s = str(item)
+                        if len(s) > self._MAX_LIST_ITEM_CHARS:
+                            kept.append(s[: self._MAX_LIST_ITEM_CHARS] + "...")
+                        else:
+                            kept.append(item)
+                    elif isinstance(item, dict):
+                        sub = self._extract_persistable_refs(item)
+                        if sub:
+                            kept.append(sub)
+                    else:
+                        kept.append(str(item)[: self._MAX_LIST_ITEM_CHARS])
+                if kept:
+                    out[k] = kept
+                continue
+            if isinstance(v, dict):
+                sub = self._extract_persistable_refs(v)
+                if sub:
+                    out[k] = sub
+        return out
+
+    def _persist_tool_results_to_shared_memory(
+        self,
+        shared_memory: Dict[str, Any],
+        tool_outputs_typed: Dict[str, Any],
+    ) -> None:
+        """Store extracted refs from tool_outputs_typed in shared_memory['last_tool_results'] with 8KB budget."""
+        if not tool_outputs_typed:
+            return
+        extracted: Dict[str, Any] = {}
+        for tool_key, typed in tool_outputs_typed.items():
+            if not isinstance(typed, dict):
+                continue
+            refs = self._extract_persistable_refs(typed)
+            if refs:
+                extracted[tool_key] = refs
+        if not extracted:
+            return
+        import json
+        try:
+            raw = json.dumps(extracted, default=str)
+        except Exception:
+            return
+        if len(raw) > self.LAST_TOOL_RESULTS_MAX_BYTES:
+            while extracted and len(raw) > self.LAST_TOOL_RESULTS_MAX_BYTES:
+                first_key = next(iter(extracted))
+                del extracted[first_key]
+                raw = json.dumps(extracted, default=str)
+        if extracted:
+            shared_memory["last_tool_results"] = extracted
+
     def _is_approval_response(self, query: str) -> bool:
         """
         Detect if user query is an approval/confirmation response.
@@ -817,12 +847,13 @@ class BaseAgent:
             timezone_display = f"{timezone_name} ({user_timezone})"
 
         return (
-            f"**Current Context (LOCAL TIME):**\n"
+            f"**Current Context (LOCAL TIME) — for grounding only:**\n"
             f"- Today's date: {current_date}\n"
             f"- Today's date (YYYY-MM-DD, use for search/filter): {iso_date}\n"
             f"- Current time: {current_time_str} {timezone_display}\n"
             f"- Current year: {current_year}\n"
             f"- **IMPORTANT**: This is the LOCAL time in the user's timezone ({user_timezone}), NOT UTC.\n"
+            f"- This date/time is provided so you can interpret \"today\", \"current\", \"recent\", and \"latest\" correctly. It is NOT from search results or documents — it is the user's actual current date.\n"
             f"- When users refer to \"today\", \"yesterday\", \"this week\", \"this month\", or \"this year\", use this date context to understand what they mean.\n"
             f"- When answering time/date questions, use this LOCAL time directly - do NOT convert to UTC unless specifically requested."
         )
@@ -871,7 +902,7 @@ class BaseAgent:
         """
         Build message list for non-editing conversational agents with conversation history
         
-        STANDARDIZED METHOD FOR NON-EDITING AGENTS (Chat, Electronics, Reference, Help, 
+        STANDARDIZED METHOD FOR NON-EDITING AGENTS (Chat, Electronics, Reference,
         Dictionary, Entertainment, Data Formatting, General Project)
         
         Message Structure:
@@ -901,29 +932,14 @@ class BaseAgent:
                 state=state
             )
         """
-        # Start with system messages
-        messages = [
-            SystemMessage(content=system_prompt),
-            SystemMessage(content=self._get_datetime_context(state))
-        ]
-        
-        # Add conversation history as proper message objects
-        if messages_list:
-            conversation_history = self._extract_conversation_history(
-                messages_list, 
-                limit=look_back_limit
-            )
-            
-            for msg in conversation_history:
-                if msg["role"] == "user":
-                    messages.append(HumanMessage(content=msg["content"]))
-                elif msg["role"] == "assistant":
-                    messages.append(AIMessage(content=msg["content"]))
-        
-        # Add current user prompt (all context embedded)
-        messages.append(HumanMessage(content=user_prompt))
-        
-        return messages
+        return MessagePreprocessor.build_conversational_messages(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            messages_list=messages_list,
+            look_back_limit=look_back_limit,
+            datetime_context=self._get_datetime_context(state),
+            sanitize_ai_responses=False,
+        )
     
     def _build_editing_agent_messages(
         self,
@@ -974,41 +990,15 @@ class BaseAgent:
                 state=state
             )
         """
-        # Start with system messages
-        messages = [
-            SystemMessage(content=system_prompt),
-            SystemMessage(content=self._get_datetime_context(state))
-        ]
-        
-        # Add conversation history as proper message objects
-        if messages_list:
-            conversation_history = self._extract_conversation_history(
-                messages_list, 
-                limit=look_back_limit
-            )
-            
-            # Remove last message if it duplicates current_request
-            if conversation_history and len(conversation_history) > 0:
-                last_msg = conversation_history[-1]
-                if last_msg.get("content") == current_request:
-                    conversation_history = conversation_history[:-1]
-            
-            # Add as proper message objects
-            for msg in conversation_history:
-                if msg["role"] == "user":
-                    messages.append(HumanMessage(content=msg["content"]))
-                elif msg["role"] == "assistant":
-                    messages.append(AIMessage(content=msg["content"]))
-        
-        # Add file context as separate message
-        if context_parts:
-            messages.append(HumanMessage(content="".join(context_parts)))
-        
-        # Add current request with instructions as separate message
-        if current_request:
-            messages.append(HumanMessage(content=current_request))
-        
-        return messages
+        return MessagePreprocessor.build_editing_messages(
+            system_prompt=system_prompt,
+            context_parts=context_parts,
+            current_request=current_request,
+            messages_list=messages_list,
+            look_back_limit=look_back_limit,
+            datetime_context=self._get_datetime_context(state),
+            sanitize_ai_responses=True,
+        )
     
     def _handle_node_error(self, error: Exception, state: Dict[str, Any], error_context: str = "Node operation") -> Dict[str, Any]:
         """

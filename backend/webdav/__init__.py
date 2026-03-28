@@ -10,7 +10,3 @@ Components:
 - config: WebDAV server configuration
 """
 
-from version import __version__
-
-
-

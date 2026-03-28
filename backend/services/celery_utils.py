@@ -155,11 +155,6 @@ def clean_result_for_storage(result: Dict[str, Any]) -> Dict[str, Any]:
         if "timestamp" not in cleaned_result:
             cleaned_result["timestamp"] = datetime.now().isoformat()
         
-        # Limit large text fields
-        if "response" in cleaned_result and isinstance(cleaned_result["response"], str):
-            if len(cleaned_result["response"]) > 50000:  # 50KB limit
-                cleaned_result["response"] = cleaned_result["response"][:50000] + "...[truncated]"
-        
         return cleaned_result
         
     except Exception as e:

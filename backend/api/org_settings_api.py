@@ -36,7 +36,7 @@ async def get_org_settings(
     Returns default settings if none exist yet.
     """
     try:
-        logger.info(f"⚙️ ROOSEVELT: Fetching org settings for user {current_user.username}")
+        logger.info("Fetching org settings for user %s", current_user.username)
         
         service = await get_org_settings_service()
         settings = await service.get_settings(current_user.user_id)
@@ -65,7 +65,7 @@ async def update_org_settings(
     Only provided fields will be updated. Omitted fields remain unchanged.
     """
     try:
-        logger.info(f"⚙️ ROOSEVELT: Updating org settings for user {current_user.username}")
+        logger.info("Updating org settings for user %s", current_user.username)
         
         service = await get_org_settings_service()
         settings = await service.create_or_update_settings(
@@ -94,7 +94,7 @@ async def reset_org_settings(
     **BULLY!** Start fresh with default configuration!
     """
     try:
-        logger.info(f"⚙️ ROOSEVELT: Resetting org settings for user {current_user.username}")
+        logger.info("Resetting org settings for user %s", current_user.username)
         
         service = await get_org_settings_service()
         await service.delete_settings(current_user.user_id)

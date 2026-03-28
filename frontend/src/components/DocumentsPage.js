@@ -4,10 +4,8 @@ import {
   IconButton,
   Divider
 } from '@mui/material';
-import {
-  ChevronRight,
-  DragIndicator
-} from '@mui/icons-material';
+import { ChevronRight } from '@mui/icons-material';
+import SplitResizeHandle from './common/SplitResizeHandle';
 import { motion } from 'framer-motion';
 import FileTreeSidebar from './FileTreeSidebar';
 import TabbedContentManager from './TabbedContentManager';
@@ -248,12 +246,15 @@ const DocumentsPage = () => {
     }
   }, []);
 
+  const handleRSSCategoryClick = useCallback((categoryTitle, feedIds, scope) => {
+    try {
+      tabbedContentRef.current?.openRSSCategory?.(categoryTitle, feedIds, scope);
+    } catch (_) {}
+  }, []);
+
   const handleAddRSSFeed = useCallback((context = null) => {
     setShowFeedManager(true);
-    // Store the context for the RSS feed manager
-    if (context) {
-      setRSSFeedContext(context);
-    }
+    setRSSFeedContext(context ?? null);
   }, []);
 
   // ROOSEVELT: Expose TabbedContentManager ref globally for FileTreeSidebar to access
@@ -282,7 +283,7 @@ const DocumentsPage = () => {
   return (
     <Box sx={{ 
       display: 'flex', 
-      height: { xs: 'calc(var(--appvh, 100vh) - 59px - 32px)', md: 'calc(100dvh - 59px - 32px)' },
+      height: { xs: 'calc(var(--appvh, 100vh) - var(--app-nav-height, 59px) - 32px)', md: 'calc(100dvh - var(--app-nav-height, 59px) - 32px)' },
       overflow: 'hidden',
       paddingBottom: 'env(safe-area-inset-bottom)'
     }}>
@@ -314,43 +315,19 @@ const DocumentsPage = () => {
             onFolderSelect={handleFolderSelect}
             onFileSelect={handleFileSelect}
             onRSSFeedClick={handleRSSFeedClick}
+            onRSSCategoryClick={handleRSSCategoryClick}
             onAddRSSFeed={handleAddRSSFeed}
             width={sidebarWidth}
             isCollapsed={sidebarCollapsed}
             onToggleCollapse={toggleSidebar}
           />
           
-          {/* ROOSEVELT: Resize Handle - Hidden on mobile */}
           {!isMobile && (
-            <Box
+            <SplitResizeHandle
+              edge="trailing"
+              isResizing={isResizing}
               onMouseDown={handleResizeStart}
-              sx={{
-                position: 'absolute',
-                right: -2,
-                top: 0,
-                bottom: 0,
-                width: 4,
-                cursor: 'ew-resize',
-                backgroundColor: isResizing ? 'primary.main' : 'transparent',
-                '&:hover': {
-                  backgroundColor: 'primary.light',
-                },
-                zIndex: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center'
-              }}
-            >
-            <DragIndicator 
-              sx={{ 
-                color: 'text.secondary', 
-                fontSize: 16,
-                transform: 'rotate(90deg)',
-                opacity: isResizing ? 1 : 0,
-                transition: 'opacity 0.2s'
-              }} 
             />
-          </Box>
           )}
         </Box>
       )}

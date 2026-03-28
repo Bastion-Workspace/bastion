@@ -12,13 +12,29 @@ from concurrent import futures
 
 sys.path.insert(0, "/app")
 
+from config.settings import settings
+
+try:
+    _root_log_level = getattr(logging, (settings.LOG_LEVEL or "INFO").upper())
+except AttributeError:
+    _root_log_level = logging.INFO
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=_root_log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger(__name__)
+from utils.log_redaction import RedactTelegramSecretsFilter
 
-from config.settings import settings
+_telegram_log_redact = RedactTelegramSecretsFilter()
+for _handler in logging.root.handlers:
+    _handler.addFilter(_telegram_log_redact)
+
+# httpx logs every request at INFO; keep that noise (and token risk) for DEBUG-only sessions
+if _root_log_level > logging.DEBUG:
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
 from service.channel_listener_manager import ChannelListenerManager
 from service.grpc_service import ConnectionsServiceImplementation
 from connections_service_pb2_grpc import add_ConnectionsServiceServicer_to_server
@@ -38,6 +54,51 @@ class GracefulShutdown:
         await self.server.stop(grace=5)
         logger.info("Server shutdown complete")
         self.shutdown_event.set()
+
+
+async def _restore_bots(listener_manager: ChannelListenerManager) -> None:
+    """Background task: fetch active chat bots from backend and register them (self-restore on startup)."""
+    await asyncio.sleep(3)
+    max_attempts = 10
+    delay = 5.0
+    for attempt in range(max_attempts):
+        try:
+            result = await listener_manager._backend_client.get_active_chat_bots()
+            if result.get("error"):
+                raise RuntimeError(result["error"])
+            bots = result.get("bots") or []
+            if not bots:
+                logger.info("No active chat bots to restore")
+                return
+            restored = 0
+            for bot in bots:
+                conn_id = bot.get("connection_id", "")
+                user_id = bot.get("user_id", "")
+                provider = bot.get("provider", "")
+                token = bot.get("bot_token", "")
+                display_name = bot.get("display_name", "")
+                config = bot.get("config") or {}
+                if not conn_id or not provider or not token:
+                    continue
+                reg = await listener_manager.register_bot(
+                    connection_id=conn_id,
+                    user_id=user_id,
+                    provider=provider,
+                    bot_token=token,
+                    display_name=display_name,
+                    config=config,
+                )
+                if reg.get("success"):
+                    restored += 1
+                else:
+                    logger.warning("Failed to restore bot %s: %s", conn_id, reg.get("error", "unknown"))
+            if restored:
+                logger.info("Restored %s of %s chat bot connection(s) on startup", restored, len(bots))
+            return
+        except Exception as e:
+            logger.warning("Bot restore attempt %s/%s failed: %s", attempt + 1, max_attempts, e)
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(delay)
 
 
 async def serve():
@@ -66,6 +127,7 @@ async def serve():
 
         await server.start()
         logger.info("Connections Service ready on port %s", settings.GRPC_PORT)
+        asyncio.create_task(_restore_bots(listener_manager))
         await shutdown_handler.shutdown_event.wait()
     except Exception as e:
         logger.exception("Failed to start server: %s", e)

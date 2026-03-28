@@ -54,13 +54,24 @@ class TelegramProvider(BaseMessagingProvider):
         connection_id: str,
     ) -> None:
         Update, Application, ContextTypes, MessageHandler, filters = _get_telegram()
+        from telegram.request import HTTPXRequest
+
         self._bot_token = bot_token
         self._connection_id = connection_id
         self._message_callback = message_callback
 
+        # Longer timeouts so send_message does not time out when agent response is slow or network is slow
+        request = HTTPXRequest(
+            read_timeout=60.0,
+            write_timeout=60.0,
+            connect_timeout=15.0,
+            pool_timeout=5.0,
+            media_write_timeout=90.0,
+        )
         application = (
             Application.builder()
             .token(bot_token)
+            .request(request)
             .post_init(self._post_init)
             .build()
         )
@@ -120,6 +131,13 @@ class TelegramProvider(BaseMessagingProvider):
         if not text:
             text = "[Image]"
 
+        chat = message.chat
+        chat_title = getattr(chat, "title", None) or (getattr(chat, "first_name", "") or "").strip()
+        if chat_title and getattr(chat, "last_name", None):
+            chat_title = (chat_title + " " + (chat.last_name or "")).strip()
+        chat_username = getattr(chat, "username", None)
+        chat_type = getattr(chat, "type", None)
+
         inbound = InboundMessage(
             sender_id=sender_id,
             sender_name=sender_name,
@@ -129,6 +147,9 @@ class TelegramProvider(BaseMessagingProvider):
             platform="telegram",
             timestamp=message.date.isoformat() if message.date else None,
             connection_id=self._connection_id,
+            chat_title=chat_title or None,
+            chat_username=("@" + chat_username) if chat_username else None,
+            chat_type=str(chat_type) if chat_type else None,
         )
         try:
             await self._message_callback(inbound)
@@ -191,8 +212,14 @@ class TelegramProvider(BaseMessagingProvider):
                     )
             return {"success": True}
         except Exception as e:
+            err_msg = str(e)
+            if "Chat not found" in err_msg or "chat not found" in err_msg.lower():
+                err_msg = (
+                    "Chat not found. Use numeric chat_id for DMs (recipient must have messaged the bot first), "
+                    "or @channelname for public channels (bot must be admin). Cannot send to a private user by @username."
+                )
             logger.exception("Telegram send_message failed: %s", e)
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": err_msg}
 
     async def send_typing_indicator(self, chat_id: str) -> None:
         """Show 'typing...' in the chat. Telegram shows it for ~5 seconds."""
@@ -204,7 +231,9 @@ class TelegramProvider(BaseMessagingProvider):
         except Exception as e:
             logger.debug("Telegram send_typing_indicator failed: %s", e)
 
-    async def get_bot_info(self, bot_token: str) -> Dict[str, Any]:
+    async def get_bot_info(
+        self, bot_token: str, config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         try:
             Update, Application, ContextTypes, MessageHandler, filters = _get_telegram()
             application = Application.builder().token(bot_token).build()

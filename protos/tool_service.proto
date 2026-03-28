@@ -26,6 +26,23 @@ message TranscribeAudioResponse {
   optional string error = 5;
 }
 
+// Help documentation search
+message SearchHelpDocsRequest {
+  string query = 1;
+  string user_id = 2;
+  int32 limit = 3;
+}
+message HelpSearchResult {
+  string topic_id = 1;
+  string title = 2;
+  string content = 3;
+  float score = 4;
+}
+message SearchHelpDocsResponse {
+  repeated HelpSearchResult results = 1;
+  int32 total_count = 2;
+}
+
 // Tool Service - Backend exposes data access to orchestrator
 service ToolService {
   // Document operations
@@ -39,12 +56,18 @@ service ToolService {
   // RSS operations
   rpc SearchRSSFeeds(RSSSearchRequest) returns (RSSSearchResponse);
   rpc GetRSSArticles(RSSArticlesRequest) returns (RSSArticlesResponse);
+  rpc ListStarredRSSArticles(ListStarredRSSArticlesRequest) returns (ListStarredRSSArticlesResponse);
   
   // RSS management operations
   rpc AddRSSFeed(AddRSSFeedRequest) returns (AddRSSFeedResponse);
   rpc ListRSSFeeds(ListRSSFeedsRequest) returns (ListRSSFeedsResponse);
   rpc RefreshRSSFeed(RefreshRSSFeedRequest) returns (RefreshRSSFeedResponse);
   rpc DeleteRSSFeed(DeleteRSSFeedRequest) returns (DeleteRSSFeedResponse);
+  rpc MarkArticleRead(MarkArticleReadRequest) returns (MarkArticleReadResponse);
+  rpc MarkArticleUnread(MarkArticleUnreadRequest) returns (MarkArticleUnreadResponse);
+  rpc SetArticleStarred(SetArticleStarredRequest) returns (SetArticleStarredResponse);
+  rpc GetUnreadCounts(GetUnreadCountsRequest) returns (GetUnreadCountsResponse);
+  rpc ToggleFeedActive(ToggleFeedActiveRequest) returns (ToggleFeedActiveResponse);
   
   // Entity operations
   rpc SearchEntities(EntitySearchRequest) returns (EntitySearchResponse);
@@ -77,6 +100,22 @@ service ToolService {
   rpc ArchiveOrgInboxDone(ArchiveOrgInboxDoneRequest) returns (ArchiveOrgInboxDoneResponse);
   rpc AppendOrgInboxText(AppendOrgInboxTextRequest) returns (AppendOrgInboxTextResponse);
   rpc GetOrgInboxPath(GetOrgInboxPathRequest) returns (GetOrgInboxPathResponse);
+  rpc CaptureJournalEntry(CaptureJournalEntryRequest) returns (CaptureJournalEntryResponse);
+  rpc GetJournalEntry(GetJournalEntryRequest) returns (GetJournalEntryResponse);
+  rpc GetJournalEntries(GetJournalEntriesRequest) returns (GetJournalEntriesResponse);
+  rpc UpdateJournalEntry(UpdateJournalEntryRequest) returns (UpdateJournalEntryResponse);
+  rpc ListJournalEntries(ListJournalEntriesRequest) returns (ListJournalEntriesResponse);
+  rpc SearchJournal(SearchJournalRequest) returns (SearchJournalResponse);
+
+  // Universal Todo operations (any org file)
+  rpc ListTodos(ListTodosRequest) returns (ListTodosResponse);
+  rpc CreateTodo(CreateTodoRequest) returns (CreateTodoResponse);
+  rpc UpdateTodo(UpdateTodoRequest) returns (UpdateTodoResponse);
+  rpc ToggleTodo(ToggleTodoRequest) returns (ToggleTodoResponse);
+  rpc DeleteTodo(DeleteTodoRequest) returns (DeleteTodoResponse);
+  rpc ArchiveDoneTodos(ArchiveDoneTodosRequest) returns (ArchiveDoneTodosResponse);
+  rpc RefileTodo(RefileTodoRequest) returns (RefileTodoResponse);
+  rpc DiscoverRefileTargets(DiscoverRefileTargetsRequest) returns (DiscoverRefileTargetsResponse);
   
   // Web search operations
   rpc SearchWeb(WebSearchRequest) returns (WebSearchResponse);
@@ -84,10 +123,31 @@ service ToolService {
   rpc SearchAndCrawl(SearchAndCrawlRequest) returns (SearchAndCrawlResponse);
   rpc CrawlWebsiteRecursive(RecursiveWebsiteCrawlRequest) returns (RecursiveWebsiteCrawlResponse);
   rpc CrawlSite(DomainCrawlRequest) returns (DomainCrawlResponse);
+
+  // Browser automation (Playwright) - navigate, interact, then final action (download/click/extract/screenshot)
+  rpc BrowserRun(BrowserRunToolRequest) returns (BrowserRunToolResponse);
+  // Deprecated: use BrowserRun with final_action_type=download. Kept for backward compatibility.
+  rpc BrowserDownload(BrowserDownloadToolRequest) returns (BrowserDownloadToolResponse);
+
+  // Granular browser automation (session-scoped; for playbooks)
+  rpc BrowserOpenSession(BrowserOpenSessionRequest) returns (BrowserOpenSessionResponse);
+  rpc BrowserNavigate(BrowserNavigateRequest) returns (BrowserNavigateResponse);
+  rpc BrowserClick(BrowserClickRequest) returns (BrowserClickResponse);
+  rpc BrowserFill(BrowserFillRequest) returns (BrowserFillResponse);
+  rpc BrowserWait(BrowserWaitRequest) returns (BrowserWaitResponse);
+  rpc BrowserScroll(BrowserScrollRequest) returns (BrowserScrollResponse);
+  rpc BrowserExtract(BrowserExtractRequest) returns (BrowserExtractResponse);
+  rpc BrowserInspect(BrowserInspectRequest) returns (BrowserInspectResponse);
+  rpc BrowserScreenshot(BrowserScreenshotRequest) returns (BrowserScreenshotResponse);
+  rpc BrowserDownloadFile(BrowserDownloadFileRequest) returns (BrowserDownloadFileResponse);
+  rpc BrowserCloseSession(BrowserCloseSessionRequest) returns (BrowserCloseSessionResponse);
   
   // Enhancement operations
   rpc ExpandQuery(QueryExpansionRequest) returns (QueryExpansionResponse);
   rpc SearchConversationCache(CacheSearchRequest) returns (CacheSearchResponse);
+  
+  // Help documentation search
+  rpc SearchHelpDocs(SearchHelpDocsRequest) returns (SearchHelpDocsResponse);
   
   // Image search operations
   rpc SearchImages(ImageSearchRequest) returns (ImageSearchResponse);
@@ -104,6 +164,8 @@ service ToolService {
   rpc CreateUserFile(CreateUserFileRequest) returns (CreateUserFileResponse);
   rpc CreateUserFolder(CreateUserFolderRequest) returns (CreateUserFolderResponse);
   rpc GetFolderTree(GetFolderTreeRequest) returns (GetFolderTreeResponse);
+  rpc ListFolderDocuments(ListFolderDocumentsRequest) returns (ListFolderDocumentsResponse);
+  rpc PickRandomDocumentFromFolder(PickRandomDocumentFromFolderRequest) returns (PickRandomDocumentFromFolderResponse);
 
   // Document editing operations (user documents only)
   rpc UpdateDocumentMetadata(UpdateDocumentMetadataRequest) returns (UpdateDocumentMetadataResponse);
@@ -113,6 +175,9 @@ service ToolService {
   rpc ProposeDocumentEdit(ProposeDocumentEditRequest) returns (ProposeDocumentEditResponse);
   rpc ApplyDocumentEditProposal(ApplyDocumentEditProposalRequest) returns (ApplyDocumentEditProposalResponse);
   rpc ApplyOperationsDirectly(ApplyOperationsDirectlyRequest) returns (ApplyOperationsDirectlyResponse);
+  rpc ListDocumentProposals(ListDocumentProposalsRequest) returns (ListDocumentProposalsResponse);
+  rpc GetDocumentEditProposal(GetDocumentEditProposalRequest) returns (GetDocumentEditProposalResponse);
+  rpc RejectDocumentEditProposal(RejectDocumentEditProposalRequest) returns (RejectDocumentEditProposalResponse);
   
   // Conversation operations
   rpc UpdateConversationTitle(UpdateConversationTitleRequest) returns (UpdateConversationTitleResponse);
@@ -154,6 +219,119 @@ service ToolService {
   rpc GetEmailFolders(GetEmailFoldersRequest) returns (GetEmailFoldersResponse);
   rpc GetEmailStatistics(GetEmailStatisticsRequest) returns (GetEmailStatisticsResponse);
   rpc MarkEmailRead(MarkEmailReadRequest) returns (MarkEmailReadResponse);
+  rpc GetEmailById(GetEmailByIdRequest) returns (GetEmailByIdResponse);
+  rpc MoveEmail(MoveEmailRequest) returns (MoveEmailResponse);
+  rpc UpdateEmail(UpdateEmailRequest) returns (UpdateEmailResponse);
+  rpc CreateDraft(CreateDraftRequest) returns (CreateDraftResponse);
+
+  // Calendar operations (via connections-service)
+  rpc ListCalendars(ListCalendarsRequest) returns (ListCalendarsResponse);
+  rpc GetCalendarEvents(GetCalendarEventsRequest) returns (GetCalendarEventsResponse);
+  rpc GetCalendarEventById(GetCalendarEventByIdRequest) returns (GetCalendarEventByIdResponse);
+  rpc CreateCalendarEvent(CreateCalendarEventRequest) returns (CreateCalendarEventResponse);
+  rpc UpdateCalendarEvent(UpdateCalendarEventRequest) returns (UpdateCalendarEventResponse);
+  rpc DeleteCalendarEvent(DeleteCalendarEventRequest) returns (DeleteCalendarEventResponse);
+
+  // Contact operations (via connections-service; O365)
+  rpc GetContacts(GetContactsRequest) returns (GetContactsResponse);
+  rpc GetContactById(GetContactByIdRequest) returns (GetContactByIdResponse);
+  rpc CreateContact(CreateContactRequest) returns (CreateContactResponse);
+  rpc UpdateContact(UpdateContactRequest) returns (UpdateContactResponse);
+  rpc DeleteContact(DeleteContactRequest) returns (DeleteContactResponse);
+  rpc SearchContacts(SearchContactsRequest) returns (SearchContactsResponse);
+
+  // Account discovery (email/calendar/contacts bound to agent or user)
+  rpc ListUserAccounts(ListUserAccountsRequest) returns (ListUserAccountsResponse);
+
+  // Agent Factory: profile and playbook for custom agent execution
+  rpc GetAgentProfile(GetAgentProfileRequest) returns (GetAgentProfileResponse);
+  rpc ListAutoRoutableProfiles(ListAutoRoutableProfilesRequest) returns (ListAutoRoutableProfilesResponse);
+  rpc GetPlaybook(GetPlaybookRequest) returns (GetPlaybookResponse);
+  rpc LogAgentExecution(LogAgentExecutionRequest) returns (LogAgentExecutionResponse);
+  rpc ParkApproval(ParkApprovalRequest) returns (ParkApprovalResponse);
+  rpc GetAgentMemory(GetAgentMemoryRequest) returns (GetAgentMemoryResponse);
+  rpc SetAgentMemory(SetAgentMemoryRequest) returns (SetAgentMemoryResponse);
+  rpc ListAgentMemories(ListAgentMemoriesRequest) returns (ListAgentMemoriesResponse);
+  rpc DeleteAgentMemory(DeleteAgentMemoryRequest) returns (DeleteAgentMemoryResponse);
+  rpc AppendAgentMemory(AppendAgentMemoryRequest) returns (AppendAgentMemoryResponse);
+  rpc GetAgentRunHistory(GetAgentRunHistoryRequest) returns (GetAgentRunHistoryResponse);
+  rpc GetSkillsByIds(GetSkillsByIdsRequest) returns (GetSkillsByIdsResponse);
+  rpc SearchSkills(SearchSkillsRequest) returns (SearchSkillsResponse);
+  rpc ExecuteConnector(ExecuteConnectorRequest) returns (ExecuteConnectorResponse);
+  rpc ResolveAgentHandle(ResolveAgentHandleRequest) returns (ResolveAgentHandleResponse);
+  rpc EnqueueAgentInvocation(EnqueueAgentInvocationRequest) returns (EnqueueAgentInvocationResponse);
+
+  // Agent Factory meta-tools: create profiles, playbooks, schedules, data source bindings
+  rpc CreateAgentProfile(CreateAgentProfileRequest) returns (CreateAgentProfileResponse);
+  rpc CreatePlaybook(CreatePlaybookRequest) returns (CreatePlaybookResponse);
+  rpc AssignPlaybookToAgent(AssignPlaybookToAgentRequest) returns (AssignPlaybookToAgentResponse);
+  rpc CreateAgentSchedule(CreateAgentScheduleRequest) returns (CreateAgentScheduleResponse);
+  rpc BindDataSourceToAgent(BindDataSourceToAgentRequest) returns (BindDataSourceToAgentResponse);
+  // Data Connection Builder: probe, test, create connectors; bulk scrape URLs
+  rpc ProbeApiEndpoint(ProbeApiEndpointRequest) returns (ProbeApiEndpointResponse);
+  rpc TestConnectorEndpoint(TestConnectorEndpointRequest) returns (TestConnectorEndpointResponse);
+  rpc CreateDataConnector(CreateDataConnectorRequest) returns (CreateDataConnectorResponse);
+  rpc BulkScrapeUrls(BulkScrapeUrlsRequest) returns (BulkScrapeUrlsResponse);
+  rpc GetBulkScrapeStatus(GetBulkScrapeStatusRequest) returns (GetBulkScrapeStatusResponse);
+  // Control Pane Builder: list, create, update, delete panes; inspect connector endpoints
+  rpc ListControlPanes(ListControlPanesRequest) returns (ListControlPanesResponse);
+  rpc GetConnectorEndpoints(GetConnectorEndpointsRequest) returns (GetConnectorEndpointsResponse);
+  rpc ListDataConnectors(ListDataConnectorsRequest) returns (ListDataConnectorsResponse);
+  rpc GetDataConnector(GetDataConnectorRequest) returns (GetDataConnectorResponse);
+  rpc UpdateDataConnector(UpdateDataConnectorRequest) returns (UpdateDataConnectorResponse);
+  rpc ListPlaybooks(ListPlaybooksRequest) returns (ListPlaybooksResponse);
+  rpc ListAgentSchedules(ListAgentSchedulesRequest) returns (ListAgentSchedulesResponse);
+  rpc ListAgentDataSources(ListAgentDataSourcesRequest) returns (ListAgentDataSourcesResponse);
+  rpc ListAgentProfiles(ListAgentProfilesRequest) returns (ListAgentProfilesResponse);
+  rpc CreateControlPane(CreateControlPaneRequest) returns (CreateControlPaneResponse);
+  rpc UpdateControlPane(UpdateControlPaneRequest) returns (UpdateControlPaneResponse);
+  rpc DeleteControlPane(DeleteControlPaneRequest) returns (DeleteControlPaneResponse);
+  rpc ExecuteControlPaneAction(ExecuteControlPaneActionRequest) returns (ExecuteControlPaneActionResponse);
+  rpc ListAvailableLlmModels(ListAvailableLlmModelsRequest) returns (ListAvailableLlmModelsResponse);
+  rpc SetAgentProfileStatus(SetAgentProfileStatusRequest) returns (SetAgentProfileStatusResponse);
+  rpc UpdateAgentProfile(UpdateAgentProfileRequest) returns (UpdateAgentProfileResponse);
+  rpc DeleteAgentProfile(DeleteAgentProfileRequest) returns (DeleteAgentProfileResponse);
+  rpc UpdatePlaybook(UpdatePlaybookRequest) returns (UpdatePlaybookResponse);
+  rpc DeletePlaybook(DeletePlaybookRequest) returns (DeletePlaybookResponse);
+  rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
+  rpc CreateSkill(CreateSkillRequest) returns (CreateSkillResponse);
+  rpc UpdateSkill(UpdateSkillRequest) returns (UpdateSkillResponse);
+
+  // Team operations (read posts, create post/comment for Agent Factory)
+  rpc ReadTeamPosts(ReadTeamPostsRequest) returns (ReadTeamPostsResponse);
+  rpc CreateTeamPost(CreateTeamPostRequest) returns (CreateTeamPostResponse);
+
+  // Agent-initiated notifications (outbound messaging + conversation creation)
+  rpc SendOutboundMessage(SendOutboundMessageRequest) returns (SendOutboundMessageResponse);
+  rpc CreateAgentConversation(CreateAgentConversationRequest) returns (CreateAgentConversationResponse);
+  rpc CreateAgentMessage(CreateAgentMessageRequest) returns (CreateAgentMessageResponse);
+  rpc AppendLineAgentChatMessage(AppendLineAgentChatMessageRequest) returns (AppendLineAgentChatMessageResponse);
+  rpc ReadTeamTimeline(ReadTeamTimelineRequest) returns (ReadTeamTimelineResponse);
+  rpc ReadAgentMessages(ReadAgentMessagesRequest) returns (ReadAgentMessagesResponse);
+  rpc GetTeamStatusBoard(GetTeamStatusBoardRequest) returns (GetTeamStatusBoardResponse);
+  rpc SetWorkspaceEntry(SetWorkspaceEntryRequest) returns (SetWorkspaceEntryResponse);
+  rpc ReadWorkspace(ReadWorkspaceRequest) returns (ReadWorkspaceResponse);
+  rpc GetGoalAncestry(GetGoalAncestryRequest) returns (GetGoalAncestryResponse);
+  rpc GetTeamGoalsTree(GetTeamGoalsTreeRequest) returns (GetTeamGoalsTreeResponse);
+  rpc GetGoalsForAgent(GetGoalsForAgentRequest) returns (GetGoalsForAgentResponse);
+  rpc UpdateGoalProgress(UpdateGoalProgressRequest) returns (UpdateGoalProgressResponse);
+  rpc CreateAgentTask(CreateAgentTaskRequest) returns (CreateAgentTaskResponse);
+  rpc GetAgentWorkQueue(GetAgentWorkQueueRequest) returns (GetAgentWorkQueueResponse);
+  rpc UpdateTaskStatus(UpdateTaskStatusRequest) returns (UpdateTaskStatusResponse);
+  rpc AssignTaskToAgent(AssignTaskToAgentRequest) returns (AssignTaskToAgentResponse);
+  rpc GetUserNotificationPreferences(GetUserNotificationPreferencesRequest) returns (GetUserNotificationPreferencesResponse);
+  rpc GetMyProfile(GetMyProfileRequest) returns (GetMyProfileResponse);
+  rpc UpsertUserFact(UpsertUserFactRequest) returns (UpsertUserFactResponse);
+  rpc GetUserFacts(GetUserFactsRequest) returns (GetUserFactsResponse);
+
+  // Local proxy (Bastion Local Proxy daemon)
+  rpc InvokeDeviceTool(InvokeDeviceToolRequest) returns (InvokeDeviceToolResponse);
+  rpc GetDeviceCapabilities(GetDeviceCapabilitiesRequest) returns (GetDeviceCapabilitiesResponse);
+
+  // External MCP servers (user-configured; execution and discovery in tools-service)
+  rpc ExecuteMcpTool(ExecuteMcpToolRequest) returns (ExecuteMcpToolResponse);
+  rpc GetMcpServerTools(GetMcpServerToolsRequest) returns (GetMcpServerToolsResponse);
+  rpc DiscoverMcpServer(DiscoverMcpServerRequest) returns (DiscoverMcpServerResponse);
 }
 
 // Document Messages
@@ -242,6 +420,8 @@ message RSSSearchRequest {
   string user_id = 1;
   string query = 2;
   int32 limit = 3;
+  bool unread_only = 4;
+  bool starred_only = 5;
 }
 
 message RSSSearchResponse {
@@ -262,15 +442,33 @@ message RSSArticle {
   string content = 3;
   string url = 4;
   string published_at = 5;
+  string feed_id = 6;
+  string feed_name = 7;
+  bool is_read = 8;
+  bool is_starred = 9;
+  bool is_imported = 10;
+  string created_at = 11;
 }
 
 message RSSArticlesRequest {
   string feed_id = 1;
   string user_id = 2;
   int32 limit = 3;
+  bool unread_only = 4;
+  bool starred_only = 5;
 }
 
 message RSSArticlesResponse {
+  repeated RSSArticle articles = 1;
+}
+
+message ListStarredRSSArticlesRequest {
+  string user_id = 1;
+  int32 limit = 2;
+  int32 offset = 3;
+}
+
+message ListStarredRSSArticlesResponse {
   repeated RSSArticle articles = 1;
 }
 
@@ -311,6 +509,7 @@ message RSSFeedDetails {
   bool is_global = 5;
   string last_polled = 6;
   int32 article_count = 7;
+  int32 unread_count = 8;
 }
 
 message RefreshRSSFeedRequest {
@@ -339,6 +538,69 @@ message DeleteRSSFeedResponse {
   string feed_id = 2;
   string message = 3;
   optional string error = 4;
+}
+
+message MarkArticleReadRequest {
+  string user_id = 1;
+  string article_id = 2;
+}
+
+message MarkArticleReadResponse {
+  bool success = 1;
+  string message = 2;
+  optional string error = 3;
+}
+
+message MarkArticleUnreadRequest {
+  string user_id = 1;
+  string article_id = 2;
+}
+
+message MarkArticleUnreadResponse {
+  bool success = 1;
+  string message = 2;
+  optional string error = 3;
+}
+
+message SetArticleStarredRequest {
+  string user_id = 1;
+  string article_id = 2;
+  bool starred = 3;
+}
+
+message SetArticleStarredResponse {
+  bool success = 1;
+  string message = 2;
+  optional string error = 3;
+}
+
+message GetUnreadCountsRequest {
+  string user_id = 1;
+}
+
+message UnreadCountEntry {
+  string feed_id = 1;
+  int32 count = 2;
+}
+
+message GetUnreadCountsResponse {
+  bool success = 1;
+  repeated UnreadCountEntry counts = 2;
+  optional string error = 3;
+}
+
+message ToggleFeedActiveRequest {
+  string user_id = 1;
+  string feed_id = 2;
+  bool is_active = 3;
+}
+
+message ToggleFeedActiveResponse {
+  bool success = 1;
+  string feed_id = 2;
+  bool is_active = 3;
+  string message = 4;
+  optional string error = 5;
 }
 
 // Entity Messages
@@ -500,6 +762,111 @@ message AddOrgInboxItemResponse {
   optional string error = 4;
 }
 
+message CaptureJournalEntryRequest {
+  string user_id = 1;
+  string content = 2;
+  optional string entry_date = 3;   // YYYY-MM-DD; omit for today
+  optional string title = 4;          // Optional heading title
+  repeated string tags = 5;
+}
+
+message CaptureJournalEntryResponse {
+  bool success = 1;
+  string message = 2;
+  optional string entry_preview = 3;
+  optional string file_path = 4;
+  optional string document_id = 5;
+  optional string error = 6;
+}
+
+message GetJournalEntryRequest {
+  string user_id = 1;
+  string date = 2;  // YYYY-MM-DD or "today"
+}
+
+message GetJournalEntryResponse {
+  bool success = 1;
+  string content = 2;
+  string date = 3;           // YYYY-MM-DD
+  string heading = 4;        // Full heading line
+  optional string document_id = 5;
+  optional string file_path = 6;
+  bool has_content = 7;
+  optional string error = 8;
+}
+
+message GetJournalEntriesRequest {
+  string user_id = 1;
+  optional string start_date = 2;  // YYYY-MM-DD
+  optional string end_date = 3;    // YYYY-MM-DD
+  optional int32 max_entries = 4;  // Cap returned entries (default 100)
+}
+
+message JournalEntryWithContent {
+  string date = 1;       // YYYY-MM-DD
+  string content = 2;   // Full body for that date
+  string heading = 3;   // Org heading line
+  bool has_content = 4;
+}
+
+message GetJournalEntriesResponse {
+  bool success = 1;
+  repeated JournalEntryWithContent entries = 2;
+  int32 total = 3;       // Total in range (may be more than returned if capped)
+  optional string error = 4;
+}
+
+message UpdateJournalEntryRequest {
+  string user_id = 1;
+  string date = 2;   // YYYY-MM-DD
+  string content = 3;
+  string mode = 4;   // "replace" or "append"
+}
+
+message UpdateJournalEntryResponse {
+  bool success = 1;
+  string date = 2;
+  optional string error = 3;
+}
+
+message ListJournalEntriesRequest {
+  string user_id = 1;
+  optional string start_date = 2;  // YYYY-MM-DD
+  optional string end_date = 3;    // YYYY-MM-DD
+}
+
+message JournalEntryMeta {
+  string date = 1;       // YYYY-MM-DD
+  int32 word_count = 2;
+  bool has_content = 3;
+}
+
+message ListJournalEntriesResponse {
+  bool success = 1;
+  repeated JournalEntryMeta entries = 2;
+  int32 total = 3;
+  optional string error = 4;
+}
+
+message SearchJournalRequest {
+  string user_id = 1;
+  string query = 2;
+  optional string start_date = 3;  // YYYY-MM-DD
+  optional string end_date = 4;    // YYYY-MM-DD
+}
+
+message JournalSearchResult {
+  string date = 1;       // YYYY-MM-DD
+  string excerpt = 2;
+}
+
+message SearchJournalResponse {
+  bool success = 1;
+  repeated JournalSearchResult results = 2;
+  int32 count = 3;
+  optional string error = 4;
+}
+
 message ToggleOrgInboxItemRequest {
   string user_id = 1;
   int32 line_index = 2;
@@ -583,6 +950,170 @@ message GetOrgInboxPathResponse {
   optional string error = 3;
 }
 
+// Universal Todo Messages
+message ListTodosRequest {
+  string user_id = 1;
+  string scope = 2;  // "all", "inbox", or file path
+  repeated string states = 3;
+  repeated string tags = 4;
+  string query = 5;
+  int32 limit = 6;
+  bool include_archives = 7;
+  bool include_body = 8;
+  int32 closed_since_days = 9;  // only DONE items closed in the last N days (0 = omit filter)
+}
+
+message TodoResult {
+  string filename = 1;
+  string file_path = 2;
+  string heading = 3;
+  int32 level = 4;
+  int32 line_number = 5;  // 0-based
+  string todo_state = 6;
+  repeated string tags = 7;
+  string scheduled = 8;
+  string deadline = 9;
+  string document_id = 10;
+  string preview = 11;
+  string body = 12;  // body/description text under the heading
+  string closed = 13;  // when item was marked DONE (org CLOSED timestamp)
+}
+
+message ListTodosResponse {
+  bool success = 1;
+  repeated TodoResult results = 2;
+  int32 count = 3;
+  int32 files_searched = 4;
+  optional string error = 5;
+}
+
+message CreateTodoRequest {
+  string user_id = 1;
+  string text = 2;
+  optional string file_path = 3;  // omit for inbox
+  string state = 4;
+  repeated string tags = 5;
+  optional string scheduled = 6;
+  optional string deadline = 7;
+  optional string priority = 8;
+  optional string body = 9;  // body/description lines under the heading
+  optional int32 heading_level = 10;  // 1-6 org stars (* to ******); default 1
+  optional int32 insert_after_line_number = 11;  // 0-based; if set, insert after this line; else append at end
+}
+
+message CreateTodoResponse {
+  bool success = 1;
+  string file_path = 2;
+  int32 line_number = 3;
+  string heading = 4;
+  optional string error = 5;
+}
+
+message UpdateTodoRequest {
+  string user_id = 1;
+  string file_path = 2;
+  int32 line_number = 3;  // 0-based
+  optional string heading_text = 4;
+  optional string new_state = 5;
+  optional string new_text = 6;
+  repeated string add_tags = 7;
+  repeated string remove_tags = 8;
+  optional string scheduled = 9;
+  optional string deadline = 10;
+  optional string priority = 11;
+  optional string new_body = 12;  // replace body under the heading
+}
+
+message UpdateTodoResponse {
+  bool success = 1;
+  string file_path = 2;
+  int32 line_number = 3;
+  string new_line = 4;
+  optional string error = 5;
+}
+
+message ToggleTodoRequest {
+  string user_id = 1;
+  string file_path = 2;
+  int32 line_number = 3;  // 0-based
+  optional string heading_text = 4;
+}
+
+message ToggleTodoResponse {
+  bool success = 1;
+  string file_path = 2;
+  int32 line_number = 3;
+  string new_line = 4;
+  optional string error = 5;
+}
+
+message DeleteTodoRequest {
+  string user_id = 1;
+  string file_path = 2;
+  int32 line_number = 3;  // 0-based
+  optional string heading_text = 4;
+}
+
+message DeleteTodoResponse {
+  bool success = 1;
+  string file_path = 2;
+  int32 deleted_line_count = 3;
+  optional string error = 4;
+}
+
+message ArchiveDoneTodosRequest {
+  string user_id = 1;
+  optional string file_path = 2;  // omit for inbox
+  bool preview_only = 3;           // resolve path + count without archiving
+  bool archive_all = 4;            // deprecated: unused; use line_number for single-entry
+  optional int32 line_number = 5;  // 0-based; if set, archive only this entry (any state). Omit for bulk closed.
+}
+
+message ArchiveDoneTodosResponse {
+  bool success = 1;
+  string path = 2;
+  string archived_to = 3;
+  int32 archived_count = 4;
+  optional string error = 5;
+  bool directive_found = 6;   // was #+ARCHIVE: present in file?
+  string directive_value = 7; // raw directive e.g. "./Archive/%s_archive.org"
+}
+
+message RefileTodoRequest {
+  string user_id = 1;
+  string source_file = 2;      // file_path from list_todos (absolute or relative)
+  int32 source_line = 3;       // 0-based line_number from list_todos
+  string target_file = 4;      // destination file path
+  optional int32 target_heading_line = 5;  // 0-based line of target heading; omit = append at file root
+}
+
+message RefileTodoResponse {
+  bool success = 1;
+  string source_file = 2;
+  string target_file = 3;
+  int32 lines_moved = 4;
+  optional string error = 5;
+}
+
+message DiscoverRefileTargetsRequest {
+  string user_id = 1;
+}
+
+message RefileTarget {
+  string file = 1;
+  string filename = 2;
+  repeated string heading_path = 3;
+  int32 heading_line = 4;      // 0-based
+  string display_name = 5;
+  int32 level = 6;
+}
+
+message DiscoverRefileTargetsResponse {
+  bool success = 1;
+  repeated RefileTarget targets = 2;
+  optional string error = 3;
+}
+
 // Web Search Messages
 message WebSearchRequest {
   string query = 1;
@@ -605,6 +1136,13 @@ message WebCrawlRequest {
   string url = 1;  // Single URL (for backward compatibility)
   repeated string urls = 2;  // Multiple URLs
   string user_id = 3;
+  optional bool paginate = 4;
+  optional int32 max_pages = 5;               // default 10
+  optional string pagination_param = 6;       // e.g. "page"
+  optional int32 start_page = 7;              // e.g. 0
+  optional string next_page_css_selector = 8; // e.g. "li.pager-next a"
+  optional string css_selector = 9;          // content extraction selector (pass-through to Crawl4AI)
+  optional int32 max_urls = 10;               // max URLs to crawl (default 5 for backward compat; e.g. 20 for bulk scrape path)
 }
 
 message WebCrawlResponse {
@@ -628,6 +1166,8 @@ message WebCrawlResult {
   string content = 3;
   string html = 4;  // HTML content
   map<string, string> metadata = 5;
+  repeated string images = 6;
+  repeated string links = 7;
 }
 
 // Recursive Website Crawling Messages
@@ -782,6 +1322,7 @@ message ImageGenerationRequest {
   optional bytes reference_image_data = 9;  // Base64-encoded reference image
   optional string reference_image_url = 10;  // Alternative: URL to reference image
   optional float reference_strength = 11;  // 0.0-1.0, default 0.5 (how much to follow reference)
+  optional string folder_id = 12;  // Target folder for promoted document (user collection)
 }
 
 message ImageGenerationResponse {
@@ -801,6 +1342,7 @@ message GeneratedImage {
   int32 width = 4;
   int32 height = 5;
   string format = 6;
+  optional string document_id = 7;  // Set when image is promoted to document_metadata
 }
 
 message GetReferenceImageForObjectRequest {
@@ -825,6 +1367,7 @@ message CreateUserFileRequest {
   optional string title = 6;
   repeated string tags = 7;
   optional string category = 8;
+  optional bytes binary_content = 9;  // When set, content is ignored; used for PDF, images, etc.
 }
 
 message CreateUserFileResponse {
@@ -834,6 +1377,205 @@ message CreateUserFileResponse {
   string folder_id = 4;
   string message = 5;
   optional string error = 6;
+}
+
+// Browser automation (Playwright) - one step in a sequence
+message BrowserStepProto {
+  string action = 1;   // "navigate", "click", "fill", "wait", "download", "extract"
+  optional string selector = 2;
+  optional string value = 3;
+  optional string wait_for = 4;
+  optional int32 timeout_seconds = 5;
+  optional string url = 6;  // For "navigate" action
+}
+
+message BrowserDownloadToolRequest {
+  string user_id = 1;
+  string url = 2;
+  repeated BrowserStepProto steps = 3;   // Optional sequence before download
+  string download_selector = 4;          // CSS selector to click to trigger download
+  optional string connection_id = 5;     // For credential lookup (login)
+  string folder_path = 6;                // Where to save the file (e.g. "Research/Reports")
+  repeated string tags = 7;
+  optional string title = 8;
+  optional string goal = 9;               // Natural language description for logging
+}
+
+message BrowserDownloadToolResponse {
+  bool success = 1;
+  string document_id = 2;
+  string filename = 3;
+  int64 file_size_bytes = 4;
+  optional string error = 5;
+}
+
+// Universal browser run: same steps, parameterized final action
+message BrowserRunToolRequest {
+  string user_id = 1;
+  string url = 2;
+  repeated BrowserStepProto steps = 3;
+  string final_action_type = 4;  // "download", "click", "extract", "screenshot"
+  string final_selector = 5;      // For download: click to trigger; click: element; extract: selector (empty=body); screenshot: optional element
+  string folder_path = 6;         // Required for download; optional for screenshot (save PNG); unused for click/extract
+  optional string connection_id = 7;
+  repeated string tags = 8;
+  optional string title = 9;
+  optional string goal = 10;
+}
+
+message BrowserRunToolResponse {
+  bool success = 1;
+  optional string error = 2;
+  optional string document_id = 3;   // Download or screenshot (saved)
+  optional string filename = 4;
+  optional int64 file_size_bytes = 5;
+  optional string extracted_text = 6;  // Click (optional) or extract
+  optional string message = 7;         // Click success message
+  optional string images_markdown = 8; // Screenshot as data URI markdown for chat/Telegram/Discord
+}
+
+// Granular browser automation (session-scoped)
+message BrowserOpenSessionRequest {
+  string user_id = 1;
+  string site_domain = 2;  // e.g. "example.com" for state restore key
+  optional int32 timeout_seconds = 3;
+}
+
+message BrowserOpenSessionResponse {
+  bool success = 1;
+  optional string session_id = 2;
+  optional string error = 3;
+}
+
+message BrowserNavigateRequest {
+  string user_id = 1;
+  string session_id = 2;
+  string url = 3;
+}
+
+message BrowserNavigateResponse {
+  bool success = 1;
+  optional string page_title = 2;
+  optional string current_url = 3;
+  optional string error = 4;
+}
+
+message BrowserClickRequest {
+  string user_id = 1;
+  string session_id = 2;
+  string selector = 3;
+}
+
+message BrowserClickResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message BrowserFillRequest {
+  string user_id = 1;
+  string session_id = 2;
+  string selector = 3;
+  string value = 4;
+}
+
+message BrowserFillResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message BrowserWaitRequest {
+  string user_id = 1;
+  string session_id = 2;
+  optional string selector = 3;   // Wait for selector
+  optional int32 timeout_seconds = 4;  // Or fixed delay
+}
+
+message BrowserWaitResponse {
+  bool success = 1;
+  bool found = 2;  // true if selector appeared (or N/A for timeout)
+  optional string error = 3;
+}
+
+message BrowserScrollRequest {
+  string user_id = 1;
+  string session_id = 2;
+  optional string direction = 3;   // "down" or "up", default "down"
+  optional int32 amount_pixels = 4;  // default 800
+}
+
+message BrowserScrollResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message BrowserExtractRequest {
+  string user_id = 1;
+  string session_id = 2;
+  string selector = 3;  // Empty = full body
+}
+
+message BrowserExtractResponse {
+  bool success = 1;
+  optional string extracted_text = 2;
+  optional string error = 3;
+}
+
+message BrowserInspectRequest {
+  string user_id = 1;
+  string session_id = 2;
+}
+
+message BrowserInspectResponse {
+  bool success = 1;
+  optional string page_structure = 2;  // JSON
+  optional string error = 3;
+}
+
+message BrowserScreenshotRequest {
+  string user_id = 1;
+  string session_id = 2;
+  string folder_path = 3;  // Optional; empty = do not save to library
+  repeated string tags = 4;
+  optional string title = 5;
+}
+
+message BrowserScreenshotResponse {
+  bool success = 1;
+  optional string images_markdown = 2;
+  optional string document_id = 3;
+  optional string filename = 4;
+  optional int64 file_size_bytes = 5;
+  optional string error = 6;
+}
+
+message BrowserDownloadFileRequest {
+  string user_id = 1;
+  string session_id = 2;
+  string selector = 3;   // Click to trigger download
+  string folder_path = 4;
+  repeated string tags = 5;
+  optional string title = 6;
+}
+
+message BrowserDownloadFileResponse {
+  bool success = 1;
+  optional string document_id = 2;
+  optional string filename = 3;
+  optional int64 file_size_bytes = 4;
+  optional string error = 5;
+}
+
+message BrowserCloseSessionRequest {
+  string user_id = 1;
+  string session_id = 2;
+  string site_domain = 3;  // For saving state key
+  bool save_state = 4;
+}
+
+message BrowserCloseSessionResponse {
+  bool success = 1;
+  bool session_saved = 2;  // true if state was persisted
+  optional string error = 3;
 }
 
 message CreateUserFolderRequest {
@@ -867,6 +1609,42 @@ message FolderInfo {
 message GetFolderTreeResponse {
   repeated FolderInfo folders = 1;
   int32 total_folders = 2;
+}
+
+message ListFolderDocumentsRequest {
+  string folder_id = 1;
+  string user_id = 2;
+  int32 limit = 3;
+  int32 offset = 4;
+}
+
+message FolderDocumentEntry {
+  string document_id = 1;
+  string filename = 2;
+  string title = 3;
+  string collection_type = 4;
+}
+
+message ListFolderDocumentsResponse {
+  repeated FolderDocumentEntry documents = 1;
+  int32 total_count = 2;
+  string error = 3;
+}
+
+message PickRandomDocumentFromFolderRequest {
+  string folder_id = 1;
+  string user_id = 2;
+  optional string file_extension = 3;  // e.g. "png", "jpg" - filter by filename extension (case-insensitive)
+}
+
+message PickRandomDocumentFromFolderResponse {
+  bool found = 1;
+  string document_id = 2;
+  string filename = 3;
+  optional string title = 4;
+  optional string folder_id = 5;
+  optional string doc_type = 6;
+  string message = 7;  // Human-readable summary or error
 }
 
 // Document Editing Messages
@@ -927,8 +1705,8 @@ message ProposeDocumentEditResponse {
 }
 
 message EditorOperationProto {
-  string op_type = 1;  // "replace_range", "insert_after_heading", "delete_range"
-  int32 start = 2;
+  string op_type = 1;  // "replace_range", "insert_after_heading", "delete_range", "insert_after"
+  int32 start = 2;     // Resolved by backend at display/apply time; 0 when semantic-only
   int32 end = 3;
   string text = 4;
   string pre_hash = 5;
@@ -939,6 +1717,7 @@ message EditorOperationProto {
   optional int32 occurrence_index = 10;
   optional string note = 11;
   optional float confidence = 12;
+  optional string search_text = 13;  // For replace/delete: text to find (with context for robust matching)
 }
 
 message ContentEditProto {
@@ -976,6 +1755,57 @@ message ApplyOperationsDirectlyResponse {
   int32 applied_count = 3;  // Number of operations applied
   string message = 4;
   optional string error = 5;
+}
+
+// List/Get/Reject document edit proposals (for agents and Telegram)
+message ListDocumentProposalsRequest {
+  string user_id = 1;
+  string document_id = 2;
+}
+
+message ProposalSummary {
+  string proposal_id = 1;
+  string document_id = 2;
+  string edit_type = 3;
+  string agent_name = 4;
+  string summary = 5;
+  int32 operations_count = 6;
+  string created_at = 7;
+  optional string expires_at = 8;
+}
+
+message ListDocumentProposalsResponse {
+  bool success = 1;
+  repeated ProposalSummary proposals = 2;
+  optional string error = 3;
+}
+
+message GetDocumentEditProposalRequest {
+  string user_id = 1;
+  string proposal_id = 2;
+}
+
+message GetDocumentEditProposalResponse {
+  bool success = 1;
+  string proposal_id = 2;
+  string document_id = 3;
+  string edit_type = 4;
+  string operations_json = 5;
+  string content_edit_json = 6;
+  string agent_name = 7;
+  string summary = 8;
+  string created_at = 9;
+  optional string error = 10;
+}
+
+message RejectDocumentEditProposalRequest {
+  string user_id = 1;
+  string proposal_id = 2;
+}
+
+message RejectDocumentEditProposalResponse {
+  bool success = 1;
+  optional string error = 2;
 }
 
 // Conversation Messages
@@ -1160,12 +1990,14 @@ message TableSchema {
   string database_name = 5;
   repeated ColumnInfo columns = 6;
   int32 row_count = 7;
+  string metadata_json = 8;  // Business context, glossary, relationships for agents
 }
 
 message ColumnInfo {
   string name = 1;
   string type = 2;  // e.g., "text", "number", "date", "boolean"
   bool is_nullable = 3;
+  string description = 4;  // Human-readable column meaning for agents
 }
 
 message QueryDataWorkspaceRequest {
@@ -1174,6 +2006,8 @@ message QueryDataWorkspaceRequest {
   string query_type = 3;  // "sql" or "natural_language"
   string user_id = 4;
   int32 limit = 5;  // Maximum rows to return (default: 100)
+  string params_json = 6;  // JSON array for $1, $2, ... (SQL only)
+  bool read_only = 7;  // When true, only SELECT is allowed (agent line / policy)
 }
 
 message QueryDataWorkspaceResponse {
@@ -1184,6 +2018,10 @@ message QueryDataWorkspaceResponse {
   int32 execution_time_ms = 5;
   string generated_sql = 6;  // SQL that was executed (for transparency)
   optional string error_message = 7;
+  int32 rows_affected = 8;  // For INSERT/UPDATE/DELETE
+  string returning_rows_json = 9;  // For write with RETURNING
+  bytes arrow_results = 10;  // Arrow IPC RecordBatch when has_arrow_data is true
+  bool has_arrow_data = 11;
 }
 
 // Face Analysis Messages
@@ -1483,6 +2321,7 @@ message GetEmailsRequest {
   int32 top = 3;
   int32 skip = 4;
   bool unread_only = 5;
+  int32 connection_id = 6;  // optional; 0 = use user's first email connection
 }
 
 message GetEmailsResponse {
@@ -1496,6 +2335,7 @@ message SearchEmailsRequest {
   string query = 2;
   int32 top = 3;
   string from_address = 4;
+  int32 connection_id = 5;
 }
 
 message SearchEmailsResponse {
@@ -1507,6 +2347,7 @@ message SearchEmailsResponse {
 message GetEmailThreadRequest {
   string user_id = 1;
   string conversation_id = 2;
+  int32 connection_id = 3;
 }
 
 message GetEmailThreadResponse {
@@ -1521,6 +2362,9 @@ message SendEmailRequest {
   string subject = 3;
   string body = 4;
   repeated string cc = 5;
+  string from_source = 6;
+  int32 connection_id = 7;
+  bool body_is_html = 8;
 }
 
 message SendEmailResponse {
@@ -1534,6 +2378,7 @@ message ReplyToEmailRequest {
   string message_id = 2;
   string body = 3;
   bool reply_all = 4;
+  int32 connection_id = 5;
 }
 
 message ReplyToEmailResponse {
@@ -1544,6 +2389,7 @@ message ReplyToEmailResponse {
 
 message GetEmailFoldersRequest {
   string user_id = 1;
+  int32 connection_id = 2;
 }
 
 message GetEmailFoldersResponse {
@@ -1554,6 +2400,7 @@ message GetEmailFoldersResponse {
 
 message GetEmailStatisticsRequest {
   string user_id = 1;
+  int32 connection_id = 2;
 }
 
 message GetEmailStatisticsResponse {
@@ -1570,5 +2417,1355 @@ message MarkEmailReadRequest {
 message MarkEmailReadResponse {
   bool success = 1;
   string result = 2;
+  string error = 3;
+}
+
+message GetEmailByIdRequest {
+  string user_id = 1;
+  string message_id = 2;
+  int32 connection_id = 3;
+}
+
+message GetEmailByIdResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message MoveEmailRequest {
+  string user_id = 1;
+  string message_id = 2;
+  string destination_folder_id = 3;
+  int32 connection_id = 4;
+}
+
+message MoveEmailResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message UpdateEmailRequest {
+  string user_id = 1;
+  string message_id = 2;
+  optional bool is_read = 3;
+  optional string importance = 4;  // low, normal, high
+  int32 connection_id = 5;
+}
+
+message UpdateEmailResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message CreateDraftRequest {
+  string user_id = 1;
+  repeated string to = 2;
+  string subject = 3;
+  string body = 4;
+  repeated string cc = 5;
+  int32 connection_id = 6;
+}
+
+message CreateDraftResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+// Calendar operation messages (result strings are LLM-ready formatted text)
+message ListCalendarsRequest {
+  string user_id = 1;
+  int32 connection_id = 2;  // optional; 0 = use user's first calendar-capable connection
+}
+
+message ListCalendarsResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message GetCalendarEventsRequest {
+  string user_id = 1;
+  string calendar_id = 2;   // empty = default calendar
+  string start_datetime = 3; // ISO 8601
+  string end_datetime = 4;   // ISO 8601
+  int32 top = 5;
+  int32 connection_id = 6;
+}
+
+message GetCalendarEventsResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message GetCalendarEventByIdRequest {
+  string user_id = 1;
+  string event_id = 2;
+  int32 connection_id = 3;
+}
+
+message GetCalendarEventByIdResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message CreateCalendarEventRequest {
+  string user_id = 1;
+  string calendar_id = 2;
+  string subject = 3;
+  string start_datetime = 4;
+  string end_datetime = 5;
+  string location = 6;
+  string body = 7;
+  bool body_is_html = 8;
+  repeated string attendee_emails = 9;
+  bool is_all_day = 10;
+  int32 connection_id = 11;
+}
+
+message CreateCalendarEventResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message UpdateCalendarEventRequest {
+  string user_id = 1;
+  string event_id = 2;
+  string subject = 3;
+  string start_datetime = 4;
+  string end_datetime = 5;
+  string location = 6;
+  string body = 7;
+  bool body_is_html = 8;
+  repeated string attendee_emails = 9;
+  bool is_all_day = 10;
+  int32 connection_id = 11;
+}
+
+message UpdateCalendarEventResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message DeleteCalendarEventRequest {
+  string user_id = 1;
+  string event_id = 2;
+  int32 connection_id = 3;
+}
+
+message DeleteCalendarEventResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+// Contact operation messages (result strings are LLM-ready formatted text)
+message GetContactsRequest {
+  string user_id = 1;
+  string folder_id = 2;   // empty = default folder
+  int32 top = 3;
+  int32 connection_id = 4;
+  string sources = 5;    // "all", "microsoft", "org", "caldav" — which contact sources to include
+}
+
+message GetContactsResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message GetContactByIdRequest {
+  string user_id = 1;
+  string contact_id = 2;
+  int32 connection_id = 3;
+}
+
+message GetContactByIdResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message CreateContactRequest {
+  string user_id = 1;
+  string folder_id = 2;
+  string display_name = 3;
+  string given_name = 4;
+  string surname = 5;
+  string company_name = 6;
+  string job_title = 7;
+  string birthday = 8;
+  string notes = 9;
+  string email_addresses_json = 10;  // JSON array [{"address":"","name":""},...]
+  string phone_numbers_json = 11;    // JSON array [{"number":"","type":""},...]
+  int32 connection_id = 12;
+}
+
+message CreateContactResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message UpdateContactRequest {
+  string user_id = 1;
+  string contact_id = 2;
+  string display_name = 3;
+  string given_name = 4;
+  string surname = 5;
+  string company_name = 6;
+  string job_title = 7;
+  string birthday = 8;
+  string notes = 9;
+  string email_addresses_json = 10;
+  string phone_numbers_json = 11;
+  int32 connection_id = 12;
+}
+
+message UpdateContactResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message DeleteContactRequest {
+  string user_id = 1;
+  string contact_id = 2;
+  int32 connection_id = 3;
+}
+
+message DeleteContactResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message SearchContactsRequest {
+  string user_id = 1;
+  string query = 2;
+  string sources = 3;   // "all", "microsoft", "org", "caldav"
+  int32 top = 4;
+  int32 connection_id = 5;
+}
+
+message SearchContactsResponse {
+  bool success = 1;
+  string result = 2;
+  string error = 3;
+}
+
+message ListUserAccountsRequest {
+  string user_id = 1;
+  string agent_profile_id = 2;  // empty = return all user connections
+  string service_type = 3;      // "email", "calendar", "contacts", or "all"
+}
+
+message ListUserAccountsResponse {
+  bool success = 1;
+  string result = 2;   // JSON array of AccountRef objects
+  string error = 3;
+}
+
+// Agent Factory: profile and playbook for custom agent execution
+message ResolveAgentHandleRequest {
+  string handle = 1;
+  string user_id = 2;
+}
+
+message ResolveAgentHandleResponse {
+  string agent_profile_id = 1;
+  string agent_name = 2;
+  bool found = 3;
+}
+
+message EnqueueAgentInvocationRequest {
+  string agent_profile_id = 1;
+  string input_content = 2;
+  string user_id = 3;
+  string source_agent_name = 4;
+  int32 chain_depth = 5;
+  string chain_path_json = 6;  // JSON array of profile IDs
+}
+
+message EnqueueAgentInvocationResponse {
+  bool success = 1;
+  string task_id = 2;
+  string error = 3;
+}
+
+// Team operations for Agent Factory
+message ReadTeamPostsRequest {
+  string team_id = 1;
+  string user_id = 2;
+  bool since_last_read = 3;
+  int32 limit = 4;
+  bool mark_as_read = 5;
+}
+
+message TeamPost {
+  string post_id = 1;
+  string author_id = 2;
+  string author_name = 3;
+  string content = 4;
+  string post_type = 5;
+  string created_at = 6;
+}
+
+message ReadTeamPostsResponse {
+  repeated TeamPost posts = 1;
+  int32 count = 2;
+  string team_name = 3;
+  bool success = 4;
+  string error = 5;
+}
+
+message CreateTeamPostRequest {
+  string team_id = 1;
+  string user_id = 2;
+  string content = 3;
+  string post_type = 4;  // "text", "image", "file"
+  string reply_to_post_id = 5;  // If set, creates a comment instead of a top-level post
+}
+
+message CreateTeamPostResponse {
+  string post_id = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+message GetAgentProfileRequest {
+  string user_id = 1;
+  string profile_id = 2;  // UUID of agent_profiles.id
+}
+
+message GetAgentProfileResponse {
+  bool success = 1;
+  string profile_json = 2;  // JSON object: profile row (id, name, handle, system_prompt_additions, etc.)
+  string error = 3;
+}
+
+message ListAgentProfilesRequest {
+  string user_id = 1;
+}
+
+message ListAgentProfilesResponse {
+  bool success = 1;
+  string profiles_json = 2;  // JSON array of { id, name, handle, description, status, ... }
+  string formatted = 3;
+  string error = 4;
+}
+
+message ListAutoRoutableProfilesRequest {
+  string user_id = 1;
+}
+
+message ListAutoRoutableProfilesResponse {
+  bool success = 1;
+  string profiles_json = 2;  // JSON array: [{id, handle, name, description}, ...]
+  string error = 3;
+}
+
+message GetPlaybookRequest {
+  string user_id = 1;
+  string playbook_id = 2;  // UUID of custom_playbooks.id
+}
+
+message GetPlaybookResponse {
+  bool success = 1;
+  string playbook_json = 2;  // JSON object: playbook row (id, name, definition, etc.)
+  string error = 3;
+}
+
+message ListPlaybooksRequest {
+  string user_id = 1;
+}
+
+message ListPlaybooksResponse {
+  bool success = 1;
+  string playbooks_json = 2;  // JSON array of { id, name, description, step_count, ... }
+  string formatted = 3;
+  string error = 4;
+}
+
+message ListAgentSchedulesRequest {
+  string user_id = 1;
+  string agent_id = 2;
+}
+
+message ListAgentSchedulesResponse {
+  bool success = 1;
+  string schedules_json = 2;  // JSON array of schedule objects
+  string formatted = 3;
+  string error = 4;
+}
+
+message ListAgentDataSourcesRequest {
+  string user_id = 1;
+  string agent_id = 2;
+}
+
+message ListAgentDataSourcesResponse {
+  bool success = 1;
+  string bindings_json = 2;  // JSON array of binding objects (connector_id, connector_name, etc.)
+  string formatted = 3;
+  string error = 4;
+}
+
+// Agent Factory Skills: batch fetch by IDs for pipeline injection
+message GetSkillsByIdsRequest {
+  string user_id = 1;           // For RLS / scope when resolving built-in + user skills
+  repeated string skill_ids = 2;
+}
+
+message GetSkillsByIdsResponse {
+  bool success = 1;
+  string skills_json = 2;       // JSON array of skill objects (id, name, slug, procedure, required_tools, etc.)
+  string error = 3;
+}
+
+message ListSkillsRequest {
+  string user_id = 1;
+  string category = 2;         // optional filter
+  bool include_builtin = 3;    // default true
+}
+
+message ListSkillsResponse {
+  bool success = 1;
+  string skills_json = 2;      // JSON array of skill objects
+  string error = 3;
+}
+
+message CreateSkillRequest {
+  string user_id = 1;
+  string name = 2;
+  string slug = 3;
+  string procedure = 4;
+  repeated string required_tools = 5;
+  repeated string optional_tools = 6;
+  string description = 7;
+  string category = 8;
+  repeated string tags = 9;
+}
+
+message CreateSkillResponse {
+  bool success = 1;
+  string skill_id = 2;
+  string skill_json = 3;       // full skill object
+  string error = 4;
+}
+
+message UpdateSkillRequest {
+  string user_id = 1;
+  string skill_id = 2;
+  string procedure = 3;        // new procedure (optional; if empty keep current)
+  string improvement_rationale = 4;
+  string evidence_metadata_json = 5;  // optional JSON object
+  string name = 6;
+  string description = 7;
+  string category = 8;
+  repeated string required_tools = 9;
+  repeated string optional_tools = 10;
+}
+
+message UpdateSkillResponse {
+  bool success = 1;
+  string skill_id = 2;
+  int32 version = 3;
+  string skill_json = 4;
+  string error = 5;
+}
+
+message SearchSkillsRequest {
+  string user_id = 1;
+  string query = 2;
+  int32 limit = 3;
+  float score_threshold = 4;
+}
+
+message SearchSkillsResponse {
+  bool success = 1;
+  string skills_json = 2;  // JSON array of skill objects with similarity_score
+  string error = 3;
+}
+
+message LogAgentExecutionRequest {
+  string user_id = 1;
+  string profile_id = 2;   // UUID
+  string playbook_id = 3;  // UUID
+  string query = 4;
+  string status = 5;       // "completed", "failed", "running"
+  int32 duration_ms = 6;
+  int32 steps_completed = 7;
+  int32 steps_total = 8;
+  string error_details = 9;
+  string started_at = 10;  // ISO 8601
+  string completed_at = 11;  // ISO 8601
+  string metadata_json = 12;  // optional JSON object
+  string steps_json = 13;     // optional JSON array of step trace entries
+}
+
+message ExecuteConnectorRequest {
+  string user_id = 1;
+  string profile_id = 2;   // Agent profile (for credentials lookup)
+  string connector_id = 3;  // data_source_connectors.id
+  string endpoint_id = 4;  // Endpoint id from connector definition
+  string params_json = 5;  // JSON object of endpoint parameters
+}
+
+message ExecuteConnectorResponse {
+  bool success = 1;
+  string result_json = 2;  // JSON: { records, count, formatted, error? }
+  string error = 3;
+}
+
+// Data Connection Builder: probe API (raw HTTP), test/save connector, bulk scrape
+message ProbeApiEndpointRequest {
+  string user_id = 1;
+  string url = 2;
+  string method = 3;        // GET, POST, etc.
+  string headers_json = 4;  // Optional JSON object
+  string body_json = 5;
+  string params_json = 6;   // Optional query params as JSON
+}
+
+message ProbeApiEndpointResponse {
+  bool success = 1;
+  int32 status_code = 2;
+  string response_headers_json = 3;
+  string response_body = 4;   // Truncated to 50KB
+  string content_type = 5;
+  string error = 6;
+}
+
+message TestConnectorEndpointRequest {
+  string user_id = 1;
+  string definition_json = 2;   // Full connector definition (no save required)
+  string endpoint_id = 3;
+  string params_json = 4;       // Optional param values
+  string credentials_json = 5;  // Optional; for auth when testing
+}
+
+message TestConnectorEndpointResponse {
+  bool success = 1;
+  string records_json = 2;      // JSON array
+  int32 count = 3;
+  string raw_response_json = 4; // Full API response when success
+  string formatted = 5;
+  string error = 6;
+}
+
+message CreateDataConnectorRequest {
+  string user_id = 1;
+  string name = 2;
+  string description = 3;
+  string definition_json = 4;
+  bool requires_auth = 5;
+  string auth_fields_json = 6;   // JSON array of auth field definitions
+  string category = 7;
+}
+
+message CreateDataConnectorResponse {
+  bool success = 1;
+  string connector_id = 2;
+  string name = 3;
+  string formatted = 4;
+  string error = 5;
+}
+
+message ListDataConnectorsRequest {
+  string user_id = 1;
+}
+
+message ListDataConnectorsResponse {
+  bool success = 1;
+  string connectors_json = 2;  // JSON array of { id, name, description, connector_type, endpoint_count, created_at, updated_at }
+  string formatted = 3;
+  string error = 4;
+}
+
+message GetDataConnectorRequest {
+  string user_id = 1;
+  string connector_id = 2;
+}
+
+message GetDataConnectorResponse {
+  bool success = 1;
+  string connector_json = 2;  // Full connector (definition, endpoints; auth values redacted)
+  string formatted = 3;
+  string error = 4;
+}
+
+message UpdateDataConnectorRequest {
+  string user_id = 1;
+  string connector_id = 2;
+  optional string name = 3;
+  optional string description = 4;
+  optional string connector_type = 5;
+  optional string definition_json = 6;
+  optional bool requires_auth = 7;
+  optional string auth_fields_json = 8;
+  optional bool is_locked = 9;
+}
+
+message UpdateDataConnectorResponse {
+  bool success = 1;
+  string connector_id = 2;
+  string formatted = 3;
+  string error = 4;
+}
+
+message BulkScrapeUrlsRequest {
+  string user_id = 1;
+  string urls_json = 2;          // JSON array of URL strings
+  bool extract_images = 3;
+  bool download_images = 4;
+  string image_output_folder = 5;  // Optional folder path for downloaded images
+  string metadata_fields_json = 6;  // Optional JSON array of field names
+  int32 max_concurrent = 7;
+  double rate_limit_seconds = 8;
+  string folder_id = 9;          // Optional; target folder for stored documents/images
+}
+
+message BulkScrapeUrlsResponse {
+  bool success = 1;
+  string task_id = 2;            // Set when backgrounded (20+ URLs)
+  string results_json = 3;       // When inline, JSON array of page results
+  int32 count = 4;
+  int32 images_found = 5;
+  int32 images_downloaded = 6;
+  string formatted = 7;
+  string error = 8;
+}
+
+message GetBulkScrapeStatusRequest {
+  string user_id = 1;
+  string task_id = 2;
+}
+
+message GetBulkScrapeStatusResponse {
+  bool success = 1;
+  string status = 2;             // PENDING, RUNNING, SUCCESS, FAILURE
+  int32 progress_current = 3;
+  int32 progress_total = 4;
+  string progress_message = 5;
+  string results_json = 6;       // Partial or final results when available
+  string formatted = 7;
+  string error = 8;
+}
+
+// Control Pane Builder: list, create, update, delete; inspect connector endpoints
+message ListControlPanesRequest {
+  string user_id = 1;
+}
+
+message ListControlPanesResponse {
+  bool success = 1;
+  string panes_json = 2;   // JSON array of { id, name, icon, connector_id, connector_name, controls, is_visible, sort_order }
+  string formatted = 3;
+  string error = 4;
+}
+
+message GetConnectorEndpointsRequest {
+  string user_id = 1;
+  string connector_id = 2;
+}
+
+message GetConnectorEndpointsResponse {
+  bool success = 1;
+  string endpoints_json = 2;  // JSON array of { id, path, method, description }
+  string formatted = 3;
+  string error = 4;
+}
+
+message CreateControlPaneRequest {
+  string user_id = 1;
+  string name = 2;
+  string icon = 3;              // e.g. Tune, VolumeUp, Dashboard
+  string connector_id = 4;
+  string credentials_encrypted_json = 5;  // JSON object; optional
+  int32 connection_id = 6;       // Optional OAuth connection ID
+  string controls_json = 7;     // JSON array of control objects
+  bool is_visible = 8;
+  int32 sort_order = 9;
+  int32 refresh_interval = 10;  // Auto-refresh interval in seconds; 0 = no polling
+}
+
+message CreateControlPaneResponse {
+  bool success = 1;
+  string pane_id = 2;
+  string name = 3;
+  string formatted = 4;
+  string error = 5;
+}
+
+message UpdateControlPaneRequest {
+  string user_id = 1;
+  string pane_id = 2;
+  optional string name = 3;
+  optional string icon = 4;
+  optional string connector_id = 5;
+  optional string credentials_encrypted_json = 6;
+  optional int32 connection_id = 7;
+  optional string controls_json = 8;
+  optional bool is_visible = 9;
+  optional int32 sort_order = 10;
+  optional int32 refresh_interval = 11;
+}
+
+message UpdateControlPaneResponse {
+  bool success = 1;
+  string formatted = 2;
+  string error = 3;
+}
+
+message DeleteControlPaneRequest {
+  string user_id = 1;
+  string pane_id = 2;
+}
+
+message DeleteControlPaneResponse {
+  bool success = 1;
+  string formatted = 2;
+  string error = 3;
+}
+
+message ExecuteControlPaneActionRequest {
+  string user_id = 1;
+  string pane_id = 2;
+  string endpoint_id = 3;   // connector endpoint key (e.g. server_set_volume)
+  string params_json = 4;   // JSON object of params to send
+}
+
+message ExecuteControlPaneActionResponse {
+  bool success = 1;
+  string raw_response_json = 2;  // full API response
+  string records_json = 3;       // extracted records array
+  int32 count = 4;
+  string formatted = 5;
+  string error = 6;
+}
+
+message LogAgentExecutionResponse {
+  bool success = 1;
+  string execution_id = 2;  // UUID of inserted row
+  string error = 3;
+}
+
+message ParkApprovalRequest {
+  string user_id = 1;
+  string agent_profile_id = 2;   // UUID
+  string execution_id = 3;       // UUID of agent_execution_log
+  string step_name = 4;
+  string prompt = 5;
+  string preview_data_json = 6;  // JSON object
+  string thread_id = 7;          // LangGraph checkpoint thread for playbook
+  string checkpoint_ns = 8;     // optional namespace
+  string playbook_config_json = 9;  // JSON config to resume graph
+  string governance_type = 10;   // playbook_step | hire_agent | modify_team | exceed_budget | strategy_change
+}
+
+message ParkApprovalResponse {
+  bool success = 1;
+  string approval_id = 2;  // UUID of agent_approval_queue row
+  string error = 3;
+}
+
+message GetAgentMemoryRequest {
+  string user_id = 1;
+  string agent_profile_id = 2;
+  string memory_key = 3;
+}
+message GetAgentMemoryResponse {
+  bool success = 1;
+  string memory_value_json = 2;
+  string error = 3;
+}
+
+message SetAgentMemoryRequest {
+  string user_id = 1;
+  string agent_profile_id = 2;
+  string memory_key = 3;
+  string memory_value_json = 4;
+  string memory_type = 5;  // kv, log, counter
+  optional string expires_at = 6;  // ISO 8601
+}
+message SetAgentMemoryResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message ListAgentMemoriesRequest {
+  string user_id = 1;
+  string agent_profile_id = 2;
+  optional string key_prefix = 3;
+}
+message ListAgentMemoriesResponse {
+  bool success = 1;
+  repeated string memory_keys = 2;
+  string error = 3;
+}
+
+message DeleteAgentMemoryRequest {
+  string user_id = 1;
+  string agent_profile_id = 2;
+  string memory_key = 3;
+}
+message DeleteAgentMemoryResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message AppendAgentMemoryRequest {
+  string user_id = 1;
+  string agent_profile_id = 2;
+  string memory_key = 3;
+  string entry_json = 4;
+}
+message AppendAgentMemoryResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message AgentRunRecord {
+  string execution_id = 1;
+  string agent_name = 2;
+  string query = 3;
+  string status = 4;
+  string started_at = 5;
+  optional int32 duration_ms = 6;
+  repeated string connectors_called = 7;
+  int32 entities_discovered = 8;
+  optional string error_details = 9;
+  int32 steps_completed = 10;
+  int32 steps_total = 11;
+}
+
+message GetAgentRunHistoryRequest {
+  string user_id = 1;
+  optional string agent_profile_id = 2;  // omit = all user's agents
+  optional int32 limit = 3;              // default 10, max 50
+  optional string status = 4;            // completed, failed, running
+  optional string start_date = 5;        // YYYY-MM-DD
+  optional string end_date = 6;
+}
+
+message GetAgentRunHistoryResponse {
+  bool success = 1;
+  repeated AgentRunRecord runs = 2;
+  int32 total = 3;
+  string agent_name = 4;  // populated when agent_profile_id provided
+  string error = 5;
+}
+
+// Agent Factory meta-tool messages (create profile, playbook, schedule, bind data source)
+message CreateAgentProfileRequest {
+  string user_id = 1;
+  string name = 2;
+  string handle = 3;
+  optional string description = 4;
+  optional string model_preference = 5;
+  optional string system_prompt_additions = 6;
+  optional bool persona_enabled = 7;
+  optional bool auto_routable = 8;
+  optional bool chat_history_enabled = 9;
+  optional bool is_active = 10;
+  optional bool chat_visible = 11;
+}
+
+message CreateAgentProfileResponse {
+  bool success = 1;
+  string agent_id = 2;
+  string name = 3;
+  string handle = 4;
+  string formatted = 5;
+  string error = 6;
+}
+
+message SetAgentProfileStatusRequest {
+  string user_id = 1;
+  string agent_id = 2;
+  bool is_active = 3;
+}
+
+message SetAgentProfileStatusResponse {
+  bool success = 1;
+  bool is_active = 2;
+  string formatted = 3;
+  string error = 4;
+}
+
+message CreatePlaybookRequest {
+  string user_id = 1;
+  string name = 2;
+  optional string description = 3;
+  string definition_json = 4;  // JSON: { steps: [...], run_context?: "interactive"|"background" }
+  optional string run_context = 5;
+  optional string category = 6;
+  repeated string tags = 7;
+}
+
+message CreatePlaybookResponse {
+  bool success = 1;
+  string playbook_id = 2;
+  string name = 3;
+  int32 step_count = 4;
+  repeated string validation_warnings = 5;
+  string formatted = 6;
+  string error = 7;
+}
+
+message AssignPlaybookToAgentRequest {
+  string user_id = 1;
+  string agent_id = 2;
+  string playbook_id = 3;
+}
+
+message AssignPlaybookToAgentResponse {
+  bool success = 1;
+  string formatted = 2;
+  string error = 3;
+}
+
+message CreateAgentScheduleRequest {
+  string user_id = 1;
+  string agent_id = 2;
+  string schedule_type = 3;  // "cron" or "interval"
+  optional string cron_expression = 4;
+  optional int32 interval_seconds = 5;
+  optional string timezone = 6;
+  optional bool is_active = 7;
+  optional string input_context_json = 8;
+}
+
+message CreateAgentScheduleResponse {
+  bool success = 1;
+  string schedule_id = 2;
+  string next_run_at = 3;
+  bool is_active = 4;
+  string formatted = 5;
+  string error = 6;
+}
+
+message BindDataSourceToAgentRequest {
+  string user_id = 1;
+  string agent_id = 2;
+  string connector_id = 3;
+  optional string config_overrides_json = 4;
+  optional string permissions_json = 5;
+}
+
+message BindDataSourceToAgentResponse {
+  bool success = 1;
+  string binding_id = 2;
+  string formatted = 3;
+  string error = 4;
+}
+
+message ListAvailableLlmModelsRequest {
+  string user_id = 1;
+}
+
+message LlmModelInfo {
+  string model_id = 1;
+  string display_name = 2;
+  string provider = 3;
+}
+
+message ListAvailableLlmModelsResponse {
+  bool success = 1;
+  repeated LlmModelInfo models = 2;
+  string formatted = 3;
+  string error = 4;
+}
+
+message UpdateAgentProfileRequest {
+  string user_id = 1;
+  string agent_id = 2;
+  string updates_json = 3;
+}
+
+message UpdateAgentProfileResponse {
+  bool success = 1;
+  string agent_id = 2;
+  string name = 3;
+  string formatted = 4;
+  string error = 5;
+}
+
+message DeleteAgentProfileRequest {
+  string user_id = 1;
+  string agent_id = 2;
+}
+
+message DeleteAgentProfileResponse {
+  bool success = 1;
+  string formatted = 2;
+  string error = 3;
+}
+
+message UpdatePlaybookRequest {
+  string user_id = 1;
+  string playbook_id = 2;
+  string updates_json = 3;
+}
+
+message UpdatePlaybookResponse {
+  bool success = 1;
+  string playbook_id = 2;
+  string name = 3;
+  int32 step_count = 4;
+  repeated string validation_warnings = 5;
+  string formatted = 6;
+  string error = 7;
+}
+
+message DeletePlaybookRequest {
+  string user_id = 1;
+  string playbook_id = 2;
+}
+
+message DeletePlaybookResponse {
+  bool success = 1;
+  string formatted = 2;
+  string error = 3;
+}
+
+// Agent-Initiated Notification Messages
+
+message SendOutboundMessageRequest {
+  string user_id = 1;
+  string provider = 2;         // "telegram", "discord"
+  string connection_id = 3;    // Specific connection; empty = default for provider
+  string message = 4;
+  string format = 5;           // "markdown", "plain", "html"
+  string recipient_chat_id = 6; // Optional. Telegram chat_id or Discord channel id; empty = use stored outbound_chat_id.
+}
+
+message SendOutboundMessageResponse {
+  bool success = 1;
+  string message_id = 2;
+  string channel = 3;
+  string error = 4;
+}
+
+message CreateAgentConversationRequest {
+  string user_id = 1;
+  string message = 2;
+  string agent_name = 3;
+  string agent_profile_id = 4;
+  string title = 5;
+  string conversation_id = 6;  // empty = create new
+}
+
+message CreateAgentConversationResponse {
+  bool success = 1;
+  string conversation_id = 2;
+  string message_id = 3;
+  string error = 4;
+}
+
+message CreateAgentMessageRequest {
+  string user_id = 1;
+  string team_id = 2;
+  string from_agent_id = 3;   // UUID, optional for system messages
+  string to_agent_id = 4;    // UUID, optional for broadcast
+  string message_type = 5;   // task_assignment, status_update, request, response, delegation, escalation, report, system
+  string content = 6;
+  string metadata_json = 7;  // JSON object
+  string parent_message_id = 8;  // UUID for threading
+}
+
+message CreateAgentMessageResponse {
+  bool success = 1;
+  string message_id = 2;
+  string message_json = 3;   // Full message object for client
+  string error = 4;
+}
+
+message AppendLineAgentChatMessageRequest {
+  string user_id = 1;
+  string conversation_id = 2;
+  string content = 3;
+  string agent_profile_id = 4;
+  string agent_display_name = 5;
+  string line_id = 6;
+  string line_role = 7;
+  string line_agent_handle = 8;
+  string delegated_by_agent_id = 9;
+  string metadata_json = 10;
+}
+
+message AppendLineAgentChatMessageResponse {
+  bool success = 1;
+  string message_id = 2;
+  string error = 3;
+}
+
+message ReadTeamTimelineRequest {
+  string user_id = 1;
+  string team_id = 2;
+  int32 limit = 3;       // default 20
+  int32 since_hours = 4; // 0 = no time filter
+}
+message ReadTeamTimelineResponse {
+  bool success = 1;
+  string items_json = 2; // JSON array of message objects (with from_agent_name, to_agent_name, content, created_at)
+  int32 total = 3;
+  string error = 4;
+}
+
+message ReadAgentMessagesRequest {
+  string user_id = 1;
+  string team_id = 2;
+  string agent_profile_id = 3;
+  int32 limit = 4;
+}
+message ReadAgentMessagesResponse {
+  bool success = 1;
+  string items_json = 2;
+  int32 total = 3;
+  string error = 4;
+}
+
+message GetTeamStatusBoardRequest {
+  string user_id = 1;
+  string team_id = 2;
+}
+message GetTeamStatusBoardResponse {
+  bool success = 1;
+  string board_json = 2;  // JSON: members (with tasks, goals, last_activity), team name
+  string error = 3;
+}
+
+message SetWorkspaceEntryRequest {
+  string user_id = 1;
+  string team_id = 2;
+  string key = 3;
+  string value = 4;
+  string updated_by_agent_id = 5;  // UUID, optional
+}
+message SetWorkspaceEntryResponse {
+  bool success = 1;
+  string key = 2;
+  string updated_at = 3;
+  string error = 4;
+}
+
+message ReadWorkspaceRequest {
+  string user_id = 1;
+  string team_id = 2;
+  string key = 3;  // If empty, list all keys (entries without value)
+}
+message ReadWorkspaceResponse {
+  bool success = 1;
+  string entries_json = 2;  // Single entry {key, value, updated_at, ...} or list of {key, updated_at, updated_by_agent_name}
+  bool single = 3;          // True if key was provided (one entry), false if list
+  string error = 4;
+}
+
+message GetGoalAncestryRequest {
+  string goal_id = 1;
+  string user_id = 2;
+}
+message GetGoalAncestryResponse {
+  bool success = 1;
+  string goals_json = 2;   // JSON array of goal objects from root to leaf
+  string error = 3;
+}
+
+message GetTeamGoalsTreeRequest {
+  string team_id = 1;
+  string user_id = 2;
+}
+message GetTeamGoalsTreeResponse {
+  bool success = 1;
+  string tree_json = 2;   // JSON array of tree nodes (with children)
+  string error = 3;
+}
+
+message GetGoalsForAgentRequest {
+  string team_id = 1;
+  string agent_profile_id = 2;
+  string user_id = 3;
+}
+message GetGoalsForAgentResponse {
+  bool success = 1;
+  string goals_json = 2;  // JSON array of goal objects (id, title, status, ...)
+  string error = 3;
+}
+
+message UpdateGoalProgressRequest {
+  string goal_id = 1;
+  string user_id = 2;
+  int32 progress_pct = 3;
+}
+message UpdateGoalProgressResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message CreateAgentTaskRequest {
+  string team_id = 1;
+  string user_id = 2;
+  string title = 3;
+  string description = 4;
+  string assigned_agent_id = 5;
+  string goal_id = 6;
+  int32 priority = 7;
+  string created_by_agent_id = 8;
+  string due_date = 9;
+}
+message CreateAgentTaskResponse {
+  bool success = 1;
+  string task_id = 2;
+  string task_json = 3;
+  string error = 4;
+}
+
+message GetAgentWorkQueueRequest {
+  string team_id = 1;
+  string agent_profile_id = 2;
+  string user_id = 3;
+}
+message GetAgentWorkQueueResponse {
+  bool success = 1;
+  string tasks_json = 2;
+  string error = 3;
+}
+
+message UpdateTaskStatusRequest {
+  string task_id = 1;
+  string user_id = 2;
+  string new_status = 3;
+}
+message UpdateTaskStatusResponse {
+  bool success = 1;
+  string task_json = 2;
+  string error = 3;
+}
+
+message AssignTaskToAgentRequest {
+  string task_id = 1;
+  string agent_profile_id = 2;
+  string user_id = 3;
+}
+message AssignTaskToAgentResponse {
+  bool success = 1;
+  string task_json = 2;
+  string error = 3;
+}
+
+message GetUserNotificationPreferencesRequest {
+  string user_id = 1;
+}
+
+message GetUserNotificationPreferencesResponse {
+  bool success = 1;
+  string preferences_json = 2;  // JSON: { default_channels, quiet_hours, ... }
+  string error = 3;
+}
+
+message GetMyProfileRequest {
+  string user_id = 1;
+}
+
+message GetMyProfileResponse {
+  string email = 1;
+  string display_name = 2;
+  string username = 3;
+  string preferred_name = 4;
+  string timezone = 5;
+  string zip_code = 6;
+  string ai_context = 7;
+  bool success = 8;
+  string error = 9;
+}
+
+message UpsertUserFactRequest {
+  string user_id = 1;
+  string fact_key = 2;
+  string value = 3;
+  string category = 4;
+  string source = 5;
+}
+
+message UpsertUserFactResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message GetUserFactsRequest {
+  string user_id = 1;
+}
+
+message GetUserFactsResponse {
+  bool success = 1;
+  string facts_json = 2;
+  string error = 3;
+}
+
+message InvokeDeviceToolRequest {
+  string user_id = 1;
+  string device_id = 2;
+  string tool = 3;
+  string args_json = 4;
+  int32 timeout_seconds = 5;
+}
+
+message InvokeDeviceToolResponse {
+  bool success = 1;
+  string result_json = 2;
+  string error = 3;
+  string formatted = 4;
+}
+
+message GetDeviceCapabilitiesRequest {
+  string user_id = 1;
+}
+
+message GetDeviceCapabilitiesResponse {
+  repeated string capabilities = 1;
+  bool has_device = 2;
+}
+
+message ExecuteMcpToolRequest {
+  int64 server_id = 1;
+  string tool_name = 2;
+  string arguments_json = 3;
+  string user_id = 4;
+}
+
+message ExecuteMcpToolResponse {
+  bool success = 1;
+  string result_json = 2;
+  string formatted = 3;
+  string error = 4;
+}
+
+message GetMcpServerToolsRequest {
+  int64 server_id = 1;
+  string user_id = 2;
+}
+
+message GetMcpServerToolsResponse {
+  bool success = 1;
+  repeated string tool_names = 2;
+  string error = 3;
+}
+
+message DiscoverMcpServerRequest {
+  int64 server_id = 1;
+  string user_id = 2;
+}
+
+message DiscoverMcpServerResponse {
+  bool success = 1;
+  string tools_json = 2; // JSON array of {name, description, input_schema?}
   string error = 3;
 }

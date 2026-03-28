@@ -98,38 +98,95 @@ const diffTheme = EditorView.baseTheme({
     boxShadow: '0 2px 8px rgba(0,0,0,0.3)',
     whiteSpace: 'pre-wrap',
     wordWrap: 'break-word'
+  },
+  '.cm-edit-diff-out-of-bounds': {
+    display: 'inline-block',
+    marginTop: '8px',
+    padding: '6px 10px',
+    border: '1px solid rgba(255, 152, 0, 0.5)',
+    borderRadius: '4px',
+    backgroundColor: 'rgba(255, 152, 0, 0.06)',
+    maxWidth: '100%'
+  },
+  '.cm-edit-diff-out-of-bounds-caption': {
+    fontSize: '11px',
+    color: 'rgba(140, 80, 0, 0.95)',
+    marginBottom: '4px',
+    fontWeight: 500
+  },
+  '.cm-edit-diff-block-container': {
+    display: 'block',
+    marginTop: '8px',
+    marginBottom: '8px',
+    border: '1px solid rgba(76, 175, 80, 0.35)',
+    borderRadius: '4px',
+    backgroundColor: 'rgba(76, 175, 80, 0.06)',
+    overflow: 'hidden'
+  },
+  '.cm-edit-diff-block-header': {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '4px 8px',
+    backgroundColor: 'rgba(76, 175, 80, 0.12)',
+    borderBottom: '1px solid rgba(76, 175, 80, 0.2)',
+    fontSize: '12px',
+    fontWeight: 500
+  },
+  '.cm-edit-diff-block-content': {
+    padding: '8px 10px',
+    whiteSpace: 'pre-wrap',
+    wordBreak: 'break-word',
+    fontSize: 'inherit',
+    fontFamily: 'inherit',
+    maxHeight: 'none'
   }
 });
 
 // Combined widget for proposed text, info icon, and buttons
 class DiffActionWidget extends WidgetType {
-  constructor(operationId, text, note, onAccept, onReject) {
+  constructor(operationId, text, note, onAccept, onReject, outOfBoundsWarning = '') {
     super();
     this.operationId = operationId;
     this.text = String(text || '');
     this.note = note || '';
     this.onAccept = onAccept;
     this.onReject = onReject;
+    this.outOfBoundsWarning = outOfBoundsWarning || '';
   }
   
   eq(other) {
     return this.operationId === other.operationId && 
            this.text === other.text && 
-           this.note === other.note;
+           this.note === other.note &&
+           this.outOfBoundsWarning === other.outOfBoundsWarning;
   }
   
   toDOM() {
     const container = document.createElement('span');
     container.className = 'cm-edit-diff-container';
-    container.style.cssText = 'display: inline-flex; align-items: center; gap: 4px; vertical-align: middle;';
+    if (this.outOfBoundsWarning) {
+      container.classList.add('cm-edit-diff-out-of-bounds');
+    }
+    container.style.cssText = 'display: inline-flex; flex-direction: column; align-items: flex-start; gap: 4px; vertical-align: middle;';
+    
+    // 0. Out-of-bounds caption (document changed since proposed)
+    if (this.outOfBoundsWarning) {
+      const caption = document.createElement('div');
+      caption.className = 'cm-edit-diff-out-of-bounds-caption';
+      caption.textContent = this.outOfBoundsWarning;
+      container.appendChild(caption);
+    }
     
     // 1. Proposed text (if any)
+    const contentRow = document.createElement('span');
+    contentRow.style.cssText = 'display: inline-flex; align-items: center; gap: 4px;';
     if (this.text) {
       const textSpan = document.createElement('span');
       textSpan.className = 'cm-edit-diff-addition';
       textSpan.textContent = this.text;
       textSpan.setAttribute('data-operation-id', this.operationId);
-      container.appendChild(textSpan);
+      contentRow.appendChild(textSpan);
     }
     
     // 2. Info icon (if note exists)
@@ -160,7 +217,7 @@ class DiffActionWidget extends WidgetType {
         }
       });
       
-      container.appendChild(infoIcon);
+      contentRow.appendChild(infoIcon);
     }
     
     // 3. Accept/Reject buttons
@@ -170,7 +227,7 @@ class DiffActionWidget extends WidgetType {
     const acceptBtn = document.createElement('button');
     acceptBtn.innerHTML = '✓';
     acceptBtn.className = 'cm-edit-diff-accept';
-    acceptBtn.title = this.note ? `Accept edit: ${this.note}` : 'Accept edit';
+    acceptBtn.title = this.outOfBoundsWarning ? 'Accept (will apply at end of document)' : (this.note ? `Accept edit: ${this.note}` : 'Accept edit');
     acceptBtn.onclick = (e) => {
       e.preventDefault(); e.stopPropagation();
       if (this.onAccept) this.onAccept(this.operationId);
@@ -187,7 +244,8 @@ class DiffActionWidget extends WidgetType {
     
     buttonsWrapper.appendChild(acceptBtn);
     buttonsWrapper.appendChild(rejectBtn);
-    container.appendChild(buttonsWrapper);
+    contentRow.appendChild(buttonsWrapper);
+    container.appendChild(contentRow);
     
     return container;
   }
@@ -346,6 +404,77 @@ class DiffButtonWidget extends WidgetType {
   }
 }
 
+// Thresholds for block-level rendering (large edits)
+const BLOCK_THRESHOLD_LINES = 3;
+const BLOCK_THRESHOLD_CHARS = 200;
+
+function isLargeEdit(text) {
+  if (!text || typeof text !== 'string') return false;
+  const lines = text.split('\n').length;
+  return lines >= BLOCK_THRESHOLD_LINES || text.length >= BLOCK_THRESHOLD_CHARS;
+}
+
+// Block-level widget for large insertions/replacements (full text, no collapse)
+class DiffBlockWidget extends WidgetType {
+  constructor(operationId, text, note, onAccept, onReject, outOfBoundsWarning = '') {
+    super();
+    this.operationId = operationId;
+    this.text = String(text || '');
+    this.note = note || '';
+    this.onAccept = onAccept;
+    this.onReject = onReject;
+    this.outOfBoundsWarning = outOfBoundsWarning || '';
+  }
+
+  eq(other) {
+    return this.operationId === other.operationId &&
+      this.text === other.text &&
+      this.note === other.note &&
+      this.outOfBoundsWarning === other.outOfBoundsWarning;
+  }
+
+  toDOM() {
+    const container = document.createElement('div');
+    container.className = 'cm-edit-diff-block-container';
+
+    const header = document.createElement('div');
+    header.className = 'cm-edit-diff-block-header';
+    const label = document.createElement('span');
+    label.textContent = 'Proposed addition';
+    if (this.outOfBoundsWarning) {
+      label.textContent += ' (document changed)';
+    }
+    header.appendChild(label);
+    const buttons = document.createElement('span');
+    buttons.className = 'cm-edit-diff-buttons';
+    const acceptBtn = document.createElement('button');
+    acceptBtn.innerHTML = '✓';
+    acceptBtn.className = 'cm-edit-diff-accept';
+    acceptBtn.title = 'Accept edit';
+    acceptBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); if (this.onAccept) this.onAccept(this.operationId); };
+    const rejectBtn = document.createElement('button');
+    rejectBtn.innerHTML = '✕';
+    rejectBtn.className = 'cm-edit-diff-reject';
+    rejectBtn.title = 'Reject edit';
+    rejectBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); if (this.onReject) this.onReject(this.operationId); };
+    buttons.appendChild(acceptBtn);
+    buttons.appendChild(rejectBtn);
+    header.appendChild(buttons);
+    container.appendChild(header);
+
+    const content = document.createElement('div');
+    content.className = 'cm-edit-diff-block-content';
+    content.textContent = this.text;
+    container.appendChild(content);
+
+    return container;
+  }
+
+  ignoreEvent() {
+    return false;
+  }
+}
+
 // State field for live diffs
 const liveDiffField = StateField.define({
   create() {
@@ -388,14 +517,6 @@ const LiveEditDiffPluginClass = class {
         // Update the view reference
         existingPlugin.view = view;
         
-        // Ensure flag is initialized (for backward compatibility with existing instances)
-        if (existingPlugin.programmaticUpdateCounter === undefined) {
-          existingPlugin.programmaticUpdateCounter = 0;
-        }
-        if (existingPlugin.programmaticUpdateShieldTime === undefined) {
-          existingPlugin.programmaticUpdateShieldTime = 0;
-        }
-        
         // ✅ FIX: Only schedule decoration update if there are operations AND decorations haven't been applied yet
         // This prevents duplicate decorations when extension is recreated (e.g., tab switch, editor remount)
         if (existingPlugin.operations.size > 0 && !existingPlugin.pendingUpdate) {
@@ -413,7 +534,7 @@ const LiveEditDiffPluginClass = class {
       this.view = view;
       this.documentId = documentId || null; // Store document identity
       this.operations = new Map(); // operationId -> {from, to, original, proposed, opType, messageId, start, end}
-      this.maxOperations = 50; // Limit concurrent diffs (increased to prevent blocking)
+      this.maxOperations = 150; // Limit concurrent diffs so large proposals (e.g. 94 ops) can be shown and applied
       this.currentMessageId = null; // Track current message ID to clear old operations
       this.decorations = Decoration.none;
       this.pendingUpdate = false; // Track if decoration update is queued
@@ -422,11 +543,9 @@ const LiveEditDiffPluginClass = class {
       this.initialRender = true; // Track if this is the first decoration update
       this.decorationsApplied = false; // Track if decorations have been applied for current operations
       this.lastOperationsHash = ''; // Track hash of operations to detect changes
-      this.programmaticUpdateCounter = 0; // Track number of pending programmatic updates to skip invalidation
-      this.programmaticUpdateShieldTime = 0; // Timestamp until which invalidation is shielded
 
       // Only log in development mode
-      if (process.env.NODE_ENV === 'development') {
+      if (import.meta.env.DEV) {
         console.log('🔍 Live diff extension plugin initialized for view:', view, 'documentId:', documentId, 'creationTime:', this.creationTime);
       }
       
@@ -441,8 +560,8 @@ const LiveEditDiffPluginClass = class {
         const savedDiffs = documentDiffStore.getDiffs(this.documentId);
         if (savedDiffs && savedDiffs.operations && Array.isArray(savedDiffs.operations) && savedDiffs.operations.length > 0) {
           console.log(`Restoring ${savedDiffs.operations.length} diffs for document ${this.documentId}`);
-          // Pass skipSave=true to avoid re-saving operations that were just loaded from store
-          this.addOperations(savedDiffs.operations, savedDiffs.messageId, true);
+          // skipSave=true, preserveExisting=true - load all proposals without wiping any
+          this.addOperations(savedDiffs.operations, savedDiffs.messageId, true, true);
         }
         
         // ✅ Subscribe to store changes to sync with other plugin instances
@@ -456,6 +575,8 @@ const LiveEditDiffPluginClass = class {
       window.addEventListener('editorOperationsLive', this.handleLiveDiffEvent);
       window.addEventListener('removeLiveDiff', this.handleLiveDiffEvent);
       window.addEventListener('clearEditorDiffs', this.handleLiveDiffEvent);
+      window.addEventListener('proposalAcceptDone', this.handleLiveDiffEvent);
+      window.addEventListener('proposalRejectDone', this.handleLiveDiffEvent);
       
       // Initial decoration update (immediate for first render)
       this.applyDecorationUpdate();
@@ -488,29 +609,51 @@ const LiveEditDiffPluginClass = class {
       window.removeEventListener('editorOperationsLive', this.handleLiveDiffEvent);
       window.removeEventListener('removeLiveDiff', this.handleLiveDiffEvent);
       window.removeEventListener('clearEditorDiffs', this.handleLiveDiffEvent);
+      window.removeEventListener('proposalAcceptDone', this.handleLiveDiffEvent);
+      window.removeEventListener('proposalRejectDone', this.handleLiveDiffEvent);
     } catch (e) {
       console.error('❌ Error destroying live diff plugin:', e);
     }
   }
-  
+
+  _clearProposalOps(detail) {
+    const { documentId: evDocId, operationIds, proposalId, clearAllForProposal } = detail || {};
+    if (evDocId !== this.documentId) return;
+    if (clearAllForProposal && proposalId) {
+      const idsToRemove = [];
+      this.operations.forEach((op, id) => {
+        if (op.messageId === proposalId) idsToRemove.push(id);
+      });
+      idsToRemove.forEach((id) => this.operations.delete(id));
+      if (this.documentId) documentDiffStore.removeProposalDiffs(this.documentId, proposalId);
+      if (idsToRemove.length > 0) this.scheduleDecorationUpdate();
+    } else if (Array.isArray(operationIds)) {
+      operationIds.forEach((id) => {
+        this.operations.delete(id);
+        if (this.documentId) documentDiffStore.removeDiff(this.documentId, id);
+      });
+      this.scheduleDecorationUpdate();
+    }
+  }
+
   handleLiveDiffEvent(event) {
     try {
       // Only log in development mode
-      if (process.env.NODE_ENV === 'development') {
+      if (import.meta.env.DEV) {
         console.log('🔍 Live diff extension handleLiveDiffEvent called:', event.type, event.detail);
       }
       if (event.type === 'editorOperationsLive') {
-        const { operations, messageId, documentId } = event.detail || {};
+        const { operations, messageId, documentId, preserveExisting } = event.detail || {};
         
         // Only process operations for THIS document
         if (documentId && documentId !== this.documentId) {
-          if (process.env.NODE_ENV === 'development') {
+          if (import.meta.env.DEV) {
             console.log(`Ignoring operations for different document (${documentId} vs ${this.documentId})`);
           }
           return;
         }
         
-        if (process.env.NODE_ENV === 'development') {
+        if (import.meta.env.DEV) {
           console.log('🔍 Live diff extension received editorOperationsLive:', { 
             operationsCount: operations?.length, 
             messageId,
@@ -521,10 +664,9 @@ const LiveEditDiffPluginClass = class {
           });
         }
         if (Array.isArray(operations) && operations.length > 0) {
-          // Clearing of old operations now happens in addOperations() before maxOperations check
-          // This ensures new operations always have room and aren't blocked by old ones
+          // Clearing of old operations now happens in addOperations() (only when !preserveExisting)
           console.log('🔍 Calling addOperations with', operations.length, 'operations');
-          this.addOperations(operations, messageId);
+          this.addOperations(operations, messageId, false, preserveExisting ?? false);
           
           // ✅ NOTE: ChatSidebarContext saves to documentDiffStore BEFORE dispatching event
           // This ensures operations persist even if this document isn't currently open
@@ -537,6 +679,10 @@ const LiveEditDiffPluginClass = class {
         if (operationId) {
           this.removeOperation(operationId);
         }
+      } else if (event.type === 'proposalAcceptDone') {
+        this._clearProposalOps(event.detail);
+      } else if (event.type === 'proposalRejectDone') {
+        this._clearProposalOps(event.detail);
       } else if (event.type === 'clearEditorDiffs') {
         this.clearAllOperations();
       }
@@ -585,120 +731,55 @@ const LiveEditDiffPluginClass = class {
   }
   
   update(update) {
-    // Handle document changes - adjust operation positions instead of removing
-    // Only remove operations that are clearly invalid (negative, reversed, or way out of bounds)
     if (update.docChanged && this.operations.size > 0) {
       const docLength = update.state.doc.length;
       const toRemove = [];
       let needsUpdate = false;
-      let hasAlreadyAdjustedOps = false;
-      
-      // Check if any operations were already adjusted by acceptOperation()
-      this.operations.forEach((op, id) => {
-        if (op.adjustedForAccept) {
-          hasAlreadyAdjustedOps = true;
-        }
-      });
-      
-      // Smart invalidation: Check if user manual edits overlap with pending diffs
-      // CRITICAL: Skip invalidation when we're applying an accepted diff programmatically
-      // This prevents all other diffs from being invalidated when one diff is accepted
-      // We use both a counter and a temporal shield to handle race conditions and network syncs
-      const now = Date.now();
-      const isShielded = this.programmaticUpdateShieldTime > now;
-      const isProgrammaticUpdate = (this.programmaticUpdateCounter > 0) || isShielded;
-      
-      if (update.changes && this.documentId && !isProgrammaticUpdate) {
+
+      if (update.changes && this.documentId) {
         update.changes.iterChanges((fromA, toA, fromB, toB, inserted) => {
-          // User edited range: [fromA, toA]
           const editStart = fromA;
           const editEnd = toA;
-          
-          // Debug logging for large edits that might be syncs
-          if (editEnd - editStart > 100 || (editStart === 0 && editEnd === update.startState.doc.length)) {
-            console.log(`🔍 Large edit detected [${editStart}-${editEnd}], docLength: ${update.startState.doc.length}. isProgrammaticUpdate: ${isProgrammaticUpdate}, counter: ${this.programmaticUpdateCounter}, shielded: ${isShielded}`);
-          }
-          
-          // Invalidate overlapping diffs (but skip operations that were adjusted by accept)
+
           this.operations.forEach((op, id) => {
-            // Skip overlap check for operations that were already adjusted by acceptOperation()
-            // These were already checked for overlap there
-            if (op.adjustedForAccept) {
-              return;
-            }
-            
             const opStart = op.from !== undefined ? op.from : (op.start !== undefined ? op.start : 0);
             const opEnd = op.to !== undefined ? op.to : (op.end !== undefined ? op.end : opStart);
-            
-            // Check for overlap
             const overlaps = !(editEnd < opStart || editStart > opEnd);
-            
+
             if (overlaps) {
-              // ✅ SMART VALIDATION: If it's a large edit (likely a full-document sync), 
-              // check if the original text still matches at the diff's position.
-              // If it matches, the diff is still valid - don't invalidate it!
               const isLargeEdit = (editEnd - editStart > 500) || (editStart === 0 && editEnd === update.startState.doc.length);
               if (isLargeEdit && op.original) {
                 const currentTextAtPos = update.state.doc.sliceString(opStart, opEnd);
                 if (currentTextAtPos === op.original) {
-                  if (process.env.NODE_ENV === 'development') {
-                    console.log(`🔍 Sync edit [${editStart}-${editEnd}] overlaps diff [${opStart}-${opEnd}] but content matches - keeping diff.`);
+                  if (import.meta.env.DEV) {
+                    console.log(`Sync edit overlaps diff but content matches - keeping diff.`);
                   }
-                  return; // Skip invalidation for this diff
+                  return;
                 }
               }
-
               console.log(`User edit [${editStart}-${editEnd}] overlaps diff [${opStart}-${opEnd}] - invalidating. Message: ${op.messageId}`);
               toRemove.push(id);
-              // Also remove from centralized store
               documentDiffStore.removeDiff(this.documentId, id);
             }
           });
         });
       }
-      
-      // Decrement the counter and update shield status after processing a document change
-      if (isProgrammaticUpdate) {
-        if (this.programmaticUpdateCounter > 0) {
-          this.programmaticUpdateCounter--;
-        }
-        console.log(`🔍 Programmatic update detected. Counter: ${this.programmaticUpdateCounter}, Shield active: ${this.programmaticUpdateShieldTime > now}`);
-      }
-      
-      // Adjust positions for remaining operations based on text length changes
-      // SKIP if operations were already adjusted by acceptOperation() to prevent double adjustment
-      if (update.changes && this.operations.size > 0 && !hasAlreadyAdjustedOps) {
+
+      if (update.changes && this.operations.size > 0) {
         update.changes.iterChanges((fromA, toA, fromB, toB) => {
           const lenChange = (toB - fromB) - (toA - fromA);
-          
           this.operations.forEach((op, id) => {
-            if (toRemove.includes(id)) return; // Skip already-invalidated operations
-            
+            if (toRemove.includes(id)) return;
             const opStart = op.from !== undefined ? op.from : (op.start !== undefined ? op.start : 0);
             const opEnd = op.to !== undefined ? op.to : (op.end !== undefined ? op.end : opStart);
-            
-            // If operation is after the edit, adjust its position
             if (opStart >= toA) {
               op.start += lenChange;
               op.end += lenChange;
               op.from = op.start;
               op.to = op.end;
               needsUpdate = true;
-            } else if (opEnd > fromA && opStart < toA && !toRemove.includes(id)) {
-              // Partial overlap - operation was already invalidated above, but ensure cleanup
-              // This shouldn't happen due to overlap check above, but safety check
             }
           });
-        });
-      }
-      
-      // Clear the adjustedForAccept flag now that we've handled the change
-      if (hasAlreadyAdjustedOps) {
-        this.operations.forEach((op, id) => {
-          if (op.adjustedForAccept) {
-            delete op.adjustedForAccept;
-            needsUpdate = true;
-          }
         });
       }
       
@@ -741,15 +822,7 @@ const LiveEditDiffPluginClass = class {
       if (needsUpdate && this.documentId && this.operations.size > 0) {
         const adjustedOperations = Array.from(this.operations.values());
         const currentContent = update.state.doc.toString();
-        const messageId = this.currentMessageId;
-        
-        console.log('💾 Saving adjusted positions to documentDiffStore:', {
-          documentId: this.documentId,
-          operationsCount: adjustedOperations.length,
-          messageId
-        });
-        
-        documentDiffStore.setDiffs(this.documentId, adjustedOperations, messageId, currentContent);
+        documentDiffStore.saveSnapshot(this.documentId, adjustedOperations, currentContent);
       }
       
       // Update decorations if any operations were adjusted or removed
@@ -790,32 +863,39 @@ const LiveEditDiffPluginClass = class {
     }
   }
   
-  addOperations(operations, messageId, skipSave = false) {
+  addOperations(operations, messageId, skipSave = false, preserveExisting = false) {
     // ✅ FIX: Reset decorations applied flag when new operations are added
     this.decorationsApplied = false;
     
-    // CRITICAL FIX: Clear operations from previous messages FIRST to ensure we have room
-    // This must happen before the maxOperations check
+    // When messageId changes: either clear previous message's ops (writing-assistant) or keep all (multi-proposal)
     if (messageId && messageId !== this.currentMessageId) {
-      const previousMessageId = this.currentMessageId;
       this.currentMessageId = messageId;
-      
-      // Remove all operations from previous messages
-      const toRemove = [];
-      this.operations.forEach((op, id) => {
-        if (op.messageId && op.messageId !== messageId) {
-          toRemove.push(id);
+      if (!preserveExisting) {
+        // Writing-assistant behavior: clear ops from previous message
+        const toRemove = [];
+        this.operations.forEach((op, id) => {
+          if (op.messageId && op.messageId !== messageId) {
+            toRemove.push(id);
+          }
+        });
+        if (toRemove.length > 0) {
+          console.log(`🧹 Clearing ${toRemove.length} operations from previous message`);
+          toRemove.forEach(id => this.operations.delete(id));
         }
-      });
-      
-      if (toRemove.length > 0) {
-        console.log(`🧹 Clearing ${toRemove.length} operations from previous message (${previousMessageId})`);
-        toRemove.forEach(id => this.operations.delete(id));
       }
     } else if (!this.currentMessageId && messageId) {
       this.currentMessageId = messageId;
     }
-    
+
+    // Replace all ops for this proposal when re-syncing (e.g. after partial apply — fresh indices/positions)
+    if (preserveExisting && messageId) {
+      const toReplace = [];
+      this.operations.forEach((op, id) => {
+        if (op.messageId === messageId) toReplace.push(id);
+      });
+      toReplace.forEach((id) => this.operations.delete(id));
+    }
+
     // Now check maxOperations limit AFTER clearing old operations
     const currentCount = this.operations.size;
     const toAdd = operations.slice(0, Math.max(0, this.maxOperations - currentCount));
@@ -829,7 +909,7 @@ const LiveEditDiffPluginClass = class {
     const frontmatterEnd = this._getFrontmatterEnd(docText);
     
     // Only log in development mode to reduce console noise
-    if (process.env.NODE_ENV === 'development') {
+    if (import.meta.env.DEV) {
       console.log('🔍 Live diff extension adding operations:', { 
         total: operations.length, 
         toAdd: toAdd.length,
@@ -844,6 +924,7 @@ const LiveEditDiffPluginClass = class {
       });
     }
     
+    let addedCount = 0;
     toAdd.forEach((op, idx) => {
       // ✅ Use stable operation ID based on operation content, not timestamp
       // This ensures the same operation gets the same ID across restores and events
@@ -875,7 +956,7 @@ const LiveEditDiffPluginClass = class {
       }
       
       // Only log in development mode
-      if (process.env.NODE_ENV === 'development') {
+      if (import.meta.env.DEV) {
         console.log('🔍 Processing operation:', { operationId, start, end, opType, proposedLength: proposed.length });
       }
       
@@ -887,19 +968,20 @@ const LiveEditDiffPluginClass = class {
         return;
       }
       
-      // Allow operations that extend slightly beyond document (will be clamped in decoration)
-      // Only reject if way out of bounds (more than 100 chars beyond)
-      if (start > docLength + 100 || end > docLength + 100) {
-        console.warn('Operation range way out of bounds:', { start, end, docLength });
-        return;
+      // Way out of bounds: show at end of document so user can still accept/reject
+      const wayOutOfBounds = start > docLength + 100 || end > docLength + 100;
+      if (wayOutOfBounds) {
+        console.warn('Operation range way out of bounds — showing at end of document:', { start, end, docLength });
+        start = docLength;
+        end = docLength;
+      } else {
+        // Clamp positions to valid range for storage
+        start = Math.max(0, Math.min(docLength, start));
+        end = Math.max(start, Math.min(docLength, end));
       }
       
-      // Clamp positions to valid range for storage
-      start = Math.max(0, Math.min(docLength, start));
-      end = Math.max(start, Math.min(docLength, end));
-      
-      // For replace_range, verify original text matches
-      if (opType === 'replace_range' && original) {
+      // For replace_range (when not out of bounds), verify original text matches
+      if (!wayOutOfBounds && opType === 'replace_range' && original) {
         const currentText = this.view.state.doc.sliceString(start, end);
         if (currentText !== original && original.length > 0) {
           console.warn('Operation original text mismatch:', {
@@ -917,21 +999,28 @@ const LiveEditDiffPluginClass = class {
         original: original,
         proposed: proposed,
         opType: opType,
-        messageId: messageId,
+        messageId: op.messageId || messageId,
         start: start,
         end: end,
-        note: op.note || op.reasoning || '' // ✅ Store note/reasoning for explainable diffs
+        note: op.note || op.reasoning || '', // ✅ Store note/reasoning for explainable diffs
+        outOfBounds: wayOutOfBounds || undefined,
+        originalStart: wayOutOfBounds ? Number(op.start ?? 0) : undefined,
+        originalEnd: wayOutOfBounds ? Number(op.end ?? op.start ?? 0) : undefined,
+        proposal_operation_index: op.proposal_operation_index !== undefined && op.proposal_operation_index !== null
+          ? Number(op.proposal_operation_index)
+          : undefined
       });
+      addedCount += 1;
     });
     
-    // ✅ Update the centralized store with operations that now have IDs
-    // Skip if this is a restoration from store (skipSave=true) to avoid unnecessary notifications
-    if (this.documentId && toAdd.length > 0 && !skipSave) {
+    // ✅ Update the centralized store ONLY when we actually added at least one operation.
+    // If all ops were rejected (e.g. out of bounds), do NOT overwrite the store — leave
+    // existing pending diffs so the badge and restore remain reliable.
+    if (this.documentId && addedCount > 0 && !skipSave) {
       // Get current stored operations and update them with IDs
       const storedOperations = Array.from(this.operations.values());
       const currentContent = this.view.state.doc.toString();
-      documentDiffStore.setDiffs(this.documentId, storedOperations, messageId, currentContent);
-      console.log('✅ Updated centralized store with', storedOperations.length, 'operations (with IDs)');
+      documentDiffStore.saveSnapshot(this.documentId, storedOperations, currentContent);
     } else if (skipSave) {
       console.log('⏭️ Skipped store update (restoring from storage)');
     }
@@ -993,53 +1082,71 @@ const LiveEditDiffPluginClass = class {
   applyDecorationUpdate() {
     try {
       const decos = [];
+      const docLength = this.view.state.doc.length;
       
       this.operations.forEach((op, id) => {
         try {
           // Validate operation positions against current document
-          const docLength = this.view.state.doc.length;
           const from = Math.max(0, Math.min(docLength, op.from !== undefined ? op.from : (op.start !== undefined ? op.start : 0)));
           const to = Math.max(from, Math.min(docLength, op.to !== undefined ? op.to : (op.end !== undefined ? op.end : from)));
           
-          // Skip if positions are invalid
-          if (from < 0 || to < from || from > docLength || to > docLength) {
-            console.warn('Skipping invalid operation:', id, { from, to, docLength });
+          // Out-of-bounds: show only the widget at end of document (no mark)
+          const outOfBounds = op.outOfBounds === true;
+          const displayFrom = outOfBounds ? docLength : from;
+          const displayTo = outOfBounds ? docLength : to;
+          
+          const outOfBoundsWarning = outOfBounds
+            ? 'Document changed since proposed. Accept will apply at end; Reject removes.'
+            : '';
+          
+          // Skip if positions are invalid (and not an out-of-bounds op placed at end)
+          if (!outOfBounds && (displayFrom < 0 || displayTo < displayFrom || displayFrom > docLength || displayTo > docLength)) {
+            console.warn('Skipping invalid operation:', id, { from: displayFrom, to: displayTo, docLength });
             return;
           }
           
           if (op.opType === 'replace_range') {
-            // Only create mark decoration if from !== to (mark decorations can't be empty)
-            if (from !== to) {
+            // Only create mark decoration if from !== to and not out-of-bounds (mark decorations can't be empty)
+            if (!outOfBounds && displayFrom !== displayTo) {
               decos.push(
                 Decoration.mark({
                   class: 'cm-edit-diff-replacement',
                   attributes: { 'data-operation-id': id }
-                }).range(from, to)
+                }).range(displayFrom, displayTo)
               );
             }
-            
-            // Add action group widget (addition text + info + buttons)
+            const useBlock = isLargeEdit(op.proposed);
             decos.push(
               Decoration.widget({
-                widget: new DiffActionWidget(
-                  id,
-                  op.proposed,
-                  op.note || op.reasoning || '',
-                  () => this.acceptOperation(id),
-                  () => this.rejectOperation(id)
-                ),
+                widget: useBlock
+                  ? new DiffBlockWidget(
+                      id,
+                      op.proposed,
+                      op.note || op.reasoning || '',
+                      () => this.acceptOperation(id),
+                      () => this.rejectOperation(id),
+                      outOfBoundsWarning
+                    )
+                  : new DiffActionWidget(
+                      id,
+                      op.proposed,
+                      op.note || op.reasoning || '',
+                      () => this.acceptOperation(id),
+                      () => this.rejectOperation(id),
+                      outOfBoundsWarning
+                    ),
                 side: 1,
-                block: false
-              }).range(to)
+                block: useBlock
+              }).range(displayTo)
             );
           } else if (op.opType === 'delete_range') {
-            // Only create mark decoration if from !== to
-            if (from !== to) {
+            // Only create mark decoration if from !== to and not out-of-bounds
+            if (!outOfBounds && displayFrom !== displayTo) {
               decos.push(
                 Decoration.mark({
                   class: 'cm-edit-diff-deletion',
                   attributes: { 'data-operation-id': id }
-                }).range(from, to)
+                }).range(displayFrom, displayTo)
               );
             }
             
@@ -1051,24 +1158,36 @@ const LiveEditDiffPluginClass = class {
                   '',
                   op.note || op.reasoning || '',
                   () => this.acceptOperation(id),
-                  () => this.rejectOperation(id)
+                  () => this.rejectOperation(id),
+                  outOfBoundsWarning
                 ),
                 side: 1
-              }).range(to)
+              }).range(displayTo)
             );
           } else if (op.opType === 'insert_after_heading' || op.opType === 'insert_after') {
-            // For insert operations, show proposed text at the insertion point
+            const useBlock = isLargeEdit(op.proposed);
             decos.push(
               Decoration.widget({
-                widget: new DiffActionWidget(
-                  id,
-                  op.proposed,
-                  op.note || op.reasoning || '',
-                  () => this.acceptOperation(id),
-                  () => this.rejectOperation(id)
-                ),
-                side: 1
-              }).range(from)
+                widget: useBlock
+                  ? new DiffBlockWidget(
+                      id,
+                      op.proposed,
+                      op.note || op.reasoning || '',
+                      () => this.acceptOperation(id),
+                      () => this.rejectOperation(id),
+                      outOfBoundsWarning
+                    )
+                  : new DiffActionWidget(
+                      id,
+                      op.proposed,
+                      op.note || op.reasoning || '',
+                      () => this.acceptOperation(id),
+                      () => this.rejectOperation(id),
+                      outOfBoundsWarning
+                    ),
+                side: 1,
+                block: useBlock
+              }).range(displayFrom)
             );
           }
         } catch (e) {
@@ -1076,63 +1195,8 @@ const LiveEditDiffPluginClass = class {
         }
       });
       
-      // CRITICAL: CodeMirror requires decorations to be sorted by `from` position and `startSide`
-      // Sort decorations by their start position (from) before creating the set
-      // CodeMirror Range objects have `from`, `to`, and `value` properties
-      
-      // Debug: log decoration positions BEFORE sorting
-      if (decos.length > 0) {
-        console.log('🔍 Decorations BEFORE sorting:', decos.map(d => ({
-          from: d.from,
-          to: d.to,
-          valueSide: d.value?.side,
-          valueWidget: d.value?.widget?.constructor?.name,
-          widgetType: d.value?.widget?.type || 'unknown',
-          allKeys: Object.keys(d)
-        })));
-        console.log('🔍 Operations Map state:', {
-          size: this.operations.size,
-          pluginCreationTime: this.creationTime,
-          operations: Array.from(this.operations.entries()).map(([id, op]) => ({
-            id,
-            operationId: op.operationId,
-            messageId: op.messageId,
-            from: op.from,
-            to: op.to,
-            proposedLength: op.proposed?.length || 0,
-            start: op.start,
-            end: op.end
-          }))
-        });
-      }
-      
-      decos.sort((a, b) => {
-        // Extract `from` position from Range object
-        const aFrom = a.from !== undefined ? a.from : 0;
-        const bFrom = b.from !== undefined ? b.from : 0;
-        
-        if (aFrom !== bFrom) {
-          return aFrom - bFrom;
-        }
-        
-        // If same position, sort by side
-        // Widget decorations store `side` in value.side, default to 0 for marks
-        const aSide = (a.value && a.value.side !== undefined) ? a.value.side : 0;
-        const bSide = (b.value && b.value.side !== undefined) ? b.value.side : 0;
-        
-        return aSide - bSide;
-      });
-      
-      // Debug: log decoration positions AFTER sorting
-      if (decos.length > 0) {
-        console.log('🔍 Decorations AFTER sorting:', decos.map(d => ({
-          from: d.from,
-          valueSide: d.value?.side
-        })));
-      }
-      
-      // Update decorations via state effect
-      const decorationSet = Decoration.set(decos);
+      // Decoration.set(decos, true) lets CodeMirror sort by from/startSide (required for RangeSet).
+      const decorationSet = Decoration.set(decos, true);
       this.decorations = decorationSet;
       
       // CRITICAL: Only dispatch if view is still valid
@@ -1162,260 +1226,78 @@ const LiveEditDiffPluginClass = class {
   acceptOperation(operationId) {
     const op = this.operations.get(operationId);
     if (!op) return;
-    
-    // Remove from centralized store
-    if (this.documentId) {
-      documentDiffStore.removeDiff(this.documentId, operationId);
+    const proposalId = op.messageId;
+    if (!proposalId) {
+      console.warn('acceptOperation: no proposalId on operation, removing locally');
+      this.operations.delete(operationId);
+      if (this.documentId) documentDiffStore.removeDiff(this.documentId, operationId);
+      this.scheduleDecorationUpdate();
+      return;
     }
-    
-    // CRITICAL: Remove the accepted operation from the map FIRST
-    // This prevents it from being affected by position adjustments
-    this.operations.delete(operationId);
-    
-    // Calculate position delta for adjusting other operations
-    let positionDelta = 0;
-    const opStart = op.start !== undefined ? op.start : op.from;
-    const opEnd = op.end !== undefined ? op.end : op.to;
-    
-    // Build operation object for applyOperations handler
-    let operationObj;
-    if (op.opType === 'insert_after_heading' || op.opType === 'insert_after') {
-      // Normalize text to ensure proper newlines
-      let normalizedText = op.proposed || '';
-      const insertPos = op.from;
-      
-      // Check context around insertion point
-      const docText = this.view.state.doc.toString();
-      const charBefore = insertPos > 0 ? docText[insertPos - 1] : '';
-      const charAfter = insertPos < docText.length ? docText[insertPos] : '';
-      
-      // Check if insertion point is at end of line (has newline after) or middle of line
-      const isAtLineEnd = charAfter === '\n' || charAfter === '';
-      const needsLeadingNewline = charBefore !== '\n' && charBefore !== '';
-      
-      // Check if text is a chapter heading
-      const isChapterHeading = normalizedText.trim().startsWith('## Chapter');
-      
-      // Normalize: ensure chapter headings have proper spacing
-      if (isChapterHeading) {
-        // Chapter headings should have newline(s) before them
-        if (!normalizedText.startsWith('\n')) {
-          // Add appropriate spacing based on context
-          if (needsLeadingNewline) {
-            normalizedText = '\n\n' + normalizedText; // Double newline for chapter separation
-          } else if (!isAtLineEnd) {
-            normalizedText = '\n' + normalizedText; // Single newline if already at line boundary
-          }
-        }
-      } else if (needsLeadingNewline && !normalizedText.startsWith('\n')) {
-        // Non-chapter insertions: add newline if inserting mid-line
-        normalizedText = '\n' + normalizedText;
-      }
-      
-      // For insert operations, start and end are the same (insertion point)
-      operationObj = {
-        start: insertPos,
-        end: insertPos, // Insert at this position
-        text: normalizedText,
-        op_type: 'replace_range' // Insert is handled as replace with start == end
-      };
-      
-      // Insertion adds text, so positions after it shift forward
-      positionDelta = normalizedText.length;
-    } else if (op.opType === 'delete_range') {
-      operationObj = {
-        start: op.start,
-        end: op.end,
-        op_type: 'delete_range'
-      };
-      
-      // Deletion removes text, so positions after it shift backward
-      positionDelta = -(opEnd - opStart);
-    } else {
-      // replace_range
-      operationObj = {
-        start: op.start,
-        end: op.end,
-        text: op.proposed,
-        op_type: 'replace_range',
-        original_text: op.original
-      };
-      
-      // Replacement: delta = new length - old length
-      const oldLength = opEnd - opStart;
-      const newLength = (op.proposed || '').length;
-      positionDelta = newLength - oldLength;
-    }
-    
-    // Track operations to remove (overlapping ones)
-    const toRemove = [];
-    
-    // Adjust positions of other operations that come after this one
-    if (positionDelta !== 0) {
-      this.operations.forEach((otherOp, otherId) => {
-        const otherStart = otherOp.start !== undefined ? otherOp.start : otherOp.from;
-        const otherEnd = otherOp.end !== undefined ? otherOp.end : otherOp.to;
-        
-        // If this operation comes after the accepted one, adjust its positions
-        if (otherStart >= opEnd) {
-          const newStart = otherStart + positionDelta;
-          const newEnd = otherEnd + positionDelta;
-          
-          // Update positions
-          otherOp.start = newStart;
-          otherOp.end = newEnd;
-          if (otherOp.from !== undefined) otherOp.from = newStart;
-          if (otherOp.to !== undefined) otherOp.to = newEnd;
-          
-          // CRITICAL: Mark as adjusted so validation doesn't remove it
-          // The operation is still valid, it just targets text at a new position
-          otherOp.adjustedForAccept = true;
-          
-          console.log('✏️ Adjusted operation', otherId, 'by', positionDelta, 'positions');
-        } else if (otherEnd > opStart && otherStart < opEnd) {
-          // Overlapping operation - mark for removal
-          console.log('⚠️ Marking overlapping operation for removal:', otherId);
-          toRemove.push(otherId);
-        }
-      });
-    }
-    
-    // Remove overlapping operations from map and store
-    toRemove.forEach(id => {
-      this.operations.delete(id);
-      if (this.documentId) {
-        documentDiffStore.removeDiff(this.documentId, id);
-      }
-    });
-    
-    // CRITICAL: Save adjusted operations to store immediately
-    // This ensures they persist and have correct positions when document changes
-    if (this.documentId && this.operations.size > 0) {
-      const adjustedOperations = Array.from(this.operations.values());
-      const currentContent = this.view.state.doc.toString();
-      const messageId = this.currentMessageId;
-      
-      console.log('💾 Saving adjusted operations to store after accept:', {
+    const proposalOperationIndex = op.proposal_operation_index;
+    window.dispatchEvent(new CustomEvent('proposalAccept', {
+      detail: {
         documentId: this.documentId,
-        operationsCount: adjustedOperations.length,
-        messageId
-      });
-      
-      documentDiffStore.setDiffs(this.documentId, adjustedOperations, messageId, currentContent);
-    }
-    
-    // CRITICAL: Shield from invalidation for a short window to handle race conditions
-    // and network syncs that might consume the counter prematurely.
-    // Increased to 1500ms to handle slow network/server responses (503/502 errors).
-    this.programmaticUpdateShieldTime = Date.now() + 1500; 
-    this.programmaticUpdateCounter = (this.programmaticUpdateCounter || 0) + 1;
-    console.log(`🔍 Shielding invalidation for 1500ms. Counter: ${this.programmaticUpdateCounter}`);
-    
-    // CRITICAL: Update decorations IMMEDIATELY before applying the change
-    // This removes the accepted operation from decorations to prevent invalid positions
-    this.scheduleDecorationUpdate();
-    
-    // Emit event for external handling (MarkdownCMEditor will apply the change)
-    // Use setTimeout to ensure decorations are updated first
-    setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('liveEditAccepted', {
-        detail: {
-          operationId: operationId,
-          operation: operationObj
-        }
-      }));
-      
-      // After document change, adjust remaining operations and update again
-      // The counter will be decremented in the update() method after processing
-      setTimeout(() => {
-        this.scheduleDecorationUpdate();
-      }, 0);
-    }, 0);
+        proposalId,
+        operationId,
+        proposalOperationIndex: proposalOperationIndex !== undefined ? proposalOperationIndex : undefined
+      }
+    }));
   }
   
   rejectOperation(operationId) {
-    console.log('🔍 rejectOperation called with ID:', operationId);
-    
     const op = this.operations.get(operationId);
-    if (!op) {
-      console.warn('⚠️ rejectOperation: Operation not found in plugin map:', operationId);
+    if (!op) return;
+    const proposalId = op.messageId;
+    if (!proposalId) {
+      console.warn('rejectOperation: no proposalId on operation, removing locally');
+      this.operations.delete(operationId);
+      if (this.documentId) documentDiffStore.removeDiff(this.documentId, operationId);
+      this.scheduleDecorationUpdate();
       return;
     }
-    
-    console.log('🔍 rejectOperation: Found operation:', {
-      operationId: op.operationId,
-      start: op.start,
-      end: op.end,
-      messageId: op.messageId
-    });
-    
-    // Remove from centralized store
-    if (this.documentId) {
-      console.log('🔍 rejectOperation: Calling documentDiffStore.removeDiff:', {
-        documentId: this.documentId,
-        operationId: operationId
-      });
-      documentDiffStore.removeDiff(this.documentId, operationId);
-    } else {
-      console.warn('⚠️ rejectOperation: No documentId, cannot remove from store');
-    }
-    
-    // Emit event for external handling
-    window.dispatchEvent(new CustomEvent('liveEditRejected', {
-      detail: {
-        operationId: operationId
-      }
+    window.dispatchEvent(new CustomEvent('proposalReject', {
+      detail: { documentId: this.documentId, proposalId, operationId }
     }));
-    
-    // Remove from active diffs
-    this.removeOperation(operationId);
   }
   
   acceptAllOperations() {
-    const operationIds = Array.from(this.operations.keys());
-    console.log(`✅ Accepting all ${operationIds.length} operations`);
-    
-    // Accept operations in reverse order (highest position first) to maintain position stability
-    // For operations with the same start position (text chunks), sort by chunk_index ascending
-    const sortedOps = operationIds.map(id => {
-      const op = this.operations.get(id);
-      return {
-        id,
-        op,
-        start: op?.start ?? op?.from ?? 0,
-        chunk_index: op?.chunk_index,
-        is_text_chunk: op?.is_text_chunk
-      };
-    }).sort((a, b) => {
-      const startDiff = b.start - a.start;
-      if (startDiff !== 0) return startDiff; // Different positions: highest first
-      
-      // Same position: check if they're text chunks
-      const aIsChunk = a.is_text_chunk && a.chunk_index !== undefined;
-      const bIsChunk = b.is_text_chunk && b.chunk_index !== undefined;
-      
-      if (aIsChunk && bIsChunk) {
-        // Both are chunks: sort by chunk_index ascending (chunk 0, then 1, then 2...)
-        return a.chunk_index - b.chunk_index;
-      }
-      
-      return 0; // Keep original order for non-chunks at same position
-    });
-    
-    // Accept each operation sequentially
-    sortedOps.forEach(({ id }) => {
-      this.acceptOperation(id);
-    });
+    const proposalIds = this._getUniqueProposalIds();
+    if (proposalIds.length > 0) {
+      window.dispatchEvent(new CustomEvent('proposalAcceptAll', {
+        detail: { documentId: this.documentId, proposalIds }
+      }));
+      return;
+    }
+    if (this.operations.size === 0) return;
+    for (const operationId of Array.from(this.operations.keys())) {
+      this.acceptOperation(operationId);
+    }
   }
-  
+
   rejectAllOperations() {
-    const operationIds = Array.from(this.operations.keys());
-    console.log(`❌ Rejecting all ${operationIds.length} operations`);
-    
-    // Reject all operations
-    operationIds.forEach(id => {
-      this.rejectOperation(id);
+    const proposalIds = this._getUniqueProposalIds();
+    if (proposalIds.length > 0) {
+      window.dispatchEvent(new CustomEvent('proposalRejectAll', {
+        detail: { documentId: this.documentId, proposalIds }
+      }));
+      return;
+    }
+    if (this.operations.size === 0) return;
+    for (const operationId of Array.from(this.operations.keys())) {
+      this.rejectOperation(operationId);
+    }
+  }
+
+  _getUniqueProposalIds() {
+    const ids = new Set();
+    this.operations.forEach((op) => {
+      if (op.messageId) ids.add(op.messageId);
     });
+    if (ids.size === 0 && this.operations.size > 0) {
+      console.warn('_getUniqueProposalIds: operations exist but none have messageId');
+    }
+    return Array.from(ids);
   }
   
   /**

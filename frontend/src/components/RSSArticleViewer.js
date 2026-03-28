@@ -3,12 +3,36 @@
  * Displays RSS articles with filtering, sorting, and article actions
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef } from 'react';
+import { useQuery } from 'react-query';
+import DOMPurify from 'dompurify';
 import rssService from '../services/rssService';
+import apiService from '../services/apiService';
+import { formatInstantDateTime } from '../utils/userTimeDisplay';
 import { useTheme } from '../contexts/ThemeContext';
 
-const RSSArticleViewer = ({ feedId, onClose }) => {
+function escapeForArticleIdSelector(id) {
+    if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+        return CSS.escape(id);
+    }
+    return String(id).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+const RSSArticleViewer = ({ feedId, feedIds, viewerTitle, onClose }) => {
     const { darkMode } = useTheme();
+
+    const { data: userTimeFormatData } = useQuery(
+        'userTimeFormat',
+        () => apiService.settings.getUserTimeFormat(),
+        { staleTime: 5 * 60 * 1000, refetchOnWindowFocus: false }
+    );
+    const { data: userTimezoneData } = useQuery(
+        'userTimezone',
+        () => apiService.getUserTimezone(),
+        { staleTime: 5 * 60 * 1000, refetchOnWindowFocus: false }
+    );
+    const displayTimeFormat = userTimeFormatData?.time_format || '24h';
+    const displayTimeZone = userTimezoneData?.timezone || undefined;
     const [articles, setArticles] = useState([]);
     const [filteredArticles, setFilteredArticles] = useState([]);
     const [currentFeed, setCurrentFeed] = useState(null);
@@ -25,50 +49,120 @@ const RSSArticleViewer = ({ feedId, onClose }) => {
     // Expanded descriptions state
     const [expandedDescriptions, setExpandedDescriptions] = useState(new Set());
 
+    const articlesContainerRef = useRef(null);
+    /** After collapsing a read article in Unread Only, scroll this article id to top of list viewport */
+    const scrollAnchorAfterCollapseRef = useRef(null);
+
+    const resolvedFeedIds = useMemo(() => {
+        if (Array.isArray(feedIds) && feedIds.length > 0) return feedIds;
+        if (feedId) return [feedId];
+        return [];
+    }, [feedId, feedIds]);
+
     useEffect(() => {
-        if (feedId) {
+        if (resolvedFeedIds.length > 0) {
             loadFeedArticles();
+        } else {
+            setArticles([]);
+            setCurrentFeed(null);
+            setLoading(false);
+            setError(null);
         }
-    }, [feedId]);
+    }, [resolvedFeedIds.join(',')]);
 
     // Live update: when background refresh completes for this feed, reload articles
     useEffect(() => {
         const handler = (e) => {
             try {
                 const detail = e?.detail || {};
-                if (detail.feedId && detail.feedId === feedId) {
+                if (detail.feedId && resolvedFeedIds.includes(detail.feedId)) {
                     loadFeedArticles();
                 }
             } catch (_) {}
         };
         window.addEventListener('rss-feed-refresh-complete', handler);
         return () => window.removeEventListener('rss-feed-refresh-complete', handler);
-    }, [feedId]);
+    }, [resolvedFeedIds.join(',')]);
 
     useEffect(() => {
-        applyFilterAndSort();
-    }, [articles, filter, sortBy]);
+        let filtered = rssService.filterArticles(articles, filter);
+        if (filter === 'unread' && expandedDescriptions.size > 0) {
+            const seen = new Set(filtered.map((a) => a.article_id));
+            for (const article of articles) {
+                if (
+                    article.is_read === true &&
+                    expandedDescriptions.has(article.article_id) &&
+                    !seen.has(article.article_id)
+                ) {
+                    filtered.push(article);
+                    seen.add(article.article_id);
+                }
+            }
+        }
+        filtered = rssService.sortArticles(filtered, sortBy);
+        setFilteredArticles(filtered);
+    }, [articles, filter, sortBy, expandedDescriptions]);
+
+    useLayoutEffect(() => {
+        const anchorId = scrollAnchorAfterCollapseRef.current;
+        if (!anchorId) return;
+        scrollAnchorAfterCollapseRef.current = null;
+        const container = articlesContainerRef.current;
+        if (!container) return;
+        const el = container.querySelector(
+            `[data-article-id="${escapeForArticleIdSelector(anchorId)}"]`
+        );
+        if (el) {
+            el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }
+    }, [filteredArticles]);
 
     const loadFeedArticles = async () => {
         try {
             setLoading(true);
             setError(null);
-            
-            const articlesData = await rssService.getFeedArticles(feedId, 1000);
+
+            if (resolvedFeedIds.length === 0) {
+                setArticles([]);
+                setCurrentFeed(null);
+                setLoading(false);
+                return;
+            }
+
+            const batches = await Promise.all(
+                resolvedFeedIds.map((id) => rssService.getFeedArticles(id, 2000))
+            );
+            const merged = new Map();
+            for (const batch of batches) {
+                if (!Array.isArray(batch)) continue;
+                for (const a of batch) {
+                    if (a?.article_id && !merged.has(a.article_id)) {
+                        merged.set(a.article_id, a);
+                    }
+                }
+            }
+            const articlesData = Array.from(merged.values());
+            articlesData.sort((a, b) => {
+                const da = new Date(a.published_date || a.created_at || 0).getTime();
+                const db = new Date(b.published_date || b.created_at || 0).getTime();
+                return db - da;
+            });
             setArticles(articlesData);
-            setCurrentFeed(rssService.currentFeed);
+
+            if (resolvedFeedIds.length === 1) {
+                setCurrentFeed(rssService.currentFeed);
+            } else {
+                setCurrentFeed({
+                    feed_id: '__multi__',
+                    feed_name: viewerTitle || 'RSS category',
+                });
+            }
         } catch (error) {
             setError(error.message || 'Failed to load articles');
             console.error('❌ RSS ARTICLE VIEWER ERROR:', error);
         } finally {
             setLoading(false);
         }
-    };
-
-    const applyFilterAndSort = () => {
-        let filtered = rssService.filterArticles(articles, filter);
-        filtered = rssService.sortArticles(filtered, sortBy);
-        setFilteredArticles(filtered);
     };
 
     const handleArticleAction = async (action, articleId) => {
@@ -97,14 +191,50 @@ const RSSArticleViewer = ({ feedId, onClose }) => {
                     
                 case 'delete':
                     await rssService.deleteArticle(articleId);
-                    // Remove from local state
-                    setArticles(prev => prev.filter(article => article.article_id !== articleId));
+                    setArticles((prev) => prev.filter((article) => article.article_id !== articleId));
+                    setExpandedDescriptions((prev) => {
+                        const next = new Set(prev);
+                        next.delete(articleId);
+                        return next;
+                    });
                     showToast('Article deleted successfully!', 'success');
                     break;
-                    
-                case 'expand-description':
-                    // Toggle expanded state for this article
-                    setExpandedDescriptions(prev => {
+
+                case 'toggle-star': {
+                    const res = await rssService.toggleArticleStar(articleId);
+                    const starred = res?.is_starred === true;
+                    setArticles((prev) =>
+                        prev.map((article) =>
+                            article.article_id === articleId
+                                ? { ...article, is_starred: starred }
+                                : article
+                        )
+                    );
+                    break;
+                }
+
+                case 'expand-description': {
+                    const wasExpanded = expandedDescriptions.has(articleId);
+                    const target = articles.find((a) => a.article_id === articleId);
+
+                    if (
+                        wasExpanded &&
+                        filter === 'unread' &&
+                        target?.is_read === true &&
+                        articlesContainerRef.current
+                    ) {
+                        const currentCard =
+                            articlesContainerRef.current.querySelector(
+                                `[data-article-id="${escapeForArticleIdSelector(articleId)}"]`
+                            );
+                        const next = currentCard?.nextElementSibling;
+                        const nextId = next?.getAttribute?.('data-article-id') ?? null;
+                        if (nextId) {
+                            scrollAnchorAfterCollapseRef.current = nextId;
+                        }
+                    }
+
+                    setExpandedDescriptions((prev) => {
                         const newSet = new Set(prev);
                         if (newSet.has(articleId)) {
                             newSet.delete(articleId);
@@ -113,7 +243,20 @@ const RSSArticleViewer = ({ feedId, onClose }) => {
                         }
                         return newSet;
                     });
+                    if (!wasExpanded) {
+                        if (target && !target.is_read) {
+                            await rssService.markArticleRead(articleId);
+                            setArticles((prev) =>
+                                prev.map((article) =>
+                                    article.article_id === articleId
+                                        ? { ...article, is_read: true }
+                                        : article
+                                )
+                            );
+                        }
+                    }
                     break;
+                }
                     
 
                     
@@ -126,37 +269,40 @@ const RSSArticleViewer = ({ feedId, onClose }) => {
     };
 
     const handleBulkAction = async (action) => {
-        if (!currentFeed) return;
-        
         let confirmMessage;
         if (action === 'mark-all-read') {
             confirmMessage = 'Mark all unread articles as read?';
         } else if (action === 'delete-all-read') {
-            confirmMessage = 'Delete all read (non-imported) articles?';
-        } else if (action === 'extract-full-content') {
-            confirmMessage = 'Extract full content for articles with truncated descriptions? This may take a few minutes.';
+            confirmMessage =
+                'Delete all read (non-imported) articles? Starred articles will be kept.';
         }
-            
-        if (!window.confirm(confirmMessage)) return;
-        
+
+        if (!confirmMessage || !window.confirm(confirmMessage)) return;
+
         try {
             setBulkLoading(true);
-            
+
             if (action === 'mark-all-read') {
-                await rssService.markAllArticlesRead(currentFeed.feed_id);
-                // Update local state
-                setArticles(prev => prev.map(article => ({ ...article, is_read: true })));
+                for (const fid of resolvedFeedIds) {
+                    await rssService.markAllArticlesRead(fid);
+                }
+                setArticles((prev) => prev.map((article) => ({ ...article, is_read: true })));
                 showToast('All articles marked as read!', 'success');
             } else if (action === 'delete-all-read') {
-                await rssService.deleteAllReadArticles(currentFeed.feed_id);
-                // Remove read non-imported articles from local state
-                setArticles(prev => prev.filter(article => !(article.is_read && !article.is_processed)));
+                for (const fid of resolvedFeedIds) {
+                    await rssService.deleteAllReadArticles(fid);
+                }
+                setArticles((prev) =>
+                    prev.filter(
+                        (article) =>
+                            !(
+                                article.is_read === true &&
+                                !article.is_processed &&
+                                !article.is_starred
+                            )
+                    )
+                );
                 showToast('All read articles deleted!', 'success');
-            } else if (action === 'extract-full-content') {
-                await rssService.extractFullContent();
-                showToast('Full content extraction started! Check back in a few minutes.', 'success');
-                // Reload articles to show updated content
-                await loadFeedArticles();
             }
         } catch (error) {
             showToast(`Failed to ${action.replace('-', ' ')}: ${error.message}`, 'error');
@@ -169,11 +315,17 @@ const RSSArticleViewer = ({ feedId, onClose }) => {
         window.open(link, '_blank');
     };
 
-    const formatDate = (dateString) => {
-        if (!dateString) return 'Unknown date';
-        const date = new Date(dateString);
-        return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    };
+    const formatArticleWhen = useCallback(
+        (dateString) => {
+            if (!dateString) return 'Unknown date';
+            const formatted = formatInstantDateTime(dateString, {
+                timeFormat: displayTimeFormat,
+                timeZone: displayTimeZone,
+            });
+            return formatted || 'Unknown date';
+        },
+        [displayTimeFormat, displayTimeZone]
+    );
 
     const stripHtmlTags = (html) => {
         if (!html) return '';
@@ -236,7 +388,7 @@ const RSSArticleViewer = ({ feedId, onClose }) => {
             <div style={headerStyle}>
                 <div style={headerLeftStyle}>
                     <h2 style={titleStyle}>
-                        {currentFeed?.feed_name || 'RSS Feed'}
+                        {viewerTitle || currentFeed?.feed_name || 'RSS Feed'}
                     </h2>
                     <span style={articleCountStyle}>
                         {filteredArticles.length} articles
@@ -259,6 +411,7 @@ const RSSArticleViewer = ({ feedId, onClose }) => {
                         <option value="unread">Unread Only</option>
                         <option value="all">All Articles</option>
                         <option value="imported">Imported Only</option>
+                        <option value="starred">Starred</option>
                     </select>
                     
                     <select 
@@ -288,18 +441,11 @@ const RSSArticleViewer = ({ feedId, onClose }) => {
                     >
                         {bulkLoading ? 'Processing...' : 'Delete All Read'}
                     </button>
-                    <button
-                        onClick={() => handleBulkAction('extract-full-content')}
-                        disabled={bulkLoading}
-                        style={{ ...bulkButtonStyle, backgroundColor: '#4caf50' }}
-                    >
-                        {bulkLoading ? 'Processing...' : 'Extract Full Content'}
-                    </button>
                 </div>
             </div>
 
             {/* Articles List */}
-            <div style={articlesContainerStyle}>
+            <div ref={articlesContainerRef} style={articlesContainerStyle}>
                 {filteredArticles.length === 0 ? (
                     <div style={emptyStateStyle}>
                         <p>No articles found matching the current filter.</p>
@@ -311,7 +457,7 @@ const RSSArticleViewer = ({ feedId, onClose }) => {
                             article={article}
                             onAction={handleArticleAction}
                             onTitleClick={handleTitleClick}
-                            formatDate={formatDate}
+                            formatArticleWhen={formatArticleWhen}
                             isExpanded={expandedDescriptions.has(article.article_id)}
                             darkMode={darkMode}
                         />
@@ -322,8 +468,29 @@ const RSSArticleViewer = ({ feedId, onClose }) => {
     );
 };
 
+const looksLikeHtml = (s) => typeof s === 'string' && /<[a-z][\s\S]*>/i.test(s);
+
+const RSS_ARTICLE_HTML_PURIFY = {
+    ALLOWED_TAGS: [
+        'p', 'br', 'strong', 'em', 'b', 'i', 'u', 'a', 'img', 'figure', 'figcaption',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'blockquote',
+        'pre', 'code', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
+        'div', 'span', 'hr', 'sub', 'sup', 'mark', 'del', 'ins',
+    ],
+    ALLOWED_ATTR: ['href', 'src', 'alt', 'title', 'target', 'rel', 'loading', 'srcset', 'class'],
+    FORBID_ATTR: ['style'],
+};
+
+const rssArticleBodyStyle = {
+    lineHeight: '1.65',
+    fontSize: '14px',
+    color: 'var(--text-primary)',
+    overflow: 'hidden',
+    wordBreak: 'break-word',
+};
+
 // Article Card Component
-const ArticleCard = ({ article, onAction, onTitleClick, formatDate, isExpanded, darkMode }) => {
+const ArticleCard = ({ article, onAction, onTitleClick, formatArticleWhen, isExpanded, darkMode }) => {
     const [showActions, setShowActions] = useState(false);
 
     const stripHtmlTags = (html) => {
@@ -334,50 +501,76 @@ const ArticleCard = ({ article, onAction, onTitleClick, formatDate, isExpanded, 
         return tempDiv.textContent || tempDiv.innerText || '';
     };
 
+    const descOrBody = article.full_content || article.description || '';
+    const previewPlain = stripHtmlTags(descOrBody);
+    const expandedHtml =
+        article.full_content_html ||
+        (looksLikeHtml(article.description) && !article.full_content ? article.description : null);
+
+    const sanitizedExpandedHtml = useMemo(() => {
+        if (!expandedHtml) return '';
+        return DOMPurify.sanitize(expandedHtml, RSS_ARTICLE_HTML_PURIFY);
+    }, [expandedHtml]);
+
     return (
-        <div 
+        <div
+            data-article-id={article.article_id}
             style={articleCardStyle}
             onMouseEnter={() => setShowActions(true)}
             onMouseLeave={() => setShowActions(false)}
         >
             <div style={articleContentStyle}>
-                <h3 
-                    style={articleTitleStyle}
-                    onClick={() => onTitleClick(article.link)}
-                >
-                    {article.title}
-                </h3>
+                <div style={articleTitleRowStyle}>
+                    <button
+                        type="button"
+                        aria-label={article.is_starred ? 'Unstar article' : 'Star article'}
+                        title={article.is_starred ? 'Unstar' : 'Star'}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            onAction('toggle-star', article.article_id);
+                        }}
+                        style={starIconButtonStyle(article.is_starred === true, darkMode)}
+                    >
+                        {article.is_starred ? '\u2605' : '\u2606'}
+                    </button>
+                    <h3
+                        style={articleTitleStyle}
+                        onClick={() => onTitleClick(article.link)}
+                    >
+                        {article.title}
+                    </h3>
+                </div>
                 
                 {/* Display full content if available, otherwise fall back to description */}
                 {(article.full_content_html || article.full_content || article.description) && (
                     <div style={articleDescriptionStyle}>
                         {isExpanded ? (
-                            // Show full content with original HTML layout
-                            article.full_content_html ? (
-                                <div 
-                                    dangerouslySetInnerHTML={{ 
-                                        __html: article.full_content_html 
-                                    }}
-                                    style={{
-                                        lineHeight: '1.6',
-                                        fontSize: '14px',
-                                        color: 'var(--text-primary)',
-                                        overflow: 'hidden'
-                                    }}
+                            sanitizedExpandedHtml ? (
+                                <div
+                                    dangerouslySetInnerHTML={{ __html: sanitizedExpandedHtml }}
+                                    style={rssArticleBodyStyle}
                                     className="rss-article-content"
                                 />
                             ) : (
-                                <p style={{ margin: '0 0 12px 0', lineHeight: '1.5' }}>
+                                <p
+                                    style={{
+                                        margin: '0 0 12px 0',
+                                        lineHeight: '1.65',
+                                        whiteSpace: 'pre-wrap',
+                                    }}
+                                >
                                     {article.full_content || article.description}
                                 </p>
                             )
                         ) : (
                             <p style={{ margin: '0 0 12px 0', lineHeight: '1.5' }}>
-                                {stripHtmlTags(article.full_content || article.description).substring(0, 300) + '...'}
+                                {previewPlain.length > 300
+                                    ? `${previewPlain.substring(0, 300)}...`
+                                    : previewPlain}
                             </p>
                         )}
                         
-                        {(article.full_content_html || article.full_content || article.description).length > 300 && (
+                        {previewPlain.length > 300 && (
                             <button 
                                 onClick={() => onAction('expand-description', article.article_id)}
                                 style={{
@@ -393,26 +586,12 @@ const ArticleCard = ({ article, onAction, onTitleClick, formatDate, isExpanded, 
                                 {isExpanded ? 'Read less' : 'Read more'}
                             </button>
                         )}
-                        
-                        {(article.full_content_html || article.full_content) && (
-                            <div style={{
-                                fontSize: '11px',
-                                color: 'var(--text-secondary)',
-                                marginTop: '8px',
-                                padding: '4px 8px',
-                                backgroundColor: darkMode ? 'var(--bg-tertiary)' : '#e3f2fd',
-                                borderRadius: '4px',
-                                display: 'inline-block'
-                            }}>
-                                ✨ {article.full_content_html ? 'Full content with original layout' : 'Full content extracted'}
-                            </div>
-                        )}
                     </div>
                 )}
                 
                 <div style={articleMetaStyle}>
                     <span style={articleDateStyle}>
-                        {formatDate(article.published_date)}
+                        {formatArticleWhen(article.published_date || article.created_at)}
                     </span>
                     {article.is_processed && (
                         <span style={importedBadgeStyle}>Imported</span>
@@ -434,7 +613,15 @@ const ArticleCard = ({ article, onAction, onTitleClick, formatDate, isExpanded, 
                             Mark Read
                         </button>
                     )}
-                    
+
+                    <button
+                        type="button"
+                        onClick={() => onAction('toggle-star', article.article_id)}
+                        style={actionButtonStyle}
+                    >
+                        {article.is_starred ? 'Unstar' : 'Star'}
+                    </button>
+
                     {!article.is_processed && (
                         <button
                             onClick={() => onAction('import', article.article_id)}
@@ -564,14 +751,37 @@ const articleContentStyle = {
     marginRight: '120px' // Space for actions
 };
 
+const articleTitleRowStyle = {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: '8px',
+    marginBottom: '12px',
+    width: '100%',
+};
+
 const articleTitleStyle = {
-    margin: '0 0 12px 0',
+    margin: 0,
+    flex: 1,
     fontSize: '18px',
     fontWeight: '600',
     color: '#2196f3',
     cursor: 'pointer',
-    textDecoration: 'none'
+    textDecoration: 'none',
 };
+
+function starIconButtonStyle(isStarred, darkMode) {
+    return {
+        flexShrink: 0,
+        marginTop: '2px',
+        padding: '4px 6px',
+        fontSize: '18px',
+        lineHeight: 1,
+        border: 'none',
+        background: 'transparent',
+        cursor: 'pointer',
+        color: isStarred ? '#ffb300' : darkMode ? '#888' : '#999',
+    };
+}
 
 const articleDescriptionStyle = {
     margin: '0 0 12px 0',

@@ -28,8 +28,6 @@ class AgentType(str, Enum):
     # DATA_FORMATTING_AGENT removed - migrated to llm-orchestrator gRPC service
     # WEATHER_AGENT removed - migrated to llm-orchestrator gRPC service
     CALCULATE_AGENT = "calculate_agent"  # ROOSEVELT'S COMPUTATION SPECIALIST
-    RSS_BACKGROUND_AGENT = "rss_background_agent"
-    RSS_AGENT = "rss_agent"
     # ORG_INBOX_AGENT removed - migrated to llm-orchestrator gRPC service
     # ORG_PROJECT_AGENT removed - migrated to llm-orchestrator gRPC service
     # IMAGE_GENERATION_AGENT removed - migrated to llm-orchestrator gRPC service
@@ -113,6 +111,7 @@ class CentralizedToolRegistry:
             
             # Register all available tools
             await self._register_search_tools()
+            await self._register_help_search_tools()
             await self._register_document_tools()
             await self._register_web_tools()
             await self._register_analysis_tools()
@@ -120,7 +119,8 @@ class CentralizedToolRegistry:
             await self._register_weather_tools()
             await self._register_expansion_tools()
             await self._register_org_inbox_tools()
-            await self._register_org_search_tools()  # **BULLY!** Org file search across all .org files!
+            await self._register_org_search_tools()
+            await self._register_todo_tools()
             await self._register_image_tools()
             await self._register_file_creation_tools()  # **BULLY!** File and folder creation for agents!
             await self._register_document_editing_tools()  # **BULLY!** Document editing tools for agents!
@@ -128,6 +128,7 @@ class CentralizedToolRegistry:
             await self._register_face_analysis_tools()  # Face detection and identification
             await self._register_object_detection_tools()  # Object detection and user annotations
             await self._register_email_tools()  # Email via connections-service (O365, etc.)
+            await self._register_calendar_tools()  # Calendar via connections-service (O365)
 
             # Set up agent permissions
             self._configure_agent_permissions()
@@ -142,13 +143,13 @@ class CentralizedToolRegistry:
     async def _register_search_tools(self):
         """Register search and retrieval tools"""
         from services.langgraph_tools.unified_search_tools import (
-            unified_local_search, get_document_content, search_conversation_cache
+            unified_local_search, get_document_content, search_conversation_cache, fulltext_search
         )
         
         self._tools["search_local"] = ToolDefinition(
             name="search_local",
             function=unified_local_search,
-            description="Search local documents and entities",
+            description="Search local TEXT documents and entities — NOT for images, comics, photos, artwork, or visual content (use search_images for those).",
             access_level=ToolAccessLevel.READ_ONLY,
             parameters={
                 "query": {"type": "string", "required": True},
@@ -183,7 +184,42 @@ class CentralizedToolRegistry:
                 "freshness_hours": {"type": "integer", "default": 24, "description": "How recent cache should be (hours)"}
             }
         )
-    
+
+        self._tools["fulltext_search"] = ToolDefinition(
+            name="fulltext_search",
+            function=fulltext_search,
+            description="Search documents by exact phrase or terms (PostgreSQL full-text). Use when the user wants to find a specific phrase, name, or quote.",
+            access_level=ToolAccessLevel.READ_ONLY,
+            parameters={
+                "query": {"type": "string", "required": True, "description": "Exact phrase (wrap in quotes) or space-separated terms"},
+                "exact_phrase": {"type": "boolean", "default": False, "description": "Treat query as exact phrase"},
+                "limit": {"type": "integer", "default": 20, "description": "Max results"},
+                "user_id": {"type": "string", "required": False, "description": "User ID for scoping"},
+                "file_types": {"type": "array", "items": {"type": "string"}, "required": False, "description": "Filter by file type"},
+                "folder_id": {"type": "string", "required": False, "description": "Filter by folder ID"},
+            }
+        )
+
+    async def _register_help_search_tools(self):
+        """Register help documentation search tool."""
+        try:
+            from services.langgraph_tools.help_search_tools import search_help_docs
+            self._tools["search_help_docs"] = ToolDefinition(
+                name="search_help_docs",
+                function=search_help_docs,
+                description="Search app help documentation for how-to questions about Bastion features.",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={
+                    "query": {"type": "string", "required": True, "description": "Natural language question about the app"},
+                    "limit": {"type": "integer", "default": 5, "description": "Max number of help sections to return"},
+                },
+                timeout_seconds=30,
+                categories=["search_local"],
+            )
+            logger.info("Registered help search tools")
+        except Exception as e:
+            logger.warning("Failed to register help search tools: %s", e)
+
     async def _register_web_tools(self):
         """Register web search and crawling tools"""
         # Import from correct locations
@@ -345,22 +381,18 @@ class CentralizedToolRegistry:
         )
 
     async def _register_org_inbox_tools(self):
-        """Register org inbox tools"""
+        """Register org inbox utility tools (non-todo operations only).
+
+        Todo CRUD (list, create, update, toggle, delete, archive) is handled by
+        the universal todo API registered in _register_todo_tools.  Only inbox-
+        specific utilities (path lookup, raw append, tag indexing) remain here.
+        """
         try:
             from services.langgraph_tools.org_inbox_tools import (
                 org_inbox_path,
-                org_inbox_list_items,
-                org_inbox_add_item,
-                org_inbox_toggle_done,
-                org_inbox_update_line,
                 org_inbox_append_text,
                 org_inbox_append_block,
                 org_inbox_index_tags,
-                org_inbox_apply_tags,
-                org_inbox_set_state,
-                org_inbox_promote_state,
-                org_inbox_demote_state,
-                org_inbox_set_schedule_and_repeater,
             )
 
             self._tools["org_inbox_path"] = ToolDefinition(
@@ -369,44 +401,6 @@ class CentralizedToolRegistry:
                 description="Get path to inbox.org, creating it at uploads root if missing",
                 access_level=ToolAccessLevel.READ_ONLY,
                 parameters={},
-                timeout_seconds=10,
-            )
-            self._tools["org_inbox_list_items"] = ToolDefinition(
-                name="org_inbox_list_items",
-                function=org_inbox_list_items,
-                description="List task-like items from inbox.org (checkboxes and TODO headings)",
-                access_level=ToolAccessLevel.READ_ONLY,
-                parameters={},
-                timeout_seconds=10,
-            )
-            self._tools["org_inbox_add_item"] = ToolDefinition(
-                name="org_inbox_add_item",
-                function=org_inbox_add_item,
-                description="Append a new checkbox or TODO heading to inbox.org",
-                access_level=ToolAccessLevel.READ_WRITE,
-                parameters={
-                    "text": {"type": "string", "required": True},
-                    "kind": {"type": "string", "enum": ["checkbox", "todo"], "default": "checkbox"}
-                },
-                timeout_seconds=10,
-            )
-            self._tools["org_inbox_toggle_done"] = ToolDefinition(
-                name="org_inbox_toggle_done",
-                function=org_inbox_toggle_done,
-                description="Toggle done state of a task line by index",
-                access_level=ToolAccessLevel.READ_WRITE,
-                parameters={"line_index": {"type": "integer", "required": True}},
-                timeout_seconds=10,
-            )
-            self._tools["org_inbox_update_line"] = ToolDefinition(
-                name="org_inbox_update_line",
-                function=org_inbox_update_line,
-                description="Update the text of a task line by index",
-                access_level=ToolAccessLevel.READ_WRITE,
-                parameters={
-                    "line_index": {"type": "integer", "required": True},
-                    "new_text": {"type": "string", "required": True}
-                },
                 timeout_seconds=10,
             )
             self._tools["org_inbox_append_text"] = ToolDefinition(
@@ -437,71 +431,19 @@ class CentralizedToolRegistry:
                 parameters={},
                 timeout_seconds=15,
             )
-            self._tools["org_inbox_apply_tags"] = ToolDefinition(
-                name="org_inbox_apply_tags",
-                function=org_inbox_apply_tags,
-                description="Apply tags to a specific line in inbox.org",
-                access_level=ToolAccessLevel.READ_WRITE,
-                parameters={
-                    "line_index": {"type": "integer", "required": True},
-                    "tags": {"type": "array", "items": {"type": "string"}, "required": True}
-                },
-                timeout_seconds=10,
-            )
-            self._tools["org_inbox_set_state"] = ToolDefinition(
-                name="org_inbox_set_state",
-                function=org_inbox_set_state,
-                description="Set the TODO state for a headline line",
-                access_level=ToolAccessLevel.READ_WRITE,
-                parameters={
-                    "line_index": {"type": "integer", "required": True},
-                    "state": {"type": "string", "required": True}
-                },
-                timeout_seconds=10,
-            )
-            self._tools["org_inbox_promote_state"] = ToolDefinition(
-                name="org_inbox_promote_state",
-                function=org_inbox_promote_state,
-                description="Promote a headline's state using the configured sequence",
-                access_level=ToolAccessLevel.READ_WRITE,
-                parameters={
-                    "line_index": {"type": "integer", "required": True},
-                    "sequence": {"type": "array", "items": {"type": "string"}, "required": True}
-                },
-                timeout_seconds=10,
-            )
-            self._tools["org_inbox_demote_state"] = ToolDefinition(
-                name="org_inbox_demote_state",
-                function=org_inbox_demote_state,
-                description="Demote a headline's state using the configured sequence",
-                access_level=ToolAccessLevel.READ_WRITE,
-                parameters={
-                    "line_index": {"type": "integer", "required": True},
-                    "sequence": {"type": "array", "items": {"type": "string"}, "required": True}
-                },
-                timeout_seconds=10,
-            )
-            self._tools["org_inbox_set_schedule_and_repeater"] = ToolDefinition(
-                name="org_inbox_set_schedule_and_repeater",
-                function=org_inbox_set_schedule_and_repeater,
-                description="Set or update SCHEDULED and repeater on a headline",
-                access_level=ToolAccessLevel.READ_WRITE,
-                parameters={
-                    "line_index": {"type": "integer", "required": True},
-                    "scheduled": {"type": "string", "required": False},
-                    "repeater": {"type": "string", "required": False}
-                },
-                timeout_seconds=10,
-            )
         except Exception as e:
             logger.error(f"❌ Failed to register org inbox tools: {e}")
 
     async def _register_org_search_tools(self):
-        """Register org-mode search tools for searching across all .org files"""
+        """Register org-mode search tools for searching across all .org files.
+
+        Note: list_org_todos was removed — use the universal list_todos tool
+        (registered in _register_todo_tools) which supersedes it with broader
+        scope and richer output.
+        """
         try:
             from services.langgraph_tools.org_search_tools import (
                 search_org_files,
-                list_org_todos,
                 search_org_by_tag
             )
             
@@ -520,19 +462,6 @@ class CentralizedToolRegistry:
                 timeout_seconds=30
             )
             
-            self._tools["list_org_todos"] = ToolDefinition(
-                name="list_org_todos",
-                function=list_org_todos,
-                description="List all TODO items from user's org files. Quick way to see tasks across all org files.",
-                access_level=ToolAccessLevel.READ_ONLY,
-                parameters={
-                    "todo_states": {"type": "array", "items": {"type": "string"}, "description": "Filter by states"},
-                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Filter by tags"},
-                    "limit": {"type": "integer", "default": 50}
-                },
-                timeout_seconds=20
-            )
-            
             self._tools["search_org_by_tag"] = ToolDefinition(
                 name="search_org_by_tag",
                 function=search_org_by_tag,
@@ -548,6 +477,42 @@ class CentralizedToolRegistry:
             logger.info("✅ Registered org search tools")
         except Exception as e:
             logger.error(f"❌ Failed to register org search tools: {e}")
+
+    async def _register_todo_tools(self):
+        """Register universal todo tools (OrgTodoService)."""
+        try:
+            from services.org_todo_service import get_org_todo_service
+
+            async def _list_todos(user_id: str, scope: str = "all", states: list = None, tags: list = None, query: str = "", limit: int = 100, **kwargs) -> str:
+                service = await get_org_todo_service()
+                result = await service.list_todos(user_id=user_id, scope=scope, states=states, tags=tags, query=query, limit=limit)
+                if not result.get("success"):
+                    return result.get("error", "Unknown error")
+                results = result.get("results", [])
+                lines = [f"Found {len(results)} todo(s)."]
+                for i, r in enumerate(results[:20], 1):
+                    lines.append(f"{i}. [{r.get('todo_state', '')}] {r.get('heading', '')[:60]} ({r.get('filename', '')})")
+                if len(results) > 20:
+                    lines.append(f"... and {len(results) - 20} more.")
+                return "\n".join(lines)
+
+            self._tools["list_todos"] = ToolDefinition(
+                name="list_todos",
+                function=_list_todos,
+                description="List todos across all org files, inbox only, or a specific file. scope: all, inbox, or file path.",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={
+                    "scope": {"type": "string", "default": "all", "description": "all, inbox, or file path"},
+                    "states": {"type": "array", "items": {"type": "string"}, "description": "TODO states filter"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Tags filter"},
+                    "query": {"type": "string", "default": "", "description": "Search query"},
+                    "limit": {"type": "integer", "default": 100},
+                },
+                timeout_seconds=30,
+            )
+            logger.info("✅ Registered todo tools")
+        except Exception as e:
+            logger.error("Failed to register todo tools: %s", e)
 
     async def _register_image_tools(self):
         """Register image generation tools"""
@@ -651,7 +616,7 @@ class CentralizedToolRegistry:
             self._tools["search_images"] = ToolDefinition(
                 name="search_images",
                 function=search_images,
-                description="Search for images, comics, artwork, memes, screenshots, and other visual content with metadata. Use this when users ask to 'show', 'display', 'find', or 'see' images, comics, pictures, or visual content. Supports searching by content description, type (comic/artwork/meme/screenshot), date, author, or series. Returns markdown-formatted results with image URLs that can be displayed in chat. Essential for queries like 'show me Dilbert comics', 'find images from 1989', 'display artwork by artist name'. Note: Comic names like 'Dilbert' are series, not authors - use the series parameter for comic names.",
+                description="Search for images, comics, photos, artwork, faces, portraits, memes, screenshots, and other visual content with metadata. Use this — NOT search_local or search_documents — when users ask to 'show', 'display', 'find', or 'see' images, comics, pictures, photos, faces, portraits, selfies, or visual content. Supports searching by content description, type (comic/artwork/meme/screenshot/photo), date, author, or series. Returns markdown-formatted results with image URLs that can be displayed in chat. Essential for queries like 'show me Dilbert comics', 'find images from 1989', 'display artwork by artist name', 'find photos of faces'. Note: Comic names like 'Dilbert' are series, not authors - use the series parameter for comic names.",
                 access_level=ToolAccessLevel.READ_ONLY,
                 parameters={
                     "query": {"type": "string", "required": True, "description": "Search query describing the image content (e.g., 'Dilbert from 1989', 'office politics comic', 'medical diagnosis diagram')"},
@@ -681,31 +646,18 @@ class CentralizedToolRegistry:
                 sys.path.insert(0, orchestrator_path)
             
             from orchestrator.tools.face_analysis_tools import (
-                detect_faces_in_image,
                 identify_faces_in_image
-            )
-            
-            self._tools["detect_faces_in_image"] = ToolDefinition(
-                name="detect_faces_in_image",
-                function=detect_faces_in_image,
-                description="Detect faces in an attached image file. Returns face encodings and bounding boxes for all detected faces. Use this when you need to detect faces but don't need to identify who they are.",
-                access_level=ToolAccessLevel.READ_ONLY,
-                parameters={
-                    "attachment_path": {"type": "string", "required": True, "description": "Full path to the image file"},
-                    "user_id": {"type": "string", "required": False, "default": "system", "description": "User ID for access control"}
-                },
-                timeout_seconds=30,
-                categories=["face_analysis", "image_processing"]
             )
             
             self._tools["identify_faces_in_image"] = ToolDefinition(
                 name="identify_faces_in_image",
                 function=identify_faces_in_image,
-                description="Identify people in an attached image by matching faces against known identities. This tool detects faces in the image and matches them against the known_identities database to identify who the people are. Use this when users ask 'who is this?' or want to identify people in photos.",
+                description="Detect and optionally identify faces in an image. Set identify=False for detection only (encodings, bounding boxes); identify=True matches faces against known identities.",
                 access_level=ToolAccessLevel.READ_ONLY,
                 parameters={
                     "attachment_path": {"type": "string", "required": True, "description": "Full path to the image file"},
                     "user_id": {"type": "string", "required": False, "default": "system", "description": "User ID for access control"},
+                    "identify": {"type": "boolean", "required": False, "default": True, "description": "If True match faces to identities; if False only detect faces."},
                     "confidence_threshold": {"type": "float", "required": False, "default": 0.82, "description": "Minimum confidence for identity matches (0.0-1.0). 0.82 aligns with L2 < 0.6 same-person rule."}
                 },
                 timeout_seconds=30,
@@ -877,6 +829,95 @@ class CentralizedToolRegistry:
         except Exception as e:
             logger.warning("Failed to register email tools: %s", e)
 
+    async def _register_calendar_tools(self):
+        """Register calendar tools (list, get events, get event, create, update, delete) via connections-service."""
+        try:
+            from services.langgraph_tools.calendar_tools import (
+                list_calendars,
+                get_calendar_events,
+                get_event_by_id,
+                create_event,
+                update_event,
+                delete_event,
+            )
+            self._tools["list_calendars"] = ToolDefinition(
+                name="list_calendars",
+                function=list_calendars,
+                description="List the user's calendars (O365).",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={"user_id": {"type": "string", "required": True}},
+            )
+            self._tools["get_calendar_events"] = ToolDefinition(
+                name="get_calendar_events",
+                function=get_calendar_events,
+                description="Get calendar events in a date range (ISO 8601 start/end).",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={
+                    "user_id": {"type": "string", "required": True},
+                    "start_datetime": {"type": "string", "required": True},
+                    "end_datetime": {"type": "string", "required": True},
+                    "calendar_id": {"type": "string", "default": ""},
+                    "top": {"type": "integer", "default": 50},
+                },
+            )
+            self._tools["get_event_by_id"] = ToolDefinition(
+                name="get_event_by_id",
+                function=get_event_by_id,
+                description="Get a single calendar event by event_id.",
+                access_level=ToolAccessLevel.READ_ONLY,
+                parameters={
+                    "user_id": {"type": "string", "required": True},
+                    "event_id": {"type": "string", "required": True},
+                },
+            )
+            self._tools["create_event"] = ToolDefinition(
+                name="create_event",
+                function=create_event,
+                description="Create a calendar event (subject, start/end ISO 8601, optional location, body, attendees).",
+                access_level=ToolAccessLevel.READ_WRITE,
+                parameters={
+                    "user_id": {"type": "string", "required": True},
+                    "subject": {"type": "string", "required": True},
+                    "start_datetime": {"type": "string", "required": True},
+                    "end_datetime": {"type": "string", "required": True},
+                    "calendar_id": {"type": "string", "default": ""},
+                    "location": {"type": "string", "default": ""},
+                    "body": {"type": "string", "default": ""},
+                    "attendee_emails": {"type": "array", "default": []},
+                    "is_all_day": {"type": "boolean", "default": False},
+                },
+            )
+            self._tools["update_event"] = ToolDefinition(
+                name="update_event",
+                function=update_event,
+                description="Update a calendar event (only provided fields are updated).",
+                access_level=ToolAccessLevel.READ_WRITE,
+                parameters={
+                    "user_id": {"type": "string", "required": True},
+                    "event_id": {"type": "string", "required": True},
+                    "subject": {"type": "string"},
+                    "start_datetime": {"type": "string"},
+                    "end_datetime": {"type": "string"},
+                    "location": {"type": "string"},
+                    "body": {"type": "string"},
+                    "attendee_emails": {"type": "array"},
+                    "is_all_day": {"type": "boolean"},
+                },
+            )
+            self._tools["delete_event"] = ToolDefinition(
+                name="delete_event",
+                function=delete_event,
+                description="Delete a calendar event.",
+                access_level=ToolAccessLevel.READ_WRITE,
+                parameters={
+                    "user_id": {"type": "string", "required": True},
+                    "event_id": {"type": "string", "required": True},
+                },
+            )
+            logger.info("Registered calendar tools")
+        except Exception as e:
+            logger.warning("Failed to register calendar tools: %s", e)
+
     def _configure_agent_permissions(self):
         """Configure which tools each agent type can access"""
         
@@ -887,10 +928,10 @@ class CentralizedToolRegistry:
             "search_conversation_cache": ToolAccessLevel.READ_ONLY,  # ROOSEVELT'S UNIVERSAL CACHE
             "search_local": ToolAccessLevel.READ_ONLY,
             "get_document": ToolAccessLevel.READ_ONLY,
+            "fulltext_search": ToolAccessLevel.READ_ONLY,  # Exact phrase/term search in documents
             "search_web": ToolAccessLevel.WEB_ACCESS,  # RESTORED: Needed for fact-checking agent
             "search_images": ToolAccessLevel.READ_ONLY,  # Universal image search with metadata sidecars
-            "detect_faces_in_image": ToolAccessLevel.READ_ONLY,  # Face detection in attached images
-            "identify_faces_in_image": ToolAccessLevel.READ_ONLY,  # Face identification against known identities
+            "identify_faces_in_image": ToolAccessLevel.READ_ONLY,  # Face detection and identification in attached images
             "detect_objects_in_image": ToolAccessLevel.READ_ONLY,  # Object detection (YOLO + CLIP)
             "search_images_by_object": ToolAccessLevel.READ_ONLY,  # Find images containing an object
             "annotate_custom_object": ToolAccessLevel.READ_WRITE,  # Create user-defined object annotation
@@ -901,13 +942,18 @@ class CentralizedToolRegistry:
             # **BULLY!** ORG-MODE SEARCH TOOLS - Search user's reference org files!
             "search_org_files": ToolAccessLevel.READ_ONLY,  # Search across all .org files
             "list_org_todos": ToolAccessLevel.READ_ONLY,  # List TODO items
+            "list_todos": ToolAccessLevel.READ_ONLY,  # Universal list todos
             "search_org_by_tag": ToolAccessLevel.READ_ONLY,  # Search by org tags
+            "search_help_docs": ToolAccessLevel.READ_ONLY,  # App help documentation
             # Email (read-only)
             "read_recent_emails": ToolAccessLevel.READ_ONLY,
             "search_emails": ToolAccessLevel.READ_ONLY,
             "get_email_thread": ToolAccessLevel.READ_ONLY,
             "get_email_statistics": ToolAccessLevel.READ_ONLY,
             "summarize_unread_emails": ToolAccessLevel.READ_ONLY,
+            "list_calendars": ToolAccessLevel.READ_ONLY,
+            "get_calendar_events": ToolAccessLevel.READ_ONLY,
+            "get_event_by_id": ToolAccessLevel.READ_ONLY,
             # CALCULATION TOOLS REMOVED: Use collaboration with Calculate Agent instead!
             # WEATHER TOOLS REMOVED: Use collaboration with Weather Agent instead!
         }
@@ -925,13 +971,18 @@ class CentralizedToolRegistry:
             # format_data removed - DataFormattingAgent migrated to llm-orchestrator gRPC service
             # **BULLY!** Quick org-mode TODO queries for casual questions
             "list_org_todos": ToolAccessLevel.READ_ONLY,  # "What's on my TODO list?"
+            "list_todos": ToolAccessLevel.READ_ONLY,  # Universal list todos
             "search_org_by_tag": ToolAccessLevel.READ_ONLY,  # "What's tagged @work?"
+            "search_help_docs": ToolAccessLevel.READ_ONLY,  # App help documentation
             # Email (read-only): inbox summary, search, stats
             "read_recent_emails": ToolAccessLevel.READ_ONLY,
             "search_emails": ToolAccessLevel.READ_ONLY,
             "get_email_thread": ToolAccessLevel.READ_ONLY,
             "get_email_statistics": ToolAccessLevel.READ_ONLY,
             "summarize_unread_emails": ToolAccessLevel.READ_ONLY,
+            "list_calendars": ToolAccessLevel.READ_ONLY,
+            "get_calendar_events": ToolAccessLevel.READ_ONLY,
+            "get_event_by_id": ToolAccessLevel.READ_ONLY,
             # REMOVED: search_local, get_document - Chat Agent uses cache first, Research Agent handles external searches
         }
         
@@ -954,22 +1005,6 @@ class CentralizedToolRegistry:
         # CodingAgent removed - not fully fleshed out
         # Removed agent permissions
         
-        # RSS agents
-        self._agent_permissions[AgentType.RSS_BACKGROUND_AGENT] = {
-            "rss_poll_feeds": ToolAccessLevel.WEB_ACCESS,
-            "rss_process_articles": ToolAccessLevel.WEB_ACCESS,
-            "rss_get_feeds": ToolAccessLevel.WEB_ACCESS,
-            "rss_create_feed": ToolAccessLevel.WEB_ACCESS,
-            "rss_update_feed": ToolAccessLevel.WEB_ACCESS,
-            "rss_delete_feed": ToolAccessLevel.WEB_ACCESS
-        }
-        self._agent_permissions[AgentType.RSS_AGENT] = {
-            "rss_get_feeds": ToolAccessLevel.WEB_ACCESS,
-            "rss_create_feed": ToolAccessLevel.WEB_ACCESS,
-            "rss_update_feed": ToolAccessLevel.WEB_ACCESS,
-            "rss_delete_feed": ToolAccessLevel.WEB_ACCESS,
-            "rss_poll_feeds": ToolAccessLevel.WEB_ACCESS
-        }
         # ORG_INBOX_AGENT removed - migrated to llm-orchestrator gRPC service
 
         # ORG_PROJECT_AGENT removed - migrated to llm-orchestrator gRPC service
@@ -984,6 +1019,12 @@ class CentralizedToolRegistry:
             "mark_email_as_read": ToolAccessLevel.READ_WRITE,
             "get_email_statistics": ToolAccessLevel.READ_ONLY,
             "summarize_unread_emails": ToolAccessLevel.READ_ONLY,
+            "list_calendars": ToolAccessLevel.READ_ONLY,
+            "get_calendar_events": ToolAccessLevel.READ_ONLY,
+            "get_event_by_id": ToolAccessLevel.READ_ONLY,
+            "create_event": ToolAccessLevel.READ_WRITE,
+            "update_event": ToolAccessLevel.READ_WRITE,
+            "delete_event": ToolAccessLevel.READ_WRITE,
         }
 
         # IMAGE_GENERATION_AGENT removed - migrated to llm-orchestrator gRPC service
@@ -1327,13 +1368,13 @@ class CentralizedToolRegistry:
         
         # Map category to tool names
         category_to_tools = {
-            "search_local": ["search_local", "search_conversation_cache"],
+            "search_local": ["search_local", "search_conversation_cache", "fulltext_search"],
             "search_web": ["search_web", "crawl_web_content"],
             "document_ops": ["get_document"],
             "analysis": ["analyze_documents"],
             "math": ["calculate"],
             "weather": ["get_weather"],
-            "org_files": ["search_org_files", "list_org_todos", "search_org_by_tag"],
+            "org_files": ["search_org_files", "list_org_todos", "list_todos", "search_org_by_tag"],
             "messaging": ["send_room_message", "get_user_rooms"],
             "file_creation": ["create_file", "create_folder"],
             "expansion": ["expand_query"],

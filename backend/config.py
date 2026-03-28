@@ -18,8 +18,12 @@ class Settings(BaseSettings):
     # Authentication Configuration
     JWT_SECRET_KEY: str = "bastion-jwt-secret-key-change-in-production"
     JWT_ALGORITHM: str = "HS256"
+    # 24 hours default. Set to 0 or negative for no expiration (long-lived tokens).
     JWT_EXPIRATION_MINUTES: int = 1440  # 24 hours
-    
+
+    # Google Reader compatible RSS API (/api/greader/...)
+    GREADER_API_ENABLED: bool = True
+
     # Default Admin User (created at startup)
     ADMIN_USERNAME: str = "admin"
     ADMIN_PASSWORD: str = "admin123"
@@ -55,6 +59,10 @@ class Settings(BaseSettings):
     IMAGE_VISION_SERVICE_PORT: int = int(os.getenv("IMAGE_VISION_SERVICE_PORT", "50056"))
     CONNECTIONS_SERVICE_HOST: str = os.getenv("CONNECTIONS_SERVICE_HOST", "connections-service")
     CONNECTIONS_SERVICE_PORT: int = int(os.getenv("CONNECTIONS_SERVICE_PORT", "50057"))
+    DOCUMENT_SERVICE_HOST: str = os.getenv("DOCUMENT_SERVICE_HOST", "document-service")
+    DOCUMENT_SERVICE_PORT: int = int(os.getenv("DOCUMENT_SERVICE_PORT", "50058"))
+    VOICE_SERVICE_HOST: str = os.getenv("VOICE_SERVICE_HOST", "voice-service")
+    VOICE_SERVICE_PORT: int = int(os.getenv("VOICE_SERVICE_PORT", "50059"))
 
     # Microsoft OAuth (external connections)
     MICROSOFT_CLIENT_ID: str = os.getenv("MICROSOFT_CLIENT_ID", "")
@@ -81,6 +89,16 @@ class Settings(BaseSettings):
     def CONNECTIONS_SERVICE_URL(self) -> str:
         """Get Connections Service gRPC URL"""
         return f"{self.CONNECTIONS_SERVICE_HOST}:{self.CONNECTIONS_SERVICE_PORT}"
+
+    @property
+    def DOCUMENT_SERVICE_URL(self) -> str:
+        """Get Document Service gRPC URL (entity extraction)."""
+        return f"{self.DOCUMENT_SERVICE_HOST}:{self.DOCUMENT_SERVICE_PORT}"
+
+    @property
+    def VOICE_SERVICE_URL(self) -> str:
+        """Get Voice Service gRPC URL (STT/TTS)."""
+        return f"{self.VOICE_SERVICE_HOST}:{self.VOICE_SERVICE_PORT}"
 
     # WebDAV Configuration for OrgMode mobile sync
     WEBDAV_HOST: str = "0.0.0.0"
@@ -126,8 +144,11 @@ class Settings(BaseSettings):
     # API Keys
     OPENAI_API_KEY: str = ""
     OPENROUTER_API_KEY: str = ""
+    GROQ_API_KEY: str = ""
     OPENWEATHERMAP_API_KEY: str = ""
     OSRM_BASE_URL: str = "http://osrm:5000"
+    VALHALLA_BASE_URL: str = "http://valhalla:8002"
+    ROUTING_PROVIDER: str = "valhalla"  # "valhalla" or "osrm"
 
     # LLM Configuration
     DEFAULT_MODEL: str = "anthropic/claude-3.5-haiku"  # Default model for general tasks
@@ -135,6 +156,11 @@ class Settings(BaseSettings):
     INTENT_CLASSIFICATION_MODEL: str = ""  # Optional override for capability-based intent classifier
     OPENROUTER_MODEL: str = ""  # Optional default chat model used when selecting primary model
     EMBEDDING_MODEL: str = "text-embedding-3-large"
+
+    # Admin LLM provider base URL overrides (optional; defaults from provider_models.CLOUD_BASE_URLS)
+    OPENAI_BASE_URL: str = ""  # e.g. https://api.openai.com/v1
+    OPENROUTER_BASE_URL: str = ""  # e.g. https://openrouter.ai/api/v1
+    GROQ_BASE_URL: str = ""  # e.g. https://api.groq.com/openai/v1
 
     # Reasoning Configuration
     REASONING_ENABLED: bool = True  # Enable reasoning tokens support

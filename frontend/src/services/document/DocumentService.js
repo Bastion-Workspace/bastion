@@ -92,11 +92,23 @@ class DocumentService extends ApiServiceBase {
     return this.put(`/api/documents/${documentId}/metadata`, metadata);
   }
 
+  getPendingProposals = async (documentId, options = {}) => {
+    return this.get(`/api/documents/${documentId}/pending-proposals`, options);
+  }
+
   applyDocumentEditProposal = async (proposalId, selectedOperationIndices = null) => {
     return this.post('/api/documents/edit-proposals/apply', {
       proposal_id: proposalId,
       selected_operation_indices: selectedOperationIndices
     });
+  }
+
+  rejectDocumentEditProposal = async (proposalId) => {
+    return this.post('/api/documents/edit-proposals/reject', { proposal_id: proposalId });
+  }
+
+  markDocumentEditProposalApplied = async (proposalId) => {
+    return this.post('/api/documents/edit-proposals/mark-applied', { proposal_id: proposalId });
   }
 
   renameDocument = async (documentId, newFilename) => {
@@ -116,6 +128,20 @@ class DocumentService extends ApiServiceBase {
     });
   }
 
+  /**
+   * Search documents (hybrid vector + full-text, semantic-only, or fulltext-only).
+   * Results include highlighted_snippet when available from full-text search.
+   */
+  searchDocuments = async (query, { searchMode = 'hybrid', limit = 20, folderId = null, fileTypes = null } = {}) => {
+    const body = {
+      query: String(query || '').trim(),
+      search_mode: searchMode,
+      limit: limit
+    };
+    if (folderId) body.folder_id = folderId;
+    if (fileTypes && fileTypes.length) body.file_types = fileTypes;
+    return this.post('/api/user/documents/search', body);
+  }
 
   // Document content retrieval
   getDocumentContent = async (documentId) => {
@@ -136,6 +162,23 @@ class DocumentService extends ApiServiceBase {
       console.error('Failed to update document content:', error);
       throw error;
     }
+  }
+
+  // Document version history
+  getDocumentVersions = async (documentId, skip = 0, limit = 100) => {
+    return this.get(`/api/documents/${documentId}/versions?skip=${skip}&limit=${limit}`);
+  }
+
+  getVersionContent = async (documentId, versionId) => {
+    return this.get(`/api/documents/${documentId}/versions/${versionId}/content`);
+  }
+
+  diffVersions = async (documentId, fromVersionId, toVersionId) => {
+    return this.get(`/api/documents/${documentId}/versions/diff?from=${encodeURIComponent(fromVersionId)}&to=${encodeURIComponent(toVersionId)}`);
+  }
+
+  rollbackToVersion = async (documentId, versionId) => {
+    return this.post(`/api/documents/${documentId}/versions/${versionId}/rollback`);
   }
 
   // Document creation methods

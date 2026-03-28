@@ -25,7 +25,7 @@ class SummarizationNode:
     Usage:
         # In agent's _build_workflow():
         summarization_node = SummarizationNode(
-            trigger_tokens=4000,
+            trigger_tokens=5000,
             keep_messages=20
         )
         workflow.add_node("summarize_history", summarization_node)
@@ -36,7 +36,7 @@ class SummarizationNode:
     def __init__(
         self,
         model: Optional[str] = None,
-        trigger_tokens: int = 4000,
+        trigger_tokens: int = 5000,
         keep_messages: int = 20,
         summary_prefix: str = "[Previous conversation summarized]"
     ):

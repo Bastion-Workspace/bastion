@@ -14,7 +14,7 @@ import re
 from typing import Dict, Any, List, TypedDict, Literal, Optional
 from langgraph.graph import StateGraph, END
 
-from orchestrator.tools import search_documents_structured, get_document_content_tool, search_images_tool
+from orchestrator.tools import search_documents_tool, get_document_content_tool, search_images_tool
 from orchestrator.backend_tool_client import get_backend_tool_client
 from orchestrator.agents.base_agent import BaseAgent
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -181,13 +181,13 @@ async def _vector_search_node(state: DocumentRetrievalState) -> Dict[str, Any]:
         candidate_limit = max(max_results * multiplier, 10)  # At least 10 candidates
         
         # Perform vector search with expanded candidate pool
-        search_result = await search_documents_structured(
+        search_result = await search_documents_tool(
             query=query,
             limit=candidate_limit,
             user_id=user_id
         )
         
-        results = search_result.get('results', [])
+        results = search_result.get('documents', [])
         
         # Filter by relevance score - mode-dependent thresholds
         relevance_thresholds = {
@@ -382,7 +382,8 @@ async def _intelligent_content_retrieval_node(state: DocumentRetrievalState) -> 
                 
             elif doc_size < small_doc_threshold:
                 # SMALL DOC: Get full content
-                full_content = await get_document_content_tool(doc_id, user_id)
+                full_result = await get_document_content_tool(doc_id, user_id)
+                full_content = full_result.get("content", full_result) if isinstance(full_result, dict) else full_result
                 doc_id_short = doc_id[:8] if doc_id else "Unknown"
                 if full_content and not full_content.startswith("Error") and not full_content.startswith("Document not found"):
                     enriched_doc["retrieval_strategy"] = "full_document"
@@ -590,7 +591,8 @@ Return an entry for each document. Set needs_full=true if the full document shou
                     logger.info(f"📄 Retrieving full document for {doc_title[:50]} (LLM determined chunks insufficient)")
                     
                     # Retrieve full document
-                    full_content = await get_document_content_tool(doc_id, user_id)
+                    full_result = await get_document_content_tool(doc_id, user_id)
+                    full_content = full_result.get("content", full_result) if isinstance(full_result, dict) else full_result
                     
                     if full_content and not full_content.startswith("Error") and not full_content.startswith("Document not found"):
                         # Update the document in retrieved_documents

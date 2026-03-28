@@ -1,0 +1,332 @@
+/**
+ * Type compatibility for Agent Factory input wiring.
+ * Mirrors backend is_type_compatible rules so the UI only shows compatible upstream outputs.
+ */
+import { PROMPT_VARIABLES, isRuntimeVar } from './promptVariableManifest';
+
+/**
+ * Map JSON Schema type to tool type system (text, number, boolean, list[...], record).
+ * @param {string} schemaType - e.g. "string", "integer", "array"
+ * @returns {string}
+ */
+export function mapSchemaType(schemaType) {
+  if (!schemaType) return 'text';
+  const t = String(schemaType).toLowerCase();
+  if (t === 'string') return 'text';
+  if (t === 'integer' || t === 'number') return 'number';
+  if (t === 'boolean') return 'boolean';
+  if (t === 'array') return 'list[any]';
+  if (t === 'object') return 'record';
+  return 'text';
+}
+
+/**
+ * Get output fields for a step. Uses action registry when available; otherwise fallback for llm_task, approval, or tool.
+ * @param {object} step - step object with step_type, output_key, action, output_schema
+ * @param {Record<string, object>} actionsByName - map action name -> action with output_fields
+ * @returns {Array<{ name: string, type: string }>}
+ */
+export function getOutputFieldsForStep(step, actionsByName) {
+  const action = actionsByName[step?.action];
+  let outputFields = action?.output_fields || [];
+  if (outputFields.length) return outputFields;
+
+  const stepType = step?.step_type || 'tool';
+  if (stepType === 'llm_task') {
+    outputFields = [
+      { name: 'formatted', type: 'text' },
+      { name: 'raw', type: 'text' },
+    ];
+    const schemaProps = step?.output_schema?.properties;
+    if (schemaProps && typeof schemaProps === 'object') {
+      for (const [fname, fdef] of Object.entries(schemaProps)) {
+        if (fname !== 'formatted' && fname !== 'raw') {
+          const ftype = (fdef && fdef.type) ? mapSchemaType(fdef.type) : 'text';
+          outputFields.push({ name: fname, type: ftype });
+        }
+      }
+    }
+    return outputFields;
+  }
+  if (stepType === 'approval') {
+    return [{ name: 'approved', type: 'boolean' }];
+  }
+  if (stepType === 'deep_agent') {
+    return [
+      { name: 'formatted', type: 'text' },
+      { name: 'phase_trace', type: 'record' },
+      { name: 'raw', type: 'text' },
+    ];
+  }
+  return [{ name: 'formatted', type: 'text' }];
+}
+
+/**
+ * Check if sourceType can be wired to targetType (with coercion).
+ * @param {string} sourceType - e.g. "text", "number", "list[record]"
+ * @param {string} targetType - e.g. "text", "number"
+ * @returns {boolean}
+ */
+export function isTypeCompatible(sourceType, targetType) {
+  if (!sourceType || !targetType) return true;
+  if (sourceType === targetType) return true;
+  if (targetType === 'any' || sourceType === 'any') return true;
+  if (targetType === 'text') return true;
+  if (sourceType === 'text') {
+    if (targetType.startsWith('list[')) return true;
+    return ['number', 'boolean', 'date', 'record', 'any'].includes(targetType);
+  }
+  if (sourceType === 'number' && targetType === 'boolean') return true;
+  if (sourceType === 'file_ref') return ['text', 'record', 'any'].includes(targetType);
+  if (sourceType.startsWith('list[') && targetType === 'text') return true;
+  if (sourceType.startsWith('list[') && targetType.startsWith('list[')) {
+    const innerSource = sourceType.slice(5, -1);
+    const innerTarget = targetType.slice(5, -1);
+    return isTypeCompatible(innerSource, innerTarget);
+  }
+  if (sourceType === 'record' && targetType === 'text') return true;
+  return false;
+}
+
+/**
+ * Expand a step into the list of steps whose outputs are available for wiring.
+ * Parallel: children in parallel_steps. Branch: children in then_steps and else_steps (both shown; only one path runs at runtime).
+ * @param {object} step - playbook step
+ * @returns {Array<{ step: object, labelSuffix?: string }>}
+ */
+function getStepsWithOutputs(step) {
+  if (!step) return [];
+  if (step.step_type === 'parallel' && Array.isArray(step.parallel_steps)) {
+    return step.parallel_steps.map((s) => ({ step: s }));
+  }
+  if (step.step_type === 'branch') {
+    const then = (step.then_steps || []).map((s) => ({ step: s, labelSuffix: ' (THEN)' }));
+    const el = (step.else_steps || []).map((s) => ({ step: s, labelSuffix: ' (ELSE)' }));
+    return [...then, ...el];
+  }
+  return [{ step }];
+}
+
+/**
+ * Build compatible upstream wiring options for a given input.
+ * @param {string} targetInputType - type of the input we're wiring to
+ * @param {Array<{ output_key: string, action: string }>} upstreamSteps - steps before current
+ * @param {Record<string, { name: string, input_fields?: Array<{name, type}>, output_fields?: Array<{name, type}> }>} actionsByName - map action name -> action with input_fields, output_fields
+ * @returns {Array<{ value: string, label: string, type?: string }>} options for dropdown, value is e.g. "{step_1.formatted}"
+ */
+export function getCompatibleUpstreamOptions(targetInputType, upstreamSteps, actionsByName) {
+  const options = [];
+  for (const s of upstreamSteps) {
+    for (const { step, labelSuffix } of getStepsWithOutputs(s)) {
+      const key = step.output_key || step.name || step.action || '';
+      if (!key) continue;
+      const outputFields = getOutputFieldsForStep(step, actionsByName);
+      for (const f of outputFields) {
+        const type = f.type || 'text';
+        if (isTypeCompatible(type, targetInputType)) {
+          options.push({
+            value: `{${key}.${f.name}}`,
+            label: `${key}.${f.name}${labelSuffix || ''}`,
+            type,
+          });
+        }
+      }
+    }
+  }
+  return options;
+}
+
+/**
+ * Build grouped wiring options: Upstream Step Outputs, Playbook Inputs, Runtime Variables.
+ * Each option has compatible flag for highlighting.
+ */
+export function getGroupedWireOptions(targetInputType, upstreamSteps, actionsByName, playbookInputs = []) {
+  const upstream = [];
+  for (const s of upstreamSteps) {
+    for (const { step, labelSuffix } of getStepsWithOutputs(s)) {
+      const key = step.output_key || step.name || step.action || '';
+      if (!key) continue;
+      const outputFields = getOutputFieldsForStep(step, actionsByName);
+      const options = outputFields.map((f) => {
+        const type = f.type || 'text';
+        return {
+          value: `{${key}.${f.name}}`,
+          label: `${key}.${f.name}${labelSuffix || ''}`,
+          type,
+          compatible: isTypeCompatible(type, targetInputType),
+        };
+      });
+      if (options.length) upstream.push({ stepKey: key, options });
+    }
+  }
+  const playbook = (playbookInputs || []).map((p) => {
+    const type = (p.type || 'string').toLowerCase();
+    const name = typeof p === 'object' && p.name ? p.name : String(p);
+    return {
+      value: `{${name}}`,
+      label: name,
+      type,
+      compatible: isTypeCompatible(type, targetInputType),
+    };
+  });
+  const runtime = PROMPT_VARIABLES.map((v) => ({
+    value: `{${v.key}}`,
+    label: v.key,
+    type: v.group === 'datetime' ? 'date' : 'text',
+    compatible: isTypeCompatible(v.group === 'datetime' ? 'date' : 'text', targetInputType),
+    alwaysAvailable: v.alwaysAvailable,
+    requiresOpenFile: v.requiresOpenFile,
+    scheduleOnly: v.scheduleOnly,
+  }));
+  return { upstream, playbookInputs: playbook, runtime };
+}
+
+/**
+ * Index actions by name for lookup.
+ * @param {Array} actions - list from API (objects with name, input_fields, output_fields)
+ * @returns {Record<string, object>}
+ */
+export function indexActionsByName(actions) {
+  const byName = {};
+  if (!Array.isArray(actions)) return byName;
+  for (const a of actions) {
+    const name = typeof a === 'string' ? a : a?.name;
+    if (name) byName[name] = a;
+  }
+  return byName;
+}
+
+const REF_PATTERN = /\{([^}]+)\}/;
+
+/**
+ * Extract {ref} placeholders from a prompt template (e.g. for LLM task steps).
+ * @param {string} template - prompt template string
+ * @returns {string[]} unique placeholder refs, e.g. ["weather.formatted", "step_1.formatted"]
+ */
+export function extractPromptPlaceholders(template) {
+  if (!template || typeof template !== 'string') return [];
+  const matches = [...template.matchAll(/\{([^}]+)\}/g)];
+  const refs = matches.map((m) => m[1].trim()).filter(Boolean);
+  return [...new Set(refs)];
+}
+
+const VALID_STEP_TYPES = new Set(['tool', 'llm_task', 'llm_agent', 'approval', 'loop', 'parallel', 'branch', 'deep_agent']);
+
+/**
+ * Validate playbook step wirings: references must point to upstream steps and compatible output fields.
+ * Also warns when a tool step has a required input with no value wired.
+ * @param {Array<{ name?: string, action?: string, output_key?: string, inputs?: Record<string, string> }>} steps
+ * @param {Record<string, object>} actionsByName - map action name -> action with input_fields, output_fields
+ * @returns {Array<{ stepIndex: number, stepName: string, inputKey: string, message: string }>} validation errors
+ */
+export function validatePlaybookWiring(steps, actionsByName) {
+  const errors = [];
+  if (!Array.isArray(steps) || !actionsByName) return errors;
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const stepName = step?.name || step?.output_key || step?.action || `Step ${i + 1}`;
+    const inputs = step?.inputs || {};
+    const stepType = step?.step_type || 'tool';
+
+    if (!VALID_STEP_TYPES.has(stepType)) {
+      errors.push({
+        stepIndex: i,
+        stepName,
+        inputKey: 'step_type',
+        message: `Invalid step_type "${stepType}". Must be one of: tool, llm_task, llm_agent, approval, loop, parallel, branch, deep_agent.`,
+      });
+    }
+
+    if (stepType === 'llm_agent' && !(step?.available_tools?.length)) {
+      errors.push({
+        stepIndex: i,
+        stepName,
+        inputKey: 'available_tools',
+        message:
+          'llm_agent step has no available_tools. Fix: add available_tools list with action names (e.g. ["send_email", "list_todos"]).',
+      });
+    }
+
+    // Tool steps: warn when a required input has no value
+    if (stepType === 'tool' && step?.action) {
+      const action = actionsByName[step.action];
+      const inputFields = action?.input_fields || [];
+      for (const field of inputFields) {
+        if (field.required !== true) continue;
+        const value = inputs[field.name];
+        const isEmpty = value === undefined || value === null || String(value).trim() === '';
+        if (isEmpty) {
+          errors.push({
+            stepIndex: i,
+            stepName,
+            inputKey: field.name,
+            message: `Required input "${field.name}" has no value. Wire it to an upstream step (e.g. {step_1.formatted}) or enter a literal.`,
+          });
+        }
+      }
+    }
+
+    const upstreamSteps = steps.slice(0, i);
+    const expandedUpstream = [];
+    for (const s of upstreamSteps) {
+      for (const { step } of getStepsWithOutputs(s)) {
+        const key = step.output_key || step.name || step.action;
+        if (key) expandedUpstream.push({ key, step });
+      }
+    }
+    for (const [inputKey, value] of Object.entries(inputs)) {
+      if (typeof value !== 'string') continue;
+      const match = value.match(REF_PATTERN);
+      if (!match) continue;
+      const ref = match[1].trim();
+      const dot = ref.indexOf('.');
+      if (dot === -1) {
+        if (isRuntimeVar(ref)) continue;
+        errors.push({
+          stepIndex: i,
+          stepName,
+          inputKey,
+          message: `Invalid reference "${value}": use {step_name.field_name}`,
+        });
+        continue;
+      }
+      const refStepKey = ref.slice(0, dot).trim();
+      const refField = ref.slice(dot + 1).trim();
+      const upstreamEntry = expandedUpstream.find((e) => e.key === refStepKey);
+      const upstream = upstreamEntry?.step;
+      if (!upstream) {
+        errors.push({
+          stepIndex: i,
+          stepName,
+          inputKey,
+          message: `Unknown upstream step "${refStepKey}" in ${value}`,
+        });
+        continue;
+      }
+      const outputFields = getOutputFieldsForStep(upstream, actionsByName);
+      const outField = outputFields.find((f) => f.name === refField);
+      if (!outField) {
+        errors.push({
+          stepIndex: i,
+          stepName,
+          inputKey,
+          message: `Upstream step "${refStepKey}" has no output "${refField}"`,
+        });
+        continue;
+      }
+      const currentAction = actionsByName[step?.action];
+      const inputFields = currentAction?.input_fields || [];
+      const inField = inputFields.find((f) => f.name === inputKey);
+      const targetType = inField?.type || 'text';
+      if (!isTypeCompatible(outField.type || 'text', targetType)) {
+        errors.push({
+          stepIndex: i,
+          stepName,
+          inputKey,
+          message: `Type mismatch: ${refStepKey}.${refField} (${outField.type || 'text'}) is not compatible with ${inputKey} (${targetType})`,
+        });
+      }
+    }
+  }
+  return errors;
+}

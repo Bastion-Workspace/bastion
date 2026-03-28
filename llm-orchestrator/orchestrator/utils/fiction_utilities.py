@@ -10,7 +10,7 @@ import logging
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -587,4 +587,110 @@ def extract_pacing_block(chapter_text: str) -> Optional[Dict[str, str]]:
             "technique": None,
             "full_text": pacing_content
         }
+
+
+# ============================================
+# Beats and Scene Group Extraction
+# ============================================
+
+def extract_beats_list(chapter_outline_text: str) -> List[str]:
+    """
+    Extract beats as a list of strings from chapter outline text.
+
+    Looks for a ### Beats section and returns bullet items (- ...) as a list.
+    Stops at the next ### or ## heading or at a non-bullet line (for multiline beats,
+    we only take the first line of each bullet).
+
+    Args:
+        chapter_outline_text: Full chapter outline text (e.g. from extract_chapter_outline)
+
+    Returns:
+        List of beat strings, stripped of leading "- ". Empty list if no Beats section.
+    """
+    if not chapter_outline_text:
+        return []
+
+    # Find ### Beats block (case-insensitive); content until next ### or ##
+    beats_pattern = r'(?i)(?:^|\n)###\s+Beats\s*\n((?:(?!\n###|\n##).)*?)(?=\n###|\n##|\Z)'
+    match = re.search(beats_pattern, chapter_outline_text, re.MULTILINE | re.DOTALL)
+    if not match:
+        return []
+
+    block = match.group(1)
+    beats = []
+    for line in block.splitlines():
+        line = line.strip()
+        if line.startswith('- '):
+            beats.append(line[2:].strip())
+    return beats
+
+
+def extract_scene_groups(chapter_outline_text: str) -> Optional[List[Dict[str, Any]]]:
+    """
+    Extract optional ### Scenes block from chapter outline for explicit beat groupings.
+
+    When authors define scene groups, the plan can use these instead of automatic
+    planning. Format examples:
+      **Scene: Arrival** — Beats 1-3 (combine; single atmospheric paragraph)
+      **Scene: Confrontation** — Beats 4-6 (expand; each beat significant)
+      Scene: Intro — Beats 1, 2
+
+    Args:
+        chapter_outline_text: Full chapter outline text (e.g. from extract_chapter_outline)
+
+    Returns:
+        List of dicts with keys: scene_name, beat_indices (1-based list), prose_hint (optional).
+        None if no ### Scenes block present. beat_indices are 1-based to match "Beat 1" in outline.
+    """
+    if not chapter_outline_text:
+        return None
+
+    # Find ### Scenes block; content until next ### or ##
+    scenes_pattern = r'(?i)(?:^|\n)###\s+Scenes\s*\n((?:(?!\n###|\n##).)*?)(?=\n###|\n##|\Z)'
+    match = re.search(scenes_pattern, chapter_outline_text, re.MULTILINE | re.DOTALL)
+    if not match:
+        return None
+
+    block = match.group(1).strip()
+    if not block:
+        return []
+
+    scenes = []
+    # Line-based: "**Scene: Name** — Beats 1-3 (hint)" or "Scene: Name — Beats 1, 2, 3"
+    # Optional prose hint in parentheses at end
+    line_pattern = re.compile(
+        r'^\s*\*?\*?Scene:\s*([^*\n—\-]+?)\*?\*?\s*[—\-]\s*Beats?\s+([0-9,\s\-]+)(?:\s*\(([^)]*)\))?\s*$',
+        re.IGNORECASE
+    )
+    for line in block.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = line_pattern.match(line)
+        if not m:
+            continue
+        scene_name = m.group(1).strip()
+        beats_part = m.group(2).strip()
+        prose_hint = m.group(3).strip() if m.group(3) else None
+        # Parse "1-3" or "1, 2, 3" or "4-6" into 1-based indices
+        indices = set()
+        for part in re.split(r'[\s,]+', beats_part):
+            if '-' in part:
+                a, b = part.split('-', 1)
+                try:
+                    lo, hi = int(a.strip()), int(b.strip())
+                    indices.update(range(lo, hi + 1))
+                except ValueError:
+                    continue
+            else:
+                try:
+                    indices.add(int(part.strip()))
+                except ValueError:
+                    continue
+        scenes.append({
+            "scene_name": scene_name,
+            "beat_indices": sorted(indices),
+            "prose_hint": prose_hint,
+        })
+    return scenes if scenes else None
 

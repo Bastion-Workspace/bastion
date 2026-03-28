@@ -11,15 +11,102 @@ export const useMusic = () => {
   return context;
 };
 
+const STORAGE_KEY = 'musicPlayerState';
+const CURRENT_TIME_SAVE_INTERVAL_MS = 2000;
+
+/** Only use CORS mode when stream URL is cross-origin; same-origin + anonymous can confuse some browsers. */
+function applyStreamUrlToAudioElement(audio, streamUrl) {
+  try {
+    const streamOrigin = new URL(streamUrl, window.location.href).origin;
+    if (streamOrigin === window.location.origin) {
+      audio.removeAttribute('crossorigin');
+    } else {
+      audio.crossOrigin = 'anonymous';
+    }
+  } catch {
+    audio.crossOrigin = 'anonymous';
+  }
+  audio.src = streamUrl;
+}
+
+function serializeTrack(track) {
+  if (!track) return null;
+  return {
+    id: track.id,
+    title: track.title,
+    artist: track.artist,
+    album: track.album,
+    artwork: track.artwork,
+    service_type: track.service_type || null,
+    parent_id: track.metadata?.parent_id || track.parent_id || null
+  };
+}
+
+function loadPlayerState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data || (!data.queue && !data.currentTrack)) return null;
+    const queue = Array.isArray(data.queue) ? data.queue : [];
+    const currentIndex = typeof data.currentIndex === 'number' && data.currentIndex >= 0 && data.currentIndex < queue.length
+      ? data.currentIndex
+      : 0;
+    const currentTrack = queue[currentIndex] || data.currentTrack || null;
+    return {
+      queue,
+      originalQueue: queue,
+      currentIndex: queue.length ? currentIndex : -1,
+      currentTrack: queue.length ? (currentTrack ? { ...currentTrack } : null) : null,
+      currentTime: typeof data.currentTime === 'number' && data.currentTime >= 0 ? data.currentTime : 0,
+      volume: typeof data.volume === 'number' && data.volume >= 0 && data.volume <= 1 ? data.volume : 1,
+      isMuted: Boolean(data.isMuted),
+      restoreTime: typeof data.currentTime === 'number' && data.currentTime > 0 ? data.currentTime : null
+    };
+  } catch (e) {
+    console.error('Failed to load music player state:', e);
+    return null;
+  }
+}
+
+function savePlayerState(state) {
+  try {
+    const payload = {
+      queue: (state.queue || []).map(serializeTrack),
+      currentIndex: state.currentIndex,
+      currentTime: state.currentTime,
+      volume: state.volume,
+      isMuted: state.isMuted
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  } catch (e) {
+    console.error('Failed to save music player state:', e);
+  }
+}
+
+function useInitialPlayerState() {
+  const ref = useRef(undefined);
+  if (ref.current === undefined) ref.current = loadPlayerState();
+  return ref.current;
+}
+
 export const MusicProvider = ({ children }) => {
-  const [currentTrack, setCurrentTrack] = useState(null);
-  const [queue, setQueue] = useState([]);
-  const [currentIndex, setCurrentIndex] = useState(-1);
+  const seekToOnLoadRef = useRef(null);
+  const initial = useInitialPlayerState();
+
+  const [currentTrack, setCurrentTrack] = useState(() => initial?.currentTrack ?? null);
+  const [queue, setQueue] = useState(() => initial?.queue ?? []);
+  const [currentIndex, setCurrentIndex] = useState(() =>
+    initial && initial.queue?.length
+      ? Math.max(0, Math.min(initial.currentIndex, initial.queue.length - 1))
+      : -1);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
+  const [currentTime, setCurrentTime] = useState(() =>
+    (typeof initial?.currentTime === 'number' && initial.currentTime >= 0) ? initial.currentTime : 0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(1);
-  const [isMuted, setIsMuted] = useState(false);
+  const [volume, setVolume] = useState(() =>
+    (typeof initial?.volume === 'number' && initial.volume >= 0 && initial.volume <= 1) ? initial.volume : 1);
+  const [isMuted, setIsMuted] = useState(() => Boolean(initial?.isMuted));
   
   // Load repeat and shuffle modes from localStorage
   const [repeatMode, setRepeatMode] = useState(() => {
@@ -41,10 +128,16 @@ export const MusicProvider = ({ children }) => {
       return false;
     }
   });
-  const [originalQueue, setOriginalQueue] = useState([]); // Store original queue for shuffle
+  const [originalQueue, setOriginalQueue] = useState(() =>
+    (initial?.queue?.length ? (initial.originalQueue ?? initial.queue) : []));
   const [currentParentId, setCurrentParentId] = useState(null); // For repeat album/playlist
   
   const audioRef = useRef(null);
+  const nextTrackAudioRef = useRef(null);
+
+  useEffect(() => {
+    if (initial?.restoreTime != null) seekToOnLoadRef.current = initial.restoreTime;
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps -- set seek-on-load once from initial restore
 
   // Track if we're waiting to play (audio loading)
   const shouldPlayRef = useRef(false);
@@ -272,6 +365,39 @@ export const MusicProvider = ({ children }) => {
     }
   }, [volume, isMuted]);
 
+  // Persist player state to localStorage (track, queue, volume, mute; throttle currentTime while playing)
+  useEffect(() => {
+    if (!currentTrack && queue.length === 0) return;
+    savePlayerState({
+      queue,
+      currentIndex,
+      currentTime,
+      volume,
+      isMuted
+    });
+  }, [currentTrack, queue, currentIndex, volume, isMuted]);
+
+  const lastSavedTimeRef = useRef(0);
+  useEffect(() => {
+    if (!isPlaying || !currentTrack) return;
+    const interval = setInterval(() => {
+      if (audioRef.current && typeof audioRef.current.currentTime === 'number') {
+        const t = audioRef.current.currentTime;
+        if (Date.now() - lastSavedTimeRef.current >= CURRENT_TIME_SAVE_INTERVAL_MS) {
+          lastSavedTimeRef.current = Date.now();
+          savePlayerState({
+            queue,
+            currentIndex,
+            currentTime: t,
+            volume,
+            isMuted
+          });
+        }
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isPlaying, currentTrack, queue, currentIndex, volume, isMuted]);
+
   // Periodic time sync when playing (backup for timeupdate event)
   useEffect(() => {
     if (!isPlaying || !audioRef.current) return;
@@ -289,88 +415,56 @@ export const MusicProvider = ({ children }) => {
   useEffect(() => {
     if (!currentTrack || !audioRef.current) return;
 
-    const loadTrack = async () => {
+    const loadTrack = () => {
       try {
         const audio = audioRef.current;
-        // Save shouldPlay state before pausing (pause event will try to clear it)
         const shouldAutoPlay = shouldPlayRef.current;
-        
-        console.log('Loading track:', currentTrack.id, currentTrack.title, 'shouldAutoPlay:', shouldAutoPlay);
-        
-        // Mark that we're loading a track (prevents pause handler from clearing shouldPlayRef)
+
         isLoadingTrackRef.current = true;
-        
-        // Cleanup previous blob URL BEFORE pausing to avoid "Empty src attribute" error
-        if (audio.src && audio.src.startsWith('blob:')) {
-          URL.revokeObjectURL(audio.src);
-          audio.src = ''; // Clear src before pausing
-        }
-        
-        // Pause and reset audio to prevent false 'ended' events
+
+        // Clear previous source (no blob URLs; direct stream URLs only)
         audio.pause();
+        audio.removeAttribute('src');
+        audio.load();
         audio.currentTime = 0;
         setCurrentTime(0);
-        setDuration(0); // Reset duration until new track loads
-        
-        // Restore shouldPlay state after pause (pause event handler won't clear it now)
+        setDuration(0);
+
         shouldPlayRef.current = shouldAutoPlay;
-        
-        // Get stream URL (proxy endpoint) - pass service_type if available
+
         const serviceType = currentTrack.service_type || null;
-        const streamUrl = await apiService.music.getStreamUrl(currentTrack.id, serviceType);
-        console.log('Stream URL received:', streamUrl, 'for service_type:', serviceType);
-        
-        // Fetch audio with authentication and create blob URL
-        // This is necessary because the proxy streaming has issues with format detection
-        const token = localStorage.getItem('auth_token') || localStorage.getItem('token');
-        console.log('Fetching audio stream with authentication...');
-        
-        const response = await fetch(streamUrl, {
-          headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-        });
-        
-        if (!response.ok) {
-          throw new Error(`Failed to load audio stream: ${response.status} ${response.statusText}`);
-        }
-        
-        // Get Content-Type from response for proper format handling
-        const contentType = response.headers.get('Content-Type') || 'audio/mpeg';
-        console.log('Audio Content-Type:', contentType);
-        
-        // Create blob URL from response with correct type
-        const blob = await response.blob();
-        const typedBlob = new Blob([blob], { type: contentType });
-        const blobUrl = URL.createObjectURL(typedBlob);
-        console.log('Blob URL created, setting audio source, shouldPlayRef:', shouldPlayRef.current);
-        
-        // Set crossOrigin for CORS if needed
-        audio.crossOrigin = 'anonymous';
-        audio.src = blobUrl;
-        
-        // Add error listener for this specific load
+        const parentId = currentTrack.metadata?.parent_id || currentTrack.parent_id || null;
+        const streamUrl = apiService.music.getStreamUrl(currentTrack.id, serviceType, parentId);
+
+        applyStreamUrlToAudioElement(audio, streamUrl);
+
         const handleLoadError = (e) => {
+          const err = audio.error;
+          if (err && (err.code === 4 && err.message === 'MEDIA_ELEMENT_ERROR: Empty src attribute')) return;
           console.error('Error loading audio source:', e);
-          const error = audio.error;
-          if (error) {
-            console.error('Audio error details:', {
-              code: error.code,
-              message: error.message
-            });
-            // Only clear shouldPlayRef for real errors, not cleanup errors
-            if (error.code !== 4 || error.message !== 'MEDIA_ELEMENT_ERROR: Empty src attribute') {
-              shouldPlayRef.current = false;
-            }
+          if (err) {
+            console.error('Audio error details:', { code: err.code, message: err.message });
+            shouldPlayRef.current = false;
           }
         };
-        
+
         audio.addEventListener('error', handleLoadError, { once: true });
-        
         audio.load();
-        console.log('Audio load() called, readyState:', audio.readyState, 'shouldPlayRef:', shouldPlayRef.current);
-        
-        // If audio is already loaded and we want to play, try playing immediately
-        if (shouldPlayRef.current && audio.readyState >= 3) { // HAVE_FUTURE_DATA or higher
-          console.log('Audio already loaded, attempting immediate play');
+
+        const seekTo = seekToOnLoadRef.current;
+        if (seekTo != null && seekTo > 0) {
+          const applySeek = () => {
+            if (audioRef.current && !isNaN(seekTo)) {
+              audioRef.current.currentTime = seekTo;
+              setCurrentTime(seekTo);
+            }
+            seekToOnLoadRef.current = null;
+          };
+          audio.addEventListener('canplay', applySeek, { once: true });
+          if (audio.readyState >= 3) setTimeout(applySeek, 0);
+        }
+
+        if (shouldPlayRef.current && audio.readyState >= 3) {
           setTimeout(() => {
             if (audioRef.current && shouldPlayRef.current) {
               audioRef.current.play().catch(err => {
@@ -379,13 +473,11 @@ export const MusicProvider = ({ children }) => {
             }
           }, 50);
         }
-        
-        // Force an initial time update after a short delay to ensure state is synced
+
         setTimeout(() => {
           if (audioRef.current && !isNaN(audioRef.current.currentTime)) {
             setCurrentTime(audioRef.current.currentTime);
           }
-          // Mark that track loading is complete
           isLoadingTrackRef.current = false;
         }, 100);
       } catch (error) {
@@ -397,15 +489,33 @@ export const MusicProvider = ({ children }) => {
     };
 
     loadTrack();
-    
-    // Cleanup blob URL when track changes or component unmounts
-    return () => {
-      if (audioRef.current && audioRef.current.src && audioRef.current.src.startsWith('blob:')) {
-        URL.revokeObjectURL(audioRef.current.src);
-        audioRef.current.src = '';
-      }
-    };
   }, [currentTrack]);
+
+  // Preload next track in a hidden audio element for near-gapless transition
+  useEffect(() => {
+    const nextIndex = currentIndex >= 0 && queue.length > 0 ? currentIndex + 1 : -1;
+    const hasNext = nextIndex >= 0 && nextIndex < queue.length;
+    if (!hasNext || !queue[nextIndex]) {
+      if (nextTrackAudioRef.current) {
+        nextTrackAudioRef.current.removeAttribute('src');
+        nextTrackAudioRef.current.load();
+      }
+      return;
+    }
+    const nextTrack = queue[nextIndex];
+    if (!nextTrack.id) return;
+    if (!nextTrackAudioRef.current) {
+      nextTrackAudioRef.current = new Audio();
+      nextTrackAudioRef.current.preload = 'auto';
+    }
+    const nextParentId = nextTrack.metadata?.parent_id || nextTrack.parent_id || null;
+    const url = apiService.music.getStreamUrl(nextTrack.id, nextTrack.service_type || null, nextParentId);
+    const resolvedUrl = new URL(url, window.location.href).href;
+    if (nextTrackAudioRef.current.src !== resolvedUrl) {
+      applyStreamUrlToAudioElement(nextTrackAudioRef.current, url);
+      nextTrackAudioRef.current.load();
+    }
+  }, [queue, currentIndex]);
 
   const handleTrackEnd = useCallback(() => {
     if (repeatMode === 'track' && currentTrack) {
@@ -648,9 +758,15 @@ export const MusicProvider = ({ children }) => {
     setCurrentTime(0);
     setDuration(0);
     shouldPlayRef.current = false;
+    seekToOnLoadRef.current = null;
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.src = '';
+    }
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch (e) {
+      console.error('Failed to clear music player state:', e);
     }
   }, []);
 

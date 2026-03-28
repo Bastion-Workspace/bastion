@@ -131,6 +131,50 @@ class BackendToolClient:
         except Exception as e:
             logger.error(f"Unexpected error in document search: {e}")
             return {'results': [], 'total_count': 0, 'error': str(e)}
+
+    async def search_help_docs(
+        self,
+        query: str,
+        user_id: str = "system",
+        limit: int = 5,
+    ) -> Dict[str, Any]:
+        """
+        Search app help documentation.
+
+        Args:
+            query: Natural language question about the app
+            user_id: User ID (for auth; help docs are global)
+            limit: Max number of results
+
+        Returns:
+            Dict with 'results' (list of {topic_id, title, content, score}) and 'total_count'
+        """
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.SearchHelpDocsRequest(
+                query=query,
+                user_id=user_id,
+                limit=limit,
+            )
+            response = await self._stub.SearchHelpDocs(request)
+            results = []
+            for r in response.results:
+                results.append({
+                    'topic_id': r.topic_id,
+                    'title': r.title,
+                    'content': r.content,
+                    'score': r.score,
+                })
+            return {
+                'results': results,
+                'total_count': response.total_count,
+            }
+        except grpc.RpcError as e:
+            logger.error("Help docs search failed: %s - %s", e.code(), e.details())
+            return {'results': [], 'total_count': 0, 'error': str(e)}
+        except Exception as e:
+            logger.error("Unexpected error in help docs search: %s", e)
+            return {'results': [], 'total_count': 0, 'error': str(e)}
     
     async def get_document(
         self,
@@ -408,27 +452,26 @@ class BackendToolClient:
         folder_path: Optional[str] = None,
         title: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        category: Optional[str] = None
+        category: Optional[str] = None,
+        content_bytes: Optional[bytes] = None,
     ) -> Dict[str, Any]:
         """
         Create a file in the user's My Documents section
-        
+
         Args:
             filename: Name of the file to create
-            content: File content as string
+            content: File content as string (ignored when content_bytes is set)
             user_id: User ID (required)
             folder_id: Optional folder ID to place file in
             folder_path: Optional folder path (e.g., "Projects/Electronics") - will create if needed
             title: Optional document title (defaults to filename)
             tags: Optional list of tags for the document
             category: Optional category for the document
-        
-        Returns:
-            Dict with success, document_id, filename, folder_id, and message
+            content_bytes: Optional binary content (PDF, images, etc.); when set, content is ignored
         """
         try:
             await self._ensure_connected()
-            
+
             request = tool_service_pb2.CreateUserFileRequest(
                 user_id=user_id,
                 filename=filename,
@@ -439,6 +482,8 @@ class BackendToolClient:
                 tags=tags if tags else [],
                 category=category if category else ""
             )
+            if content_bytes is not None:
+                request.binary_content = content_bytes
             
             response = await self._stub.CreateUserFile(request)
             
@@ -551,6 +596,120 @@ class BackendToolClient:
         except Exception as e:
             logger.error(f"Unexpected error getting folder tree: {e}")
             return []
+
+    async def list_folder_documents(
+        self,
+        folder_id: str,
+        user_id: str = "system",
+        limit: int = 500,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """
+        List documents directly in a folder (same access as folder contents API).
+
+        Returns:
+            Dict with success, documents (list of dicts), total_count, error
+        """
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListFolderDocumentsRequest(
+                folder_id=folder_id or "",
+                user_id=user_id or "",
+                limit=int(limit) if limit else 500,
+                offset=int(offset) if offset else 0,
+            )
+            response = await self._stub.ListFolderDocuments(request)
+            if response.error:
+                return {
+                    "success": False,
+                    "documents": [],
+                    "total_count": 0,
+                    "error": response.error,
+                }
+            docs = []
+            for d in response.documents:
+                docs.append(
+                    {
+                        "document_id": d.document_id,
+                        "filename": d.filename,
+                        "title": d.title,
+                        "collection_type": d.collection_type,
+                    }
+                )
+            return {
+                "success": True,
+                "documents": docs,
+                "total_count": int(response.total_count or len(docs)),
+                "error": None,
+            }
+        except grpc.RpcError as e:
+            logger.error("ListFolderDocuments failed: %s - %s", e.code(), e.details())
+            return {
+                "success": False,
+                "documents": [],
+                "total_count": 0,
+                "error": str(e),
+            }
+        except Exception as e:
+            logger.error("Unexpected error in list_folder_documents: %s", e)
+            return {
+                "success": False,
+                "documents": [],
+                "total_count": 0,
+                "error": str(e),
+            }
+
+    async def pick_random_document_from_folder(
+        self,
+        folder_id: str,
+        user_id: str = "system",
+        file_extension: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Pick a random document from a folder. Optional file_extension filter (e.g. png, jpg).
+
+        Returns:
+            Dict with found, document_id, filename, title, folder_id, doc_type, message.
+        """
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.PickRandomDocumentFromFolderRequest(
+                folder_id=folder_id,
+                user_id=user_id,
+                file_extension=file_extension or "",
+            )
+            response = await self._stub.PickRandomDocumentFromFolder(request)
+            return {
+                "found": response.found,
+                "document_id": response.document_id or "",
+                "filename": response.filename or "",
+                "title": response.title or None,
+                "folder_id": response.folder_id or None,
+                "doc_type": response.doc_type or None,
+                "message": response.message or "",
+            }
+        except grpc.RpcError as e:
+            logger.error(f"Pick random document failed: {e.code()} - {e.details()}")
+            return {
+                "found": False,
+                "document_id": "",
+                "filename": "",
+                "title": None,
+                "folder_id": None,
+                "doc_type": None,
+                "message": f"Pick random document failed: {e.details()}",
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error picking random document: {e}")
+            return {
+                "found": False,
+                "document_id": "",
+                "filename": "",
+                "title": None,
+                "folder_id": None,
+                "doc_type": None,
+                "message": f"Unexpected error: {e}",
+            }
 
     # ===== Document Editing Operations =====
     
@@ -692,7 +851,7 @@ class BackendToolClient:
         try:
             await self._ensure_connected()
             
-            # Convert operations to proto
+            # Convert operations to proto (semantic ops: no start/end; backend resolves JIT)
             operations_proto = []
             if operations:
                 for op in operations:
@@ -708,7 +867,8 @@ class BackendToolClient:
                         right_context=op.get("right_context") or "",
                         occurrence_index=op.get("occurrence_index", 0),
                         note=op.get("note") or "",
-                        confidence=op.get("confidence") or 0.0
+                        confidence=op.get("confidence") or 0.0,
+                        search_text=op.get("search_text") or "",
                     )
                     operations_proto.append(op_proto)
             
@@ -889,6 +1049,109 @@ class BackendToolClient:
                 "message": "Failed to apply document edit proposal"
             }
 
+    async def list_document_proposals(
+        self,
+        document_id: str,
+        user_id: str = "system"
+    ) -> Dict[str, Any]:
+        """List pending document edit proposals for a document."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListDocumentProposalsRequest(
+                user_id=user_id,
+                document_id=document_id
+            )
+            response = await self._stub.ListDocumentProposals(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "proposals": [],
+                    "error": response.error or "Unknown error"
+                }
+            proposals = [
+                {
+                    "proposal_id": p.proposal_id,
+                    "document_id": p.document_id,
+                    "edit_type": p.edit_type,
+                    "agent_name": p.agent_name,
+                    "summary": p.summary,
+                    "operations_count": p.operations_count,
+                    "created_at": p.created_at,
+                    "expires_at": p.expires_at or None
+                }
+                for p in response.proposals
+            ]
+            return {"success": True, "proposals": proposals}
+        except grpc.RpcError as e:
+            logger.error(f"List document proposals failed: {e.code()} - {e.details()}")
+            return {"success": False, "proposals": [], "error": f"{e.code()}: {e.details()}"}
+        except Exception as e:
+            logger.error(f"Unexpected error listing document proposals: {e}")
+            return {"success": False, "proposals": [], "error": str(e)}
+
+    async def get_document_edit_proposal(
+        self,
+        proposal_id: str,
+        user_id: str = "system"
+    ) -> Dict[str, Any]:
+        """Get full details of a document edit proposal."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetDocumentEditProposalRequest(
+                user_id=user_id,
+                proposal_id=proposal_id
+            )
+            response = await self._stub.GetDocumentEditProposal(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "error": response.error or "Proposal not found"
+                }
+            import json
+            operations = json.loads(response.operations_json) if response.operations_json else []
+            content_edit = json.loads(response.content_edit_json) if response.content_edit_json else None
+            return {
+                "success": True,
+                "proposal_id": response.proposal_id,
+                "document_id": response.document_id,
+                "edit_type": response.edit_type,
+                "operations": operations,
+                "content_edit": content_edit,
+                "agent_name": response.agent_name,
+                "summary": response.summary,
+                "created_at": response.created_at
+            }
+        except grpc.RpcError as e:
+            logger.error(f"Get document edit proposal failed: {e.code()} - {e.details()}")
+            return {"success": False, "error": f"{e.code()}: {e.details()}"}
+        except Exception as e:
+            logger.error(f"Unexpected error getting document edit proposal: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def reject_document_edit_proposal(
+        self,
+        proposal_id: str,
+        user_id: str = "system"
+    ) -> Dict[str, Any]:
+        """Reject (delete) a document edit proposal."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.RejectDocumentEditProposalRequest(
+                user_id=user_id,
+                proposal_id=proposal_id
+            )
+            response = await self._stub.RejectDocumentEditProposal(request)
+            return {
+                "success": response.success,
+                "error": response.error if response.error else None
+            }
+        except grpc.RpcError as e:
+            logger.error(f"Reject document edit proposal failed: {e.code()} - {e.details()}")
+            return {"success": False, "error": f"{e.code()}: {e.details()}"}
+        except Exception as e:
+            logger.error(f"Unexpected error rejecting document edit proposal: {e}")
+            return {"success": False, "error": str(e)}
+
     # ===== Weather Operations =====
     
     async def get_weather(
@@ -955,7 +1218,8 @@ class BackendToolClient:
         model: Optional[str] = None,
         reference_image_data: Optional[bytes] = None,
         reference_image_url: Optional[str] = None,
-        reference_strength: float = 0.5
+        reference_strength: float = 0.5,
+        folder_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Generate images using backend image generation service
@@ -991,6 +1255,8 @@ class BackendToolClient:
                 request.negative_prompt = negative_prompt
             if model is not None:
                 request.model = model
+            if folder_id:
+                request.folder_id = folder_id
             
             # Add reference image fields
             if reference_image_data:
@@ -1019,14 +1285,17 @@ class BackendToolClient:
             
             if response.success:
                 for img in response.images:
-                    result["images"].append({
+                    item = {
                         "filename": img.filename,
                         "path": img.path,
                         "url": img.url,
                         "width": img.width,
                         "height": img.height,
                         "format": img.format
-                    })
+                    }
+                    if getattr(img, "document_id", None):
+                        item["document_id"] = img.document_id
+                    result["images"].append(item)
                 logger.info(f"Generated {len(result['images'])} image(s)")
             else:
                 result["error"] = response.error
@@ -1337,49 +1606,462 @@ class BackendToolClient:
         self,
         url: str = None,
         urls: List[str] = None,
-        user_id: str = "system"
+        user_id: str = "system",
+        paginate: bool = False,
+        max_pages: int = 10,
+        pagination_param: str = None,
+        start_page: int = 0,
+        next_page_css_selector: str = None,
+        css_selector: str = None
     ) -> List[Dict[str, Any]]:
         """
-        Crawl web content from URLs
-        
+        Crawl web content from URLs, with optional pagination.
+
         Args:
             url: Single URL to crawl
             urls: Multiple URLs to crawl
             user_id: User ID
-            
+            paginate: If True, follow pagination across multiple pages
+            max_pages: Max pages when paginating (default 10)
+            pagination_param: URL query param for page number (e.g. "page")
+            start_page: Starting page number (default 0)
+            next_page_css_selector: CSS selector for next-page link
+            css_selector: CSS selector for content extraction
+
         Returns:
-            List of crawled content
+            List of crawled content (each with url, title, content, html, metadata, images, links)
         """
         try:
             await self._ensure_connected()
-            
-            request = tool_service_pb2.WebCrawlRequest(
-                url=url if url else "",
-                urls=urls if urls else [],
-                user_id=user_id
-            )
-            
+
+            request_kwargs = {
+                "url": url or "",
+                "urls": urls or [],
+                "user_id": user_id,
+            }
+            if paginate:
+                request_kwargs["paginate"] = True
+                request_kwargs["max_pages"] = max_pages
+                if pagination_param is not None:
+                    request_kwargs["pagination_param"] = pagination_param
+                request_kwargs["start_page"] = start_page
+                if next_page_css_selector is not None:
+                    request_kwargs["next_page_css_selector"] = next_page_css_selector
+            if css_selector is not None:
+                request_kwargs["css_selector"] = css_selector
+
+            request = tool_service_pb2.WebCrawlRequest(**request_kwargs)
             response = await self._stub.CrawlWebContent(request)
-            
+
             results = []
             for result in response.results:
                 results.append({
-                    'url': result.url,
-                    'title': result.title,
-                    'content': result.content,
-                    'html': result.html,  # WebCrawlResponse (singular) has html field
-                    'metadata': dict(result.metadata)
+                    "url": result.url,
+                    "title": result.title,
+                    "content": result.content,
+                    "html": result.html,
+                    "metadata": dict(result.metadata),
+                    "images": list(result.images),
+                    "links": list(result.links),
                 })
-            
             return results
-            
+
         except grpc.RpcError as e:
             logger.error(f"Web crawl failed: {e.code()} - {e.details()}")
             return []
         except Exception as e:
             logger.error(f"Unexpected error in web crawl: {e}")
             return []
-    
+
+    def _steps_to_protos(self, steps: Optional[List[Dict[str, Any]]]) -> list:
+        """Build BrowserStepProto list from steps dicts."""
+        step_protos = []
+        if steps:
+            for s in steps:
+                step = tool_service_pb2.BrowserStepProto(action=s.get("action", ""))
+                if s.get("selector") is not None:
+                    step.selector = s["selector"]
+                if s.get("value") is not None:
+                    step.value = s["value"]
+                if s.get("wait_for") is not None:
+                    step.wait_for = s["wait_for"]
+                if s.get("timeout_seconds") is not None:
+                    step.timeout_seconds = s["timeout_seconds"]
+                if s.get("url") is not None:
+                    step.url = s["url"]
+                step_protos.append(step)
+        return step_protos
+
+    async def browser_run(
+        self,
+        url: str,
+        final_action_type: str,
+        final_selector: str,
+        folder_path: str = "",
+        user_id: str = "system",
+        steps: Optional[List[Dict[str, Any]]] = None,
+        connection_id: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        title: Optional[str] = None,
+        goal: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run browser automation: steps then final action (download, click, extract, screenshot).
+        Returns unified dict: success, error, document_id, filename, file_size_bytes, extracted_text, message.
+        """
+        try:
+            await self._ensure_connected()
+            step_protos = self._steps_to_protos(steps)
+            request = tool_service_pb2.BrowserRunToolRequest(
+                user_id=user_id,
+                url=url,
+                steps=step_protos,
+                final_action_type=final_action_type or "download",
+                final_selector=final_selector or "",
+                folder_path=folder_path or "",
+                tags=tags or [],
+            )
+            if connection_id is not None:
+                request.connection_id = connection_id
+            if title is not None:
+                request.title = title
+            if goal is not None:
+                request.goal = goal
+            response = await self._stub.BrowserRun(request)
+            out = {
+                "success": response.success,
+                "error": response.error if response.HasField("error") and response.error else None,
+                "document_id": response.document_id if response.HasField("document_id") else None,
+                "filename": response.filename if response.HasField("filename") else None,
+                "file_size_bytes": response.file_size_bytes if response.HasField("file_size_bytes") else None,
+                "extracted_text": response.extracted_text if response.HasField("extracted_text") else None,
+                "message": response.message if response.HasField("message") else None,
+                "images_markdown": response.images_markdown if response.HasField("images_markdown") and response.images_markdown else None,
+            }
+            return out
+        except grpc.RpcError as e:
+            logger.error(f"Browser run failed: {e.code()} - {e.details()}")
+            return {"success": False, "error": str(e.details())}
+        except Exception as e:
+            logger.error(f"Unexpected error in browser run: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def browser_download(
+        self,
+        url: str,
+        download_selector: str,
+        folder_path: str,
+        user_id: str = "system",
+        steps: Optional[List[Dict[str, Any]]] = None,
+        connection_id: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        title: Optional[str] = None,
+        goal: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Run browser automation: optional steps, trigger download by selector, save file to user folder.
+        Wrapper around browser_run with final_action_type=download.
+        Returns: success, document_id, filename, file_size_bytes, error.
+        """
+        result = await self.browser_run(
+            url=url,
+            final_action_type="download",
+            final_selector=download_selector,
+            folder_path=folder_path,
+            user_id=user_id,
+            steps=steps,
+            connection_id=connection_id,
+            tags=tags,
+            title=title,
+            goal=goal,
+        )
+        if not result.get("success"):
+            return {
+                "success": False,
+                "document_id": "",
+                "filename": "",
+                "file_size_bytes": 0,
+                "error": result.get("error"),
+            }
+        return {
+            "success": True,
+            "document_id": result.get("document_id") or "",
+            "filename": result.get("filename") or "",
+            "file_size_bytes": result.get("file_size_bytes") or 0,
+            "error": result.get("error"),
+        }
+
+    async def browser_open_session(
+        self,
+        site_domain: str,
+        user_id: str = "system",
+        timeout_seconds: int = 30,
+    ) -> Dict[str, Any]:
+        """Create browser session; restore saved state for user/site if available. Returns session_id."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BrowserOpenSessionRequest(
+                user_id=user_id,
+                site_domain=site_domain or "",
+                timeout_seconds=timeout_seconds,
+            )
+            response = await self._stub.BrowserOpenSession(request)
+            return {
+                "success": response.success,
+                "session_id": response.session_id if response.session_id else None,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error(f"BrowserOpenSession failed: {e.code()} - {e.details()}")
+            return {"success": False, "session_id": None, "error": str(e.details())}
+        except Exception as e:
+            logger.error(f"Unexpected error in browser_open_session: {e}")
+            return {"success": False, "session_id": None, "error": str(e)}
+
+    async def browser_navigate(
+        self,
+        session_id: str,
+        url: str,
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BrowserNavigateRequest(
+                user_id=user_id,
+                session_id=session_id,
+                url=url or "",
+            )
+            response = await self._stub.BrowserNavigate(request)
+            return {
+                "success": response.success,
+                "page_title": response.page_title if response.page_title else None,
+                "current_url": response.current_url if response.current_url else None,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error(f"BrowserNavigate failed: {e.code()} - {e.details()}")
+            return {"success": False, "error": str(e.details())}
+
+    async def browser_click(
+        self,
+        session_id: str,
+        selector: str,
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BrowserClickRequest(
+                user_id=user_id,
+                session_id=session_id,
+                selector=selector or "",
+            )
+            response = await self._stub.BrowserClick(request)
+            return {"success": response.success, "error": response.error if response.error else None}
+        except grpc.RpcError as e:
+            logger.error(f"BrowserClick failed: {e.code()} - {e.details()}")
+            return {"success": False, "error": str(e.details())}
+
+    async def browser_fill(
+        self,
+        session_id: str,
+        selector: str,
+        value: str,
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BrowserFillRequest(
+                user_id=user_id,
+                session_id=session_id,
+                selector=selector or "",
+                value=value or "",
+            )
+            response = await self._stub.BrowserFill(request)
+            return {"success": response.success, "error": response.error if response.error else None}
+        except grpc.RpcError as e:
+            logger.error(f"BrowserFill failed: {e.code()} - {e.details()}")
+            return {"success": False, "error": str(e.details())}
+
+    async def browser_wait(
+        self,
+        session_id: str,
+        user_id: str = "system",
+        selector: Optional[str] = None,
+        timeout_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BrowserWaitRequest(user_id=user_id, session_id=session_id)
+            if selector is not None:
+                request.selector = selector
+            if timeout_seconds is not None:
+                request.timeout_seconds = timeout_seconds
+            response = await self._stub.BrowserWait(request)
+            return {
+                "success": response.success,
+                "found": response.found,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error(f"BrowserWait failed: {e.code()} - {e.details()}")
+            return {"success": False, "found": False, "error": str(e.details())}
+
+    async def browser_scroll(
+        self,
+        session_id: str,
+        user_id: str = "system",
+        direction: str = "down",
+        amount_pixels: int = 800,
+    ) -> Dict[str, Any]:
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BrowserScrollRequest(
+                user_id=user_id,
+                session_id=session_id,
+                direction=direction or "down",
+                amount_pixels=amount_pixels if amount_pixels > 0 else 800,
+            )
+            response = await self._stub.BrowserScroll(request)
+            return {
+                "success": response.success,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error(f"BrowserScroll failed: {e.code()} - {e.details()}")
+            return {"success": False, "error": str(e.details())}
+
+    async def browser_extract(
+        self,
+        session_id: str,
+        selector: str = "",
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BrowserExtractRequest(
+                user_id=user_id,
+                session_id=session_id,
+                selector=selector or "",
+            )
+            response = await self._stub.BrowserExtract(request)
+            return {
+                "success": response.success,
+                "extracted_text": response.extracted_text if response.extracted_text else None,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error(f"BrowserExtract failed: {e.code()} - {e.details()}")
+            return {"success": False, "extracted_text": None, "error": str(e.details())}
+
+    async def browser_inspect(
+        self,
+        session_id: str,
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BrowserInspectRequest(
+                user_id=user_id,
+                session_id=session_id,
+            )
+            response = await self._stub.BrowserInspect(request)
+            return {
+                "success": response.success,
+                "page_structure": response.page_structure if response.page_structure else None,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error(f"BrowserInspect failed: {e.code()} - {e.details()}")
+            return {"success": False, "page_structure": None, "error": str(e.details())}
+
+    async def browser_screenshot(
+        self,
+        session_id: str,
+        user_id: str = "system",
+        folder_path: str = "",
+        tags: Optional[List[str]] = None,
+        title: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BrowserScreenshotRequest(
+                user_id=user_id,
+                session_id=session_id,
+                folder_path=folder_path or "",
+                tags=tags or [],
+            )
+            if title is not None:
+                request.title = title
+            response = await self._stub.BrowserScreenshot(request)
+            return {
+                "success": response.success,
+                "images_markdown": response.images_markdown if response.images_markdown else None,
+                "document_id": response.document_id if response.document_id else None,
+                "filename": response.filename if response.filename else None,
+                "file_size_bytes": response.file_size_bytes if response.file_size_bytes else None,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error(f"BrowserScreenshot failed: {e.code()} - {e.details()}")
+            return {"success": False, "error": str(e.details())}
+
+    async def browser_download_file(
+        self,
+        session_id: str,
+        selector: str,
+        folder_path: str,
+        user_id: str = "system",
+        tags: Optional[List[str]] = None,
+        title: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BrowserDownloadFileRequest(
+                user_id=user_id,
+                session_id=session_id,
+                selector=selector or "",
+                folder_path=folder_path or "",
+                tags=tags or [],
+            )
+            if title is not None:
+                request.title = title
+            response = await self._stub.BrowserDownloadFile(request)
+            return {
+                "success": response.success,
+                "document_id": response.document_id if response.document_id else None,
+                "filename": response.filename if response.filename else None,
+                "file_size_bytes": response.file_size_bytes if response.file_size_bytes else None,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error(f"BrowserDownloadFile failed: {e.code()} - {e.details()}")
+            return {"success": False, "error": str(e.details())}
+
+    async def browser_close_session(
+        self,
+        session_id: str,
+        site_domain: str,
+        save_state: bool = False,
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BrowserCloseSessionRequest(
+                user_id=user_id,
+                session_id=session_id,
+                site_domain=site_domain or "",
+                save_state=save_state,
+            )
+            response = await self._stub.BrowserCloseSession(request)
+            return {
+                "success": response.success,
+                "session_saved": response.session_saved,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error(f"BrowserCloseSession failed: {e.code()} - {e.details()}")
+            return {"success": False, "session_saved": False, "error": str(e.details())}
+
     async def crawl_website_recursive(
         self,
         start_url: str,
@@ -2337,6 +3019,642 @@ class BackendToolClient:
                 "error": str(e),
             }
 
+    async def capture_journal_entry(
+        self,
+        user_id: str,
+        content: str,
+        entry_date: Optional[str] = None,
+        title: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Append an entry to the user's journal. Respects journal organization
+        preferences and creates date headings if missing.
+
+        Args:
+            user_id: User ID for access control
+            content: Entry body text
+            entry_date: Optional date (YYYY-MM-DD); omit for today
+            title: Optional heading title
+            tags: Optional list of tags
+
+        Returns:
+            Dict with success, message, entry_preview, file_path, document_id, error
+        """
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CaptureJournalEntryRequest(
+                user_id=user_id,
+                content=content or "",
+                tags=tags or [],
+            )
+            if entry_date is not None:
+                request.entry_date = entry_date
+            if title is not None:
+                request.title = title
+            response = await self._stub.CaptureJournalEntry(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "message": response.message or "",
+                    "entry_preview": response.entry_preview if response.HasField("entry_preview") else None,
+                    "file_path": response.file_path if response.HasField("file_path") else None,
+                    "document_id": response.document_id if response.HasField("document_id") else None,
+                    "error": response.error if response.HasField("error") else "Unknown error",
+                }
+            return {
+                "success": True,
+                "message": response.message or "",
+                "entry_preview": response.entry_preview if response.HasField("entry_preview") else None,
+                "file_path": response.file_path if response.HasField("file_path") else None,
+                "document_id": response.document_id if response.HasField("document_id") else None,
+                "error": None,
+            }
+        except grpc.RpcError as e:
+            logger.error("CaptureJournalEntry failed: %s - %s", e.code(), e.details())
+            return {
+                "success": False,
+                "message": "",
+                "entry_preview": None,
+                "file_path": None,
+                "document_id": None,
+                "error": str(e.details()),
+            }
+        except Exception as e:
+            logger.error("Unexpected error in capture_journal_entry: %s", e)
+            return {
+                "success": False,
+                "message": "",
+                "entry_preview": None,
+                "file_path": None,
+                "document_id": None,
+                "error": str(e),
+            }
+
+    async def get_journal_entry(
+        self,
+        user_id: str,
+        date: str = "today",
+    ) -> Dict[str, Any]:
+        """Read one date's journal entry (section-aware). date: YYYY-MM-DD or 'today'."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetJournalEntryRequest(user_id=user_id, date=date or "today")
+            response = await self._stub.GetJournalEntry(request)
+            return {
+                "success": response.success,
+                "content": response.content or "",
+                "date": response.date or "",
+                "heading": response.heading or "",
+                "document_id": response.document_id if response.document_id else None,
+                "file_path": response.file_path if response.file_path else None,
+                "has_content": response.has_content,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("GetJournalEntry failed: %s - %s", e.code(), e.details())
+            return {
+                "success": False,
+                "content": "",
+                "date": "",
+                "heading": "",
+                "document_id": None,
+                "file_path": None,
+                "has_content": False,
+                "error": str(e.details()),
+            }
+        except Exception as e:
+            logger.error("Unexpected error in get_journal_entry: %s", e)
+            return {
+                "success": False,
+                "content": "",
+                "date": "",
+                "heading": "",
+                "document_id": None,
+                "file_path": None,
+                "has_content": False,
+                "error": str(e),
+            }
+
+    async def get_journal_entries(
+        self,
+        user_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        max_entries: int = 100,
+    ) -> Dict[str, Any]:
+        """Get full content of journal entries in a date range (review/lookback)."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetJournalEntriesRequest(user_id=user_id)
+            if start_date is not None:
+                request.start_date = start_date
+            if end_date is not None:
+                request.end_date = end_date
+            if max_entries is not None and max_entries > 0:
+                request.max_entries = max_entries
+            response = await self._stub.GetJournalEntries(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "entries": [],
+                    "total": 0,
+                    "error": response.error or "",
+                }
+            entries = [
+                {
+                    "date": e.date,
+                    "content": e.content or "",
+                    "heading": e.heading or "",
+                    "has_content": e.has_content,
+                }
+                for e in response.entries
+            ]
+            return {"success": True, "entries": entries, "total": response.total, "error": None}
+        except grpc.RpcError as e:
+            logger.error("GetJournalEntries failed: %s - %s", e.code(), e.details())
+            return {"success": False, "entries": [], "total": 0, "error": str(e.details())}
+        except Exception as e:
+            logger.error("Unexpected error in get_journal_entries: %s", e)
+            return {"success": False, "entries": [], "total": 0, "error": str(e)}
+
+    async def update_journal_entry(
+        self,
+        user_id: str,
+        date: str,
+        content: str,
+        mode: str = "replace",
+    ) -> Dict[str, Any]:
+        """Replace or append to a single date's journal section only. mode: 'replace' or 'append'."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpdateJournalEntryRequest(
+                user_id=user_id,
+                date=date,
+                content=content or "",
+                mode=mode or "replace",
+            )
+            response = await self._stub.UpdateJournalEntry(request)
+            return {
+                "success": response.success,
+                "date": response.date or "",
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("UpdateJournalEntry failed: %s - %s", e.code(), e.details())
+            return {"success": False, "date": date, "error": str(e.details())}
+        except Exception as e:
+            logger.error("Unexpected error in update_journal_entry: %s", e)
+            return {"success": False, "date": date, "error": str(e)}
+
+    async def list_journal_entries(
+        self,
+        user_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """List journal entries in a date range with metadata (date, word_count, has_content)."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListJournalEntriesRequest(user_id=user_id)
+            if start_date is not None:
+                request.start_date = start_date
+            if end_date is not None:
+                request.end_date = end_date
+            response = await self._stub.ListJournalEntries(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "entries": [],
+                    "total": 0,
+                    "error": response.error or "",
+                }
+            entries = [
+                {"date": e.date, "word_count": e.word_count, "has_content": e.has_content}
+                for e in response.entries
+            ]
+            return {"success": True, "entries": entries, "total": response.total, "error": None}
+        except grpc.RpcError as e:
+            logger.error("ListJournalEntries failed: %s - %s", e.code(), e.details())
+            return {"success": False, "entries": [], "total": 0, "error": str(e.details())}
+        except Exception as e:
+            logger.error("Unexpected error in list_journal_entries: %s", e)
+            return {"success": False, "entries": [], "total": 0, "error": str(e)}
+
+    async def search_journal(
+        self,
+        user_id: str,
+        query: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Search within journal entry content in a date range. Returns list of {date, excerpt}."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.SearchJournalRequest(user_id=user_id, query=query or "")
+            if start_date is not None:
+                request.start_date = start_date
+            if end_date is not None:
+                request.end_date = end_date
+            response = await self._stub.SearchJournal(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "results": [],
+                    "count": 0,
+                    "error": response.error or "",
+                }
+            results = [{"date": r.date, "excerpt": r.excerpt or ""} for r in response.results]
+            return {"success": True, "results": results, "count": response.count, "error": None}
+        except grpc.RpcError as e:
+            logger.error("SearchJournal failed: %s - %s", e.code(), e.details())
+            return {"success": False, "results": [], "count": 0, "error": str(e.details())}
+        except Exception as e:
+            logger.error("Unexpected error in search_journal: %s", e)
+            return {"success": False, "results": [], "count": 0, "error": str(e)}
+
+    async def get_agent_run_history(
+        self,
+        user_id: str,
+        agent_profile_id: Optional[str] = None,
+        limit: int = 10,
+        status: Optional[str] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Query agent run history for the user. Optional filter by agent_profile_id, status, date range."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetAgentRunHistoryRequest(user_id=user_id)
+            if agent_profile_id is not None:
+                request.agent_profile_id = agent_profile_id
+            if limit > 0:
+                request.limit = min(limit, 50)
+            if status is not None:
+                request.status = status
+            if start_date is not None:
+                request.start_date = start_date
+            if end_date is not None:
+                request.end_date = end_date
+            response = await self._stub.GetAgentRunHistory(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "runs": [],
+                    "total": 0,
+                    "agent_name": "",
+                    "error": response.error or "",
+                }
+            runs = []
+            for r in response.runs:
+                runs.append({
+                    "execution_id": r.execution_id or "",
+                    "agent_name": r.agent_name or "",
+                    "query": r.query or "",
+                    "status": r.status or "",
+                    "started_at": r.started_at or "",
+                    "duration_ms": r.duration_ms if r.HasField("duration_ms") else None,
+                    "connectors_called": list(r.connectors_called) if r.connectors_called else [],
+                    "entities_discovered": r.entities_discovered or 0,
+                    "error_details": r.error_details if r.HasField("error_details") and r.error_details else None,
+                    "steps_completed": r.steps_completed or 0,
+                    "steps_total": r.steps_total or 0,
+                })
+            return {
+                "success": True,
+                "runs": runs,
+                "total": response.total,
+                "agent_name": response.agent_name or "",
+                "error": None,
+            }
+        except grpc.RpcError as e:
+            logger.error("GetAgentRunHistory failed: %s - %s", e.code(), e.details())
+            return {
+                "success": False,
+                "runs": [],
+                "total": 0,
+                "agent_name": "",
+                "error": str(e.details()),
+            }
+        except Exception as e:
+            logger.error("Unexpected error in get_agent_run_history: %s", e)
+            return {
+                "success": False,
+                "runs": [],
+                "total": 0,
+                "agent_name": "",
+                "error": str(e),
+            }
+
+    # ===== Universal Todo Operations =====
+
+    async def list_todos(
+        self,
+        user_id: str,
+        scope: str = "all",
+        states: Optional[List[str]] = None,
+        tags: Optional[List[str]] = None,
+        query: str = "",
+        limit: int = 100,
+        include_archives: bool = False,
+        include_body: bool = False,
+        closed_since_days: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """List todos. scope: all, inbox, or file path. closed_since_days: only DONE items closed in last N days (e.g. 7 for last week). Returns success, results, count, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListTodosRequest(
+                user_id=user_id,
+                scope=scope,
+                query=query,
+                limit=limit,
+                include_archives=include_archives,
+            )
+            if hasattr(request, "include_body"):
+                request.include_body = include_body
+            if hasattr(request, "closed_since_days") and closed_since_days is not None and closed_since_days > 0:
+                request.closed_since_days = closed_since_days
+            if states:
+                request.states.extend(states)
+            if tags:
+                request.tags.extend(tags)
+            response = await self._stub.ListTodos(request)
+            if not response.success:
+                return {"success": False, "error": response.error or "Unknown error", "results": [], "count": 0}
+            results = []
+            for r in response.results:
+                item = {
+                    "filename": r.filename,
+                    "file_path": r.file_path,
+                    "heading": r.heading,
+                    "level": r.level,
+                    "line_number": r.line_number,
+                    "todo_state": r.todo_state,
+                    "tags": list(r.tags),
+                    "scheduled": r.scheduled or None,
+                    "deadline": r.deadline or None,
+                    "document_id": r.document_id or None,
+                    "preview": r.preview or "",
+                    "closed": getattr(r, "closed", None) or None,
+                }
+                if include_body:
+                    item["body"] = getattr(r, "body", "") or ""
+                results.append(item)
+            return {"success": True, "results": results, "count": response.count, "files_searched": response.files_searched}
+        except grpc.RpcError as e:
+            logger.error("list_todos failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e), "results": [], "count": 0}
+        except Exception as e:
+            logger.error("list_todos error: %s", e)
+            return {"success": False, "error": str(e), "results": [], "count": 0}
+
+    async def create_todo(
+        self,
+        user_id: str,
+        text: str,
+        file_path: Optional[str] = None,
+        state: str = "TODO",
+        tags: Optional[List[str]] = None,
+        scheduled: Optional[str] = None,
+        deadline: Optional[str] = None,
+        priority: Optional[str] = None,
+        body: Optional[str] = None,
+        heading_level: Optional[int] = None,
+        insert_after_line_number: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Create a todo. file_path None = inbox. heading_level 1-6 = org stars. insert_after_line_number = insert after this 0-based line (else append)."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CreateTodoRequest(user_id=user_id, text=text, state=state)
+            if file_path:
+                request.file_path = file_path
+            if tags:
+                request.tags.extend(tags)
+            if scheduled:
+                request.scheduled = scheduled
+            if deadline:
+                request.deadline = deadline
+            if priority:
+                request.priority = priority
+            if body and body.strip():
+                if hasattr(request, "body"):
+                    request.body = body.strip()
+            if heading_level is not None and hasattr(request, "heading_level"):
+                request.heading_level = max(1, min(6, heading_level))
+            if insert_after_line_number is not None and hasattr(request, "insert_after_line_number"):
+                request.insert_after_line_number = insert_after_line_number
+            response = await self._stub.CreateTodo(request)
+            if not response.success:
+                return {"success": False, "error": response.error or "Unknown error"}
+            return {"success": True, "file_path": response.file_path, "line_number": response.line_number, "heading": response.heading}
+        except grpc.RpcError as e:
+            logger.error("create_todo failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("create_todo error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def update_todo(
+        self,
+        user_id: str,
+        file_path: str,
+        line_number: int,
+        heading_text: Optional[str] = None,
+        new_state: Optional[str] = None,
+        new_text: Optional[str] = None,
+        add_tags: Optional[List[str]] = None,
+        remove_tags: Optional[List[str]] = None,
+        scheduled: Optional[str] = None,
+        deadline: Optional[str] = None,
+        priority: Optional[str] = None,
+        new_body: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Update a todo. Returns success, file_path, line_number, new_line, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpdateTodoRequest(user_id=user_id, file_path=file_path, line_number=line_number)
+            if heading_text:
+                request.heading_text = heading_text
+            if new_state:
+                request.new_state = new_state
+            if new_text:
+                request.new_text = new_text
+            if add_tags:
+                request.add_tags.extend(add_tags)
+            if remove_tags:
+                request.remove_tags.extend(remove_tags)
+            if scheduled:
+                request.scheduled = scheduled
+            if deadline:
+                request.deadline = deadline
+            if priority:
+                request.priority = priority
+            if new_body is not None and (isinstance(new_body, str) and new_body.strip()) and hasattr(request, "new_body"):
+                request.new_body = new_body.strip()
+            response = await self._stub.UpdateTodo(request)
+            if not response.success:
+                return {"success": False, "error": response.error or "Unknown error"}
+            return {"success": True, "file_path": response.file_path, "line_number": response.line_number, "new_line": response.new_line}
+        except grpc.RpcError as e:
+            logger.error("update_todo failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("update_todo error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def toggle_todo(
+        self,
+        user_id: str,
+        file_path: str,
+        line_number: int,
+        heading_text: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Toggle TODO <-> DONE. Returns success, file_path, line_number, new_line, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ToggleTodoRequest(user_id=user_id, file_path=file_path, line_number=line_number)
+            if heading_text:
+                request.heading_text = heading_text
+            response = await self._stub.ToggleTodo(request)
+            if not response.success:
+                return {"success": False, "error": response.error or "Unknown error"}
+            return {"success": True, "file_path": response.file_path, "line_number": response.line_number, "new_line": response.new_line}
+        except grpc.RpcError as e:
+            logger.error("toggle_todo failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("toggle_todo error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def delete_todo(
+        self,
+        user_id: str,
+        file_path: str,
+        line_number: int,
+        heading_text: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Delete a todo line. Returns success, file_path, deleted_line_count, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.DeleteTodoRequest(user_id=user_id, file_path=file_path, line_number=line_number)
+            if heading_text:
+                request.heading_text = heading_text
+            response = await self._stub.DeleteTodo(request)
+            if not response.success:
+                return {"success": False, "error": response.error or "Unknown error"}
+            return {"success": True, "file_path": response.file_path, "deleted_line_count": response.deleted_line_count}
+        except grpc.RpcError as e:
+            logger.error("delete_todo failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("delete_todo error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def archive_done_todos(
+        self,
+        user_id: str,
+        file_path: Optional[str] = None,
+        preview_only: bool = False,
+        line_number: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Archive one entry (line_number set) or bulk closed items. file_path None = inbox. preview_only=True returns path/count without writing. Returns success, path, archived_to, archived_count, directive_found, directive_value, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ArchiveDoneTodosRequest(user_id=user_id)
+            if file_path:
+                request.file_path = file_path
+            if hasattr(request, "preview_only"):
+                request.preview_only = preview_only
+            if line_number is not None and hasattr(request, "line_number"):
+                request.line_number = line_number
+            response = await self._stub.ArchiveDoneTodos(request)
+            if not response.success:
+                return {"success": False, "error": response.error or "Unknown error"}
+            out = {
+                "success": True,
+                "path": response.path,
+                "archived_to": response.archived_to,
+                "archived_count": response.archived_count,
+            }
+            if hasattr(response, "directive_found"):
+                out["directive_found"] = response.directive_found
+            if hasattr(response, "directive_value"):
+                out["directive_value"] = response.directive_value
+            return out
+        except grpc.RpcError as e:
+            logger.error("archive_done_todos failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("archive_done_todos error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def refile_todo(
+        self,
+        user_id: str,
+        source_file: str,
+        source_line: int,
+        target_file: str,
+        target_heading_line: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Move a todo entry (and its subtree) from one org file to another. Returns success, source_file, target_file, lines_moved, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.RefileTodoRequest(
+                user_id=user_id,
+                source_file=source_file,
+                source_line=source_line,
+                target_file=target_file,
+            )
+            if target_heading_line is not None:
+                request.target_heading_line = target_heading_line
+            response = await self._stub.RefileTodo(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "source_file": response.source_file,
+                    "target_file": response.target_file,
+                    "lines_moved": response.lines_moved,
+                    "error": response.error or "Unknown error",
+                }
+            return {
+                "success": True,
+                "source_file": response.source_file,
+                "target_file": response.target_file,
+                "lines_moved": response.lines_moved,
+            }
+        except grpc.RpcError as e:
+            logger.error("refile_todo failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("refile_todo error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def discover_refile_targets(self, user_id: str) -> Dict[str, Any]:
+        """List all org files and headings available as refile destinations. Returns success, targets, count, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.DiscoverRefileTargetsRequest(user_id=user_id)
+            response = await self._stub.DiscoverRefileTargets(request)
+            if not response.success:
+                return {"success": False, "targets": [], "count": 0, "error": response.error or "Unknown error"}
+            targets = []
+            for t in response.targets:
+                targets.append({
+                    "file": t.file,
+                    "filename": t.filename,
+                    "heading_path": list(t.heading_path),
+                    "heading_line": t.heading_line,
+                    "display_name": t.display_name,
+                    "level": t.level,
+                })
+            return {"success": True, "targets": targets, "count": len(targets)}
+        except grpc.RpcError as e:
+            logger.error("discover_refile_targets failed: %s - %s", e.code(), e.details())
+            return {"success": False, "targets": [], "count": 0, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("discover_refile_targets error: %s", e)
+            return {"success": False, "targets": [], "count": 0, "error": str(e)}
+
     # ===== RSS Feed Operations =====
 
     async def add_rss_feed(
@@ -2395,6 +3713,7 @@ class BackendToolClient:
                     "is_global": f.is_global,
                     "last_polled": f.last_polled or None,
                     "article_count": f.article_count,
+                    "unread_count": int(f.unread_count),
                 })
             return {"success": True, "feeds": feeds, "count": response.count}
         except grpc.RpcError as e:
@@ -2433,6 +3752,277 @@ class BackendToolClient:
             return {"success": False, "error": e.details() or str(e)}
         except Exception as e:
             logger.error("refresh_rss_feed error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    @staticmethod
+    def _rss_article_pb_to_dict(a: tool_service_pb2.RSSArticle) -> Dict[str, Any]:
+        return {
+            "article_id": a.article_id,
+            "title": a.title,
+            "content": a.content,
+            "url": a.url,
+            "published_at": a.published_at,
+            "feed_id": a.feed_id,
+            "feed_name": a.feed_name,
+            "is_read": bool(a.is_read),
+            "is_starred": bool(a.is_starred),
+            "is_imported": bool(a.is_imported),
+            "created_at": a.created_at,
+        }
+
+    async def get_rss_articles(
+        self,
+        feed_id: str,
+        user_id: str = "system",
+        limit: int = 20,
+        unread_only: bool = False,
+        starred_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Retrieve articles from a specific RSS feed. Returns dict with articles list."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.RSSArticlesRequest(
+                feed_id=feed_id,
+                user_id=user_id,
+                limit=limit,
+                unread_only=unread_only,
+                starred_only=starred_only,
+            )
+            response = await self._stub.GetRSSArticles(request)
+            articles = [
+                self._rss_article_pb_to_dict(a) for a in response.articles
+            ]
+            return {"articles": articles, "count": len(articles)}
+        except grpc.RpcError as e:
+            logger.error("get_rss_articles failed: %s - %s", e.code(), e.details())
+            return {"articles": [], "count": 0, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("get_rss_articles error: %s", e)
+            return {"articles": [], "count": 0, "error": str(e)}
+
+    async def list_starred_rss_articles(
+        self,
+        user_id: str = "system",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """List starred RSS articles across all feeds for the user. Returns dict with articles list."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListStarredRSSArticlesRequest(
+                user_id=user_id,
+                limit=int(limit),
+                offset=int(offset),
+            )
+            response = await self._stub.ListStarredRSSArticles(request)
+            articles = [
+                self._rss_article_pb_to_dict(a) for a in response.articles
+            ]
+            return {
+                "articles": articles,
+                "count": len(articles),
+                "limit": limit,
+                "offset": offset,
+            }
+        except grpc.RpcError as e:
+            logger.error(
+                "list_starred_rss_articles failed: %s - %s", e.code(), e.details()
+            )
+            return {
+                "articles": [],
+                "count": 0,
+                "limit": limit,
+                "offset": offset,
+                "error": e.details() or str(e),
+            }
+        except Exception as e:
+            logger.error("list_starred_rss_articles error: %s", e)
+            return {
+                "articles": [],
+                "count": 0,
+                "limit": limit,
+                "offset": offset,
+                "error": str(e),
+            }
+
+    async def search_rss(
+        self,
+        query: str,
+        user_id: str = "system",
+        limit: int = 20,
+        unread_only: bool = False,
+        starred_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Full-text search across RSS article content and titles. Returns dict with articles list."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.RSSSearchRequest(
+                user_id=user_id,
+                query=query,
+                limit=limit,
+                unread_only=unread_only,
+                starred_only=starred_only,
+            )
+            response = await self._stub.SearchRSSFeeds(request)
+            articles = [
+                self._rss_article_pb_to_dict(a) for a in response.articles
+            ]
+            return {"articles": articles, "count": len(articles), "query_used": query}
+        except grpc.RpcError as e:
+            logger.error("search_rss failed: %s - %s", e.code(), e.details())
+            return {"articles": [], "count": 0, "query_used": query, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("search_rss error: %s", e)
+            return {"articles": [], "count": 0, "query_used": query, "error": str(e)}
+
+    async def delete_rss_feed(
+        self,
+        user_id: str,
+        feed_name: str = "",
+        feed_id: str = "",
+    ) -> Dict[str, Any]:
+        """Delete an RSS feed by name or ID."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.DeleteRSSFeedRequest(
+                user_id=user_id,
+                feed_name=feed_name,
+                feed_id=feed_id,
+            )
+            response = await self._stub.DeleteRSSFeed(request)
+            if not response.success:
+                return {"success": False, "error": response.error or "Unknown error"}
+            return {
+                "success": True,
+                "feed_id": response.feed_id,
+                "message": response.message or "Feed deleted",
+            }
+        except grpc.RpcError as e:
+            logger.error("delete_rss_feed failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("delete_rss_feed error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def mark_article_read(
+        self,
+        user_id: str,
+        article_id: str,
+    ) -> Dict[str, Any]:
+        """Mark an RSS article as read."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.MarkArticleReadRequest(
+                user_id=user_id,
+                article_id=article_id,
+            )
+            response = await self._stub.MarkArticleRead(request)
+            if not response.success:
+                return {"success": False, "error": response.error or "Unknown error"}
+            return {"success": True, "message": response.message or "Marked read"}
+        except grpc.RpcError as e:
+            logger.error("mark_article_read failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("mark_article_read error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def mark_article_unread(
+        self,
+        user_id: str,
+        article_id: str,
+    ) -> Dict[str, Any]:
+        """Mark an RSS article as unread."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.MarkArticleUnreadRequest(
+                user_id=user_id,
+                article_id=article_id,
+            )
+            response = await self._stub.MarkArticleUnread(request)
+            if not response.success:
+                return {"success": False, "error": response.error or "Unknown error"}
+            return {"success": True, "message": response.message or "Marked unread"}
+        except grpc.RpcError as e:
+            logger.error("mark_article_unread failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("mark_article_unread error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def set_article_starred(
+        self,
+        user_id: str,
+        article_id: str,
+        starred: bool,
+    ) -> Dict[str, Any]:
+        """Set RSS article starred flag."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.SetArticleStarredRequest(
+                user_id=user_id,
+                article_id=article_id,
+                starred=starred,
+            )
+            response = await self._stub.SetArticleStarred(request)
+            if not response.success:
+                return {"success": False, "error": response.error or "Unknown error"}
+            return {"success": True, "message": response.message or "Updated"}
+        except grpc.RpcError as e:
+            logger.error("set_article_starred failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("set_article_starred error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def get_unread_counts(
+        self,
+        user_id: str,
+    ) -> Dict[str, Any]:
+        """Per-feed unread counts for the user."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetUnreadCountsRequest(user_id=user_id)
+            response = await self._stub.GetUnreadCounts(request)
+            if not response.success:
+                return {"success": False, "counts": {}, "error": response.error or "Unknown error"}
+            counts = {c.feed_id: int(c.count) for c in response.counts}
+            return {"success": True, "counts": counts}
+        except grpc.RpcError as e:
+            logger.error("get_unread_counts failed: %s - %s", e.code(), e.details())
+            return {"success": False, "counts": {}, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("get_unread_counts error: %s", e)
+            return {"success": False, "counts": {}, "error": str(e)}
+
+    async def toggle_feed_active(
+        self,
+        user_id: str,
+        feed_id: str,
+        is_active: bool,
+    ) -> Dict[str, Any]:
+        """Enable or disable RSS feed polling."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ToggleFeedActiveRequest(
+                user_id=user_id,
+                feed_id=feed_id,
+                is_active=is_active,
+            )
+            response = await self._stub.ToggleFeedActive(request)
+            if not response.success:
+                return {"success": False, "error": response.error or "Unknown error"}
+            return {
+                "success": True,
+                "feed_id": response.feed_id,
+                "is_active": response.is_active,
+                "message": response.message or "Updated",
+            }
+        except grpc.RpcError as e:
+            logger.error("toggle_feed_active failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("toggle_feed_active error: %s", e)
             return {"success": False, "error": str(e)}
 
     # ===== Data Workspace Operations =====
@@ -2516,7 +4106,7 @@ class BackendToolClient:
             
             response = await self._stub.GetWorkspaceSchema(request)
             
-            # Convert proto response to dict
+            # Convert proto response to dict (include description and metadata for agents)
             tables = []
             for table in response.tables:
                 columns = []
@@ -2524,9 +4114,14 @@ class BackendToolClient:
                     columns.append({
                         'name': col.name,
                         'type': col.type,
-                        'is_nullable': col.is_nullable
+                        'is_nullable': col.is_nullable,
+                        'description': getattr(col, 'description', None) or ''
                     })
-                
+                meta = getattr(table, 'metadata_json', None) or ''
+                try:
+                    metadata_json = json.loads(meta) if meta else {}
+                except (json.JSONDecodeError, TypeError):
+                    metadata_json = {}
                 tables.append({
                     'table_id': table.table_id,
                     'name': table.name,
@@ -2534,7 +4129,8 @@ class BackendToolClient:
                     'database_id': table.database_id,
                     'database_name': table.database_name,
                     'columns': columns,
-                    'row_count': table.row_count
+                    'row_count': table.row_count,
+                    'metadata_json': metadata_json
                 })
             
             result = {
@@ -2571,7 +4167,9 @@ class BackendToolClient:
         query: str,
         query_type: str = "natural_language",
         user_id: str = "system",
-        limit: int = 100
+        limit: int = 100,
+        params: Optional[List[Any]] = None,
+        read_only: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute a query against a data workspace (SQL or natural language)
@@ -2582,33 +4180,55 @@ class BackendToolClient:
             query_type: "sql" or "natural_language"
             user_id: User ID for access control
             limit: Maximum rows to return (default: 100)
+            params: Optional list of values for $1, $2, ... (SQL only)
             
         Returns:
             Dict with 'success', 'column_names', 'results', 'result_count', 
-            'execution_time_ms', 'generated_sql', 'error_message'
+            'execution_time_ms', 'generated_sql', 'error_message',
+            'rows_affected', 'returning_rows'
         """
         try:
             await self._ensure_connected()
             
+            import json
+            params_json = json.dumps(params) if params else ""
             request = tool_service_pb2.QueryDataWorkspaceRequest(
                 workspace_id=workspace_id,
                 query=query,
                 query_type=query_type,
                 user_id=user_id,
-                limit=limit
+                limit=limit,
+                params_json=params_json,
+                read_only=read_only,
             )
             
             response = await self._stub.QueryDataWorkspace(request)
-            
-            # Parse results JSON
-            import json
+
             results = []
-            if response.results_json:
+            if getattr(response, "has_arrow_data", False) and response.arrow_results:
+                from orchestrator.utils.arrow_decode import decode_query_arrow
+
+                try:
+                    results = decode_query_arrow(bytes(response.arrow_results))
+                except Exception as ex:
+                    logger.warning("Failed to decode Arrow query results: %s", ex)
+                    results = []
+            elif response.results_json:
                 try:
                     results = json.loads(response.results_json)
                 except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse results JSON: {response.results_json[:100]}")
+                    logger.warning(
+                        "Failed to parse results JSON: %s",
+                        response.results_json[:100],
+                    )
                     results = []
+            
+            returning_rows = []
+            if getattr(response, 'returning_rows_json', None) and response.returning_rows_json:
+                try:
+                    returning_rows = json.loads(response.returning_rows_json)
+                except json.JSONDecodeError:
+                    pass
             
             result = {
                 'success': response.success,
@@ -2616,7 +4236,9 @@ class BackendToolClient:
                 'results': results,
                 'result_count': response.result_count,
                 'execution_time_ms': response.execution_time_ms,
-                'generated_sql': response.generated_sql
+                'generated_sql': response.generated_sql,
+                'rows_affected': getattr(response, 'rows_affected', 0) or 0,
+                'returning_rows': returning_rows
             }
             
             if response.HasField("error_message") and response.error_message:
@@ -2633,7 +4255,9 @@ class BackendToolClient:
                 'result_count': 0,
                 'execution_time_ms': 0,
                 'generated_sql': '',
-                'error_message': str(e)
+                'error_message': str(e),
+                'rows_affected': 0,
+                'returning_rows': []
             }
         except Exception as e:
             logger.error(f"Unexpected error querying data workspace: {e}")
@@ -2644,7 +4268,9 @@ class BackendToolClient:
                 'result_count': 0,
                 'execution_time_ms': 0,
                 'generated_sql': '',
-                'error_message': str(e)
+                'error_message': str(e),
+                'rows_affected': 0,
+                'returning_rows': []
             }
 
     # ===== Navigation Operations (locations and routes) =====
@@ -2923,6 +4549,7 @@ class BackendToolClient:
         top: int = 10,
         skip: int = 0,
         unread_only: bool = False,
+        connection_id: Optional[int] = None,
     ) -> str:
         """Get emails for user. Returns formatted string for LLM."""
         try:
@@ -2933,6 +4560,7 @@ class BackendToolClient:
                 top=top,
                 skip=skip,
                 unread_only=unread_only,
+                connection_id=connection_id or 0,
             )
             response = await self._stub.GetEmails(request)
             if not response.success:
@@ -2951,6 +4579,7 @@ class BackendToolClient:
         query: str,
         top: int = 20,
         from_address: str = "",
+        connection_id: Optional[int] = None,
     ) -> str:
         """Search emails. Returns formatted string for LLM."""
         try:
@@ -2960,6 +4589,7 @@ class BackendToolClient:
                 query=query,
                 top=top,
                 from_address=from_address or "",
+                connection_id=connection_id or 0,
             )
             response = await self._stub.SearchEmails(request)
             if not response.success:
@@ -2976,6 +4606,7 @@ class BackendToolClient:
         self,
         user_id: str,
         conversation_id: str,
+        connection_id: Optional[int] = None,
     ) -> str:
         """Get full email thread. Returns formatted string for LLM."""
         try:
@@ -2983,6 +4614,7 @@ class BackendToolClient:
             request = tool_service_pb2.GetEmailThreadRequest(
                 user_id=user_id,
                 conversation_id=conversation_id,
+                connection_id=connection_id or 0,
             )
             response = await self._stub.GetEmailThread(request)
             if not response.success:
@@ -3002,8 +4634,11 @@ class BackendToolClient:
         subject: str,
         body: str,
         cc: List[str] = None,
+        from_source: str = "user",
+        connection_id: Optional[int] = None,
+        body_is_html: bool = False,
     ) -> str:
-        """Send email. Returns success or error message. HITL should be applied by agent."""
+        """Send email. from_source: 'system' = Bastion SMTP, 'user' = user's email connection. Returns success or error message."""
         try:
             await self._ensure_connected()
             request = tool_service_pb2.SendEmailRequest(
@@ -3012,6 +4647,9 @@ class BackendToolClient:
                 subject=subject,
                 body=body,
                 cc=cc or [],
+                from_source=(from_source or "user").strip().lower() or "user",
+                connection_id=connection_id or 0,
+                body_is_html=body_is_html,
             )
             response = await self._stub.SendEmail(request)
             if not response.success:
@@ -3030,6 +4668,7 @@ class BackendToolClient:
         message_id: str,
         body: str,
         reply_all: bool = False,
+        connection_id: Optional[int] = None,
     ) -> str:
         """Reply to an email. Returns success or error message."""
         try:
@@ -3039,6 +4678,7 @@ class BackendToolClient:
                 message_id=message_id,
                 body=body,
                 reply_all=reply_all,
+                connection_id=connection_id or 0,
             )
             response = await self._stub.ReplyToEmail(request)
             if not response.success:
@@ -3051,11 +4691,18 @@ class BackendToolClient:
             logger.error(f"reply_to_email error: {e}")
             return f"Error: {e}"
 
-    async def get_email_folders(self, user_id: str) -> str:
+    async def get_email_folders(
+        self,
+        user_id: str,
+        connection_id: Optional[int] = None,
+    ) -> str:
         """List email folders. Returns formatted string for LLM."""
         try:
             await self._ensure_connected()
-            request = tool_service_pb2.GetEmailFoldersRequest(user_id=user_id)
+            request = tool_service_pb2.GetEmailFoldersRequest(
+                user_id=user_id,
+                connection_id=connection_id or 0,
+            )
             response = await self._stub.GetEmailFolders(request)
             if not response.success:
                 return response.error or "Failed to get folders"
@@ -3067,11 +4714,18 @@ class BackendToolClient:
             logger.error(f"get_email_folders error: {e}")
             return f"Error: {e}"
 
-    async def get_email_statistics(self, user_id: str) -> str:
+    async def get_email_statistics(
+        self,
+        user_id: str,
+        connection_id: Optional[int] = None,
+    ) -> str:
         """Get email statistics (inbox total/unread). Returns formatted string."""
         try:
             await self._ensure_connected()
-            request = tool_service_pb2.GetEmailStatisticsRequest(user_id=user_id)
+            request = tool_service_pb2.GetEmailStatisticsRequest(
+                user_id=user_id,
+                connection_id=connection_id or 0,
+            )
             response = await self._stub.GetEmailStatistics(request)
             if not response.success:
                 return response.error or "Failed to get statistics"
@@ -3105,6 +4759,2836 @@ class BackendToolClient:
         except Exception as e:
             logger.error(f"mark_email_read error: {e}")
             return f"Error: {e}"
+
+    async def get_email_by_id(
+        self,
+        user_id: str,
+        message_id: str,
+        connection_id: Optional[int] = None,
+    ) -> str:
+        """Get a single email by message ID (full content). Returns formatted string for LLM."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetEmailByIdRequest(
+                user_id=user_id,
+                message_id=message_id,
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.GetEmailById(request)
+            if not response.success:
+                return response.error or "Failed to get email"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"get_email_by_id failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"get_email_by_id error: {e}")
+            return f"Error: {e}"
+
+    async def move_email(
+        self,
+        user_id: str,
+        message_id: str,
+        destination_folder_id: str,
+        connection_id: Optional[int] = None,
+    ) -> str:
+        """Move an email to a different folder. Returns success or error message."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.MoveEmailRequest(
+                user_id=user_id,
+                message_id=message_id,
+                destination_folder_id=destination_folder_id,
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.MoveEmail(request)
+            if not response.success:
+                return response.error or "Failed to move email"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"move_email failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"move_email error: {e}")
+            return f"Error: {e}"
+
+    async def update_email(
+        self,
+        user_id: str,
+        message_id: str,
+        is_read: Optional[bool] = None,
+        importance: Optional[str] = None,
+        connection_id: Optional[int] = None,
+    ) -> str:
+        """Update an email (mark read/unread, set importance). Returns success or error message."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpdateEmailRequest(
+                user_id=user_id,
+                message_id=message_id,
+                connection_id=connection_id or 0,
+            )
+            if is_read is not None:
+                request.is_read = is_read
+            if importance is not None:
+                request.importance = importance
+            response = await self._stub.UpdateEmail(request)
+            if not response.success:
+                return response.error or "Failed to update email"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"update_email failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"update_email error: {e}")
+            return f"Error: {e}"
+
+    async def create_draft(
+        self,
+        user_id: str,
+        to: List[str],
+        subject: str,
+        body: str,
+        cc: Optional[List[str]] = None,
+        connection_id: Optional[int] = None,
+    ) -> str:
+        """Create a draft email (do not send). Returns success or error message."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CreateDraftRequest(
+                user_id=user_id,
+                to=to or [],
+                subject=subject,
+                body=body,
+                cc=cc or [],
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.CreateDraft(request)
+            if not response.success:
+                return response.error or "Failed to create draft"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"create_draft failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"create_draft error: {e}")
+            return f"Error: {e}"
+
+    # ===== Calendar operations (via backend tool service -> connections-service) =====
+
+    async def list_calendars(
+        self,
+        user_id: str,
+        connection_id: Optional[int] = None,
+    ) -> str:
+        """List user's calendars. Returns formatted string for LLM."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListCalendarsRequest(
+                user_id=user_id,
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.ListCalendars(request)
+            if not response.success:
+                return response.error or "Failed to list calendars"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"list_calendars failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"list_calendars error: {e}")
+            return f"Error: {e}"
+
+    async def get_calendar_events(
+        self,
+        user_id: str,
+        start_datetime: str,
+        end_datetime: str,
+        calendar_id: str = "",
+        top: int = 50,
+        connection_id: Optional[int] = None,
+    ) -> str:
+        """Get calendar events in date range. Returns formatted string for LLM."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetCalendarEventsRequest(
+                user_id=user_id,
+                calendar_id=calendar_id,
+                start_datetime=start_datetime,
+                end_datetime=end_datetime,
+                top=top,
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.GetCalendarEvents(request)
+            if not response.success:
+                return response.error or "Failed to get calendar events"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"get_calendar_events failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"get_calendar_events error: {e}")
+            return f"Error: {e}"
+
+    async def get_calendar_event_by_id(
+        self,
+        user_id: str,
+        event_id: str,
+        connection_id: Optional[int] = None,
+    ) -> str:
+        """Get a single calendar event by ID. Returns formatted string for LLM."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetCalendarEventByIdRequest(
+                user_id=user_id,
+                event_id=event_id,
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.GetCalendarEventById(request)
+            if not response.success:
+                return response.error or "Failed to get event"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"get_calendar_event_by_id failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"get_calendar_event_by_id error: {e}")
+            return f"Error: {e}"
+
+    async def create_calendar_event(
+        self,
+        user_id: str,
+        subject: str,
+        start_datetime: str,
+        end_datetime: str,
+        connection_id: Optional[int] = None,
+        calendar_id: str = "",
+        location: str = "",
+        body: str = "",
+        body_is_html: bool = False,
+        attendee_emails: Optional[List[str]] = None,
+        is_all_day: bool = False,
+    ) -> str:
+        """Create a calendar event. Returns success or error message."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CreateCalendarEventRequest(
+                user_id=user_id,
+                calendar_id=calendar_id,
+                subject=subject,
+                start_datetime=start_datetime,
+                end_datetime=end_datetime,
+                location=location,
+                body=body,
+                body_is_html=body_is_html,
+                attendee_emails=attendee_emails or [],
+                is_all_day=is_all_day,
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.CreateCalendarEvent(request)
+            if not response.success:
+                return response.error or "Failed to create event"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"create_calendar_event failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"create_calendar_event error: {e}")
+            return f"Error: {e}"
+
+    async def update_calendar_event(
+        self,
+        user_id: str,
+        event_id: str,
+        connection_id: Optional[int] = None,
+        subject: str = "",
+        start_datetime: str = "",
+        end_datetime: str = "",
+        location: str = "",
+        body: str = "",
+        body_is_html: bool = False,
+        attendee_emails: Optional[List[str]] = None,
+        is_all_day: bool = False,
+    ) -> str:
+        """Update a calendar event. Returns success or error message."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpdateCalendarEventRequest(
+                user_id=user_id,
+                event_id=event_id,
+                subject=subject,
+                start_datetime=start_datetime,
+                end_datetime=end_datetime,
+                location=location,
+                body=body,
+                body_is_html=body_is_html,
+                attendee_emails=attendee_emails or [],
+                is_all_day=is_all_day,
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.UpdateCalendarEvent(request)
+            if not response.success:
+                return response.error or "Failed to update event"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"update_calendar_event failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"update_calendar_event error: {e}")
+            return f"Error: {e}"
+
+    async def delete_calendar_event(
+        self,
+        user_id: str,
+        event_id: str,
+        connection_id: Optional[int] = None,
+    ) -> str:
+        """Delete a calendar event. Returns success or error message."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.DeleteCalendarEventRequest(
+                user_id=user_id,
+                event_id=event_id,
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.DeleteCalendarEvent(request)
+            if not response.success:
+                return response.error or "Failed to delete event"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"delete_calendar_event failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"delete_calendar_event error: {e}")
+            return f"Error: {e}"
+
+    async def get_contacts(
+        self,
+        user_id: str,
+        connection_id: Optional[int] = None,
+        folder_id: str = "",
+        top: int = 100,
+        sources: str = "all",
+    ) -> str:
+        """Get contacts. sources: all (O365+org), microsoft, org, caldav. Returns formatted string or JSON string."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetContactsRequest(
+                user_id=user_id,
+                folder_id=folder_id,
+                top=top,
+                connection_id=connection_id or 0,
+                sources=(sources or "all").strip().lower() or "all",
+            )
+            response = await self._stub.GetContacts(request)
+            if not response.success:
+                return response.error or "Failed to get contacts"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"get_contacts failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"get_contacts error: {e}")
+            return f"Error: {e}"
+
+    async def get_contact_by_id(
+        self,
+        user_id: str,
+        contact_id: str,
+        connection_id: Optional[int] = None,
+    ) -> str:
+        """Get a single O365 contact by ID. Returns formatted string for LLM."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetContactByIdRequest(
+                user_id=user_id,
+                contact_id=contact_id,
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.GetContactById(request)
+            if not response.success:
+                return response.error or "Failed to get contact"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"get_contact_by_id failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"get_contact_by_id error: {e}")
+            return f"Error: {e}"
+
+    async def create_contact(
+        self,
+        user_id: str,
+        display_name: str = "",
+        given_name: str = "",
+        surname: str = "",
+        connection_id: Optional[int] = None,
+        folder_id: str = "",
+        email_addresses: Optional[List[Dict[str, str]]] = None,
+        phone_numbers: Optional[List[Dict[str, str]]] = None,
+        company_name: str = "",
+        job_title: str = "",
+        birthday: str = "",
+        notes: str = "",
+    ) -> str:
+        """Create an O365 contact. Returns success or error message."""
+        try:
+            await self._ensure_connected()
+            email_json = json.dumps(email_addresses or [])
+            phone_json = json.dumps(phone_numbers or [])
+            request = tool_service_pb2.CreateContactRequest(
+                user_id=user_id,
+                folder_id=folder_id,
+                display_name=display_name,
+                given_name=given_name,
+                surname=surname,
+                company_name=company_name,
+                job_title=job_title,
+                birthday=birthday,
+                notes=notes,
+                email_addresses_json=email_json,
+                phone_numbers_json=phone_json,
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.CreateContact(request)
+            if not response.success:
+                return response.error or "Failed to create contact"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"create_contact failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"create_contact error: {e}")
+            return f"Error: {e}"
+
+    async def update_contact(
+        self,
+        user_id: str,
+        contact_id: str,
+        connection_id: Optional[int] = None,
+        display_name: Optional[str] = None,
+        given_name: Optional[str] = None,
+        surname: Optional[str] = None,
+        email_addresses: Optional[List[Dict[str, str]]] = None,
+        phone_numbers: Optional[List[Dict[str, str]]] = None,
+        company_name: Optional[str] = None,
+        job_title: Optional[str] = None,
+        birthday: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> str:
+        """Update an O365 contact. Returns success or error message."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpdateContactRequest(
+                user_id=user_id,
+                contact_id=contact_id,
+                connection_id=connection_id or 0,
+            )
+            if display_name is not None:
+                request.display_name = display_name
+            if given_name is not None:
+                request.given_name = given_name
+            if surname is not None:
+                request.surname = surname
+            if company_name is not None:
+                request.company_name = company_name
+            if job_title is not None:
+                request.job_title = job_title
+            if birthday is not None:
+                request.birthday = birthday
+            if notes is not None:
+                request.notes = notes
+            if email_addresses is not None:
+                request.email_addresses_json = json.dumps(email_addresses)
+            if phone_numbers is not None:
+                request.phone_numbers_json = json.dumps(phone_numbers)
+            response = await self._stub.UpdateContact(request)
+            if not response.success:
+                return response.error or "Failed to update contact"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"update_contact failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"update_contact error: {e}")
+            return f"Error: {e}"
+
+    async def delete_contact(
+        self,
+        user_id: str,
+        contact_id: str,
+        connection_id: Optional[int] = None,
+    ) -> str:
+        """Delete an O365 contact. Returns success or error message."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.DeleteContactRequest(
+                user_id=user_id,
+                contact_id=contact_id,
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.DeleteContact(request)
+            if not response.success:
+                return response.error or "Failed to delete contact"
+            return response.result
+        except grpc.RpcError as e:
+            logger.error(f"delete_contact failed: {e.code()} - {e.details()}")
+            return f"Error: {e.details() or str(e)}"
+        except Exception as e:
+            logger.error(f"delete_contact error: {e}")
+            return f"Error: {e}"
+
+    async def list_user_accounts(
+        self,
+        user_id: str,
+        agent_profile_id: str = "",
+        service_type: str = "all",
+    ) -> List[Dict[str, Any]]:
+        """List email/calendar/contacts accounts. If agent_profile_id is set, return only accounts bound to that profile."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListUserAccountsRequest(
+                user_id=user_id,
+                agent_profile_id=agent_profile_id,
+                service_type=service_type,
+            )
+            response = await self._stub.ListUserAccounts(request)
+            if response.success and response.result:
+                try:
+                    return json.loads(response.result)
+                except json.JSONDecodeError:
+                    return []
+            return []
+        except grpc.RpcError as e:
+            logger.error("list_user_accounts failed: %s - %s", e.code(), e.details())
+            return []
+        except Exception as e:
+            logger.error("list_user_accounts error: %s", e)
+            return []
+
+    async def search_contacts(
+        self,
+        user_id: str,
+        query: str,
+        sources: str = "all",
+        top: int = 20,
+        connection_id: Optional[int] = None,
+    ) -> str:
+        """Search contacts by query. Returns JSON string with contacts and formatted."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.SearchContactsRequest(
+                user_id=user_id,
+                query=query,
+                sources=sources,
+                top=top,
+                connection_id=connection_id or 0,
+            )
+            response = await self._stub.SearchContacts(request)
+            if not response.success:
+                return json.dumps({"contacts": [], "formatted": response.error or "Search failed"})
+            return response.result or json.dumps({"contacts": [], "formatted": "No results."})
+        except grpc.RpcError as e:
+            logger.error("search_contacts failed: %s - %s", e.code(), e.details())
+            return json.dumps({"contacts": [], "formatted": str(e.details() or e)})
+        except Exception as e:
+            logger.error("search_contacts error: %s", e)
+            return json.dumps({"contacts": [], "formatted": str(e)})
+
+    async def get_agent_profile(
+        self,
+        user_id: str,
+        profile_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get agent profile by ID for custom agent execution. Returns profile dict or None."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetAgentProfileRequest(
+                user_id=user_id,
+                profile_id=profile_id,
+            )
+            response = await self._stub.GetAgentProfile(request)
+            if not response.success:
+                logger.warning("get_agent_profile: %s", response.error)
+                return None
+            return json.loads(response.profile_json)
+        except grpc.RpcError as e:
+            logger.error("get_agent_profile failed: %s - %s", e.code(), e.details())
+            return None
+        except Exception as e:
+            logger.error("get_agent_profile error: %s", e)
+            return None
+
+    async def list_auto_routable_profiles(self, user_id: str) -> List[Dict[str, Any]]:
+        """List agent profiles for the user where auto_routable=true and is_active=true."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListAutoRoutableProfilesRequest(user_id=user_id)
+            response = await self._stub.ListAutoRoutableProfiles(request)
+            if not response.success:
+                logger.warning("list_auto_routable_profiles: %s", response.error)
+                return []
+            return json.loads(response.profiles_json or "[]")
+        except grpc.RpcError as e:
+            logger.warning("list_auto_routable_profiles failed: %s - %s", e.code(), e.details())
+            return []
+        except Exception as e:
+            logger.warning("list_auto_routable_profiles error: %s", e)
+            return []
+
+    async def resolve_agent_handle(
+        self,
+        handle: str,
+        user_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve @handle to agent_profile_id and agent_name. Returns dict with agent_profile_id, agent_name, found or None."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ResolveAgentHandleRequest(
+                handle=handle.strip(),
+                user_id=user_id,
+            )
+            response = await self._stub.ResolveAgentHandle(request)
+            if not response.found:
+                return None
+            return {
+                "agent_profile_id": response.agent_profile_id,
+                "agent_name": response.agent_name,
+                "found": True,
+            }
+        except grpc.RpcError as e:
+            logger.error("resolve_agent_handle failed: %s - %s", e.code(), e.details())
+            return None
+        except Exception as e:
+            logger.error("resolve_agent_handle error: %s", e)
+            return None
+
+    async def enqueue_agent_invocation(
+        self,
+        agent_profile_id: str,
+        input_content: str,
+        user_id: str,
+        source_agent_name: str = "",
+        chain_depth: int = 0,
+        chain_path: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Enqueue async agent-to-agent invocation. Returns dict with success, task_id, error."""
+        try:
+            await self._ensure_connected()
+            import json as _json
+            chain_path_json = _json.dumps(chain_path or [])
+            request = tool_service_pb2.EnqueueAgentInvocationRequest(
+                agent_profile_id=agent_profile_id,
+                input_content=input_content,
+                user_id=user_id,
+                source_agent_name=source_agent_name,
+                chain_depth=chain_depth,
+                chain_path_json=chain_path_json,
+            )
+            response = await self._stub.EnqueueAgentInvocation(request)
+            return {
+                "success": response.success,
+                "task_id": response.task_id or "",
+                "error": response.error or "",
+            }
+        except grpc.RpcError as e:
+            logger.error("enqueue_agent_invocation failed: %s - %s", e.code(), e.details())
+            return {"success": False, "task_id": "", "error": str(e.details() or e.code())}
+        except Exception as e:
+            logger.error("enqueue_agent_invocation error: %s", e)
+            return {"success": False, "task_id": "", "error": str(e)}
+
+    async def read_team_posts(
+        self,
+        team_id: str,
+        user_id: str,
+        since_last_read: bool = True,
+        limit: int = 20,
+        mark_as_read: bool = True,
+    ) -> Dict[str, Any]:
+        """Read team posts (optionally since last_read). Returns dict with posts, count, team_name, success, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ReadTeamPostsRequest(
+                team_id=team_id,
+                user_id=user_id,
+                since_last_read=since_last_read,
+                limit=limit,
+                mark_as_read=mark_as_read,
+            )
+            response = await self._stub.ReadTeamPosts(request)
+            posts = [
+                {
+                    "post_id": p.post_id,
+                    "author_id": p.author_id,
+                    "author_name": p.author_name,
+                    "content": p.content,
+                    "post_type": p.post_type,
+                    "created_at": p.created_at,
+                }
+                for p in response.posts
+            ]
+            return {
+                "posts": posts,
+                "count": response.count,
+                "team_name": response.team_name or "",
+                "success": response.success,
+                "error": response.error or "",
+            }
+        except grpc.RpcError as e:
+            logger.error("read_team_posts failed: %s - %s", e.code(), e.details())
+            return {"posts": [], "count": 0, "team_name": "", "success": False, "error": str(e.details() or e.code())}
+        except Exception as e:
+            logger.error("read_team_posts error: %s", e)
+            return {"posts": [], "count": 0, "team_name": "", "success": False, "error": str(e)}
+
+    async def create_team_post(
+        self,
+        team_id: str,
+        user_id: str,
+        content: str,
+        post_type: str = "text",
+        reply_to_post_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a team post or comment. Returns dict with post_id, success, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CreateTeamPostRequest(
+                team_id=team_id,
+                user_id=user_id,
+                content=content.strip(),
+                post_type=post_type or "text",
+                reply_to_post_id=reply_to_post_id or "",
+            )
+            response = await self._stub.CreateTeamPost(request)
+            return {
+                "post_id": response.post_id or "",
+                "success": response.success,
+                "error": response.error or "",
+            }
+        except grpc.RpcError as e:
+            logger.error("create_team_post failed: %s - %s", e.code(), e.details())
+            return {"post_id": "", "success": False, "error": str(e.details() or e.code())}
+        except Exception as e:
+            logger.error("create_team_post error: %s", e)
+            return {"post_id": "", "success": False, "error": str(e)}
+
+    async def get_playbook(
+        self,
+        user_id: str,
+        playbook_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get playbook by ID for custom agent execution. Returns playbook dict or None."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetPlaybookRequest(
+                user_id=user_id,
+                playbook_id=playbook_id,
+            )
+            response = await self._stub.GetPlaybook(request)
+            if not response.success:
+                logger.warning("get_playbook: %s", response.error)
+                return None
+            return json.loads(response.playbook_json)
+        except grpc.RpcError as e:
+            logger.error("get_playbook failed: %s - %s", e.code(), e.details())
+            return None
+        except Exception as e:
+            logger.error("get_playbook error: %s", e)
+            return None
+
+    async def get_skills_by_ids(
+        self,
+        user_id: str,
+        skill_ids: List[str],
+    ) -> List[Dict[str, Any]]:
+        """Batch fetch skills by IDs for pipeline injection. Returns list of skill dicts."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetSkillsByIdsRequest(
+                user_id=user_id,
+                skill_ids=skill_ids,
+            )
+            response = await self._stub.GetSkillsByIds(request)
+            if not response.success:
+                logger.warning("get_skills_by_ids: %s", response.error)
+                return []
+            return json.loads(response.skills_json or "[]")
+        except grpc.RpcError as e:
+            logger.error("get_skills_by_ids failed: %s - %s", e.code(), e.details())
+            return []
+        except Exception as e:
+            logger.error("get_skills_by_ids error: %s", e)
+            return []
+
+    async def search_skills(
+        self,
+        user_id: str,
+        query: str,
+        limit: int = 3,
+        score_threshold: float = 0.5,
+    ) -> List[Dict[str, Any]]:
+        """Semantic search over skills for auto-discovery. Returns list of dicts with id, similarity_score, etc."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.SearchSkillsRequest(
+                user_id=user_id,
+                query=query or "",
+                limit=limit,
+                score_threshold=score_threshold,
+            )
+            response = await self._stub.SearchSkills(request)
+            if not response.success:
+                logger.warning("search_skills: %s", response.error)
+                return []
+            return json.loads(response.skills_json or "[]")
+        except grpc.RpcError as e:
+            logger.error("search_skills failed: %s - %s", e.code(), e.details())
+            return []
+        except Exception as e:
+            logger.error("search_skills error: %s", e)
+            return []
+
+    async def list_skills(
+        self,
+        user_id: str,
+        category: Optional[str] = None,
+        include_builtin: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """List user and optionally built-in skills. Returns list of skill dicts."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListSkillsRequest(
+                user_id=user_id,
+                category=category or "",
+                include_builtin=include_builtin,
+            )
+            response = await self._stub.ListSkills(request)
+            if not response.success:
+                logger.warning("list_skills: %s", response.error)
+                return []
+            return json.loads(response.skills_json or "[]")
+        except grpc.RpcError as e:
+            logger.error("list_skills failed: %s - %s", e.code(), e.details())
+            return []
+        except Exception as e:
+            logger.error("list_skills error: %s", e)
+            return []
+
+    async def create_skill(
+        self,
+        user_id: str,
+        name: str,
+        slug: str,
+        procedure: str,
+        required_tools: Optional[List[str]] = None,
+        optional_tools: Optional[List[str]] = None,
+        description: Optional[str] = None,
+        category: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Create a user skill. Returns {success, skill_id, skill, error}."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CreateSkillRequest(
+                user_id=user_id,
+                name=name or "Unnamed skill",
+                slug=(slug or "").strip().lower().replace(" ", "-")[:100] or "unnamed-skill",
+                procedure=procedure or "",
+                required_tools=required_tools or [],
+                optional_tools=optional_tools or [],
+                description=description or "",
+                category=category or "",
+                tags=tags or [],
+            )
+            response = await self._stub.CreateSkill(request)
+            if not response.success:
+                return {"success": False, "skill_id": "", "skill": None, "error": response.error}
+            skill = json.loads(response.skill_json) if response.skill_json else None
+            return {"success": True, "skill_id": response.skill_id, "skill": skill, "error": None}
+        except grpc.RpcError as e:
+            logger.error("create_skill failed: %s - %s", e.code(), e.details())
+            return {"success": False, "skill_id": "", "skill": None, "error": str(e.details() or e)}
+        except Exception as e:
+            logger.error("create_skill error: %s", e)
+            return {"success": False, "skill_id": "", "skill": None, "error": str(e)}
+
+    async def update_skill(
+        self,
+        user_id: str,
+        skill_id: str,
+        procedure: Optional[str] = None,
+        improvement_rationale: Optional[str] = None,
+        evidence_metadata: Optional[Dict[str, Any]] = None,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        category: Optional[str] = None,
+        required_tools: Optional[List[str]] = None,
+        optional_tools: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Update a user skill (new version). Returns {success, skill_id, version, skill, error}."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpdateSkillRequest(
+                user_id=user_id,
+                skill_id=skill_id,
+                procedure=procedure or "",
+                improvement_rationale=improvement_rationale or "",
+                evidence_metadata_json=json.dumps(evidence_metadata or {}),
+                name=name or "",
+                description=description or "",
+                category=category or "",
+                required_tools=required_tools or [],
+                optional_tools=optional_tools or [],
+            )
+            response = await self._stub.UpdateSkill(request)
+            if not response.success:
+                return {"success": False, "skill_id": "", "version": 0, "skill": None, "error": response.error}
+            skill = json.loads(response.skill_json) if response.skill_json else None
+            return {
+                "success": True,
+                "skill_id": response.skill_id,
+                "version": response.version,
+                "skill": skill,
+                "error": None,
+            }
+        except grpc.RpcError as e:
+            logger.error("update_skill failed: %s - %s", e.code(), e.details())
+            return {"success": False, "skill_id": "", "version": 0, "skill": None, "error": str(e.details() or e)}
+        except Exception as e:
+            logger.error("update_skill error: %s", e)
+            return {"success": False, "skill_id": "", "version": 0, "skill": None, "error": str(e)}
+
+    async def log_agent_execution(
+        self,
+        user_id: str,
+        profile_id: str,
+        playbook_id: str,
+        query: str,
+        status: str,
+        duration_ms: int,
+        steps_completed: int = 0,
+        steps_total: int = 0,
+        error_details: Optional[str] = None,
+        started_at: Optional[str] = None,
+        completed_at: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        steps_json: Optional[str] = None,
+    ) -> Optional[str]:
+        """Log a custom agent execution to agent_execution_log. Returns execution_id or None."""
+        try:
+            from datetime import datetime, timezone
+            await self._ensure_connected()
+            now = datetime.now(timezone.utc).isoformat()
+            request = tool_service_pb2.LogAgentExecutionRequest(
+                user_id=user_id,
+                profile_id=profile_id,
+                playbook_id=playbook_id or "",
+                query=query or "",
+                status=status or "completed",
+                duration_ms=duration_ms,
+                steps_completed=steps_completed,
+                steps_total=steps_total,
+                error_details=error_details or "",
+                started_at=started_at or now,
+                completed_at=completed_at or now,
+                metadata_json=json.dumps(metadata or {}),
+                steps_json=steps_json or "",
+            )
+            response = await self._stub.LogAgentExecution(request)
+            if not response.success:
+                logger.warning("log_agent_execution: %s", response.error)
+                return None
+            return response.execution_id or None
+        except grpc.RpcError as e:
+            logger.error("log_agent_execution failed: %s - %s", e.code(), e.details())
+            return None
+        except Exception as e:
+            logger.error("log_agent_execution error: %s", e)
+            return None
+
+    async def park_approval(
+        self,
+        user_id: str,
+        agent_profile_id: str,
+        execution_id: Optional[str],
+        step_name: str,
+        prompt: str,
+        preview_data: Optional[Dict[str, Any]] = None,
+        thread_id: str = "",
+        checkpoint_ns: str = "",
+        playbook_config: Optional[Dict[str, Any]] = None,
+        governance_type: str = "playbook_step",
+    ) -> Optional[str]:
+        """Park an approval request for background/scheduled run. Returns approval_id or None."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ParkApprovalRequest(
+                user_id=user_id,
+                agent_profile_id=agent_profile_id or "",
+                execution_id=execution_id or "",
+                step_name=step_name[:255],
+                prompt=prompt[:10000],
+                preview_data_json=json.dumps(preview_data or {}),
+                thread_id=thread_id[:500],
+                checkpoint_ns=checkpoint_ns[:255],
+                playbook_config_json=json.dumps(playbook_config or {}),
+                governance_type=governance_type[:50],
+            )
+            response = await self._stub.ParkApproval(request)
+            if not response.success:
+                logger.warning("park_approval: %s", response.error)
+                return None
+            return response.approval_id or None
+        except grpc.RpcError as e:
+            logger.error("park_approval failed: %s - %s", e.code(), e.details())
+            return None
+        except Exception as e:
+            logger.error("park_approval error: %s", e)
+            return None
+
+    async def get_agent_memory(
+        self,
+        user_id: str,
+        agent_profile_id: str,
+        memory_key: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get agent memory value. Returns parsed JSON or None."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetAgentMemoryRequest(
+                user_id=user_id,
+                agent_profile_id=agent_profile_id,
+                memory_key=memory_key[:500],
+            )
+            response = await self._stub.GetAgentMemory(request)
+            if not response.success:
+                return None
+            if not response.memory_value_json:
+                return None
+            return json.loads(response.memory_value_json)
+        except Exception as e:
+            logger.debug("get_agent_memory error: %s", e)
+            return None
+
+    async def set_agent_memory(
+        self,
+        user_id: str,
+        agent_profile_id: str,
+        memory_key: str,
+        memory_value: Dict[str, Any],
+        memory_type: str = "kv",
+        expires_at: Optional[str] = None,
+    ) -> bool:
+        """Set agent memory key. Returns True on success."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.SetAgentMemoryRequest(
+                user_id=user_id,
+                agent_profile_id=agent_profile_id,
+                memory_key=memory_key[:500],
+                memory_value_json=json.dumps(memory_value),
+                memory_type=memory_type[:50],
+                expires_at=expires_at or "",
+            )
+            response = await self._stub.SetAgentMemory(request)
+            return bool(response.success)
+        except Exception as e:
+            logger.debug("set_agent_memory error: %s", e)
+            return False
+
+    async def list_agent_memories(
+        self,
+        user_id: str,
+        agent_profile_id: str,
+        key_prefix: Optional[str] = None,
+    ) -> Optional[List[str]]:
+        """List agent memory keys, optionally with prefix filter."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListAgentMemoriesRequest(
+                user_id=user_id,
+                agent_profile_id=agent_profile_id,
+                key_prefix=key_prefix or "",
+            )
+            response = await self._stub.ListAgentMemories(request)
+            if not response.success:
+                return None
+            return list(response.memory_keys)
+        except Exception as e:
+            logger.debug("list_agent_memories error: %s", e)
+            return None
+
+    async def delete_agent_memory(
+        self,
+        user_id: str,
+        agent_profile_id: str,
+        memory_key: str,
+    ) -> bool:
+        """Delete agent memory key. Returns True on success."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.DeleteAgentMemoryRequest(
+                user_id=user_id,
+                agent_profile_id=agent_profile_id,
+                memory_key=memory_key[:500],
+            )
+            response = await self._stub.DeleteAgentMemory(request)
+            return bool(response.success)
+        except Exception as e:
+            logger.debug("delete_agent_memory error: %s", e)
+            return False
+
+    async def append_agent_memory(
+        self,
+        user_id: str,
+        agent_profile_id: str,
+        memory_key: str,
+        entry: Dict[str, Any],
+    ) -> bool:
+        """Append entry to a log-type memory. Returns True on success."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.AppendAgentMemoryRequest(
+                user_id=user_id,
+                agent_profile_id=agent_profile_id,
+                memory_key=memory_key[:500],
+                entry_json=json.dumps(entry),
+            )
+            response = await self._stub.AppendAgentMemory(request)
+            return bool(response.success)
+        except Exception as e:
+            logger.debug("append_agent_memory error: %s", e)
+            return False
+
+    async def execute_connector(
+        self,
+        user_id: str,
+        profile_id: str,
+        connector_id: str,
+        endpoint_id: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Execute a connector endpoint via Tools Service. Returns { records, count, formatted, error? } or None."""
+        import json
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ExecuteConnectorRequest(
+                user_id=user_id,
+                profile_id=profile_id,
+                connector_id=connector_id,
+                endpoint_id=endpoint_id,
+                params_json=json.dumps(params or {}),
+            )
+            response = await self._stub.ExecuteConnector(request)
+            if not response.success:
+                logger.warning("execute_connector: %s", response.error)
+                return {"records": [], "count": 0, "formatted": response.error or "Failed", "error": response.error}
+            if response.result_json:
+                return json.loads(response.result_json)
+            return {"records": [], "count": 0, "formatted": ""}
+        except grpc.RpcError as e:
+            logger.error("execute_connector failed: %s - %s", e.code(), e.details())
+            return None
+        except Exception as e:
+            logger.error("execute_connector error: %s", e)
+            return None
+
+    async def execute_mcp_tool(
+        self,
+        user_id: str,
+        server_id: int,
+        tool_name: str,
+        arguments_json: str = "{}",
+    ) -> Dict[str, Any]:
+        """Invoke tools/call on a user MCP server via Tools Service."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ExecuteMcpToolRequest(
+                server_id=int(server_id),
+                tool_name=tool_name or "",
+                arguments_json=arguments_json or "{}",
+                user_id=user_id or "system",
+            )
+            response = await self._stub.ExecuteMcpTool(request)
+            err = getattr(response, "error", "") or ""
+            formatted = (response.formatted or "").strip() or (response.result_json or "")
+            base: Dict[str, Any] = {
+                "success": bool(response.success),
+                "formatted": formatted,
+                "result_json": response.result_json or "",
+                "error": err,
+            }
+            if response.success and response.result_json:
+                try:
+                    parsed = json.loads(response.result_json)
+                    if isinstance(parsed, dict):
+                        for k, v in parsed.items():
+                            if k not in base:
+                                base[k] = v
+                except json.JSONDecodeError:
+                    pass
+            if not response.success:
+                base["formatted"] = err or formatted or "MCP tool failed"
+            return base
+        except grpc.RpcError as e:
+            logger.error("execute_mcp_tool failed: %s - %s", e.code(), e.details())
+            return {
+                "success": False,
+                "formatted": e.details() or str(e.code()),
+                "error": e.details() or str(e.code()),
+            }
+        except Exception as e:
+            logger.error("execute_mcp_tool error: %s", e)
+            return {"success": False, "formatted": str(e), "error": str(e)}
+
+    async def get_mcp_server_tool_names(self, user_id: str, server_id: int) -> List[str]:
+        """Tool names from cached MCP discovery for this server."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetMcpServerToolsRequest(
+                server_id=int(server_id),
+                user_id=user_id or "system",
+            )
+            response = await self._stub.GetMcpServerTools(request)
+            if not response.success:
+                return []
+            return list(response.tool_names or [])
+        except grpc.RpcError as e:
+            logger.error("get_mcp_server_tool_names failed: %s - %s", e.code(), e.details())
+            return []
+        except Exception as e:
+            logger.error("get_mcp_server_tool_names error: %s", e)
+            return []
+
+    async def probe_api_endpoint(
+        self,
+        user_id: str,
+        url: str,
+        method: str = "GET",
+        headers_json: str = "",
+        body_json: str = "",
+        params_json: str = "",
+    ) -> Dict[str, Any]:
+        """Raw HTTP probe for API discovery. Returns status_code, response_headers, response_body, content_type, error."""
+        import json
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ProbeApiEndpointRequest(
+                user_id=user_id,
+                url=url,
+                method=method,
+                headers_json=headers_json or "{}",
+                body_json=body_json or "",
+                params_json=params_json or "{}",
+            )
+            response = await self._stub.ProbeApiEndpoint(request)
+            if not response.success:
+                return {"success": False, "error": response.error or "Probe failed"}
+            return {
+                "success": True,
+                "status_code": response.status_code,
+                "response_headers_json": response.response_headers_json,
+                "response_body": response.response_body,
+                "content_type": response.content_type,
+            }
+        except grpc.RpcError as e:
+            logger.error("probe_api_endpoint failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": e.details() or str(e.code())}
+        except Exception as e:
+            logger.error("probe_api_endpoint error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def test_connector_endpoint(
+        self,
+        user_id: str,
+        definition_json: str,
+        endpoint_id: str,
+        params_json: str = "{}",
+        credentials_json: str = "{}",
+    ) -> Dict[str, Any]:
+        """Test a connector definition against the live API. Returns records, count, raw_response, formatted, error."""
+        import json
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.TestConnectorEndpointRequest(
+                user_id=user_id,
+                definition_json=definition_json,
+                endpoint_id=endpoint_id,
+                params_json=params_json,
+                credentials_json=credentials_json,
+            )
+            response = await self._stub.TestConnectorEndpoint(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "records": [],
+                    "count": 0,
+                    "raw_response": None,
+                    "formatted": response.formatted or response.error,
+                    "error": response.error,
+                }
+            records = []
+            if response.records_json:
+                try:
+                    records = json.loads(response.records_json)
+                except json.JSONDecodeError:
+                    pass
+            raw_response = None
+            if response.raw_response_json:
+                try:
+                    raw_response = json.loads(response.raw_response_json)
+                except json.JSONDecodeError:
+                    pass
+            return {
+                "success": True,
+                "records": records,
+                "count": response.count,
+                "raw_response": raw_response,
+                "formatted": response.formatted or "",
+            }
+        except grpc.RpcError as e:
+            logger.error("test_connector_endpoint failed: %s - %s", e.code(), e.details())
+            return {"success": False, "records": [], "count": 0, "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("test_connector_endpoint error: %s", e)
+            return {"success": False, "records": [], "count": 0, "formatted": str(e), "error": str(e)}
+
+    async def create_data_connector(
+        self,
+        user_id: str,
+        name: str,
+        description: str,
+        definition_json: str,
+        requires_auth: bool = False,
+        auth_fields_json: str = "[]",
+        category: str = "",
+    ) -> Dict[str, Any]:
+        """Save a connector definition to the database. Returns connector_id, name, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CreateDataConnectorRequest(
+                user_id=user_id,
+                name=name,
+                description=description,
+                definition_json=definition_json,
+                requires_auth=requires_auth,
+                auth_fields_json=auth_fields_json,
+                category=category or "",
+            )
+            response = await self._stub.CreateDataConnector(request)
+            return {
+                "success": response.success,
+                "connector_id": response.connector_id,
+                "name": response.name,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("create_data_connector failed: %s - %s", e.code(), e.details())
+            return {"success": False, "connector_id": "", "name": "", "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("create_data_connector error: %s", e)
+            return {"success": False, "connector_id": "", "name": "", "formatted": str(e), "error": str(e)}
+
+    async def bulk_scrape_urls(
+        self,
+        user_id: str,
+        urls_json: str,
+        extract_images: bool = True,
+        download_images: bool = True,
+        image_output_folder: str = "",
+        metadata_fields_json: str = "[]",
+        max_concurrent: int = 10,
+        rate_limit_seconds: float = 1.0,
+        folder_id: str = "",
+    ) -> Dict[str, Any]:
+        """Bulk scrape URLs. Returns task_id (if backgrounded), results, count, images_found, images_downloaded, formatted."""
+        import json
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BulkScrapeUrlsRequest(
+                user_id=user_id,
+                urls_json=urls_json,
+                extract_images=extract_images,
+                download_images=download_images,
+                image_output_folder=image_output_folder,
+                metadata_fields_json=metadata_fields_json,
+                max_concurrent=max_concurrent,
+                rate_limit_seconds=rate_limit_seconds,
+                folder_id=folder_id,
+            )
+            response = await self._stub.BulkScrapeUrls(request)
+            results = []
+            if response.results_json:
+                try:
+                    results = json.loads(response.results_json)
+                except json.JSONDecodeError:
+                    pass
+            return {
+                "success": response.success,
+                "task_id": response.task_id or "",
+                "results": results,
+                "count": response.count,
+                "images_found": response.images_found,
+                "images_downloaded": response.images_downloaded,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("bulk_scrape_urls failed: %s - %s", e.code(), e.details())
+            return {"success": False, "task_id": "", "results": [], "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("bulk_scrape_urls error: %s", e)
+            return {"success": False, "task_id": "", "results": [], "formatted": str(e), "error": str(e)}
+
+    async def get_bulk_scrape_status(
+        self,
+        user_id: str,
+        task_id: str,
+    ) -> Dict[str, Any]:
+        """Get status of a bulk scrape Celery task. Returns status, progress_*, results, formatted."""
+        import json
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetBulkScrapeStatusRequest(
+                user_id=user_id,
+                task_id=task_id,
+            )
+            response = await self._stub.GetBulkScrapeStatus(request)
+            results = []
+            if response.results_json:
+                try:
+                    results = json.loads(response.results_json)
+                except json.JSONDecodeError:
+                    pass
+            return {
+                "success": response.success,
+                "status": response.status,
+                "progress_current": response.progress_current,
+                "progress_total": response.progress_total,
+                "progress_message": response.progress_message,
+                "results": results,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("get_bulk_scrape_status failed: %s - %s", e.code(), e.details())
+            return {"success": False, "status": "UNKNOWN", "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("get_bulk_scrape_status error: %s", e)
+            return {"success": False, "status": "UNKNOWN", "formatted": str(e), "error": str(e)}
+
+    async def list_control_panes(self, user_id: str) -> Dict[str, Any]:
+        """List all control panes for the user. Returns panes (list), formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListControlPanesRequest(user_id=user_id)
+            response = await self._stub.ListControlPanes(request)
+            panes = []
+            if response.panes_json:
+                try:
+                    panes = json.loads(response.panes_json)
+                except json.JSONDecodeError:
+                    pass
+            return {
+                "success": response.success,
+                "panes": panes,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("list_control_panes failed: %s - %s", e.code(), e.details())
+            return {"success": False, "panes": [], "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("list_control_panes error: %s", e)
+            return {"success": False, "panes": [], "formatted": str(e), "error": str(e)}
+
+    async def get_connector_endpoints(
+        self, user_id: str, connector_id: str
+    ) -> Dict[str, Any]:
+        """Get endpoint ids and metadata from a connector definition. Returns endpoints (list), formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetConnectorEndpointsRequest(
+                user_id=user_id,
+                connector_id=connector_id,
+            )
+            response = await self._stub.GetConnectorEndpoints(request)
+            endpoints = []
+            if response.endpoints_json:
+                try:
+                    endpoints = json.loads(response.endpoints_json)
+                except json.JSONDecodeError:
+                    pass
+            return {
+                "success": response.success,
+                "endpoints": endpoints,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("get_connector_endpoints failed: %s - %s", e.code(), e.details())
+            return {"success": False, "endpoints": [], "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("get_connector_endpoints error: %s", e)
+            return {"success": False, "endpoints": [], "formatted": str(e), "error": str(e)}
+
+    async def list_data_connectors(self, user_id: str) -> Dict[str, Any]:
+        """List user-owned data source connectors. Returns connectors (list), formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListDataConnectorsRequest(user_id=user_id)
+            response = await self._stub.ListDataConnectors(request)
+            connectors = []
+            if response.connectors_json:
+                try:
+                    connectors = json.loads(response.connectors_json)
+                except json.JSONDecodeError:
+                    pass
+            return {
+                "success": response.success,
+                "connectors": connectors,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("list_data_connectors failed: %s - %s", e.code(), e.details())
+            return {"success": False, "connectors": [], "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("list_data_connectors error: %s", e)
+            return {"success": False, "connectors": [], "formatted": str(e), "error": str(e)}
+
+    async def get_data_connector(
+        self,
+        user_id: str,
+        connector_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get full data connector by ID (definition, endpoints; auth values redacted). Returns connector dict or None."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetDataConnectorRequest(
+                user_id=user_id,
+                connector_id=connector_id,
+            )
+            response = await self._stub.GetDataConnector(request)
+            if not response.success:
+                logger.warning("get_data_connector: %s", response.error)
+                return None
+            if not response.connector_json:
+                return None
+            return json.loads(response.connector_json)
+        except grpc.RpcError as e:
+            logger.warning("get_data_connector failed: %s - %s", e.code(), e.details())
+            return None
+        except Exception as e:
+            logger.error("get_data_connector error: %s", e)
+            return None
+
+    async def update_data_connector(
+        self,
+        user_id: str,
+        connector_id: str,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        connector_type: Optional[str] = None,
+        definition_json: Optional[str] = None,
+        requires_auth: Optional[bool] = None,
+        auth_fields_json: Optional[str] = None,
+        is_locked: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Update a data connector (partial update). Returns success, connector_id, formatted, error."""
+        try:
+            await self._ensure_connected()
+            req = tool_service_pb2.UpdateDataConnectorRequest(
+                user_id=user_id,
+                connector_id=connector_id,
+            )
+            if name is not None:
+                req.name = name
+            if description is not None:
+                req.description = description
+            if connector_type is not None:
+                req.connector_type = connector_type
+            if definition_json is not None:
+                req.definition_json = definition_json
+            if requires_auth is not None:
+                req.requires_auth = requires_auth
+            if auth_fields_json is not None:
+                req.auth_fields_json = auth_fields_json
+            if is_locked is not None:
+                req.is_locked = is_locked
+            response = await self._stub.UpdateDataConnector(req)
+            return {
+                "success": response.success,
+                "connector_id": response.connector_id,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("update_data_connector failed: %s - %s", e.code(), e.details())
+            return {"success": False, "connector_id": connector_id, "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("update_data_connector error: %s", e)
+            return {"success": False, "connector_id": connector_id, "formatted": str(e), "error": str(e)}
+
+    async def list_playbooks(self, user_id: str) -> Dict[str, Any]:
+        """List playbooks owned by the user or templates. Returns playbooks (list), formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListPlaybooksRequest(user_id=user_id)
+            response = await self._stub.ListPlaybooks(request)
+            playbooks = []
+            if response.playbooks_json:
+                try:
+                    playbooks = json.loads(response.playbooks_json)
+                except json.JSONDecodeError:
+                    pass
+            return {
+                "success": response.success,
+                "playbooks": playbooks,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("list_playbooks failed: %s - %s", e.code(), e.details())
+            return {"success": False, "playbooks": [], "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("list_playbooks error: %s", e)
+            return {"success": False, "playbooks": [], "formatted": str(e), "error": str(e)}
+
+    async def list_agent_profiles(self, user_id: str) -> Dict[str, Any]:
+        """List agent profiles for the user with derived status. Returns profiles (list), formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListAgentProfilesRequest(user_id=user_id)
+            response = await self._stub.ListAgentProfiles(request)
+            profiles = []
+            if response.profiles_json:
+                try:
+                    profiles = json.loads(response.profiles_json)
+                except json.JSONDecodeError:
+                    pass
+            return {
+                "success": response.success,
+                "profiles": profiles,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("list_agent_profiles failed: %s - %s", e.code(), e.details())
+            return {"success": False, "profiles": [], "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("list_agent_profiles error: %s", e)
+            return {"success": False, "profiles": [], "formatted": str(e), "error": str(e)}
+
+    async def create_control_pane(
+        self,
+        user_id: str,
+        name: str,
+        connector_id: str,
+        icon: str = "Tune",
+        credentials_encrypted_json: str = "{}",
+        connection_id: Optional[int] = None,
+        controls_json: str = "[]",
+        is_visible: bool = True,
+        sort_order: int = 0,
+        refresh_interval: int = 0,
+    ) -> Dict[str, Any]:
+        """Create a control pane. Returns pane_id, name, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CreateControlPaneRequest(
+                user_id=user_id,
+                name=name,
+                icon=icon,
+                connector_id=connector_id,
+                credentials_encrypted_json=credentials_encrypted_json,
+                connection_id=connection_id or 0,
+                controls_json=controls_json,
+                is_visible=is_visible,
+                sort_order=sort_order,
+                refresh_interval=refresh_interval,
+            )
+            response = await self._stub.CreateControlPane(request)
+            return {
+                "success": response.success,
+                "pane_id": response.pane_id,
+                "name": response.name,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("create_control_pane failed: %s - %s", e.code(), e.details())
+            return {"success": False, "pane_id": "", "name": "", "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("create_control_pane error: %s", e)
+            return {"success": False, "pane_id": "", "name": "", "formatted": str(e), "error": str(e)}
+
+    async def update_control_pane(
+        self,
+        user_id: str,
+        pane_id: str,
+        name: Optional[str] = None,
+        icon: Optional[str] = None,
+        connector_id: Optional[str] = None,
+        credentials_encrypted_json: Optional[str] = None,
+        connection_id: Optional[int] = None,
+        controls_json: Optional[str] = None,
+        is_visible: Optional[bool] = None,
+        sort_order: Optional[int] = None,
+        refresh_interval: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Update a control pane (partial). Returns formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpdateControlPaneRequest(
+                user_id=user_id,
+                pane_id=pane_id,
+            )
+            if name is not None:
+                request.name = name
+            if icon is not None:
+                request.icon = icon
+            if connector_id is not None:
+                request.connector_id = connector_id
+            if credentials_encrypted_json is not None:
+                request.credentials_encrypted_json = credentials_encrypted_json
+            if connection_id is not None:
+                request.connection_id = connection_id
+            if controls_json is not None:
+                request.controls_json = controls_json
+            if is_visible is not None:
+                request.is_visible = is_visible
+            if sort_order is not None:
+                request.sort_order = sort_order
+            if refresh_interval is not None:
+                request.refresh_interval = refresh_interval
+            response = await self._stub.UpdateControlPane(request)
+            return {
+                "success": response.success,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("update_control_pane failed: %s - %s", e.code(), e.details())
+            return {"success": False, "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("update_control_pane error: %s", e)
+            return {"success": False, "formatted": str(e), "error": str(e)}
+
+    async def delete_control_pane(self, user_id: str, pane_id: str) -> Dict[str, Any]:
+        """Delete a control pane. Returns formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.DeleteControlPaneRequest(
+                user_id=user_id,
+                pane_id=pane_id,
+            )
+            response = await self._stub.DeleteControlPane(request)
+            return {
+                "success": response.success,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("delete_control_pane failed: %s - %s", e.code(), e.details())
+            return {"success": False, "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("delete_control_pane error: %s", e)
+            return {"success": False, "formatted": str(e), "error": str(e)}
+
+    async def execute_control_pane_action(
+        self,
+        user_id: str,
+        pane_id: str,
+        endpoint_id: str,
+        params_json: str = "{}",
+    ) -> Dict[str, Any]:
+        """Execute a connector endpoint through a saved control pane. Returns raw_response, records, count, formatted, error."""
+        import json
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ExecuteControlPaneActionRequest(
+                user_id=user_id,
+                pane_id=pane_id,
+                endpoint_id=endpoint_id,
+                params_json=params_json,
+            )
+            response = await self._stub.ExecuteControlPaneAction(request)
+            if not response.success:
+                return {
+                    "success": False,
+                    "raw_response": None,
+                    "records": [],
+                    "count": 0,
+                    "formatted": response.formatted or response.error,
+                    "error": response.error,
+                }
+            records = []
+            if response.records_json:
+                try:
+                    records = json.loads(response.records_json)
+                except json.JSONDecodeError:
+                    pass
+            raw_response = None
+            if response.raw_response_json:
+                try:
+                    raw_response = json.loads(response.raw_response_json)
+                except json.JSONDecodeError:
+                    pass
+            return {
+                "success": True,
+                "raw_response": raw_response,
+                "records": records,
+                "count": response.count,
+                "formatted": response.formatted or "",
+            }
+        except grpc.RpcError as e:
+            logger.error("execute_control_pane_action failed: %s - %s", e.code(), e.details())
+            return {"success": False, "raw_response": None, "records": [], "count": 0, "formatted": e.details(), "error": e.details()}
+        except Exception as e:
+            logger.error("execute_control_pane_action error: %s", e)
+            return {"success": False, "raw_response": None, "records": [], "count": 0, "formatted": str(e), "error": str(e)}
+
+    # ===== Agent Factory meta-tools =====
+
+    async def create_agent_profile(
+        self,
+        user_id: str,
+        name: str,
+        handle: Optional[str] = None,
+        description: Optional[str] = None,
+        model_preference: Optional[str] = None,
+        system_prompt_additions: Optional[str] = None,
+        persona_enabled: bool = False,
+        auto_routable: bool = False,
+        chat_history_enabled: bool = False,
+        chat_visible: bool = True,
+        is_active: bool = False,
+    ) -> Dict[str, Any]:
+        """Create an agent profile via Tools Service. Default is_active=False (paused). Handle optional (empty = schedule/Run-only). Returns agent_id, name, handle, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CreateAgentProfileRequest(
+                user_id=user_id,
+                name=name,
+                handle=handle or "",
+                description=description or "",
+                model_preference=model_preference or "",
+                system_prompt_additions=system_prompt_additions or "",
+                persona_enabled=persona_enabled,
+                auto_routable=auto_routable,
+                chat_history_enabled=chat_history_enabled,
+                chat_visible=chat_visible,
+                is_active=is_active,
+            )
+            response = await self._stub.CreateAgentProfile(request)
+            return {
+                "success": response.success,
+                "agent_id": response.agent_id,
+                "name": response.name,
+                "handle": response.handle,
+                "formatted": response.formatted,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("create_agent_profile failed: %s - %s", e.code(), e.details())
+            return {"success": False, "agent_id": "", "name": "", "handle": "", "formatted": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("create_agent_profile error: %s", e)
+            return {"success": False, "agent_id": "", "name": "", "handle": "", "formatted": "", "error": str(e)}
+
+    async def set_agent_profile_status(
+        self,
+        user_id: str,
+        agent_id: str,
+        is_active: bool,
+    ) -> Dict[str, Any]:
+        """Set an agent profile's active status (pause or activate). Returns success, is_active, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.SetAgentProfileStatusRequest(
+                user_id=user_id,
+                agent_id=agent_id,
+                is_active=is_active,
+            )
+            response = await self._stub.SetAgentProfileStatus(request)
+            return {
+                "success": response.success,
+                "is_active": response.is_active,
+                "formatted": response.formatted,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("set_agent_profile_status failed: %s - %s", e.code(), e.details())
+            return {"success": False, "is_active": False, "formatted": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("set_agent_profile_status error: %s", e)
+            return {"success": False, "is_active": False, "formatted": "", "error": str(e)}
+
+    async def create_playbook(
+        self,
+        user_id: str,
+        name: str,
+        definition: Dict[str, Any],
+        description: Optional[str] = None,
+        run_context: str = "background",
+        category: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Create a custom playbook via Tools Service. Returns playbook_id, name, step_count, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CreatePlaybookRequest(
+                user_id=user_id,
+                name=name,
+                description=description or "",
+                definition_json=json.dumps(definition),
+                run_context=run_context or "background",
+                category=category or "",
+                tags=tags or [],
+            )
+            response = await self._stub.CreatePlaybook(request)
+            return {
+                "success": response.success,
+                "playbook_id": response.playbook_id,
+                "name": response.name,
+                "step_count": response.step_count,
+                "validation_warnings": list(response.validation_warnings) if response.validation_warnings else [],
+                "formatted": response.formatted,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("create_playbook failed: %s - %s", e.code(), e.details())
+            return {"success": False, "playbook_id": "", "name": "", "step_count": 0, "formatted": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("create_playbook error: %s", e)
+            return {"success": False, "playbook_id": "", "name": "", "step_count": 0, "formatted": "", "error": str(e)}
+
+    async def assign_playbook_to_agent(
+        self,
+        user_id: str,
+        agent_id: str,
+        playbook_id: str,
+    ) -> Dict[str, Any]:
+        """Assign a playbook to an agent profile (set default_playbook_id). Returns success, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.AssignPlaybookToAgentRequest(
+                user_id=user_id,
+                agent_id=agent_id,
+                playbook_id=playbook_id,
+            )
+            response = await self._stub.AssignPlaybookToAgent(request)
+            return {
+                "success": response.success,
+                "formatted": response.formatted,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("assign_playbook_to_agent failed: %s - %s", e.code(), e.details())
+            return {"success": False, "formatted": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("assign_playbook_to_agent error: %s", e)
+            return {"success": False, "formatted": "", "error": str(e)}
+
+    async def update_agent_profile(
+        self,
+        user_id: str,
+        agent_id: str,
+        updates: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Update an agent profile. Lock enforced on backend (only is_active/is_locked when locked). Returns success, agent_id, name, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpdateAgentProfileRequest(
+                user_id=user_id,
+                agent_id=agent_id,
+                updates_json=json.dumps(updates) if updates else "{}",
+            )
+            response = await self._stub.UpdateAgentProfile(request)
+            return {
+                "success": response.success,
+                "agent_id": response.agent_id,
+                "name": response.name,
+                "formatted": response.formatted,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("update_agent_profile failed: %s - %s", e.code(), e.details())
+            return {"success": False, "agent_id": agent_id, "name": "", "formatted": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("update_agent_profile error: %s", e)
+            return {"success": False, "agent_id": agent_id, "name": "", "formatted": "", "error": str(e)}
+
+    async def delete_agent_profile(
+        self,
+        user_id: str,
+        agent_id: str,
+    ) -> Dict[str, Any]:
+        """Delete an agent profile. Blocked when profile is locked. Returns success, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.DeleteAgentProfileRequest(
+                user_id=user_id,
+                agent_id=agent_id,
+            )
+            response = await self._stub.DeleteAgentProfile(request)
+            return {
+                "success": response.success,
+                "formatted": response.formatted,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("delete_agent_profile failed: %s - %s", e.code(), e.details())
+            return {"success": False, "formatted": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("delete_agent_profile error: %s", e)
+            return {"success": False, "formatted": "", "error": str(e)}
+
+    async def update_playbook(
+        self,
+        user_id: str,
+        playbook_id: str,
+        updates: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Update a playbook. Lock enforced on backend (only is_locked toggle when locked). Returns success, playbook_id, name, step_count, validation_warnings, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpdatePlaybookRequest(
+                user_id=user_id,
+                playbook_id=playbook_id,
+                updates_json=json.dumps(updates) if updates else "{}",
+            )
+            response = await self._stub.UpdatePlaybook(request)
+            return {
+                "success": response.success,
+                "playbook_id": response.playbook_id,
+                "name": response.name,
+                "step_count": response.step_count,
+                "validation_warnings": list(response.validation_warnings) if response.validation_warnings else [],
+                "formatted": response.formatted,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("update_playbook failed: %s - %s", e.code(), e.details())
+            return {"success": False, "playbook_id": playbook_id, "name": "", "step_count": 0, "validation_warnings": [], "formatted": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("update_playbook error: %s", e)
+            return {"success": False, "playbook_id": playbook_id, "name": "", "step_count": 0, "validation_warnings": [], "formatted": "", "error": str(e)}
+
+    async def delete_playbook(
+        self,
+        user_id: str,
+        playbook_id: str,
+    ) -> Dict[str, Any]:
+        """Delete a playbook. Blocked when playbook is locked or is a template. Returns success, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.DeletePlaybookRequest(
+                user_id=user_id,
+                playbook_id=playbook_id,
+            )
+            response = await self._stub.DeletePlaybook(request)
+            return {
+                "success": response.success,
+                "formatted": response.formatted,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("delete_playbook failed: %s - %s", e.code(), e.details())
+            return {"success": False, "formatted": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("delete_playbook error: %s", e)
+            return {"success": False, "formatted": "", "error": str(e)}
+
+    async def list_available_llm_models(self, user_id: str = "system") -> Dict[str, Any]:
+        """List LLM models available to the user (for Agent Factory model_preference). Returns success, models, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListAvailableLlmModelsRequest(user_id=user_id)
+            response = await self._stub.ListAvailableLlmModels(request)
+            models = [
+                {"model_id": m.model_id, "display_name": m.display_name, "provider": m.provider}
+                for m in response.models
+            ]
+            return {
+                "success": response.success,
+                "models": models,
+                "formatted": response.formatted,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("list_available_llm_models failed: %s - %s", e.code(), e.details())
+            return {"success": False, "models": [], "formatted": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("list_available_llm_models error: %s", e)
+            return {"success": False, "models": [], "formatted": "", "error": str(e)}
+
+    async def list_agent_schedules(
+        self,
+        user_id: str,
+        agent_id: str,
+    ) -> Dict[str, Any]:
+        """List schedules for an agent profile. Returns success, schedules (list), formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListAgentSchedulesRequest(
+                user_id=user_id,
+                agent_id=agent_id,
+            )
+            response = await self._stub.ListAgentSchedules(request)
+            schedules = []
+            if response.schedules_json:
+                try:
+                    schedules = json.loads(response.schedules_json)
+                except json.JSONDecodeError:
+                    pass
+            return {
+                "success": response.success,
+                "schedules": schedules,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.warning("list_agent_schedules failed: %s - %s", e.code(), e.details())
+            return {"success": False, "schedules": [], "formatted": e.details() or "", "error": e.details()}
+        except Exception as e:
+            logger.error("list_agent_schedules error: %s", e)
+            return {"success": False, "schedules": [], "formatted": str(e), "error": str(e)}
+
+    async def list_agent_data_sources(
+        self,
+        user_id: str,
+        agent_id: str,
+    ) -> Dict[str, Any]:
+        """List data source bindings for an agent profile. Returns success, bindings (list), formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ListAgentDataSourcesRequest(
+                user_id=user_id,
+                agent_id=agent_id,
+            )
+            response = await self._stub.ListAgentDataSources(request)
+            bindings = []
+            if response.bindings_json:
+                try:
+                    bindings = json.loads(response.bindings_json)
+                except json.JSONDecodeError:
+                    pass
+            return {
+                "success": response.success,
+                "bindings": bindings,
+                "formatted": response.formatted or response.error,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.warning("list_agent_data_sources failed: %s - %s", e.code(), e.details())
+            return {"success": False, "bindings": [], "formatted": e.details() or "", "error": e.details()}
+        except Exception as e:
+            logger.error("list_agent_data_sources error: %s", e)
+            return {"success": False, "bindings": [], "formatted": str(e), "error": str(e)}
+
+    async def create_agent_schedule(
+        self,
+        user_id: str,
+        agent_id: str,
+        schedule_type: str,
+        cron_expression: Optional[str] = None,
+        interval_seconds: Optional[int] = None,
+        timezone: str = "UTC",
+        is_active: bool = False,
+        input_context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create a schedule for an agent profile. Returns schedule_id, next_run_at, is_active, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CreateAgentScheduleRequest(
+                user_id=user_id,
+                agent_id=agent_id,
+                schedule_type=schedule_type,
+                cron_expression=cron_expression or "",
+                interval_seconds=interval_seconds or 0,
+                timezone=timezone or "UTC",
+                is_active=is_active,
+                input_context_json=json.dumps(input_context or {}),
+            )
+            response = await self._stub.CreateAgentSchedule(request)
+            return {
+                "success": response.success,
+                "schedule_id": response.schedule_id,
+                "next_run_at": response.next_run_at,
+                "is_active": response.is_active,
+                "formatted": response.formatted,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("create_agent_schedule failed: %s - %s", e.code(), e.details())
+            return {"success": False, "schedule_id": "", "next_run_at": "", "is_active": False, "formatted": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("create_agent_schedule error: %s", e)
+            return {"success": False, "schedule_id": "", "next_run_at": "", "is_active": False, "formatted": "", "error": str(e)}
+
+    async def bind_data_source_to_agent(
+        self,
+        user_id: str,
+        agent_id: str,
+        connector_id: str,
+        config_overrides: Optional[Dict[str, Any]] = None,
+        permissions: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Bind a data source connector to an agent profile. Returns binding_id, formatted, error."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.BindDataSourceToAgentRequest(
+                user_id=user_id,
+                agent_id=agent_id,
+                connector_id=connector_id,
+                config_overrides_json=json.dumps(config_overrides or {}),
+                permissions_json=json.dumps(permissions or {}),
+            )
+            response = await self._stub.BindDataSourceToAgent(request)
+            return {
+                "success": response.success,
+                "binding_id": response.binding_id,
+                "formatted": response.formatted,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("bind_data_source_to_agent failed: %s - %s", e.code(), e.details())
+            return {"success": False, "binding_id": "", "formatted": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("bind_data_source_to_agent error: %s", e)
+            return {"success": False, "binding_id": "", "formatted": "", "error": str(e)}
+
+    # ===== Agent-Initiated Notifications =====
+
+    async def send_outbound_message(
+        self,
+        user_id: str,
+        provider: str,
+        connection_id: str = "",
+        message: str = "",
+        format: str = "markdown",
+        recipient_chat_id: str = "",
+    ) -> Dict[str, Any]:
+        """Send a proactive outbound message via a messaging bot (Telegram, Discord)."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.SendOutboundMessageRequest(
+                user_id=user_id,
+                provider=provider,
+                connection_id=connection_id,
+                message=message,
+                format=format,
+                recipient_chat_id=recipient_chat_id or "",
+            )
+            response = await self._stub.SendOutboundMessage(request)
+            return {
+                "success": response.success,
+                "message_id": response.message_id,
+                "channel": response.channel,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("send_outbound_message failed: %s - %s", e.code(), e.details())
+            return {"success": False, "message_id": "", "channel": provider, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("send_outbound_message error: %s", e)
+            return {"success": False, "message_id": "", "channel": provider, "error": str(e)}
+
+    async def create_agent_conversation(
+        self,
+        user_id: str,
+        message: str,
+        agent_name: str = "",
+        agent_profile_id: str = "",
+        title: str = "",
+        conversation_id: str = "",
+    ) -> Dict[str, Any]:
+        """Create or append to an agent-initiated conversation."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CreateAgentConversationRequest(
+                user_id=user_id,
+                message=message,
+                agent_name=agent_name,
+                agent_profile_id=agent_profile_id,
+                title=title,
+                conversation_id=conversation_id,
+            )
+            response = await self._stub.CreateAgentConversation(request)
+            return {
+                "success": response.success,
+                "conversation_id": response.conversation_id,
+                "message_id": response.message_id,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("create_agent_conversation failed: %s - %s", e.code(), e.details())
+            return {"success": False, "conversation_id": "", "message_id": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("create_agent_conversation error: %s", e)
+            return {"success": False, "conversation_id": "", "message_id": "", "error": str(e)}
+
+    async def create_agent_message(
+        self,
+        user_id: str,
+        team_id: str,
+        from_agent_id: Optional[str] = None,
+        to_agent_id: Optional[str] = None,
+        message_type: str = "report",
+        content: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+        parent_message_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create an inter-agent message (team timeline)."""
+        try:
+            await self._ensure_connected()
+            metadata_json = json.dumps(metadata or {})
+            request = tool_service_pb2.CreateAgentMessageRequest(
+                user_id=user_id,
+                team_id=team_id,
+                from_agent_id=from_agent_id or "",
+                to_agent_id=to_agent_id or "",
+                message_type=message_type,
+                content=content,
+                metadata_json=metadata_json,
+                parent_message_id=parent_message_id or "",
+            )
+            response = await self._stub.CreateAgentMessage(request)
+            out = {
+                "success": response.success,
+                "message_id": response.message_id,
+                "message": None,
+                "error": response.error if response.error else None,
+            }
+            if response.success and response.message_json:
+                try:
+                    out["message"] = json.loads(response.message_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            return out
+        except grpc.RpcError as e:
+            logger.error("create_agent_message failed: %s - %s", e.code(), e.details())
+            return {"success": False, "message_id": "", "message": None, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("create_agent_message error: %s", e)
+            return {"success": False, "message_id": "", "message": None, "error": str(e)}
+
+    async def append_line_agent_chat_message(
+        self,
+        user_id: str,
+        conversation_id: str,
+        content: str,
+        agent_profile_id: str,
+        agent_display_name: str = "",
+        line_id: str = "",
+        line_role: str = "",
+        line_agent_handle: str = "",
+        delegated_by_agent_id: str = "",
+        extra_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Persist a line sub-agent assistant message into the user's chat conversation."""
+        try:
+            await self._ensure_connected()
+            meta_json = json.dumps(extra_metadata or {})
+            request = tool_service_pb2.AppendLineAgentChatMessageRequest(
+                user_id=user_id,
+                conversation_id=conversation_id or "",
+                content=content or "",
+                agent_profile_id=agent_profile_id or "",
+                agent_display_name=agent_display_name or "",
+                line_id=line_id or "",
+                line_role=line_role or "",
+                line_agent_handle=line_agent_handle or "",
+                delegated_by_agent_id=delegated_by_agent_id or "",
+                metadata_json=meta_json,
+            )
+            response = await self._stub.AppendLineAgentChatMessage(request)
+            return {
+                "success": response.success,
+                "message_id": response.message_id,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("append_line_agent_chat_message failed: %s - %s", e.code(), e.details())
+            return {"success": False, "message_id": "", "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("append_line_agent_chat_message error: %s", e)
+            return {"success": False, "message_id": "", "error": str(e)}
+
+    async def read_team_timeline(
+        self,
+        team_id: str,
+        user_id: str = "system",
+        limit: int = 20,
+        since_hours: int = 0,
+    ) -> Dict[str, Any]:
+        """Read recent team timeline messages (for agent context)."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ReadTeamTimelineRequest(
+                user_id=user_id,
+                team_id=team_id,
+                limit=limit,
+                since_hours=since_hours,
+            )
+            response = await self._stub.ReadTeamTimeline(request)
+            if not response.success:
+                return {"success": False, "items": [], "total": 0, "error": response.error}
+            items = json.loads(response.items_json) if response.items_json else []
+            return {"success": True, "items": items, "total": response.total}
+        except grpc.RpcError as e:
+            logger.error("read_team_timeline failed: %s - %s", e.code(), e.details())
+            return {"success": False, "items": [], "total": 0, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("read_team_timeline error: %s", e)
+            return {"success": False, "items": [], "total": 0, "error": str(e)}
+
+    async def read_agent_messages(
+        self,
+        team_id: str,
+        agent_profile_id: str,
+        user_id: str = "system",
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        """Read messages to/from a specific agent in a team."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ReadAgentMessagesRequest(
+                user_id=user_id,
+                team_id=team_id,
+                agent_profile_id=agent_profile_id,
+                limit=limit,
+            )
+            response = await self._stub.ReadAgentMessages(request)
+            if not response.success:
+                return {"success": False, "items": [], "total": 0, "error": response.error}
+            items = json.loads(response.items_json) if response.items_json else []
+            return {"success": True, "items": items, "total": response.total}
+        except grpc.RpcError as e:
+            logger.error("read_agent_messages failed: %s - %s", e.code(), e.details())
+            return {"success": False, "items": [], "total": 0, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("read_agent_messages error: %s", e)
+            return {"success": False, "items": [], "total": 0, "error": str(e)}
+
+    async def get_team_status_board(
+        self,
+        team_id: str,
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        """Get composed team overview: members with tasks, goals, last activity."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetTeamStatusBoardRequest(
+                user_id=user_id,
+                team_id=team_id,
+            )
+            response = await self._stub.GetTeamStatusBoard(request)
+            if not response.success:
+                return {"success": False, "board": {}, "error": response.error}
+            board = json.loads(response.board_json) if response.board_json else {}
+            return {"success": True, "board": board}
+        except grpc.RpcError as e:
+            logger.error("get_team_status_board failed: %s - %s", e.code(), e.details())
+            return {"success": False, "board": {}, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("get_team_status_board error: %s", e)
+            return {"success": False, "board": {}, "error": str(e)}
+
+    async def set_workspace_entry(
+        self,
+        team_id: str,
+        key: str,
+        value: str,
+        user_id: str = "system",
+        updated_by_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Write a key-value entry to the team workspace (Blackboard pattern)."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.SetWorkspaceEntryRequest(
+                user_id=user_id,
+                team_id=team_id,
+                key=key,
+                value=value,
+                updated_by_agent_id=updated_by_agent_id or "",
+            )
+            response = await self._stub.SetWorkspaceEntry(request)
+            return {
+                "success": response.success,
+                "key": response.key,
+                "updated_at": response.updated_at or None,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error("set_workspace_entry failed: %s - %s", e.code(), e.details())
+            return {"success": False, "key": key, "updated_at": None, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("set_workspace_entry error: %s", e)
+            return {"success": False, "key": key, "updated_at": None, "error": str(e)}
+
+    async def read_workspace(
+        self,
+        team_id: str,
+        user_id: str = "system",
+        key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Read one workspace entry by key, or list all keys if key is None/empty."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.ReadWorkspaceRequest(
+                user_id=user_id,
+                team_id=team_id,
+                key=key or "",
+            )
+            response = await self._stub.ReadWorkspace(request)
+            if not response.success:
+                return {"success": False, "entry": None, "entries": [], "single": False, "error": response.error}
+            data = json.loads(response.entries_json) if response.entries_json else ({} if response.single else [])
+            if response.single:
+                return {"success": True, "entry": data, "entries": [], "single": True}
+            return {"success": True, "entry": None, "entries": data if isinstance(data, list) else [], "single": False}
+        except grpc.RpcError as e:
+            logger.error("read_workspace failed: %s - %s", e.code(), e.details())
+            return {"success": False, "entry": None, "entries": [], "single": False, "error": e.details() or str(e)}
+        except Exception as e:
+            logger.error("read_workspace error: %s", e)
+            return {"success": False, "entry": None, "entries": [], "single": False, "error": str(e)}
+
+    async def get_goal_ancestry(self, goal_id: str, user_id: str = "system") -> Dict[str, Any]:
+        """Get goal ancestry (root to leaf) for context injection."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetGoalAncestryRequest(goal_id=goal_id, user_id=user_id)
+            response = await self._stub.GetGoalAncestry(request)
+            if not response.success:
+                return {"success": False, "goals": [], "error": response.error}
+            goals = json.loads(response.goals_json) if response.goals_json else []
+            return {"success": True, "goals": goals}
+        except Exception as e:
+            logger.error("get_goal_ancestry error: %s", e)
+            return {"success": False, "goals": [], "error": str(e)}
+
+    async def get_team_goals_tree(self, team_id: str, user_id: str = "system") -> Dict[str, Any]:
+        """Get full goal tree for a team."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetTeamGoalsTreeRequest(team_id=team_id, user_id=user_id)
+            response = await self._stub.GetTeamGoalsTree(request)
+            if not response.success:
+                return {"success": False, "tree": [], "error": response.error}
+            tree = json.loads(response.tree_json) if response.tree_json else []
+            return {"success": True, "tree": tree}
+        except Exception as e:
+            logger.error("get_team_goals_tree error: %s", e)
+            return {"success": False, "tree": [], "error": str(e)}
+
+    async def get_goals_for_agent(
+        self,
+        team_id: str,
+        agent_profile_id: str,
+        user_id: str = "system",
+    ) -> Dict[str, Any]:
+        """Get goals assigned to an agent in a team."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetGoalsForAgentRequest(
+                team_id=team_id, agent_profile_id=agent_profile_id, user_id=user_id
+            )
+            response = await self._stub.GetGoalsForAgent(request)
+            goals = []
+            if response.success and response.goals_json:
+                goals = json.loads(response.goals_json)
+            return {"success": response.success, "goals": goals, "error": response.error or None}
+        except Exception as e:
+            logger.error("get_goals_for_agent error: %s", e)
+            return {"success": False, "goals": [], "error": str(e)}
+
+    async def update_goal_progress(
+        self, goal_id: str, user_id: str = "system", progress_pct: int = 0
+    ) -> Dict[str, Any]:
+        """Update goal progress percentage."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpdateGoalProgressRequest(
+                goal_id=goal_id, user_id=user_id, progress_pct=progress_pct
+            )
+            response = await self._stub.UpdateGoalProgress(request)
+            return {"success": response.success, "error": response.error or None}
+        except Exception as e:
+            logger.error("update_goal_progress error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def create_agent_task(
+        self,
+        team_id: str,
+        user_id: str = "system",
+        title: str = "Untitled",
+        description: Optional[str] = None,
+        assigned_agent_id: Optional[str] = None,
+        goal_id: Optional[str] = None,
+        priority: int = 0,
+        created_by_agent_id: Optional[str] = None,
+        due_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a team task."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.CreateAgentTaskRequest(
+                team_id=team_id,
+                user_id=user_id,
+                title=title,
+                description=description or "",
+                assigned_agent_id=assigned_agent_id or "",
+                goal_id=goal_id or "",
+                priority=priority,
+                created_by_agent_id=created_by_agent_id or "",
+                due_date=due_date or "",
+            )
+            response = await self._stub.CreateAgentTask(request)
+            task = {}
+            if response.task_json:
+                task = json.loads(response.task_json)
+            return {"success": response.success, "task_id": response.task_id, "task": task, "error": response.error or None}
+        except Exception as e:
+            logger.error("create_agent_task error: %s", e)
+            return {"success": False, "task_id": "", "task": {}, "error": str(e)}
+
+    async def get_agent_work_queue(
+        self, team_id: str, agent_profile_id: str, user_id: str = "system"
+    ) -> Dict[str, Any]:
+        """Get tasks assigned to an agent in a team."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetAgentWorkQueueRequest(
+                team_id=team_id, agent_profile_id=agent_profile_id, user_id=user_id
+            )
+            response = await self._stub.GetAgentWorkQueue(request)
+            tasks = []
+            if response.success and response.tasks_json:
+                tasks = json.loads(response.tasks_json)
+            return {"success": response.success, "tasks": tasks, "error": response.error or None}
+        except Exception as e:
+            logger.error("get_agent_work_queue error: %s", e)
+            return {"success": False, "tasks": [], "error": str(e)}
+
+    async def update_task_status(
+        self, task_id: str, user_id: str, new_status: str
+    ) -> Dict[str, Any]:
+        """Transition task to a new status."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpdateTaskStatusRequest(
+                task_id=task_id, user_id=user_id, new_status=new_status
+            )
+            response = await self._stub.UpdateTaskStatus(request)
+            task = {}
+            if response.task_json:
+                task = json.loads(response.task_json)
+            return {"success": response.success, "task": task, "error": response.error or None}
+        except Exception as e:
+            logger.error("update_task_status error: %s", e)
+            return {"success": False, "task": {}, "error": str(e)}
+
+    async def assign_task_to_agent(
+        self, task_id: str, agent_profile_id: str, user_id: str = "system"
+    ) -> Dict[str, Any]:
+        """Assign a task to an agent."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.AssignTaskToAgentRequest(
+                task_id=task_id, agent_profile_id=agent_profile_id, user_id=user_id
+            )
+            response = await self._stub.AssignTaskToAgent(request)
+            task = {}
+            if response.task_json:
+                task = json.loads(response.task_json)
+            return {"success": response.success, "task": task, "error": response.error or None}
+        except Exception as e:
+            logger.error("assign_task_to_agent error: %s", e)
+            return {"success": False, "task": {}, "error": str(e)}
+
+    async def get_user_notification_preferences(
+        self,
+        user_id: str,
+    ) -> Dict[str, Any]:
+        """Get user notification preferences for channel routing."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetUserNotificationPreferencesRequest(
+                user_id=user_id,
+            )
+            response = await self._stub.GetUserNotificationPreferences(request)
+            if response.success and response.preferences_json:
+                return json.loads(response.preferences_json)
+            return {}
+        except grpc.RpcError as e:
+            logger.error("get_user_notification_preferences failed: %s - %s", e.code(), e.details())
+            return {}
+        except Exception as e:
+            logger.error("get_user_notification_preferences error: %s", e)
+            return {}
+
+    async def get_my_profile(self, user_id: str = "system") -> Dict[str, Any]:
+        """Get the current user's profile (email, display_name, username) and key settings."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetMyProfileRequest(user_id=user_id)
+            response = await self._stub.GetMyProfile(request)
+            if not response.success:
+                return {
+                    "email": "",
+                    "display_name": "",
+                    "username": "",
+                    "preferred_name": "",
+                    "timezone": "",
+                    "zip_code": "",
+                    "ai_context": "",
+                    "success": False,
+                    "error": response.error or "Unknown error",
+                }
+            return {
+                "email": response.email or "",
+                "display_name": response.display_name or "",
+                "username": response.username or "",
+                "preferred_name": response.preferred_name or "",
+                "timezone": response.timezone or "",
+                "zip_code": response.zip_code or "",
+                "ai_context": response.ai_context or "",
+                "success": True,
+                "error": "",
+            }
+        except grpc.RpcError as e:
+            logger.error("get_my_profile failed: %s - %s", e.code(), e.details())
+            return {
+                "email": "",
+                "display_name": "",
+                "username": "",
+                "preferred_name": "",
+                "timezone": "",
+                "zip_code": "",
+                "ai_context": "",
+                "success": False,
+                "error": str(e.details()),
+            }
+        except Exception as e:
+            logger.error("get_my_profile error: %s", e)
+            return {
+                "email": "",
+                "display_name": "",
+                "username": "",
+                "preferred_name": "",
+                "timezone": "",
+                "zip_code": "",
+                "ai_context": "",
+                "success": False,
+                "error": str(e),
+            }
+
+    async def upsert_user_fact(
+        self,
+        user_id: str = "system",
+        fact_key: str = "",
+        value: str = "",
+        category: str = "general",
+        source: str = "agent",
+    ) -> Dict[str, Any]:
+        """Insert or update a single user fact."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.UpsertUserFactRequest(
+                user_id=user_id,
+                fact_key=fact_key,
+                value=value,
+                category=category,
+                source=source,
+            )
+            response = await self._stub.UpsertUserFact(request)
+            return {
+                "success": response.success,
+                "error": response.error or "",
+            }
+        except grpc.RpcError as e:
+            logger.error("upsert_user_fact failed: %s - %s", e.code(), e.details())
+            return {"success": False, "error": str(e.details())}
+        except Exception as e:
+            logger.error("upsert_user_fact error: %s", e)
+            return {"success": False, "error": str(e)}
+
+    async def get_user_facts(self, user_id: str = "system") -> Dict[str, Any]:
+        """Get all facts for a user. Returns { success, facts: list[dict], error }."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetUserFactsRequest(user_id=user_id)
+            response = await self._stub.GetUserFacts(request)
+            if not response.success:
+                return {"success": False, "facts": [], "error": response.error or "Unknown error"}
+            facts = json.loads(response.facts_json) if response.facts_json else []
+            return {"success": True, "facts": facts, "error": ""}
+        except grpc.RpcError as e:
+            logger.error("get_user_facts failed: %s - %s", e.code(), e.details())
+            return {"success": False, "facts": [], "error": str(e.details())}
+        except Exception as e:
+            logger.error("get_user_facts error: %s", e)
+            return {"success": False, "facts": [], "error": str(e)}
+
+    async def invoke_device_tool(
+        self,
+        user_id: str = "system",
+        tool: str = "",
+        args: Optional[Dict[str, Any]] = None,
+        device_id: str = "",
+        timeout: int = 30,
+    ) -> Dict[str, Any]:
+        """Invoke a tool on a connected local proxy device. Returns dict with success, result_json, error, formatted."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.InvokeDeviceToolRequest(
+                user_id=user_id,
+                device_id=device_id,
+                tool=tool,
+                args_json=json.dumps(args or {}),
+                timeout_seconds=timeout,
+            )
+            response = await self._stub.InvokeDeviceTool(request)
+            result = {
+                "success": response.success,
+                "result_json": response.result_json or "{}",
+                "error": response.error or "",
+                "formatted": response.formatted or "",
+            }
+            if response.success and response.result_json:
+                try:
+                    result["result"] = json.loads(response.result_json)
+                except json.JSONDecodeError:
+                    result["result"] = {}
+            else:
+                result["result"] = {}
+            return result
+        except grpc.RpcError as e:
+            logger.error("invoke_device_tool failed: %s - %s", e.code(), e.details())
+            return {"success": False, "result": {}, "result_json": "{}", "error": str(e.details()), "formatted": str(e.details())}
+        except Exception as e:
+            logger.error("invoke_device_tool error: %s", e)
+            return {"success": False, "result": {}, "result_json": "{}", "error": str(e), "formatted": str(e)}
+
+    async def get_device_capabilities(self, user_id: str = "system") -> List[str]:
+        """Return union of capabilities from all connected devices for this user."""
+        try:
+            await self._ensure_connected()
+            request = tool_service_pb2.GetDeviceCapabilitiesRequest(user_id=user_id)
+            response = await self._stub.GetDeviceCapabilities(request)
+            return list(response.capabilities) if response.capabilities else []
+        except grpc.RpcError as e:
+            logger.warning("get_device_capabilities failed: %s - %s", e.code(), e.details())
+            return []
+        except Exception as e:
+            logger.warning("get_device_capabilities error: %s", e)
+            return []
 
 
 # Global client instance

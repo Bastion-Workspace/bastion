@@ -1,0 +1,39 @@
+[package]
+name = "bastion-local-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "Local proxy daemon for Bastion - system tray, WebSocket connection, screenshot and future capabilities"
+authors = ["Bastion"]
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+xcap = "0.8"
+image = "0.25"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tray-icon = "0.21"
+muda = "0.17"
+eframe = "0.28"
+egui = "0.28"
+dirs = "5"
+thiserror = "1"
+async-trait = "0.1"
+arboard = "3"
+sysinfo = "0.32"
+open = "5"
+
+[target.'cfg(not(windows))'.dependencies]
+notify-rust = "4"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+tracing-appender = "0.2"
+winrt-notification = "0.5"

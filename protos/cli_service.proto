@@ -1,0 +1,261 @@
+syntax = "proto3";
+
+package cli_service;
+
+// CLI Worker Service - Sandboxed CLI tool execution for agents
+// Receives file bytes in, returns result bytes out. No database access.
+
+service CliService {
+  // Media processing (FFmpeg)
+  rpc TranscodeMedia(TranscodeMediaRequest) returns (CliBytesResponse);
+  rpc ExtractAudio(ExtractAudioRequest) returns (CliBytesResponse);
+  rpc GenerateMediaThumbnail(GenerateMediaThumbnailRequest) returns (CliBytesResponse);
+  rpc GetMediaInfo(GetMediaInfoRequest) returns (GetMediaInfoResponse);
+  rpc TrimMedia(TrimMediaRequest) returns (CliBytesResponse);
+  rpc BurnSubtitles(BurnSubtitlesRequest) returns (CliBytesResponse);
+
+  // Image processing (ImageMagick)
+  rpc ConvertImage(ConvertImageRequest) returns (CliBytesResponse);
+  rpc OptimizeImage(OptimizeImageRequest) returns (CliBytesResponse);
+
+  // Document conversion (Pandoc)
+  rpc ConvertDocument(ConvertDocumentRequest) returns (CliBytesResponse);
+
+  // Text extraction (Tesseract + Poppler)
+  rpc OcrImage(OcrImageRequest) returns (CliBytesResponse);
+  rpc ExtractPdfText(ExtractPdfTextRequest) returns (CliBytesResponse);
+  rpc SplitPdf(SplitPdfRequest) returns (CliMultiBytesResponse);
+  rpc MergePdfs(MergePdfsRequest) returns (CliBytesResponse);
+  rpc RenderPdfPages(RenderPdfPagesRequest) returns (CliMultiBytesResponse);
+
+  // Diagram rendering (Graphviz)
+  rpc RenderDiagram(RenderDiagramRequest) returns (CliBytesResponse);
+
+  // Metadata (ExifTool)
+  rpc ReadMediaMetadata(ReadMediaMetadataRequest) returns (ReadMediaMetadataResponse);
+  rpc WriteMediaMetadata(WriteMediaMetadataRequest) returns (CliBytesResponse);
+
+  // Media download (yt-dlp)
+  rpc DownloadMedia(DownloadMediaRequest) returns (CliBytesResponse);
+
+  // PDF post-processing (Ghostscript)
+  rpc CompressPdf(CompressPdfRequest) returns (CliBytesResponse);
+  rpc ConvertPdfA(ConvertPdfARequest) returns (CliBytesResponse);
+
+  // QR code (qrencode)
+  rpc GenerateQrCode(GenerateQrCodeRequest) returns (CliBytesResponse);
+
+  // SVG rendering (librsvg)
+  rpc RenderSvg(RenderSvgRequest) returns (CliBytesResponse);
+}
+
+// Common response for operations that return file bytes
+message CliBytesResponse {
+  bool success = 1;
+  bytes output_data = 2;
+  string output_filename = 3;
+  string error = 4;
+  string formatted = 5;
+}
+
+// Response for operations that return multiple files (e.g. SplitPdf)
+message CliMultiBytesResponse {
+  bool success = 1;
+  repeated bytes output_data = 2;
+  repeated string output_filenames = 3;
+  string error = 4;
+  string formatted = 5;
+}
+
+// ----- Media (FFmpeg) -----
+message TranscodeMediaRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+  string output_format = 3;  // mp3, mp4, wav, ogg, webm, flac, aac, mkv, mov
+  optional int32 audio_bitrate_kbps = 4;  // 8-320
+  optional int32 video_bitrate_kbps = 5;  // 100-50000
+  optional int32 max_width = 6;
+  optional int32 max_height = 7;
+}
+
+message ExtractAudioRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+  string output_format = 3;  // mp3, wav, ogg, flac, aac
+  optional int32 bitrate_kbps = 4;  // 8-320
+}
+
+message GenerateMediaThumbnailRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+  string output_format = 3;  // jpg, png
+  int32 width = 4;
+  int32 height = 5;
+  optional string timestamp = 6;  // HH:MM:SS or seconds
+  optional int32 quality = 7;  // 1-100 for jpg
+}
+
+message GetMediaInfoRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+}
+
+message GetMediaInfoResponse {
+  bool success = 1;
+  string error = 2;
+  string formatted = 3;
+  optional double duration_seconds = 4;
+  optional int32 width = 5;
+  optional int32 height = 6;
+  optional string video_codec = 7;
+  optional string audio_codec = 8;
+  optional int32 audio_bitrate_kbps = 9;
+  optional int32 video_bitrate_kbps = 10;
+  optional string metadata_json = 11;
+}
+
+message TrimMediaRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+  string output_format = 3;
+  string start_time = 4;  // HH:MM:SS or seconds
+  string end_time = 5;
+}
+
+message BurnSubtitlesRequest {
+  bytes input_data = 1;           // Video bytes
+  string input_filename = 2;
+  bytes subtitle_data = 3;        // SRT/ASS content as bytes
+  string subtitle_filename = 4;   // e.g. "subs.srt"
+  string output_format = 5;       // mp4, mkv, webm, mov
+  optional int32 font_size = 6;
+  optional string font_color = 7; // hex e.g. "FFFFFF"
+}
+
+// ----- Image (ImageMagick) -----
+message ConvertImageRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+  string output_format = 3;  // png, jpg, jpeg, webp, gif, tiff, bmp, svg
+  optional int32 width = 4;
+  optional int32 height = 5;
+  optional int32 quality = 6;  // 1-100
+  optional int32 crop_x = 7;
+  optional int32 crop_y = 8;
+  optional int32 crop_width = 9;
+  optional int32 crop_height = 10;
+}
+
+// Image optimization (optipng, jpegoptim)
+message OptimizeImageRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+  optional int32 quality = 3;  // 1-100 for JPEG
+  optional bool strip_metadata = 4;
+}
+
+// ----- Document (Pandoc) -----
+message ConvertDocumentRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+  string input_format = 3;   // markdown, org, html, latex, rst, docx, epub
+  string output_format = 4;  // pdf, docx, html, epub, latex, rst, plain
+  optional string output_filename = 5;
+}
+
+// ----- OCR (Tesseract) -----
+message OcrImageRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+  string output_format = 3;  // text, hocr, tsv, pdf
+  repeated string languages = 4;  // eng, fra, deu
+}
+
+// ----- PDF (Poppler) -----
+message ExtractPdfTextRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+  optional int32 first_page = 3;
+  optional int32 last_page = 4;
+}
+
+message SplitPdfRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+}
+
+message MergePdfsRequest {
+  repeated bytes input_documents = 1;  // PDFs to merge in order
+  repeated string input_filenames = 2;  // Optional names for logging
+}
+
+message RenderPdfPagesRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+  string output_format = 3;  // png, jpeg
+  optional int32 first_page = 4;
+  optional int32 last_page = 5;
+  optional int32 dpi = 6;  // default 150
+}
+
+// ----- Diagram (Graphviz) -----
+message RenderDiagramRequest {
+  bytes input_data = 1;  // DOT source
+  string output_format = 2;  // png, svg, pdf
+  string engine = 3;  // dot, neato, fdp, sfdp, circo, twopi
+}
+
+// ----- Metadata (ExifTool) -----
+message ReadMediaMetadataRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+}
+
+message ReadMediaMetadataResponse {
+  bool success = 1;
+  string error = 2;
+  string formatted = 3;
+  string metadata_json = 4;
+}
+
+message WriteMediaMetadataRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+  map<string, string> metadata_fields = 3;  // Allowlisted keys only server-side
+}
+
+// ----- Download (yt-dlp) -----
+message DownloadMediaRequest {
+  string url = 1;
+  string format_preference = 2;  // best, bestaudio, bestvideo
+  optional int32 max_filesize_mb = 3;
+}
+
+// ----- PDF post-processing (Ghostscript) -----
+message CompressPdfRequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+  string quality = 3;  // screen, ebook, printer, prepress
+}
+
+message ConvertPdfARequest {
+  bytes input_data = 1;
+  string input_filename = 2;
+}
+
+// ----- QR code (qrencode) -----
+message GenerateQrCodeRequest {
+  string content = 1;
+  string output_format = 2;  // png, svg
+  optional int32 size = 3;  // pixels, default 256
+  optional string error_correction = 4;  // L, M, Q, H
+}
+
+// ----- SVG rendering (librsvg) -----
+message RenderSvgRequest {
+  bytes input_data = 1;
+  string output_format = 2;  // png, pdf
+  optional int32 width = 3;
+  optional int32 height = 4;
+  optional int32 dpi = 5;
+}

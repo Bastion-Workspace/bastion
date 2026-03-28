@@ -4,7 +4,7 @@
 
 ## Overview
 
-Capture notes, TODOs, journal entries, or meeting notes to `inbox.org` with a single hotkey from anywhere in the application. No need to navigate to files or open editors - just press the hotkey, type, and capture!
+Capture notes, TODOs, contacts, or meeting notes to `inbox.org` with a single hotkey from anywhere in the application. For **journal entries**, use **Ctrl+Shift+J** (Journal for the day) instead. No need to navigate to files or open editors - just press the hotkey, type, and capture!
 
 ## How It Works
 
@@ -17,13 +17,15 @@ Capture notes, TODOs, journal entries, or meeting notes to `inbox.org` with a si
 
 1. **Note** - Quick note with timestamp
 2. **TODO** - Task item with optional priority, scheduling, and deadline
-3. **Journal** - Journal entry with automatic date and tags
+3. **Contact** - Contact info (dedicated form)
 4. **Meeting** - Meeting notes with structured sections (Attendees, Notes, Action Items)
+
+**Journal** — Use **Ctrl+Shift+J** (Journal for the day) to open the journal modal. View or edit today’s entry (or pick another date); content is saved to your configured journal file.
 
 ### Workflow
 
 1. Press **Ctrl+Shift+C** anywhere in the app
-2. Select a template (Note, TODO, Journal, Meeting)
+2. Select a template (Note, TODO, Contact, Meeting)
 3. Type your content
 4. Optional: Add tags, priority, scheduled/deadline dates
 5. Press **Ctrl+Enter** to capture (or click Capture button)

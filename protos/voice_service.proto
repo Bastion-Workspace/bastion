@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+package voice_service;
+
+// Voice Service - Speech-to-Text (STT) and Text-to-Speech (TTS)
+service VoiceService {
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc Transcribe(TranscribeRequest) returns (TranscribeResponse);
+  rpc Synthesize(SynthesizeRequest) returns (SynthesizeResponse);
+  rpc SynthesizeStream(SynthesizeRequest) returns (stream SynthesizeChunk);
+  rpc ListVoices(ListVoicesRequest) returns (ListVoicesResponse);
+}
+
+// ============================================================================
+// Health Check Messages
+// ============================================================================
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;  // "healthy", "degraded", "unhealthy"
+  string service_version = 2;
+  string device = 3;  // "cpu" or "cuda"
+  map<string, string> details = 4;
+}
+
+// ============================================================================
+// Transcribe (STT) Messages
+// ============================================================================
+
+message TranscribeRequest {
+  bytes audio_data = 1;
+  string audio_format = 2;  // "ogg", "wav", "webm", "pcm"
+  string language = 3;       // ISO code or "auto" for detection
+  string provider = 4;      // "whisper", etc.; empty = default
+  string api_key = 5;       // optional per-request override; empty = env default
+  string base_url = 6;      // optional API base URL override
+}
+
+message TranscribeResponse {
+  string text = 1;
+  string detected_language = 2;
+  float confidence = 3;
+  float duration_seconds = 4;
+  optional string error = 5;
+}
+
+// ============================================================================
+// Synthesize (TTS) Messages
+// ============================================================================
+
+message SynthesizeRequest {
+  string text = 1;
+  string voice_id = 2;       // Provider-specific voice identifier
+  string provider = 3;       // "elevenlabs", "openai", "piper"; empty = default
+  string output_format = 4; // "ogg", "wav", "mp3"
+  string api_key = 5;       // optional per-request override; empty = env default
+  string base_url = 6;      // optional API base URL override
+  string model_id = 7;      // optional; ElevenLabs synthesis model; empty = platform default
+}
+
+message SynthesizeResponse {
+  bytes audio_data = 1;
+  string audio_format = 2;
+  float duration_seconds = 3;
+  optional string error = 4;
+}
+
+message SynthesizeChunk {
+  bytes audio_data = 1;
+  string audio_format = 2;  // set on first chunk only (e.g. "ogg", "mp3")
+  bool is_final = 3;
+  optional string error = 4;
+}
+
+// ============================================================================
+// ListVoices Messages
+// ============================================================================
+
+message ListVoicesRequest {
+  string provider = 1;  // empty = all providers
+  string api_key = 2;   // optional; when set with provider, list voices for this key
+  string base_url = 3;  // optional API base URL override
+}
+
+message VoiceInfo {
+  string voice_id = 1;
+  string name = 2;
+  string provider = 3;
+  string language = 4;
+  string gender = 5;
+}
+
+message ListVoicesResponse {
+  repeated VoiceInfo voices = 1;
+  optional string error = 2;
+}

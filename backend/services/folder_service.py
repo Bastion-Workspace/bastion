@@ -65,6 +65,33 @@ class FolderService:
         except Exception as e:
             logger.warning(f"⚠️ Could not get username for {user_id}: {e}")
             return user_id
+
+    async def _count_user_rss_feeds(self, user_id: str) -> int:
+        """RSS feeds owned by this user (My Documents virtual folder)."""
+        if not user_id:
+            return 0
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            row = await fetch_one(
+                "SELECT COUNT(*)::int AS c FROM rss_feeds WHERE user_id = $1",
+                user_id,
+            )
+            return int(row["c"]) if row and row.get("c") is not None else 0
+        except Exception as e:
+            logger.warning(f"Could not count user RSS feeds: {e}")
+            return 0
+
+    async def _count_global_rss_feeds(self) -> int:
+        """Global RSS feeds (user_id IS NULL)."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            row = await fetch_one(
+                "SELECT COUNT(*)::int AS c FROM rss_feeds WHERE user_id IS NULL",
+            )
+            return int(row["c"]) if row and row.get("c") is not None else 0
+        except Exception as e:
+            logger.warning(f"Could not count global RSS feeds: {e}")
+            return 0
     
     async def get_folder_physical_path(self, folder_id: str, user_id: str = None, user_role: str = None) -> Optional[Path]:
         """Get the physical filesystem path for a folder"""
@@ -289,7 +316,35 @@ class FolderService:
                 await self._create_physical_directory(folder_path)
             else:
                 logger.warning(f"⚠️ Could not determine physical path for folder {actual_folder_id}, skipping directory creation")
-            
+
+            # Notify frontend so folder tree updates live (e.g. when agent creates a folder)
+            try:
+                from utils.websocket_manager import get_websocket_manager
+                ws_manager = get_websocket_manager()
+                if ws_manager:
+                    folder_payload = {
+                        "folder_id": actual_folder_id,
+                        "name": result_folder_data.get("name", name),
+                        "parent_folder_id": result_folder_data.get("parent_folder_id"),
+                        "user_id": result_folder_data.get("user_id"),
+                        "collection_type": result_folder_data.get("collection_type", collection_type),
+                        "created_at": (lambda t: t.isoformat() if hasattr(t, "isoformat") else str(t))(result_folder_data.get("created_at") or now),
+                    }
+                    message = {
+                        "type": "folder_event",
+                        "action": "created",
+                        "folder": folder_payload,
+                        "user_id": user_id,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                    target_user = admin_user_id or user_id
+                    if target_user:
+                        await ws_manager.send_to_session(message, target_user)
+                    else:
+                        await ws_manager.broadcast(message)
+            except Exception as ws_err:
+                logger.debug("WebSocket folder_event not sent: %s", ws_err)
+
             # Return DocumentFolder object with actual data from database
             return DocumentFolder(**result_folder_data)
             
@@ -422,9 +477,27 @@ class FolderService:
         except Exception as e:
             logger.error(f"❌ Failed to get or create root folder '{folder_name}': {e}")
             raise
-    
-    async def get_folder_tree(self, user_id: str = None, collection_type: str = "user") -> List[DocumentFolder]:
-        """Get the complete folder tree for a user - always fresh from database"""
+
+    def _folder_ids_under_versions(self, all_folders_data: List[Dict[str, Any]]) -> set:
+        """Return set of folder_ids that are .versions or descendants of .versions (exclude from tree/contents)."""
+        versions_ids = {f["folder_id"] for f in all_folders_data if f.get("name") == ".versions"}
+        excluded = set(versions_ids)
+        while True:
+            added = {
+                f["folder_id"]
+                for f in all_folders_data
+                if f.get("parent_folder_id") in excluded and f["folder_id"] not in excluded
+            }
+            if not added:
+                break
+            excluded |= added
+        return excluded
+
+    async def get_folder_tree(
+        self, user_id: str = None, collection_type: str = "user", shallow: bool = True
+    ) -> List[DocumentFolder]:
+        """Get the complete folder tree for a user - always fresh from database.
+        When shallow=True, only virtual roots keep their direct children; those children get children=[] for lazy loading."""
         try:
             logger.info(f"📁 Building fresh folder tree for user_id: {user_id}, collection_type: {collection_type}")
             
@@ -434,7 +507,7 @@ class FolderService:
             user_folders_data = await self.document_repository.get_folders_by_user(user_id, "user")
             logger.info(f"📁 Found {len(user_folders_data)} user folders for user {user_id}")
             for folder in user_folders_data:
-                logger.info(f"📁 User folder: {folder.get('name')} (ID: {folder.get('folder_id')}, parent: {folder.get('parent_folder_id')})")
+                logger.debug(f"📁 User folder: {folder.get('name')} (ID: {folder.get('folder_id')}, parent: {folder.get('parent_folder_id')})")
             
             # Get global folders (always include for all users - read-only access)
             global_folders_data = []
@@ -461,25 +534,23 @@ class FolderService:
             
             # Combine all folders
             all_folders_data = user_folders_data + global_folders_data + team_folders_data
-            
-            # Add counts for each folder with RLS context
+
+            # Exclude .versions and all its descendants (version snapshots, not user-visible folders)
+            excluded_folder_ids = self._folder_ids_under_versions(all_folders_data)
+            if excluded_folder_ids:
+                all_folders_data = [f for f in all_folders_data if f["folder_id"] not in excluded_folder_ids]
+                logger.debug(f"📁 Excluded {len(excluded_folder_ids)} .versions folders from tree")
+
+            # Batch fetch counts (one user context for all; RLS allows global docs for all users)
+            folder_ids = [f["folder_id"] for f in all_folders_data]
+            batch_counts = await self.document_repository.get_batch_folder_counts(
+                folder_ids, user_id=user_id, user_role="user"
+            )
             for folder_data in all_folders_data:
-                # Determine RLS context based on folder's collection type
-                # For global folders, use user context so RLS allows read access (RLS policy allows global docs for all users)
-                if folder_data.get('collection_type') == 'global':
-                    count_user_id = user_id  # Use user_id so RLS allows access to global docs
-                    count_role = 'user'  # Use 'user' role - RLS policy allows global docs for all users
-                else:
-                    count_user_id = user_id
-                    count_role = 'user'
-                
-                folder_data["document_count"] = await self.document_repository.get_document_count_in_folder(
-                    folder_data["folder_id"], count_user_id, count_role
-                )
-                folder_data["subfolder_count"] = await self.document_repository.get_subfolder_count(
-                    folder_data["folder_id"], count_user_id, count_role
-                )
-            
+                counts = batch_counts.get(folder_data["folder_id"], {})
+                folder_data["document_count"] = counts.get("document_count", 0)
+                folder_data["subfolder_count"] = counts.get("subfolder_count", 0)
+
             folders = [DocumentFolder(**folder_data) for folder_data in all_folders_data]
             
             # Build hierarchical structure
@@ -505,25 +576,26 @@ class FolderService:
             for folder in user_root_folders:
                 logger.info(f"🔍 User root folder: {folder.name} (ID: {folder.folder_id})")
             
-            # Create virtual sources based on collection type
+            # Create virtual sources based on collection type (only when user has configured feeds)
             virtual_sources = []
-            if collection_type == "user":
-                # Add virtual sources (only RSS Feeds, no Web Sources) as children for user collection
-                virtual_sources = [
-                    DocumentFolder(
-                        folder_id="rss_feeds_virtual",
-                        name="RSS Feeds",
-                        parent_folder_id="my_documents_root",
-                        user_id=user_id,
-                        collection_type="user",
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
-                        document_count=0,
-                        subfolder_count=0,
-                        children=[],
-                        is_virtual_source=True
-                    )
-                ]
+            if collection_type == "user" and user_id:
+                user_rss_n = await self._count_user_rss_feeds(user_id)
+                if user_rss_n > 0:
+                    virtual_sources = [
+                        DocumentFolder(
+                            folder_id="rss_feeds_virtual",
+                            name="RSS Feeds",
+                            parent_folder_id="my_documents_root",
+                            user_id=user_id,
+                            collection_type="user",
+                            created_at=datetime.utcnow(),
+                            updated_at=datetime.utcnow(),
+                            document_count=0,
+                            subfolder_count=0,
+                            children=[],
+                            is_virtual_source=True,
+                        )
+                    ]
             
             # Combine user folders with virtual sources
             all_my_documents_children = user_root_folders + virtual_sources
@@ -553,22 +625,23 @@ class FolderService:
             # Only admins get virtual sources like RSS Feeds for global collection
             global_virtual_sources = []
             if is_admin:
-                # Add virtual sources for Global Documents (only RSS Feeds, no Web Sources) - admin only
-                global_virtual_sources = [
-                    DocumentFolder(
-                        folder_id="global_rss_feeds_virtual",
-                        name="RSS Feeds",
-                        parent_folder_id="global_documents_root",
-                        user_id=None,
-                        collection_type="global",
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow(),
-                        document_count=0,
-                        subfolder_count=0,
-                        children=[],
-                        is_virtual_source=True
-                    )
-                ]
+                global_rss_n = await self._count_global_rss_feeds()
+                if global_rss_n > 0:
+                    global_virtual_sources = [
+                        DocumentFolder(
+                            folder_id="global_rss_feeds_virtual",
+                            name="RSS Feeds",
+                            parent_folder_id="global_documents_root",
+                            user_id=None,
+                            collection_type="global",
+                            created_at=datetime.utcnow(),
+                            updated_at=datetime.utcnow(),
+                            document_count=0,
+                            subfolder_count=0,
+                            children=[],
+                            is_virtual_source=True,
+                        )
+                    ]
             
             # Combine global folders with virtual sources (if admin)
             all_global_children = global_root_folders + global_virtual_sources
@@ -601,7 +674,15 @@ class FolderService:
                 result = root_folders
             else:
                 result = virtual_roots
-            
+
+            if shallow and result:
+                for root in result:
+                    children = getattr(root, "children", None) or []
+                    for child in children:
+                        if hasattr(child, "children"):
+                            child.children = []
+                logger.debug("📁 Shallow tree: stripped children from depth-2+ folders")
+
             logger.info(f"📁 Built fresh folder tree with {len(result)} root folders")
             return result
             
@@ -629,6 +710,32 @@ class FolderService:
             if not folder_data:
                 logger.warning(f"⚠️ Folder {folder_id} not found or access denied for user {user_id}")
                 return None
+
+            # Do not show contents of .versions or any folder under it (version snapshots)
+            if folder_data.get("name") == ".versions":
+                folder = DocumentFolder(**folder_data)
+                return FolderContentsResponse(
+                    folder=folder,
+                    documents=[],
+                    subfolders=[],
+                    total_documents=0,
+                    total_subfolders=0,
+                )
+            parent_id = folder_data.get("parent_folder_id")
+            while parent_id:
+                parent_data = await self.document_repository.get_folder(parent_id, user_id, "user")
+                if not parent_data:
+                    break
+                if parent_data.get("name") == ".versions":
+                    folder = DocumentFolder(**folder_data)
+                    return FolderContentsResponse(
+                        folder=folder,
+                        documents=[],
+                        subfolders=[],
+                        total_documents=0,
+                        total_subfolders=0,
+                    )
+                parent_id = parent_data.get("parent_folder_id")
             
             folder = DocumentFolder(**folder_data)
             
@@ -651,6 +758,8 @@ class FolderService:
             
             user_role = 'admin' if folder.collection_type == 'global' else 'user'
             subfolders_data = await self.document_repository.get_subfolders(folder_id, query_user_id, user_role)
+            # Hide .versions from folder listing (version snapshots are not user-visible)
+            subfolders_data = [s for s in subfolders_data if s.get("name") != ".versions"]
             subfolders = [DocumentFolder(**subfolder_data) for subfolder_data in subfolders_data]
             logger.debug(f"📁 Found {len(subfolders)} subfolders in folder {folder_id}")
             
@@ -821,9 +930,9 @@ class FolderService:
                     
                     # Send WebSocket notification for folder rename
                     try:
-                        from services.websocket_manager import get_websocket_manager
+                        from utils.websocket_manager import get_websocket_manager
                         ws_manager = get_websocket_manager()
-                        await ws_manager.send_to_user(user_id, {
+                        await ws_manager.send_to_session({
                             "type": "folder_update",
                             "action": "renamed",
                             "folder": {
@@ -833,7 +942,7 @@ class FolderService:
                                 "updated_at": updated_folder.updated_at.isoformat() if updated_folder.updated_at else None
                             },
                             "old_name": old_folder_name
-                        })
+                        }, user_id)
                         logger.info(f"📡 WebSocket notification sent for folder rename: {folder_id}")
                     except Exception as ws_error:
                         logger.warning(f"⚠️ Failed to send WebSocket notification: {ws_error}")
@@ -865,9 +974,9 @@ class FolderService:
                     
                     # Send WebSocket notification for folder move
                     try:
-                        from services.websocket_manager import get_websocket_manager
+                        from utils.websocket_manager import get_websocket_manager
                         ws_manager = get_websocket_manager()
-                        await ws_manager.send_to_user(user_id, {
+                        await ws_manager.send_to_session({
                             "type": "folder_update",
                             "action": "moved",
                             "folder": {
@@ -877,7 +986,7 @@ class FolderService:
                                 "updated_at": updated_folder.updated_at.isoformat() if updated_folder.updated_at else None
                             },
                             "old_parent_folder_id": old_parent_folder_id
-                        })
+                        }, user_id)
                         logger.info(f"📡 WebSocket notification sent for folder move: {folder_id}")
                     except Exception as ws_error:
                         logger.warning(f"⚠️ Failed to send WebSocket notification: {ws_error}")

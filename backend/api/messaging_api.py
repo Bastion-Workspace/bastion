@@ -355,6 +355,31 @@ async def send_message(
             exclude_user_id=current_user.user_id
         )
         
+        # Agent conversation watches (chat rooms): skip if this message was posted by an agent to avoid re-triggering
+        from_agent = (request.metadata or {}).get("from_agent_profile_id") if request.metadata else None
+        if not from_agent:
+            try:
+                from services.database_manager.database_helpers import fetch_all
+                from services.celery_tasks.agent_tasks import dispatch_conversation_reaction
+                watches = await fetch_all(
+                    "SELECT agent_profile_id FROM agent_conversation_watches "
+                    "WHERE room_id = $1::uuid AND watch_type = 'chat_room' AND is_active = true",
+                    room_id,
+                )
+                content = request.content or (message.get("content") if isinstance(message, dict) else "") or ""
+                for w in watches:
+                    dispatch_conversation_reaction.delay(
+                        agent_profile_id=str(w["agent_profile_id"]),
+                        user_id=current_user.user_id,
+                        message_content=content,
+                        message_sender=current_user.user_id,
+                        watch_type="chat_room",
+                        conversation_id=None,
+                        room_id=room_id,
+                    )
+            except Exception as watch_err:
+                logger.warning("Agent conversation watch (room) dispatch failed: %s", watch_err)
+        
         return message
     
     except HTTPException:

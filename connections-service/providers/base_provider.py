@@ -69,6 +69,20 @@ class BaseProvider(ABC):
         pass
 
     @abstractmethod
+    async def create_draft(
+        self,
+        access_token: str,
+        to_recipients: List[str],
+        subject: str,
+        body: str,
+        cc_recipients: Optional[List[str]] = None,
+        bcc_recipients: Optional[List[str]] = None,
+        body_is_html: bool = False,
+    ) -> Dict[str, Any]:
+        """Create a draft message (do not send). Keys: success (bool), message_id (optional), error (optional)."""
+        pass
+
+    @abstractmethod
     async def reply_to_email(
         self,
         access_token: str,
@@ -126,4 +140,69 @@ class BaseProvider(ABC):
         self, access_token: str, folder_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Return counts. Keys: total_count (int), unread_count (int), error (optional)."""
+        pass
+
+    # -------------------------------------------------------------------------
+    # Calendar (optional; providers that support calendar implement these)
+    # -------------------------------------------------------------------------
+
+    @abstractmethod
+    async def list_calendars(self, access_token: str) -> Dict[str, Any]:
+        """Return user's calendars. Keys: calendars (list of dicts with id, name, color, is_default, can_edit), error (optional)."""
+        pass
+
+    @abstractmethod
+    async def get_calendar_events(
+        self,
+        access_token: str,
+        calendar_id: str = "",
+        start_datetime: str = "",
+        end_datetime: str = "",
+        top: int = 50,
+    ) -> Dict[str, Any]:
+        """Return events in range. Keys: events (list), total_count (int), error (optional). Datetimes ISO 8601."""
+        pass
+
+    @abstractmethod
+    async def get_event_by_id(self, access_token: str, event_id: str) -> Dict[str, Any]:
+        """Return single event or error. Keys: event (dict or None), error (optional)."""
+        pass
+
+    @abstractmethod
+    async def create_event(
+        self,
+        access_token: str,
+        subject: str,
+        start_datetime: str,
+        end_datetime: str,
+        location: str = "",
+        body: str = "",
+        body_is_html: bool = False,
+        attendee_emails: Optional[List[str]] = None,
+        is_all_day: bool = False,
+        calendar_id: str = "",
+    ) -> Dict[str, Any]:
+        """Create event. Keys: success (bool), event_id (optional), error (optional)."""
+        pass
+
+    @abstractmethod
+    async def update_event(
+        self,
+        access_token: str,
+        event_id: str,
+        subject: Optional[str] = None,
+        start_datetime: Optional[str] = None,
+        end_datetime: Optional[str] = None,
+        location: Optional[str] = None,
+        body: Optional[str] = None,
+        body_is_html: bool = False,
+        attendee_emails: Optional[List[str]] = None,
+        is_all_day: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Update event. Keys: success (bool), error (optional)."""
+        pass
+
+    @abstractmethod
+    async def delete_event(self, access_token: str, event_id: str) -> Dict[str, Any]:
+        """Delete event. Keys: success (bool), error (optional)."""
         pass

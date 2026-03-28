@@ -6,6 +6,7 @@ import BackgroundJobService from '../services/backgroundJobService';
 import tabNotificationManager from '../utils/tabNotification';
 import browserNotificationManager from '../utils/browserNotification';
 import { documentDiffStore } from '../services/documentDiffStore';
+import { createAgentStatusWebSocket } from '../utils/agentStatusTypes';
 
 // Format agent type to display name
 const formatAgentName = (agentType) => {
@@ -55,8 +56,17 @@ export const ChatSidebarProvider = ({ children }) => {
   const [messages, setMessages] = useState([]);
   const [query, setQuery] = useState('');
   const [replyToMessage, setReplyToMessage] = useState(null); // Message being replied to
-  const [selectedModel, setSelectedModel] = useState('');
+  const [selectedModel, setSelectedModel] = useState(() => {
+    try {
+      const saved = localStorage.getItem('chatSidebarSelectedModel');
+      return saved && saved !== 'null' ? saved : '';
+    } catch {
+      return '';
+    }
+  });
   const [backgroundJobService, setBackgroundJobService] = useState(null);
+  /** When set, chat follow-ups route to this agent line (CEO) until @auto */
+  const [activeLineRouting, setActiveLineRouting] = useState(null);
   const [sessionId] = useState(() => `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
   // LangGraph is the only system - no toggles needed
   const useLangGraphSystem = true; // Always use LangGraph
@@ -143,7 +153,87 @@ export const ChatSidebarProvider = ({ children }) => {
     }
   }, [location.pathname, userEditorPreference, editorPreference]);
 
+  const [dataWorkspacePreference, setDataWorkspacePreferenceState] = useState(() => {
+    try { return localStorage.getItem('dataWorkspacePreference') || 'auto'; } catch { return 'auto'; }
+  });
+  const setDataWorkspacePreference = React.useCallback((pref) => {
+    setDataWorkspacePreferenceState(pref);
+    try { localStorage.setItem('dataWorkspacePreference', pref); } catch {}
+  }, []);
+
+  // WebSocket: line sub-agent messages persisted during CEO run (out-of-band from SSE)
+  useEffect(() => {
+    if (!currentConversationId) return undefined;
+    const token = localStorage.getItem('auth_token');
+    if (!token) return undefined;
+    const ctrl = createAgentStatusWebSocket({
+      conversationId: currentConversationId,
+      token,
+      onMessage: (msg) => {
+        if (msg.type !== 'line_agent_message') return;
+        if (msg.conversation_id && msg.conversation_id !== currentConversationId) return;
+        const mid = msg.message_id || `line-${Date.now()}`;
+        setMessages((prev) => {
+          if (prev.some((m) => m.message_id === mid || m.id === mid)) return prev;
+          return [
+            ...prev,
+            {
+              id: mid,
+              message_id: mid,
+              role: 'assistant',
+              type: 'assistant',
+              content: msg.content || '',
+              timestamp: msg.timestamp || new Date().toISOString(),
+              metadata: msg.metadata || {},
+            },
+          ];
+        });
+      },
+    });
+    return () => {
+      try {
+        ctrl.close();
+      } catch (_) {}
+    };
+  }, [currentConversationId]);
+
   const queryClient = useQueryClient();
+
+  // WebSocket: line sub-agent messages during CEO run (out-of-band from SSE)
+  useEffect(() => {
+    if (!currentConversationId) return undefined;
+    const token = localStorage.getItem('auth_token');
+    if (!token) return undefined;
+    const ctrl = createAgentStatusWebSocket({
+      conversationId: currentConversationId,
+      token,
+      onMessage: (msg) => {
+        if (msg.type !== 'line_agent_message') return;
+        if (msg.conversation_id && msg.conversation_id !== currentConversationId) return;
+        const mid = msg.message_id || `line-${Date.now()}`;
+        setMessages((prev) => {
+          if (prev.some((m) => m.message_id === mid || m.id === mid)) return prev;
+          return [
+            ...prev,
+            {
+              id: mid,
+              message_id: mid,
+              role: 'assistant',
+              type: 'assistant',
+              content: msg.content || '',
+              timestamp: msg.timestamp || new Date().toISOString(),
+              metadata: msg.metadata || {},
+            },
+          ];
+        });
+      },
+    });
+    return () => {
+      try {
+        ctrl.close();
+      } catch (_) { /* ignore */ }
+    };
+  }, [currentConversationId]);
 
   // Preference update function for saving to conversation metadata
   const updateConversationPreference = React.useCallback(async (key, value) => {
@@ -338,6 +428,7 @@ export const ChatSidebarProvider = ({ children }) => {
   // Load conversation-specific preferences from metadata
   useEffect(() => {
     if (!currentConversationId) {
+      setActiveLineRouting(null);
       // No conversation - use global preferences
       const globalModel = localStorage.getItem('chatSidebarSelectedModel');
       if (globalModel) setSelectedModel(globalModel);
@@ -349,6 +440,15 @@ export const ChatSidebarProvider = ({ children }) => {
     
     if (conversationData?.metadata_json) {
       const metadata = conversationData.metadata_json;
+
+      if (metadata.active_line_id) {
+        setActiveLineRouting({
+          id: metadata.active_line_id,
+          name: metadata.active_line_name || '',
+        });
+      } else {
+        setActiveLineRouting(null);
+      }
       
       // Load model preference
       if (metadata.user_chat_model) {
@@ -375,6 +475,7 @@ export const ChatSidebarProvider = ({ children }) => {
         }
       }
     } else if (conversationData) {
+      setActiveLineRouting(null);
       // Conversation loaded but no metadata yet - use global preferences
       console.log('🔄 Conversation loaded but no metadata, using global preferences');
       const globalModel = localStorage.getItem('chatSidebarSelectedModel');
@@ -423,6 +524,8 @@ export const ChatSidebarProvider = ({ children }) => {
             metadata: message.metadata_json || message.metadata || {},
             // ✅ CRITICAL FIX: Extract editor_operations from metadata to top level
             editor_operations: (message.metadata_json || message.metadata || {})?.editor_operations || message.editor_operations || [],
+            editor_document_id: (message.metadata_json || message.metadata || {})?.editor_document_id ?? message.editor_document_id,
+            editor_filename: (message.metadata_json || message.metadata || {})?.editor_filename ?? message.editor_filename,
             // Preserve any other fields
             ...message
           }));
@@ -494,6 +597,8 @@ export const ChatSidebarProvider = ({ children }) => {
         metadata: message.metadata || {},
         // ✅ CRITICAL FIX: Extract editor_operations from metadata to top level
         editor_operations: message.metadata?.editor_operations || message.editor_operations || [],
+        editor_document_id: message.metadata?.editor_document_id ?? message.editor_document_id,
+        editor_filename: message.metadata?.editor_filename ?? message.editor_filename,
         // Preserve any other fields
         ...message
       }));
@@ -903,9 +1008,8 @@ export const ChatSidebarProvider = ({ children }) => {
       const token = localStorage.getItem('auth_token'); // Match apiService token key
       console.log('🔑 Using auth_token for streaming:', token ? 'TOKEN_PRESENT' : 'NO_TOKEN');
       
-      // Attach active editor payload ONLY if an editable markdown file is actually open in an editor tab
-      // CRITICAL: Be very strict - check localStorage with strict validation
-      // Note: EditorProvider is a child of ChatSidebarProvider, so we check localStorage directly
+      // Attach active_editor when preference is not ignore and cache shows an open editable .md/.org with content.
+      // EditorProvider is a child of ChatSidebarProvider, so we read editor_ctx_cache from localStorage.
       let activeEditorPayload = null;
       
       // Check editor preference first - if set to 'ignore', don't send editor context
@@ -920,14 +1024,14 @@ export const ChatSidebarProvider = ({ children }) => {
             };
             window.addEventListener('editorCacheRefreshed', handleRefreshComplete, { once: true });
             
-            // Dispatch refresh event
             window.dispatchEvent(new CustomEvent('refreshEditorCache'));
             
-            // Fallback timeout in case event doesn't fire
             setTimeout(() => {
               window.removeEventListener('editorCacheRefreshed', handleRefreshComplete);
+              // Do not clear editor_ctx_cache on timeout: a slow editor mount or busy main thread
+              // can miss the refresh event; clearing here used to drop valid active_editor.
               resolve();
-            }, 100);
+            }, 400);
           });
           
           await refreshPromise;
@@ -953,12 +1057,7 @@ export const ChatSidebarProvider = ({ children }) => {
           // DEBUG: Log the raw cache value
           console.log('🔍 RAW EDITOR_CTX_CACHE:', localStorage.getItem('editor_ctx_cache'));
           
-          // STRICT VALIDATION: Must have ALL of these conditions met:
-          // 1. editorCtx exists
-          // 2. isEditable is EXACTLY true (not truthy, not undefined)
-          // 3. filename exists and ends with .md
-          // 4. content exists (not empty/null)
-          // 5. frontmatter.type is in allowed list
+          // Transport checks only: open editable .md/.org with content. How to use it is Agent Factory / orchestrator.
           const filenameLower = editorCtx?.filename?.toLowerCase() || '';
           const hasValidEditorState = editorCtx && 
                                       editorCtx.isEditable === true && 
@@ -976,35 +1075,22 @@ export const ChatSidebarProvider = ({ children }) => {
           });
           
           if (hasValidEditorState) {
-            // All validation passed - editor is actually open and editable
-            const fmType = (editorCtx.frontmatter && editorCtx.frontmatter.type || '').toLowerCase().trim();
-            const allowedTypes = ['fiction','non-fiction','nonfiction','nfoutline','article','rules','outline','character','style','sysml','podcast','substack','blog','electronics','project','reference','system','systems','org'];
-            
-            // For org files, allow even without frontmatter.type (org files may not have frontmatter)
-            const isOrgFile = filenameLower.endsWith('.org');
-            const hasAllowedType = allowedTypes.includes(fmType);
-            
-            if (hasAllowedType || (isOrgFile && !fmType)) {
-              const language = filenameLower.endsWith('.org') ? 'org' : (editorCtx.language || 'markdown');
-              activeEditorPayload = {
-                is_editable: true,
-                filename: editorCtx.filename,
-                language: language,
-                content: editorCtx.content,
-                content_length: editorCtx.contentLength || editorCtx.content.length,
-                frontmatter: editorCtx.frontmatter || {},
-                cursor_offset: typeof editorCtx.cursorOffset === 'number' ? editorCtx.cursorOffset : -1,
-                selection_start: typeof editorCtx.selectionStart === 'number' ? editorCtx.selectionStart : -1,
-                selection_end: typeof editorCtx.selectionEnd === 'number' ? editorCtx.selectionEnd : -1,
-                canonical_path: editorCtx.canonicalPath || null,
-                document_id: editorCtx.documentId || null,
-                folder_id: editorCtx.folderId || null,
-              };
-              console.log('✅ Editor tab is open and editable - sending active_editor:', editorCtx.filename);
-            } else {
-              console.log('🚫 Editor open but frontmatter.type not in allowed list:', fmType);
-              activeEditorPayload = null;
-            }
+            const language = filenameLower.endsWith('.org') ? 'org' : (editorCtx.language || 'markdown');
+            activeEditorPayload = {
+              is_editable: true,
+              filename: editorCtx.filename,
+              language: language,
+              content: editorCtx.content,
+              content_length: editorCtx.contentLength || editorCtx.content.length,
+              frontmatter: editorCtx.frontmatter || {},
+              cursor_offset: typeof editorCtx.cursorOffset === 'number' ? editorCtx.cursorOffset : -1,
+              selection_start: typeof editorCtx.selectionStart === 'number' ? editorCtx.selectionStart : -1,
+              selection_end: typeof editorCtx.selectionEnd === 'number' ? editorCtx.selectionEnd : -1,
+              canonical_path: editorCtx.canonicalPath || null,
+              document_id: editorCtx.documentId || null,
+              folder_id: editorCtx.folderId || null,
+            };
+            console.log('✅ Editor tab is open and editable - sending active_editor:', editorCtx.filename);
           } else {
             // Editor is NOT open or NOT editable - be very explicit about why
             if (!editorCtx) {
@@ -1028,7 +1114,32 @@ export const ChatSidebarProvider = ({ children }) => {
         console.log('🚫 Editor preference is "ignore" - not sending editor context');
         activeEditorPayload = null;
       }
-      
+
+      let activeDataWorkspacePayload = null;
+      if (dataWorkspacePreference !== 'ignore') {
+        try {
+          const dwCtx = JSON.parse(localStorage.getItem('data_workspace_ctx_cache') || 'null');
+          const schema = dwCtx?.schema;
+          const hasSchema = Array.isArray(schema) && schema.length > 0;
+          if (dwCtx && dwCtx.table_id && hasSchema) {
+            activeDataWorkspacePayload = {
+              workspace_id: dwCtx.workspace_id || '',
+              workspace_name: dwCtx.workspace_name || '',
+              database_id: dwCtx.database_id || '',
+              database_name: dwCtx.database_name || '',
+              table_id: dwCtx.table_id,
+              table_name: dwCtx.table_name || '',
+              row_count: typeof dwCtx.row_count === 'number' ? dwCtx.row_count : 0,
+              schema: schema,
+              visible_rows: Array.isArray(dwCtx.visible_rows) ? dwCtx.visible_rows : [],
+              visible_row_count: typeof dwCtx.visible_row_count === 'number' ? dwCtx.visible_row_count : 0
+            };
+          }
+        } catch (e) {
+          activeDataWorkspacePayload = null;
+        }
+      }
+
       const response = await fetch('/api/async/orchestrator/stream', {
         method: 'POST',
         headers: {
@@ -1040,7 +1151,10 @@ export const ChatSidebarProvider = ({ children }) => {
           conversation_id: conversationId,
           session_id: sessionId,
           active_editor: activeEditorPayload,
-          editor_preference: editorPreference
+          editor_preference: editorPreference,
+          active_data_workspace: activeDataWorkspacePayload,
+          data_workspace_preference: dataWorkspacePreference,
+          user_chat_model: selectedModel || undefined
         })
       });
 
@@ -1098,10 +1212,12 @@ export const ChatSidebarProvider = ({ children }) => {
                     if (msg.id === streamingMessage.id) {
                       const currentMetadata = msg.metadata || {};
                       const updateData = { content: `${data.message}` };
-                      // Check for agent info in various field names: agent_type, agent, node
                       const agentType = data.agent_type || data.agent || data.node;
                       if (agentType) {
                         updateData.metadata = { ...currentMetadata, agent_type: agentType };
+                      }
+                      if (data.agent_display_name) {
+                        updateData.metadata = { ...(updateData.metadata || currentMetadata), agent_display_name: data.agent_display_name };
                       }
                       return { ...msg, ...updateData };
                     }
@@ -1161,7 +1277,6 @@ export const ChatSidebarProvider = ({ children }) => {
                       : msg
                   ));
                 } else if (data.type === 'content') {
-                  // ROOSEVELT'S NEWLINE FIX: Don't add spaces between chunks!
                   accumulatedContent += data.content;
                   
                   // Flash tab if this is the first content chunk and tab is hidden
@@ -1170,289 +1285,16 @@ export const ChatSidebarProvider = ({ children }) => {
                     tabNotificationManager.startFlashing('New message');
                   }
                   
-                  setMessages(prev => prev.map(msg => 
-                    msg.id === streamingMessage.id 
-                      ? { ...msg, content: accumulatedContent, isStreaming: true }
-                      : msg
-                  ));
-                } else if (data.type === 'editor_operations') {
-                  // ROOSEVELT'S HITL EDIT PREVIEW: Capture editor operations payload
-                  console.log('📥 ChatSidebarContext: Received editor_operations SSE message', {
-                    dataType: data.type,
-                    operationsCount: Array.isArray(data.operations) ? data.operations.length : 0,
-                    hasManuscriptEdit: !!data.manuscript_edit,
-                    documentId: data.document_id,
-                    filename: data.filename,
-                    streamingMessageId: streamingMessage.id
-                  });
-                  
-                  const ops = Array.isArray(data.operations) ? data.operations : [];
-                  const mEdit = data.manuscript_edit || null;
-                  const documentId = data.document_id || null;
-                  const filename = data.filename || null;
-                  
-                  console.log('📥 ChatSidebarContext: Processing editor_operations', {
-                    opsLength: ops.length,
-                    documentId: documentId,
-                    filename: filename,
-                    streamingMessageId: streamingMessage.id
-                  });
-                  
-                  setMessages(prev => {
-                    const updated = prev.map(msg => 
-                      msg.id === streamingMessage.id 
-                        ? { 
-                            ...msg, 
-                            editor_operations: ops,
-                            manuscript_edit: mEdit,
-                            hasEditorOps: ops.length > 0
-                          }
-                        : msg
-                    );
-                    
-                    const foundMessage = updated.find(msg => msg.id === streamingMessage.id);
-                    console.log('📥 ChatSidebarContext: Updated messages', {
-                      foundMessage: !!foundMessage,
-                      messageHasOps: foundMessage?.editor_operations?.length || 0,
-                      totalMessages: updated.length
-                    });
-                    
-                    return updated;
-                  });
-                  
-                  // Emit event for live diff display in editor
-                  if (ops.length > 0) {
-                    // **CRITICAL**: Use document_id from payload (sent by backend), fall back to localStorage only if missing
-                    let finalDocumentId = documentId;
-                    let finalFilename = filename;
-                    let contentSnapshot = null;
-                    
-                    // If backend didn't send document_id, try localStorage as fallback
-                    if (!finalDocumentId) {
-                      console.warn('⚠️ No documentId in operations payload - falling back to editor_ctx_cache');
-                      try {
-                        const cached = localStorage.getItem('editor_ctx_cache');
-                        if (cached) {
-                          const editorCtx = JSON.parse(cached);
-                          finalDocumentId = editorCtx?.documentId || null;
-                          finalFilename = editorCtx?.filename || null;
-                          contentSnapshot = editorCtx?.content?.substring(0, 1000) || null;
-                        }
-                      } catch (e) {
-                        console.warn('Failed to parse editor context cache:', e);
+                  setMessages(prev => prev.map(msg => {
+                    if (msg.id === streamingMessage.id) {
+                      const updated = { ...msg, content: accumulatedContent, isStreaming: true };
+                      if (data.agent_display_name) {
+                        updated.metadata = { ...(msg.metadata || {}), agent_display_name: data.agent_display_name };
                       }
+                      return updated;
                     }
-                    
-                    //  ⚠️ CRITICAL: Warn if documentId is STILL missing after fallback
-                    if (!finalDocumentId) {
-                      console.warn('⚠️ No documentId in payload OR editor_ctx_cache - diffs will not be displayed!', {
-                        payloadDocumentId: documentId,
-                        payloadFilename: filename
-                      });
-                    } else {
-                      console.log('✅ Using documentId from payload:', finalDocumentId);
-                    }
-                    
-                    console.log('🔍 ChatSidebarContext emitting editorOperationsLive:', {
-                      operationsCount: ops.length,
-                      messageId: streamingMessage.id,
-                      documentId: finalDocumentId,
-                      filename: finalFilename,
-                      firstOp: ops[0],
-                      allOps: ops.map(op => ({
-                        start: op.start,
-                        end: op.end,
-                        op_type: op.op_type,
-                        hasText: !!op.text,
-                        textLength: op.text?.length
-                      }))
-                    });
-                    
-                    // **CRITICAL**: Save to documentDiffStore BEFORE dispatching event
-                    // This ensures operations persist even if target document isn't currently open
-                    // When user switches to that document, plugin will load from store
-                    // IMPORTANT: Only save if operations don't already exist in store (avoid overwriting accepted/rejected ops)
-                    if (finalDocumentId) {
-                      // Use dynamic import to avoid circular dependency
-                      import('../services/documentDiffStore').then(({ documentDiffStore }) => {
-                        // Check if operations already exist for this message - don't overwrite if user is actively accepting/rejecting
-                        const existingDiffs = documentDiffStore.getDiffs(finalDocumentId);
-                        const existingMessageId = existingDiffs?.messageId;
-                        
-                        // Only save if:
-                        // 1. No existing diffs for this document, OR
-                        // 2. Existing diffs are for a DIFFERENT message (new operations arriving)
-                        // This prevents overwriting operations that user has already accepted/rejected
-                        if (!existingDiffs || existingMessageId !== streamingMessage.id) {
-                          // Generate stable operation IDs before saving (same logic as plugin)
-                          const opsWithIds = ops.map((op, idx) => ({
-                            ...op,
-                            operationId: op.operationId || `${streamingMessage.id}_${idx}`
-                          }));
-                          
-                          documentDiffStore.setDiffs(
-                            finalDocumentId, 
-                            opsWithIds, 
-                            streamingMessage.id, 
-                            contentSnapshot || ''
-                          );
-                          
-                          console.log('💾 Saved operations to documentDiffStore for later retrieval', {
-                            documentId: finalDocumentId,
-                            operationsCount: opsWithIds.length,
-                            messageId: streamingMessage.id
-                          });
-                        } else {
-                          console.log('⏭️ Skipped saving to store - operations already exist for this message (user may be accepting/rejecting)', {
-                            documentId: finalDocumentId,
-                            existingMessageId,
-                            newMessageId: streamingMessage.id
-                          });
-                        }
-                      }).catch(err => {
-                        console.error('Failed to save to documentDiffStore:', err);
-                      });
-                    }
-                    
-                    const event = new CustomEvent('editorOperationsLive', {
-                      detail: { 
-                        operations: ops,
-                        manuscriptEdit: mEdit,
-                        messageId: streamingMessage.id,
-                        documentId: finalDocumentId,
-                        filename: finalFilename,
-                        contentSnapshot: contentSnapshot
-                      }
-                    });
-                    window.dispatchEvent(event);
-                    
-                    console.log('✅ ChatSidebarContext: editorOperationsLive event dispatched');
-                  } else {
-                    console.warn('⚠️ ChatSidebarContext: No operations to emit (ops.length = 0)');
-                  }
-                } else if (data.type === 'editor_operations_chunk') {
-                  // **CHUNKED OPERATIONS**: Reassemble large editor operations sent in chunks
-                  console.log(`📦 Received editor operation chunk ${data.chunk_index + 1}/${data.total_chunks}`);
-                  
-                  // Initialize accumulator if this is the first chunk
-                  if (data.chunk_index === 0) {
-                    window.__editor_ops_accumulator = {
-                      operations: [],
-                      manuscript_edit: null,
-                      document_id: data.document_id || null,  // Store document_id from first chunk
-                      filename: data.filename || null,
-                      total_chunks: data.total_chunks
-                    };
-                  }
-                  
-                  // Add this operation to accumulator
-                  if (window.__editor_ops_accumulator) {
-                    window.__editor_ops_accumulator.operations.push(data.operation);
-                    
-                    // If this is the last chunk, include manuscript_edit and dispatch event
-                    if (data.chunk_index === data.total_chunks - 1) {
-                      window.__editor_ops_accumulator.manuscript_edit = data.manuscript_edit;
-                      
-                      const ops = window.__editor_ops_accumulator.operations;
-                      const mEdit = window.__editor_ops_accumulator.manuscript_edit;
-                      const documentIdFromPayload = window.__editor_ops_accumulator.document_id;
-                      const filenameFromPayload = window.__editor_ops_accumulator.filename;
-                      
-                      console.log('✅ All chunks received - dispatching editorOperationsLive event with', ops.length, 'operations');
-                      
-                      // **CRITICAL**: Use document_id from payload (sent by backend), fall back to localStorage only if missing
-                      let finalDocumentId = documentIdFromPayload;
-                      let finalFilename = filenameFromPayload;
-                      let contentSnapshot = null;
-                      
-                      // If backend didn't send document_id, try localStorage as fallback
-                      if (!finalDocumentId) {
-                        console.warn('⚠️ No documentId in chunked operations payload - falling back to editor_ctx_cache');
-                        try {
-                          const cached = localStorage.getItem('editor_ctx_cache');
-                          if (cached) {
-                            const editorCtx = JSON.parse(cached);
-                            finalDocumentId = editorCtx?.documentId || null;
-                            finalFilename = editorCtx?.filename || null;
-                            contentSnapshot = editorCtx?.content?.substring(0, 1000) || null;
-                          }
-                        } catch (e) {
-                          console.warn('Failed to parse editor context cache:', e);
-                        }
-                      }
-                      
-                      // ⚠️ CRITICAL: Warn if documentId is STILL missing after fallback
-                      if (!finalDocumentId) {
-                        console.warn('⚠️ No documentId in payload OR editor_ctx_cache - diffs will not be displayed!', {
-                          payloadDocumentId: documentIdFromPayload,
-                          payloadFilename: filenameFromPayload
-                        });
-                      } else {
-                        console.log('✅ Dispatching editorOperationsLive with documentId:', finalDocumentId);
-                      }
-                      
-                      // **CRITICAL**: Save to documentDiffStore BEFORE dispatching event (chunked operations)
-                      // This ensures operations persist even if target document isn't currently open
-                      // IMPORTANT: Only save if operations don't already exist in store (avoid overwriting accepted/rejected ops)
-                      if (finalDocumentId) {
-                        // Use dynamic import to avoid circular dependency
-                        import('../services/documentDiffStore').then(({ documentDiffStore }) => {
-                          // Check if operations already exist for this message - don't overwrite if user is actively accepting/rejecting
-                          const existingDiffs = documentDiffStore.getDiffs(finalDocumentId);
-                          const existingMessageId = existingDiffs?.messageId;
-                          
-                          // Only save if:
-                          // 1. No existing diffs for this document, OR
-                          // 2. Existing diffs are for a DIFFERENT message (new operations arriving)
-                          // This prevents overwriting operations that user has already accepted/rejected
-                          if (!existingDiffs || existingMessageId !== streamingMessage.id) {
-                            // Generate stable operation IDs before saving (same logic as plugin)
-                            const opsWithIds = ops.map((op, idx) => ({
-                              ...op,
-                              operationId: op.operationId || `${streamingMessage.id}_${idx}`
-                            }));
-                            
-                            documentDiffStore.setDiffs(
-                              finalDocumentId, 
-                              opsWithIds, 
-                              streamingMessage.id, 
-                              contentSnapshot || ''
-                            );
-                            
-                            console.log('💾 Saved chunked operations to documentDiffStore for later retrieval', {
-                              documentId: finalDocumentId,
-                              operationsCount: opsWithIds.length,
-                              messageId: streamingMessage.id
-                            });
-                          } else {
-                            console.log('⏭️ Skipped saving chunked operations to store - operations already exist for this message (user may be accepting/rejecting)', {
-                              documentId: finalDocumentId,
-                              existingMessageId,
-                              newMessageId: streamingMessage.id
-                            });
-                          }
-                        }).catch(err => {
-                          console.error('Failed to save chunked operations to documentDiffStore:', err);
-                        });
-                      }
-                      
-                      // Dispatch the event
-                      const event = new CustomEvent('editorOperationsLive', {
-                        detail: { 
-                          operations: ops,
-                          manuscriptEdit: mEdit,
-                          messageId: streamingMessage.id,
-                          documentId: finalDocumentId,
-                          filename: finalFilename,
-                          contentSnapshot: contentSnapshot
-                        }
-                      });
-                      window.dispatchEvent(event);
-                      
-                      // Clean up accumulator
-                      delete window.__editor_ops_accumulator;
-                    }
-                  }
+                    return msg;
+                  }));
                 } else if (data.type === 'citations') {
                   // **ROOSEVELT'S CITATION CAVALRY**: Capture citations from research agent!
                   console.log('🔗 Citations received:', data.citations);
@@ -1597,8 +1439,15 @@ export const ChatSidebarProvider = ({ children }) => {
                   
                   // Also refetch the conversation list to ensure title updates are visible
                   queryClient.refetchQueries(['conversations']);
+                  window.dispatchEvent(new CustomEvent('agentStreamComplete'));
                   break;
                 } else if (data.type === 'done') {
+                  if (data.active_line_id) {
+                    setActiveLineRouting({
+                      id: data.active_line_id,
+                      name: data.active_line_name || '',
+                    });
+                  }
                   // Streaming complete - check if conversation was updated (title generation)
                   if (data.conversation_updated) {
                     console.log('🔄 Conversation updated - refreshing to get new title');
@@ -1612,6 +1461,7 @@ export const ChatSidebarProvider = ({ children }) => {
                   // This ensures the saved message appears even if the 'complete' event was missed
                   queryClient.invalidateQueries(['conversationMessages', conversationId]);
                   queryClient.refetchQueries(['conversationMessages', conversationId]);
+                  window.dispatchEvent(new CustomEvent('agentStreamComplete'));
                   break;
                 } else if (data.type === 'error') {
                   throw new Error(data.message || 'Streaming error');
@@ -1714,9 +1564,14 @@ export const ChatSidebarProvider = ({ children }) => {
     editorPreference, // Active preference sent to backend (context-aware)
     setEditorPreference: setUserEditorPreference, // UI checkboxes modify user preference
     handleEditorPreferenceChange, // Handler that saves to conversation metadata
-    
+
+    dataWorkspacePreference,
+    setDataWorkspacePreference,
+
     // Conversation preference management
     updateConversationPreference, // Save preferences to conversation metadata
+
+    activeLineRouting,
   };
 
   return (

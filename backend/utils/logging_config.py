@@ -280,4 +280,4 @@ def setup_logging():
     
     # Test structured logging
     db_log.info("SYSTEM", "INIT", component="structured_logging")
-    logger.info("✅ Roosevelt's Structured Logging System initialized - dual format ready!")
+    logger.info("Structured logging initialized (dual format)")

@@ -9,31 +9,69 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 
-from orchestrator.tools.document_tools import search_documents_structured, get_document_content_tool
+from pydantic import BaseModel, Field
+
+from orchestrator.tools.document_tools import search_documents_tool, get_document_content_tool
+from orchestrator.utils.document_type_registry import get_type_spec, get_hub_child_spec_for_frontmatter
+from orchestrator.utils.frontmatter_utils import strip_frontmatter_block
 
 logger = logging.getLogger(__name__)
 
 
+# ── I/O models for load_file_by_path ───────────────────────────────────────
+
+class LoadFileByPathInputs(BaseModel):
+    """Required inputs for load_file_by_path."""
+    ref_path: str = Field(description="Reference path (e.g., ./component_list.md, ../file.md)")
+    user_id: str = Field(default="system", description="User ID for access control")
+
+
+class LoadFileByPathOutputs(BaseModel):
+    """Outputs for load_file_by_path."""
+    document_id: Optional[str] = Field(default=None, description="Document ID if found")
+    filename: Optional[str] = Field(default=None, description="Filename")
+    content: Optional[str] = Field(default=None, description="Full content")
+    path: Optional[str] = Field(default=None, description="Reference path")
+    found: bool = Field(description="Whether the file was found")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
+
+
+# ── I/O models for load_referenced_files ────────────────────────────────────
+
+class LoadReferencedFilesInputs(BaseModel):
+    """Required inputs for load_referenced_files."""
+    user_id: str = Field(default="system", description="User ID for access control")
+
+
+class LoadReferencedFilesOutputs(BaseModel):
+    """Outputs for load_referenced_files."""
+    loaded_files: Dict[str, Any] = Field(default_factory=dict, description="Loaded files by category")
+    category_count: int = Field(description="Number of categories with loaded files")
+    total_files: int = Field(description="Total number of files loaded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
+
+
 async def load_file_by_path(
     ref_path: str,
-    user_id: str,
+    user_id: str = "system",
     base_filename: Optional[str] = None,
     active_editor: Optional[Dict[str, Any]] = None
-) -> Optional[Dict[str, Any]]:
+) -> Dict[str, Any]:
     """
     Load a file by its reference path using TRUE FILESYSTEM PATH RESOLUTION.
-    
+
     Resolves relative paths from the active editor's canonical_path, then finds
     the document by actual filesystem path. Deterministic and fast.
-    
+
     Args:
         ref_path: Reference path (e.g., "./component_list.md", "../file.md", "file.md")
         user_id: User ID for access control
         base_filename: Optional base filename (deprecated - use active_editor)
         active_editor: Active editor dict with canonical_path for base directory
-        
+
     Returns:
-        Dict with document info and content, or None if not found
+        Dict with document_id, filename, content, path, found, formatted
     """
     try:
         from orchestrator.backend_tool_client import get_backend_tool_client
@@ -88,41 +126,82 @@ async def load_file_by_path(
         
         if not doc_info:
             logger.warning(f"⚠️ Could not find document by path: {ref_path} (base: {base_path})")
-            return None
-        
-        # 🎯 ROOSEVELT'S SECURITY CHECK: Ensure we aren't loading system files or logs
-        # Even if the path resolution found it, we MUST NOT let logs leak into prose context.
-        resolved_path = doc_info.get("resolved_path", "").lower()
+            return {
+                "document_id": None,
+                "filename": None,
+                "content": None,
+                "path": ref_path,
+                "found": False,
+                "formatted": f"File not found: {ref_path}",
+            }
+
+        # Security check: ensure we aren't loading system files or logs
+        resolved_path_lower = doc_info.get("resolved_path", "").lower()
         system_dirs = ['/logs/', '\\logs\\', '/processed/', '\\processed\\', '/node_modules/', '\\node_modules\\']
-        if any(sys_dir in resolved_path for sys_dir in system_dirs):
-            logger.error(f"🚨 SECURITY BREACH PREVENTED: Attempted to load log/system file as reference: {resolved_path}")
-            return None
-        
+        if any(sys_dir in resolved_path_lower for sys_dir in system_dirs):
+            logger.error(f"SECURITY: Attempted to load log/system file as reference: {resolved_path_lower}")
+            return {
+                "document_id": None,
+                "filename": None,
+                "content": None,
+                "path": ref_path,
+                "found": False,
+                "formatted": f"Access denied for path: {ref_path}",
+            }
+
         document_id = doc_info.get("document_id")
         resolved_path = doc_info.get("resolved_path")
-        
-        logger.info(f"✅ Found document {document_id} at {resolved_path}")
-        
+        filename = doc_info.get("filename", Path(ref_path).name)
+
+        logger.info(f"Found document {document_id} at {resolved_path}")
+
         # Get full content
-        content = await get_document_content_tool(document_id, user_id)
-        
-        # Check for SPECIFIC error messages from get_document_content_tool, not arbitrary "Error" in content
+        content_result = await get_document_content_tool(document_id, user_id)
+        content = content_result.get("content", content_result) if isinstance(content_result, dict) else content_result
+
+        # Check for specific error messages from get_document_content_tool
         if not content or content.startswith("Document not found:") or content.startswith("Error getting document content:"):
-            logger.warning(f"⚠️ Could not load content for document: {document_id}")
-            return None
-        
+            logger.warning(f"Could not load content for document: {document_id}")
+            return {
+                "document_id": document_id,
+                "filename": filename,
+                "content": None,
+                "path": ref_path,
+                "found": False,
+                "formatted": f"Found {filename} but could not load content.",
+            }
+
+        # Diagnostic: log content fingerprint so we can verify correct document (e.g. outline for book 7 vs 4)
+        _preview_for_log = (content.strip() or "")[:200].replace("\n", " ")
+        logger.info(
+            "REFERENCE LOADED: ref_path=%s document_id=%s resolved_path=%s len=%s preview=%s",
+            ref_path, document_id, resolved_path, len(content), _preview_for_log,
+        )
+
+        # Strip YAML frontmatter so refs inject only body content (e.g. into editor_refs_*)
+        if isinstance(content, str) and content.strip().startswith("---"):
+            content = strip_frontmatter_block(content)
+
+        preview = content[:200] + "..." if len(content) > 200 else content
         return {
             "document_id": document_id,
-            "filename": doc_info.get("filename", Path(ref_path).name),
-            "title": doc_info.get("filename", Path(ref_path).name),  # Use filename as title
+            "filename": filename,
             "content": content,
             "path": ref_path,
-            "resolved_path": resolved_path
+            "found": True,
+            "formatted": f"Loaded {filename} ({len(content)} chars). Preview: {preview}",
         }
-        
+
     except Exception as e:
-        logger.error(f"❌ Error loading file by path '{ref_path}': {e}")
-        return None
+        logger.error(f"Error loading file by path '{ref_path}': {e}")
+        return {
+            "document_id": None,
+            "filename": None,
+            "content": None,
+            "path": ref_path,
+            "found": False,
+            "formatted": f"Error loading {ref_path}: {e}",
+        }
 
 
 async def extract_reference_paths(
@@ -245,8 +324,15 @@ async def load_referenced_files(
         
         # Check if we have an active editor with actual content
         if not active_editor or (not active_editor.get("content") and not active_editor.get("filename") and not active_editor.get("frontmatter")):
-            logger.info("📄 No active editor - skipping referenced file loading")
-            return {"loaded_files": loaded_files}
+            logger.info("No active editor - skipping referenced file loading")
+            total = sum(len(v) if isinstance(v, list) else 0 for v in loaded_files.values())
+            return {
+                "loaded_files": loaded_files,
+                "category_count": 0,
+                "total_files": 0,
+                "error": None,
+                "formatted": "No active editor - no referenced files loaded.",
+            }
         
         frontmatter = active_editor.get("frontmatter", {})
         doc_type = frontmatter.get("type", "").lower()
@@ -260,8 +346,74 @@ async def load_referenced_files(
         
         # Only load references if document type matches filter
         if doc_type_filter and doc_type != doc_type_filter:
-            logger.info(f"📄 Active editor type is '{doc_type}', not '{doc_type_filter}' - skipping referenced files")
-            return {"loaded_files": loaded_files}
+            logger.info(f"Active editor type is '{doc_type}', not '{doc_type_filter}' - skipping referenced files")
+            return {
+                "loaded_files": loaded_files,
+                "category_count": 0,
+                "total_files": 0,
+                "error": None,
+                "formatted": f"Document type '{doc_type}' does not match filter - no files loaded.",
+            }
+        
+        # Child-to-hub cascade: if this is a hub_child (e.g. project/electronics child with project_plan),
+        # load the hub and then all siblings from the hub's frontmatter.
+        hub_child_spec = get_hub_child_spec_for_frontmatter(frontmatter)
+        if hub_child_spec and hub_child_spec.hub_key:
+            hub_path = frontmatter.get(hub_child_spec.hub_key)
+            if isinstance(hub_path, list):
+                hub_path = hub_path[0] if hub_path else None
+            if hub_path:
+                try:
+                    hub_doc = await load_file_by_path(
+                        ref_path=hub_path,
+                        user_id=user_id,
+                        base_filename=active_editor.get("filename"),
+                        active_editor=active_editor,
+                    )
+                    if hub_doc and hub_doc.get("found"):
+                        hub_content = hub_doc.get("content", "")
+                        import yaml
+                        import re
+                        fm_match = re.match(r"^---\s*\n([\s\S]*?)\n---\s*\n", hub_content or "")
+                        if fm_match:
+                            hub_frontmatter = yaml.safe_load(fm_match.group(1)) or {}
+                            hub_type = (hub_frontmatter.get("type") or "").lower()
+                            hub_spec = get_type_spec(hub_type)
+                            if hub_spec and hub_spec.reference_categories:
+                                referenced_paths_from_hub = await extract_reference_paths(
+                                    hub_frontmatter, hub_spec.reference_categories
+                                )
+                                loaded_files["hub"] = [hub_doc]
+                                if hub_child_spec.hub_key:
+                                    loaded_files[hub_child_spec.hub_key] = [hub_doc]
+                                import asyncio
+                                for ref_path, category in referenced_paths_from_hub:
+                                    try:
+                                        doc = await load_file_by_path(
+                                            ref_path=ref_path,
+                                            user_id=user_id,
+                                            base_filename=hub_doc.get("filename"),
+                                            active_editor=active_editor,
+                                        )
+                                        if doc and doc.get("found"):
+                                            if category not in loaded_files:
+                                                loaded_files[category] = []
+                                            loaded_files[category].append(doc)
+                                    except Exception as e:
+                                        logger.warning("Failed to load sibling %s: %s", ref_path, e)
+                                category_count = len(loaded_files)
+                                total_files = sum(
+                                    len(v) if isinstance(v, list) else 0 for v in loaded_files.values()
+                                )
+                                return {
+                                    "loaded_files": loaded_files,
+                                    "category_count": category_count,
+                                    "total_files": total_files,
+                                    "error": None,
+                                    "formatted": f"Loaded hub and {total_files - 1} sibling(s) from hub.",
+                                }
+                except Exception as e:
+                    logger.warning("Child-to-hub cascade failed: %s", e)
         
         logger.info(f"📄 Loading referenced files from frontmatter (type: {doc_type})")
         
@@ -274,8 +426,14 @@ async def load_referenced_files(
                 logger.info(f"📄 Reference: {category} -> {path}")
         
         if not referenced_paths:
-            logger.info("📄 No referenced files found in frontmatter")
-            return {"loaded_files": loaded_files}
+            logger.info("No referenced files found in frontmatter")
+            return {
+                "loaded_files": loaded_files,
+                "category_count": 0,
+                "total_files": 0,
+                "error": None,
+                "formatted": "No referenced files found in frontmatter.",
+            }
         
         logger.info(f"📄 Found {len(referenced_paths)} referenced file(s) to load")
         
@@ -292,11 +450,11 @@ async def load_referenced_files(
                     active_editor=active_editor
                 )
                 
-                if loaded_doc:
-                    logger.info(f"✅ Loaded {category} file: {loaded_doc.get('filename')}")
+                if loaded_doc and loaded_doc.get("found"):
+                    logger.info(f"Loaded {category} file: {loaded_doc.get('filename')}")
                     return (category, loaded_doc, None)
                 else:
-                    logger.warning(f"⚠️ Failed to load {category} file: {ref_path}")
+                    logger.warning(f"Failed to load {category} file: {ref_path}")
                     return (category, None, ref_path)
                     
             except Exception as e:
@@ -348,24 +506,63 @@ async def load_referenced_files(
                                         active_editor=active_editor  # Pass through for project context
                                     )
                                     
-                                    if cascade_doc:
+                                    if cascade_doc and cascade_doc.get("found"):
                                         if cascade_category not in loaded_files:
                                             loaded_files[cascade_category] = []
                                         loaded_files[cascade_category].append(cascade_doc)
-                                        logger.info(f"✅ Loaded cascaded {cascade_category} file: {cascade_doc.get('filename')}")
+                                        logger.info(f"Loaded cascaded {cascade_category} file: {cascade_doc.get('filename')}")
                                 except Exception as e:
                                     logger.error(f"❌ Error loading cascaded {cascade_category} file '{cascade_path}': {e}")
                     except Exception as e:
-                        logger.warning(f"⚠️ Could not parse frontmatter from primary file for cascading: {e}")
-        
-        return {"loaded_files": loaded_files}
-        
+                        logger.warning(f"Could not parse frontmatter from primary file for cascading: {e}")
+
+        category_count = len(loaded_files)
+        total_files = sum(len(v) if isinstance(v, list) else 0 for v in loaded_files.values())
+        summary = f"Loaded {total_files} file(s) in {category_count} categor(ies)."
+        if category_count:
+            cats = ", ".join(f"{k}: {len(v)}" for k, v in loaded_files.items() if isinstance(v, list))
+            summary = f"Loaded {total_files} file(s): {cats}."
+        return {
+            "loaded_files": loaded_files,
+            "category_count": category_count,
+            "total_files": total_files,
+            "error": None,
+            "formatted": summary,
+        }
+
     except Exception as e:
-        logger.error(f"❌ Error in load_referenced_files: {e}")
+        logger.error(f"Error in load_referenced_files: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {
             "loaded_files": {},
-            "error": str(e)
+            "category_count": 0,
+            "total_files": 0,
+            "error": str(e),
+            "formatted": f"Error loading referenced files: {e}",
         }
 
+
+def extract_ref_prefix_paths(
+    frontmatter: Dict[str, Any],
+) -> List[Tuple[str, str]]:
+    """
+    Scan frontmatter for ref_* keys. Returns (path, category) tuples
+    where category = key with 'ref_' stripped.
+    Single strings and lists of strings are both supported.
+    """
+    results = []
+    for key, value in frontmatter.items():
+        if not key.startswith("ref_"):
+            continue
+        category = key[4:]
+        if isinstance(value, str) and value:
+            results.append((value, category))
+        elif isinstance(value, list):
+            results.extend((v, category) for v in value if isinstance(v, str) and v)
+    return results
+
+
+# ── Registry ───────────────────────────────────────────────────────────────
+# Not registered: used internally by built-in agents (electronics, general_project)
+# for context loading before editing. Not exposed in Agent Factory tool list.

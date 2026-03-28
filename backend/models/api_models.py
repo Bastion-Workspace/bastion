@@ -25,6 +25,7 @@ class DocumentType(str, Enum):
     TXT = "txt"
     MD = "md"
     DOCX = "docx"
+    PPTX = "pptx"
     HTML = "html"
     URL = "url"
     EML = "eml"
@@ -93,6 +94,16 @@ class QueryRequest(BaseModel):
     conversation_id: Optional[str] = Field(None, description="Conversation ID for persistent conversations")
     max_results: Optional[int] = Field(default=10, description="Maximum results to return")
     execution_mode: Optional[str] = Field(default=None, description="Execution mode: 'plan', 'execute', 'chat', or 'direct' (auto-determined if not specified)")
+
+
+class DocumentSearchRequest(BaseModel):
+    """Request for document search (semantic, full-text, or hybrid)"""
+    query: str = Field(..., description="Search query")
+    search_mode: Optional[str] = Field(default="hybrid", description="hybrid, semantic, or fulltext")
+    limit: Optional[int] = Field(default=None, description="Max results")
+    max_results: Optional[int] = Field(default=None, description="Alias for limit (backward compatibility)")
+    file_types: Optional[List[str]] = Field(default=None, description="Filter by file type")
+    folder_id: Optional[str] = Field(default=None, description="Filter by folder ID")
 
 
 class ModelConfigRequest(BaseModel):
@@ -229,6 +240,7 @@ class DocumentInfo(BaseModel):
     review_comment: Optional[str] = Field(None, description="Admin review comment")
     collection_type: str = Field(default="user", description="Collection type: 'user' or 'global'")
     exempt_from_vectorization: Optional[bool] = Field(default=None, description="Three-state exemption: TRUE=exempt, FALSE=not exempt (override), NULL=inherit from folder")
+    has_pending_proposals: bool = Field(default=False, description="Whether document has pending edit proposals")
 
 
 class DocumentFolder(BaseModel):
@@ -435,6 +447,11 @@ class ModelInfo(BaseModel):
     top_provider: Optional[Dict[str, Any]] = Field(None, description="Top provider configuration")
     per_request_limits: Optional[Dict[str, Any]] = Field(None, description="Rate limiting information")
     created: Optional[int] = Field(None, description="Unix timestamp when model was added to OpenRouter")
+    output_modalities: Optional[List[str]] = Field(None, description="e.g. ['text', 'image']")
+    input_modalities: Optional[List[str]] = Field(None, description="e.g. ['text', 'image']")
+    source: Optional[str] = Field(None, description="Model source: 'admin' or 'user'")
+    provider_type: Optional[str] = Field(None, description="Provider type: openai, openrouter, groq, ollama, vllm")
+    provider_id: Optional[int] = Field(None, description="User provider id when source is user")
 
 
 class AvailableModelsResponse(BaseModel):
@@ -757,3 +774,141 @@ class EpubExportRequest(BaseModel):
     heading_alignments: Dict[int, str] = Field(default_factory=dict, description="Per-heading alignment: {level: left|center|right|justify}")
     indent_paragraphs: bool = Field(default=True, description="Indent paragraphs (traditional book style)")
     no_indent_first_paragraph: bool = Field(default=True, description="Don't indent first paragraph in each section")
+
+
+class PdfExportKind(str, Enum):
+    """Type of PDF export requested"""
+    markdown_document = "markdown_document"
+    chat_message = "chat_message"
+    conversation = "conversation"
+
+
+class PdfExportLayout(str, Enum):
+    """PDF layout preset for markdown documents"""
+    article = "article"
+    book = "book"
+
+
+class PdfHeadingOutlineRequest(BaseModel):
+    """Request heading outline for PDF book section UI (same ids as export)"""
+    content: str = Field(..., description="Markdown source including optional frontmatter")
+    source_format: str = Field(
+        default="markdown",
+        description="'markdown' or 'org' — org converts * headlines to # before parsing",
+    )
+
+
+class PdfHeadingOutlineItem(BaseModel):
+    """One heading in document order"""
+    id: str = Field(..., description="Stable anchor id, e.g. toc-1")
+    level: int = Field(..., ge=1, le=6)
+    text: str = Field(..., description="Plain heading text")
+
+
+class PdfHeadingOutlineResponse(BaseModel):
+    headings: List[PdfHeadingOutlineItem] = Field(default_factory=list)
+
+
+class PdfBookExportOptions(BaseModel):
+    """Book layout options (used when pdf_layout is book)"""
+    margin_top_mm: float = Field(default=20.0, ge=5.0, le=80.0)
+    margin_right_mm: float = Field(default=20.0, ge=5.0, le=80.0)
+    margin_bottom_mm: float = Field(default=28.0, ge=5.0, le=80.0)
+    margin_left_mm: float = Field(default=20.0, ge=5.0, le=80.0)
+    indent_body_paragraphs: bool = Field(default=True, description="Indent body paragraphs (book style)")
+    no_indent_after_section_heading: bool = Field(
+        default=True,
+        description="Do not indent first paragraph after a section heading",
+    )
+    page_number_format: str = Field(
+        default="n_of_total",
+        description="'n_of_total' or 'n_only'",
+    )
+    page_number_vertical: str = Field(
+        default="bottom",
+        description="'top' or 'bottom'",
+    )
+    page_number_horizontal: str = Field(
+        default="center",
+        description="'left', 'center', or 'right'",
+    )
+    suppress_page_number_on_first_page: bool = Field(
+        default=False,
+        description="Omit page number on the first page of the document",
+    )
+
+
+class PdfBookSectionOverride(BaseModel):
+    """Per-section overrides; heading_id must match outline (e.g. toc-3)"""
+    heading_id: str = Field(..., description="Anchor id of the section-start heading")
+    page_numbers: Optional[bool] = Field(
+        None,
+        description="If set, override global page numbers for this section",
+    )
+    plain_first_page: bool = Field(
+        default=False,
+        description="Suppress page number on first page of this section (named @page :first when supported)",
+    )
+
+
+class PdfExportRequest(BaseModel):
+    """Request to export content as PDF"""
+    kind: PdfExportKind = Field(..., description="Type of export: markdown_document, chat_message, or conversation")
+    pdf_layout: PdfExportLayout = Field(
+        default=PdfExportLayout.article,
+        description="article: current single-column layout; book: named pages and book typography",
+    )
+    book_options: Optional[PdfBookExportOptions] = Field(
+        None,
+        description="Book-only settings; ignored when pdf_layout is article",
+    )
+    book_section_overrides: List[PdfBookSectionOverride] = Field(
+        default_factory=list,
+        description="Per-section PDF rules keyed by heading id (markdown_document + book only)",
+    )
+    pdf_source_format: str = Field(
+        default="markdown",
+        description="'markdown' or 'org' (Org * headlines → ATX before Markdown parse)",
+    )
+    pdf_font_preset: str = Field(
+        default="liberation",
+        description="Font stack: liberation, dejavu, noto, times_helvetica",
+    )
+    pdf_typeface_style: str = Field(
+        default="mixed",
+        description="mixed: serif body + sans headings; serif or sans: entire document",
+    )
+    page_size: str = Field(default="letter", description="Page size: 'letter' or 'a4'")
+    page_orientation: str = Field(
+        default="portrait",
+        description="Page orientation: 'portrait' or 'landscape'",
+    )
+    include_toc: bool = Field(default=False, description="Generate a table of contents page (markdown_document only)")
+    toc_depth: int = Field(default=3, ge=1, le=6, description="Deepest heading level in TOC (1-6)")
+    page_numbers: bool = Field(default=True, description="Show page numbers in footer")
+    watermark_text: Optional[str] = Field(None, description="Watermark text (e.g. DRAFT, CONFIDENTIAL)")
+    watermark_on_all_pages: bool = Field(
+        default=True,
+        description="Watermark on all pages; if false, first page only",
+    )
+    page_break_before_headings: List[int] = Field(
+        default_factory=list,
+        description="Heading levels that start a new page (1-6), e.g. [1, 2]",
+    )
+    title: Optional[str] = Field(None, description="Document title for filename")
+    
+    # Markdown document fields
+    content: Optional[str] = Field(None, description="Markdown content (for markdown_document kind)")
+    document_id: Optional[str] = Field(None, description="Source document ID for context")
+    folder_id: Optional[str] = Field(None, description="Source folder ID for context")
+    metadata: Optional[Dict[str, Any]] = Field(None, description="Metadata such as title, author (for markdown_document)")
+    
+    # Chat message fields
+    message_content: Optional[str] = Field(None, description="Message markdown content (for chat_message kind)")
+    message_timestamp: Optional[str] = Field(None, description="Message timestamp ISO string (for chat_message kind)")
+    message_role: Optional[str] = Field(None, description="Message role/label (for chat_message kind)")
+    
+    # Conversation fields
+    conversation_title: Optional[str] = Field(None, description="Conversation title (for conversation kind)")
+    conversation_created_at: Optional[str] = Field(None, description="Conversation creation timestamp ISO string (for conversation kind)")
+    messages: Optional[List[Dict[str, Any]]] = Field(None, description="List of messages with role, timestamp, content (for conversation kind)")

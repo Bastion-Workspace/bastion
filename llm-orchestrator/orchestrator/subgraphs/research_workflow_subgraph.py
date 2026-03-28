@@ -26,7 +26,7 @@ from langchain_openai import ChatOpenAI
 from orchestrator.tools import (
     search_web_tool,
     crawl_web_content_tool,
-    expand_query_tool,
+    enhance_query_tool,
     search_conversation_cache_tool,
     get_document_content_tool,
     search_images_tool
@@ -202,8 +202,8 @@ async def query_expansion_node(state: Dict[str, Any]) -> Dict[str, Any]:
         # Track tool usage
         shared_memory = state.get("shared_memory", {})
         previous_tools = shared_memory.get("previous_tools_used", [])
-        if "expand_query_tool" not in previous_tools:
-            previous_tools.append("expand_query_tool")
+        if "enhance_query_tool" not in previous_tools:
+            previous_tools.append("enhance_query_tool")
             shared_memory["previous_tools_used"] = previous_tools
             state["shared_memory"] = shared_memory
         
@@ -225,16 +225,16 @@ async def query_expansion_node(state: Dict[str, Any]) -> Dict[str, Any]:
             
             for msg in last_messages:
                 if isinstance(msg, HumanMessage):
-                    context_parts.append(f"User: {msg.content}")
+                    context_parts.append(f"USER: {msg.content}")
                 elif isinstance(msg, AIMessage):
-                    context_parts.append(f"Assistant: {msg.content}")
+                    context_parts.append(f"ASSISTANT: {msg.content}")
                 elif isinstance(msg, dict):
                     role = msg.get("role", "")
                     content = msg.get("content", "")
                     if role == "user" or role == "human":
-                        context_parts.append(f"User: {content}")
+                        context_parts.append(f"USER: {content}")
                     elif role == "assistant" or role == "ai":
-                        context_parts.append(f"Assistant: {content}")
+                        context_parts.append(f"ASSISTANT: {content}")
             
             if context_parts:
                 conversation_context = "\n".join(context_parts)
@@ -243,14 +243,15 @@ async def query_expansion_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 logger.warning(f"⚠️ Had {len(conversation_messages)} messages but extracted 0 context_parts - message format issue?")
         
         # Expand query
-        expansion_result = await expand_query_tool(
-            query=query, 
+        expansion_result = await enhance_query_tool(
+            query=query,
+            mode="basic",
             num_variations=3,
             conversation_context=conversation_context
         )
-        logger.info("Tool used: expand_query_tool (query expansion)")
+        logger.info("Tool used: enhance_query_tool (query expansion)")
         
-        expanded_queries = expansion_result.get("expanded_queries", [])
+        expanded_queries = expansion_result.get("expanded_queries", expansion_result.get("queries", []))
         key_entities = expansion_result.get("key_entities", [])
         
         # Ensure we always have at least the original query
@@ -787,9 +788,10 @@ async def round1_web_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
             }
         
         # Search web using structured search for better URL prioritization
-        from orchestrator.tools import search_web_structured
-        structured_results = await search_web_structured(query=search_query, max_results=10)
-        logger.info("Tool used: search_web_structured (web search)")
+        from orchestrator.tools import search_web_tool
+        raw = await search_web_tool(query=search_query, max_results=10)
+        structured_results = raw.get("results", []) if isinstance(raw, dict) else (raw or [])
+        logger.info("Tool used: search_web_tool (web search)")
         
         # Format results for display
         formatted_parts = []
@@ -953,7 +955,7 @@ STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact sc
         from orchestrator.agents.base_agent import BaseAgent
         base_agent = BaseAgent("research_subgraph")
         llm = base_agent._get_llm(temperature=0.7, state=state)
-        datetime_context = base_agent._get_datetime_context()
+        datetime_context = base_agent._get_datetime_context(state)
         
         assessment_messages = [
             SystemMessage(content="You are a research quality assessor. Always respond with valid JSON."),

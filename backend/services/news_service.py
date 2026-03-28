@@ -35,7 +35,7 @@ class NewsService:
         except Exception:
             pass
         self._initialized = True
-        logger.info("🗞️ BULLY! NewsService initialized (SQL-backed)")
+        logger.info("NewsService initialized (SQL-backed)")
 
     async def upsert_article(self, article: NewsArticleSynth) -> None:
         # **BULLY!** Use lighter sanitization since RSS processing already cleaned content

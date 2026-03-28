@@ -13,8 +13,12 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileSystemEvent
 
 from config import settings
+from utils.ocr_in_progress import contains as ocr_in_progress_contains
 
 logger = logging.getLogger(__name__)
+
+# Document types that require full reprocess from file (binary; cannot read as UTF-8)
+BINARY_DOC_TYPES = frozenset({'pdf', 'docx', 'epub', 'zip'})
 
 
 class DocumentFileHandler(FileSystemEventHandler):
@@ -41,6 +45,11 @@ class DocumentFileHandler(FileSystemEventHandler):
         """
         path_lower = path.lower()
         
+        # Document version snapshots live under .versions/{document_id}/ and must not
+        # be treated as normal documents (no DB records, no vectorization).
+        if '/.versions/' in path_lower or '\\.versions\\' in path_lower:
+            return True
+
         # **BULLY!** Ignore sensitive system and log directories!
         # This prevents "log leakage" into the vector database
         ignored_dirs = [
@@ -103,7 +112,7 @@ class DocumentFileHandler(FileSystemEventHandler):
         if '/teams/' in path_lower and '/posts/' in path_lower:
             # Allow text and document files to be vectorized
             text_doc_extensions = [
-                '.md', '.org', '.txt', '.pdf', '.docx', '.html', '.htm', '.epub',
+                '.md', '.org', '.txt', '.pdf', '.docx', '.pptx', '.html', '.htm', '.epub',
                 '.csv', '.json', '.xml', '.rtf', '.odt'
             ]
             if any(path_lower.endswith(ext) for ext in text_doc_extensions):
@@ -122,7 +131,7 @@ class DocumentFileHandler(FileSystemEventHandler):
             
         # Ignore non-document files (for other locations)
         valid_extensions = [
-            '.md', '.org', '.txt', '.pdf', '.docx', '.html', '.htm', '.epub',  # Documents
+            '.md', '.org', '.txt', '.pdf', '.docx', '.pptx', '.html', '.htm', '.epub',  # Documents
             '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'  # Images
         ]
         if not any(path_lower.endswith(ext) for ext in valid_extensions):
@@ -500,33 +509,46 @@ class DocumentFileHandler(FileSystemEventHandler):
     async def _handle_file_modified(self, file_path: str):
         """Process file modification"""
         try:
-            logger.info(f"🔄 Processing modified file: {file_path}")
-            
-            # CRITICAL: Check if this is a .metadata.json sidecar file FIRST
-            # Sidecars must ALWAYS route to ImageSidecarService, not text processing
+            logger.info(f"Processing modified file: {file_path}")
+
+            if ocr_in_progress_contains(file_path):
+                logger.debug(f"Skipping modified file (OCR in progress): {file_path}")
+                return
+
             path = Path(file_path)
             if path.name.lower().endswith('.metadata.json'):
-                logger.info(f"📸 Modified file is image metadata sidecar - routing to ImageSidecarService")
-                # Route to ImageSidecarService (same as new file)
+                logger.info(f"Modified file is image metadata sidecar - routing to ImageSidecarService")
                 await self._handle_new_file(file_path)
                 return
-            
-            # Find document record
+
             doc_info = await self._get_document_by_path(file_path)
-            
+
             if not doc_info:
-                logger.info(f"📄 Modified file has no document record, treating as new: {file_path}")
-                # **BULLY!** New file created via WebDAV - create document record!
+                logger.info(f"Modified file has no document record, treating as new: {file_path}")
                 await self._handle_new_file(file_path)
                 return
-            
-            # Re-process the document
+
             document_id = doc_info['document_id']
             user_id = doc_info['user_id']
-            
-            logger.info(f"♻️ Re-processing document {document_id} due to file change")
-            
-            # Read file content
+            filename = doc_info.get('filename') or path.name
+            doc_type = self.document_service._detect_document_type(filename)
+
+            if doc_type in BINARY_DOC_TYPES:
+                logger.info(f"Re-processing binary document {document_id} due to file change (full pipeline)")
+                from models.api_models import ProcessingStatus
+                await self.document_service.document_repository.update_status(
+                    document_id, ProcessingStatus.PROCESSING
+                )
+                await self.document_service._emit_document_status_update(
+                    document_id, "processing", user_id
+                )
+                await self.document_service._process_document_async(
+                    document_id, path, doc_type, user_id
+                )
+                return
+
+            logger.info(f"Re-processing document {document_id} due to file change")
+
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
             
@@ -609,7 +631,7 @@ class DocumentFileHandler(FileSystemEventHandler):
                         # Use DocumentProcessor's sophisticated entity extraction (spaCy + patterns)
                         entities = await self.document_service.document_processor._extract_entities(content, chunks)
                         if entities:
-                            await self.document_service.kg_service.store_entities(entities, document_id)
+                            await self.document_service.kg_service.store_entities(entities, document_id, chunks)
                             logger.info(f"🔗 Extracted and stored {len(entities)} NEW entities using spaCy NER for {document_id}")
                     except Exception as e:
                         logger.warning(f"⚠️  Failed to extract/store new entities for {document_id}: {e}")
@@ -1419,6 +1441,7 @@ class DocumentFileHandler(FileSystemEventHandler):
                 '.txt': 'txt',  # Must match DocumentType.TXT
                 '.pdf': 'pdf',  # Must match DocumentType.PDF
                 '.docx': 'docx',  # Must match DocumentType.DOCX
+                '.pptx': 'pptx',  # Must match DocumentType.PPTX
                 '.html': 'html',  # Must match DocumentType.HTML
                 '.htm': 'html',  # Must match DocumentType.HTML
                 '.epub': 'epub',  # Must match DocumentType.EPUB
@@ -1509,6 +1532,36 @@ class DocumentFileHandler(FileSystemEventHandler):
                     logger.info(f"📡 Sent folder update notification for document: {document_id} in folder: {folder_id}")
                 except Exception as e:
                     logger.error(f"❌ Failed to send folder update notification: {e}")
+            
+            # Agent folder watches: trigger custom agents when a new file appears in a watched folder
+            if folder_id:
+                try:
+                    from services.database_manager.database_helpers import fetch_all
+                    from services.celery_tasks.agent_tasks import dispatch_folder_file_reaction
+                    watches = await fetch_all(
+                        "SELECT agent_profile_id, user_id, file_type_filter FROM agent_folder_watches "
+                        "WHERE folder_id = $1 AND is_active = true",
+                        folder_id,
+                    )
+                    folder_path_display = " / ".join(folder_parts) if folder_parts else ""
+                    file_ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+                    for w in watches:
+                        ft_filter = (w.get("file_type_filter") or "").strip()
+                        if ft_filter:
+                            allowed = [x.strip().lower() for x in ft_filter.split(",") if x.strip()]
+                            if allowed and file_ext not in allowed:
+                                continue
+                        dispatch_folder_file_reaction.delay(
+                            agent_profile_id=str(w["agent_profile_id"]),
+                            user_id=str(w["user_id"]),
+                            document_id=document_id,
+                            filename=filename,
+                            folder_id=folder_id,
+                            folder_path=folder_path_display,
+                            file_type=doc_type or file_ext or "",
+                        )
+                except Exception as e:
+                    logger.warning("Agent folder watch dispatch failed: %s", e)
             
             # **BULLY!** Process ALL files asynchronously - don't block the file watcher!
             logger.info(f"🔄 Starting async processing for document: {document_id} (type: {doc_type})")
@@ -1959,7 +2012,7 @@ class FileWatcherService:
             logger.debug(f"   🗑️ Orphaned folders removed: {cleaned_count}")
             
             if cleaned_count > 0:
-                logger.debug(f"   🏇 BULLY! {cleaned_count} orphaned folders cleaned up!")
+                logger.debug("%s orphaned folders cleaned up", cleaned_count)
             
         except Exception as e:
             logger.error(f"❌ Folder cleanup failed: {e}")
@@ -2099,7 +2152,7 @@ class FileWatcherService:
             
             # Supported file extensions
             valid_extensions = [
-                '.md', '.org', '.txt', '.pdf', '.docx', '.html', '.htm', '.epub', '.eml',  # Documents
+                '.md', '.org', '.txt', '.pdf', '.docx', '.pptx', '.html', '.htm', '.epub', '.eml',  # Documents
                 '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'  # Images
             ]
             

@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package connections_service;
 
-// Connections Service - OAuth-based external integrations (email, calendar, etc.)
+// Connections Service - All third-party connections (email, messaging bots, data source connectors, external APIs)
 service ConnectionsService {
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
 
@@ -12,6 +12,7 @@ service ConnectionsService {
   rpc GetEmailThread(GetEmailThreadRequest) returns (GetEmailThreadResponse);
   rpc SearchEmails(SearchEmailsRequest) returns (SearchEmailsResponse);
   rpc SendEmail(SendEmailRequest) returns (SendEmailResponse);
+  rpc CreateDraft(CreateDraftRequest) returns (CreateDraftResponse);
   rpc ReplyToEmail(ReplyToEmailRequest) returns (ReplyToEmailResponse);
   rpc UpdateEmail(UpdateEmailRequest) returns (UpdateEmailResponse);
   rpc MoveEmail(MoveEmailRequest) returns (MoveEmailResponse);
@@ -20,10 +21,34 @@ service ConnectionsService {
   rpc SyncFolder(SyncFolderRequest) returns (SyncFolderResponse);
   rpc GetEmailStatistics(GetEmailStatisticsRequest) returns (GetEmailStatisticsResponse);
 
+  // Calendar operations (provider-agnostic; backend passes access_token for the connection)
+  rpc ListCalendars(ListCalendarsRequest) returns (ListCalendarsResponse);
+  rpc GetCalendarEvents(GetCalendarEventsRequest) returns (GetCalendarEventsResponse);
+  rpc GetCalendarEventById(GetCalendarEventByIdRequest) returns (GetCalendarEventByIdResponse);
+  rpc CreateCalendarEvent(CreateCalendarEventRequest) returns (CreateCalendarEventResponse);
+  rpc UpdateCalendarEvent(UpdateCalendarEventRequest) returns (UpdateCalendarEventResponse);
+  rpc DeleteCalendarEvent(DeleteCalendarEventRequest) returns (DeleteCalendarEventResponse);
+
+  // Contacts operations (provider-agnostic; backend passes access_token for the connection)
+  rpc GetContacts(GetContactsRequest) returns (GetContactsResponse);
+  rpc GetContactById(GetContactByIdRequest) returns (GetContactByIdResponse);
+  rpc CreateContact(CreateContactRequest) returns (CreateContactResponse);
+  rpc UpdateContact(UpdateContactRequest) returns (UpdateContactResponse);
+  rpc DeleteContact(DeleteContactRequest) returns (DeleteContactResponse);
+
   // Bot lifecycle management (called by backend)
   rpc RegisterBot(RegisterBotRequest) returns (RegisterBotResponse);
   rpc UnregisterBot(UnregisterBotRequest) returns (UnregisterBotResponse);
   rpc GetBotStatus(GetBotStatusRequest) returns (GetBotStatusResponse);
+
+  // Outbound messaging (agent-initiated, proactive notifications)
+  rpc SendOutboundMessage(SendOutboundMessageRequest) returns (SendOutboundMessageResponse);
+
+  // Data source connector execution (generic REST API calls to third-party APIs)
+  rpc ExecuteConnectorEndpoint(ExecuteConnectorEndpointRequest) returns (ExecuteConnectorEndpointResponse);
+
+  // Raw HTTP probe for API discovery (no connector definition required)
+  rpc ProbeApiEndpoint(ProbeApiEndpointRequest) returns (ProbeApiEndpointResponse);
 }
 
 // ============================================================================
@@ -128,6 +153,23 @@ message SendEmailResponse {
   optional string error = 3;
 }
 
+message CreateDraftRequest {
+  string access_token = 1;
+  string provider = 2;
+  repeated string to_recipients = 3;
+  string subject = 4;
+  string body = 5;
+  repeated string cc_recipients = 6;
+  repeated string bcc_recipients = 7;
+  bool body_is_html = 8;
+}
+
+message CreateDraftResponse {
+  bool success = 1;
+  string message_id = 2;
+  optional string error = 3;
+}
+
 message ReplyToEmailRequest {
   string access_token = 1;
   string provider = 2;
@@ -225,6 +267,231 @@ message GetEmailStatisticsResponse {
 }
 
 // ============================================================================
+// Calendar Messages
+// ============================================================================
+
+message CalendarInfo {
+  string id = 1;
+  string name = 2;
+  string color = 3;       // optional hex or provider color
+  bool is_default = 4;
+  bool can_edit = 5;
+}
+
+message CalendarEventAttendee {
+  string email = 1;
+  string name = 2;
+  string response_status = 3;  // none, organizer, tentativelyAccepted, accepted, declined
+}
+
+message CalendarEvent {
+  string id = 1;
+  string subject = 2;
+  string start_datetime = 3;   // ISO 8601 with timezone
+  string end_datetime = 4;     // ISO 8601 with timezone
+  string location = 5;
+  string body_preview = 6;
+  string body_content = 7;
+  string organizer_email = 8;
+  string organizer_name = 9;
+  repeated CalendarEventAttendee attendees = 10;
+  bool is_all_day = 11;
+  string recurrence = 12;      // optional recurrence description
+  string calendar_id = 13;
+  string web_link = 14;
+}
+
+message ListCalendarsRequest {
+  string access_token = 1;
+  string provider = 2;
+}
+
+message ListCalendarsResponse {
+  repeated CalendarInfo calendars = 1;
+  optional string error = 2;
+}
+
+message GetCalendarEventsRequest {
+  string access_token = 1;
+  string provider = 2;
+  string calendar_id = 3;      // empty = default calendar
+  string start_datetime = 4;   // ISO 8601
+  string end_datetime = 5;     // ISO 8601
+  int32 top = 6;
+}
+
+message GetCalendarEventsResponse {
+  repeated CalendarEvent events = 1;
+  int32 total_count = 2;
+  optional string error = 3;
+}
+
+message GetCalendarEventByIdRequest {
+  string access_token = 1;
+  string provider = 2;
+  string event_id = 3;
+}
+
+message GetCalendarEventByIdResponse {
+  CalendarEvent event = 1;
+  optional string error = 2;
+}
+
+message CreateCalendarEventRequest {
+  string access_token = 1;
+  string provider = 2;
+  string calendar_id = 3;      // empty = default calendar
+  string subject = 4;
+  string start_datetime = 5;    // ISO 8601
+  string end_datetime = 6;      // ISO 8601
+  string location = 7;
+  string body = 8;              // plain text or HTML per body_is_html
+  bool body_is_html = 9;
+  repeated string attendee_emails = 10;
+  bool is_all_day = 11;
+}
+
+message CreateCalendarEventResponse {
+  bool success = 1;
+  string event_id = 2;
+  optional string error = 3;
+}
+
+message UpdateCalendarEventRequest {
+  string access_token = 1;
+  string provider = 2;
+  string event_id = 3;
+  optional string subject = 4;
+  optional string start_datetime = 5;
+  optional string end_datetime = 6;
+  optional string location = 7;
+  optional string body = 8;
+  optional bool body_is_html = 9;
+  repeated string attendee_emails = 10;  // replace list if non-empty
+  optional bool is_all_day = 11;
+}
+
+message UpdateCalendarEventResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message DeleteCalendarEventRequest {
+  string access_token = 1;
+  string provider = 2;
+  string event_id = 3;
+}
+
+message DeleteCalendarEventResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+// ============================================================================
+// Contacts Messages
+// ============================================================================
+
+message ContactEmailAddress {
+  string address = 1;
+  string name = 2;
+}
+
+message ContactPhoneNumber {
+  string number = 1;
+  string type = 2;  // mobile, home, business, etc.
+}
+
+message Contact {
+  string id = 1;
+  string display_name = 2;
+  string given_name = 3;
+  string surname = 4;
+  repeated ContactEmailAddress email_addresses = 5;
+  repeated ContactPhoneNumber phone_numbers = 6;
+  string company_name = 7;
+  string job_title = 8;
+  string birthday = 9;   // ISO 8601 date
+  string notes = 10;
+  string folder_id = 11;
+}
+
+message GetContactsRequest {
+  string access_token = 1;
+  string provider = 2;
+  string folder_id = 3;   // empty = default contacts folder
+  int32 top = 4;
+}
+
+message GetContactsResponse {
+  repeated Contact contacts = 1;
+  int32 total_count = 2;
+  optional string error = 3;
+}
+
+message GetContactByIdRequest {
+  string access_token = 1;
+  string provider = 2;
+  string contact_id = 3;
+}
+
+message GetContactByIdResponse {
+  Contact contact = 1;
+  optional string error = 2;
+}
+
+message CreateContactRequest {
+  string access_token = 1;
+  string provider = 2;
+  string folder_id = 3;       // empty = default
+  string display_name = 4;
+  string given_name = 5;
+  string surname = 6;
+  repeated ContactEmailAddress email_addresses = 7;
+  repeated ContactPhoneNumber phone_numbers = 8;
+  string company_name = 9;
+  string job_title = 10;
+  string birthday = 11;        // ISO 8601 date
+  string notes = 12;
+}
+
+message CreateContactResponse {
+  bool success = 1;
+  string contact_id = 2;
+  optional string error = 3;
+}
+
+message UpdateContactRequest {
+  string access_token = 1;
+  string provider = 2;
+  string contact_id = 3;
+  optional string display_name = 4;
+  optional string given_name = 5;
+  optional string surname = 6;
+  repeated ContactEmailAddress email_addresses = 7;  // replace list if non-empty
+  repeated ContactPhoneNumber phone_numbers = 8;    // replace list if non-empty
+  optional string company_name = 9;
+  optional string job_title = 10;
+  optional string birthday = 11;
+  optional string notes = 12;
+}
+
+message UpdateContactResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+message DeleteContactRequest {
+  string access_token = 1;
+  string provider = 2;
+  string contact_id = 3;
+}
+
+message DeleteContactResponse {
+  bool success = 1;
+  optional string error = 2;
+}
+
+// ============================================================================
 // Messaging Bots (Telegram, Discord)
 // ============================================================================
 
@@ -260,4 +527,68 @@ message GetBotStatusResponse {
   string status = 1;   // "running", "stopped", "error"
   string bot_username = 2;
   optional string error = 3;
+}
+
+// ============================================================================
+// Outbound Messaging (agent-initiated notifications via bots)
+// ============================================================================
+
+message SendOutboundMessageRequest {
+  string user_id = 1;          // Target user
+  string provider = 2;         // "telegram" or "discord"
+  string connection_id = 3;    // Specific connection; empty = default for provider
+  string message = 4;          // Message text (max 4000 chars)
+  string format = 5;           // "markdown", "plain", or "html" (default: markdown)
+  string recipient_chat_id = 6; // Optional. Platform chat/channel ID (Telegram chat_id, Discord channel id). If empty, uses stored outbound_chat_id for the connection.
+}
+
+message SendOutboundMessageResponse {
+  bool success = 1;
+  string message_id = 2;       // Provider message ID
+  string channel = 3;          // Channel that was used (e.g. "telegram")
+  optional string error = 4;
+}
+
+// ============================================================================
+// Data Source Connector Execution
+// ============================================================================
+
+message ExecuteConnectorEndpointRequest {
+  string definition_json = 1;   // Full connector definition (base_url, auth, endpoints)
+  string credentials_json = 2;   // Decrypted credentials dict as JSON
+  string endpoint_id = 3;
+  string params_json = 4;        // Optional; param values as JSON object
+  int32 max_pages = 5;           // Default 5
+  string oauth_token = 6;       // Optional Bearer token when auth type is oauth_connection
+  bool raw_response = 7;        // When true, include full API response in response
+}
+
+message ExecuteConnectorEndpointResponse {
+  bool success = 1;
+  string records_json = 2;      // JSON array of records
+  int32 count = 3;
+  string formatted = 4;        // Human-readable summary
+  string raw_response_json = 5; // When requested; full API response as JSON
+  optional string error = 6;
+}
+
+// ============================================================================
+// Raw HTTP Probe (API discovery - no connector definition)
+// ============================================================================
+
+message ProbeApiEndpointRequest {
+  string url = 1;
+  string method = 2;       // GET, POST, PUT, etc.
+  string headers_json = 3;  // Optional JSON object of headers
+  string body_json = 4;    // Optional body for POST/PUT
+  string params_json = 5;  // Optional query params as JSON object
+}
+
+message ProbeApiEndpointResponse {
+  bool success = 1;
+  int32 status_code = 2;
+  string response_headers_json = 3;
+  string response_body = 4;   // Truncated to 50KB
+  string content_type = 5;
+  optional string error = 6;
 }

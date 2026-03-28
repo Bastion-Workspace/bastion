@@ -123,7 +123,7 @@ class DataWorkspaceService:
                     )
                     
                     if table_details:
-                        # Parse schema JSON
+                        # Parse schema JSON (format: {"columns": [{"name", "type", "nullable", "description"?}, ...]})
                         schema_json = table_details.get('schema_json', '{}')
                         if isinstance(schema_json, str):
                             try:
@@ -132,24 +132,28 @@ class DataWorkspaceService:
                                 schema = {}
                         else:
                             schema = schema_json
-                        
-                        # Extract column information from schema
+                        schema_cols = schema.get('columns', []) if isinstance(schema, dict) else []
                         columns = []
-                        if isinstance(schema, dict):
-                            for col_name, col_info in schema.items():
-                                if isinstance(col_info, dict):
-                                    col_type = col_info.get('type', 'text')
-                                    is_nullable = col_info.get('nullable', True)
-                                else:
-                                    col_type = str(col_info) if col_info else 'text'
-                                    is_nullable = True
-                                
-                                columns.append({
-                                    'name': col_name,
-                                    'type': col_type,
-                                    'is_nullable': is_nullable
-                                })
-                        
+                        for col in schema_cols:
+                            if not isinstance(col, dict):
+                                continue
+                            columns.append({
+                                'name': col.get('name', ''),
+                                'type': col.get('type', 'text'),
+                                'is_nullable': col.get('nullable', True),
+                                'description': col.get('description', '') or ''
+                            })
+                        # Parse metadata_json for business context (agents)
+                        metadata_json = table_details.get('metadata_json', '') or ''
+                        if isinstance(metadata_json, str) and metadata_json.strip():
+                            try:
+                                metadata_json = json.loads(metadata_json) if metadata_json.strip() else {}
+                            except json.JSONDecodeError:
+                                metadata_json = {}
+                        else:
+                            metadata_json = {}
+                        if not isinstance(metadata_json, dict):
+                            metadata_json = {}
                         all_tables.append({
                             'table_id': table_id,
                             'name': table.get('name', ''),
@@ -157,7 +161,8 @@ class DataWorkspaceService:
                             'database_id': database_id,
                             'database_name': database_name,
                             'columns': columns,
-                            'row_count': table_details.get('row_count', 0)
+                            'row_count': table_details.get('row_count', 0),
+                            'metadata_json': metadata_json
                         })
             
             logger.info(f"Retrieved schema for workspace {workspace_id}: {len(all_tables)} tables")
@@ -178,7 +183,9 @@ class DataWorkspaceService:
         query: str,
         query_type: str,
         user_id: str,
-        limit: int = 100
+        limit: int = 100,
+        params: Optional[List[Any]] = None,
+        read_only: bool = False,
     ) -> Dict[str, Any]:
         """
         Execute a query against a workspace (SQL or natural language)
@@ -189,9 +196,10 @@ class DataWorkspaceService:
             query_type: "sql" or "natural_language"
             user_id: User ID for access control
             limit: Maximum rows to return (default: 100)
+            params: Optional list of values for $1, $2, ... (SQL only)
             
         Returns:
-            Dictionary with query results, column names, execution time, etc.
+            Dictionary with query results, column names, execution time, rows_affected, returning_rows, etc.
         """
         try:
             await self._ensure_initialized()
@@ -202,27 +210,40 @@ class DataWorkspaceService:
                     workspace_id=workspace_id,
                     query=query,
                     user_id=user_id,
-                    limit=limit
+                    limit=limit,
+                    params=params,
+                    read_only=read_only,
                 )
             elif query_type == "natural_language":
                 # Execute natural language query (converts to SQL)
                 result = await self._data_client.execute_nl_query(
                     workspace_id=workspace_id,
                     natural_query=query,
-                    user_id=user_id
+                    user_id=user_id,
+                    read_only=read_only,
                 )
             else:
                 raise ValueError(f"Invalid query_type: {query_type}. Must be 'sql' or 'natural_language'")
             
-            # Parse results JSON
-            results_json = result.get('results_json', '[]')
-            if isinstance(results_json, str):
-                try:
-                    results = json.loads(results_json)
-                except json.JSONDecodeError:
-                    results = []
+            has_arrow = bool(result.get('has_arrow_data')) and result.get('arrow_results')
+            if has_arrow:
+                results = []
             else:
-                results = results_json
+                results_json = result.get('results_json', '[]')
+                if isinstance(results_json, str):
+                    try:
+                        results = json.loads(results_json)
+                    except json.JSONDecodeError:
+                        results = []
+                else:
+                    results = results_json
+
+            returning_rows = None
+            if result.get('returning_rows_json'):
+                try:
+                    returning_rows = json.loads(result['returning_rows_json'])
+                except (json.JSONDecodeError, TypeError):
+                    pass
             
             return {
                 'success': result.get('error_message') is None,
@@ -231,7 +252,11 @@ class DataWorkspaceService:
                 'result_count': result.get('result_count', len(results)),
                 'execution_time_ms': result.get('execution_time_ms', 0),
                 'generated_sql': result.get('generated_sql', ''),
-                'error_message': result.get('error_message')
+                'error_message': result.get('error_message'),
+                'rows_affected': result.get('rows_affected', 0),
+                'returning_rows': returning_rows,
+                'has_arrow_data': bool(result.get('has_arrow_data')),
+                'arrow_results': result.get('arrow_results') or b'',
             }
             
         except Exception as e:
@@ -243,7 +268,11 @@ class DataWorkspaceService:
                 'result_count': 0,
                 'execution_time_ms': 0,
                 'generated_sql': '',
-                'error_message': str(e)
+                'error_message': str(e),
+                'rows_affected': 0,
+                'returning_rows': None,
+                'has_arrow_data': False,
+                'arrow_results': b'',
             }
 
 

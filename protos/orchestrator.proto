@@ -7,16 +7,14 @@ service OrchestratorService {
   // Streaming chat response (primary interface)
   rpc StreamChat(ChatRequest) returns (stream ChatChunk);
   
-  // Async task processing
-  rpc StartTask(TaskRequest) returns (TaskResponse);
-  rpc GetTaskStatus(TaskStatusRequest) returns (TaskStatusResponse);
-  
-  // Human-in-the-Loop (HITL) support
-  rpc ApprovePermission(PermissionApproval) returns (ApprovalResponse);
-  rpc GetPendingPermissions(PermissionRequest) returns (PermissionList);
-  
   // Health check
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+  // Agent Factory: registered action I/O contracts for Workflow Composer
+  rpc GetActions(GetActionsRequest) returns (GetActionsResponse);
+
+  // Agent Factory: list available plugins and their connection requirements
+  rpc GetPlugins(GetPluginsRequest) returns (GetPluginsResponse);
 }
 
 // ============================================================================
@@ -60,6 +58,9 @@ message ChatRequest {
   
   // === CHECKPOINTING (Optional - For conversation branching) ===
   string base_checkpoint_id = 15;  // Start from this checkpoint to branch
+  
+  // === DATA WORKSPACE CONTEXT (Optional - When data workspace tab is open) ===
+  ActiveDataWorkspace active_data_workspace = 16;
   
   // === LEGACY METADATA (Deprecated - Use specific fields above) ===
   map<string, string> metadata = 99;
@@ -116,6 +117,27 @@ message EditorFrontmatter {
   repeated string tags = 4;
   string status = 5;  // e.g. "draft", "published"
   map<string, string> custom_fields = 6;  // Extensible frontmatter
+}
+
+// Data workspace column schema (for active_data_workspace)
+message DataWorkspaceColumn {
+  string name = 1;
+  string type = 2;  // e.g. "TEXT", "REAL", "INTEGER"
+  string description = 3;
+}
+
+// Active data workspace context (when user has a data workspace table open)
+message ActiveDataWorkspace {
+  string workspace_id = 1;
+  string workspace_name = 2;
+  string database_id = 3;
+  string database_name = 4;
+  string table_id = 5;
+  string table_name = 6;
+  int32 row_count = 7;
+  repeated DataWorkspaceColumn columns = 8;
+  string visible_rows_json = 9;   // JSON-serialized list of row objects
+  int32 visible_row_count = 10;
 }
 
 // Pipeline execution context
@@ -198,66 +220,6 @@ message ChatChunk {
   repeated string tools_used = 6;
 }
 
-// Async Task Messages
-message TaskRequest {
-  string user_id = 1;
-  string conversation_id = 2;
-  string query = 3;
-  string priority = 4;  // "normal", "high", "low"
-  map<string, string> context = 5;
-}
-
-message TaskResponse {
-  string task_id = 1;
-  string status = 2;  // "queued", "running", "completed", "failed"
-  string message = 3;
-}
-
-message TaskStatusRequest {
-  string task_id = 1;
-  string user_id = 2;
-}
-
-message TaskStatusResponse {
-  string task_id = 1;
-  string status = 2;
-  string result = 3;
-  string error_message = 4;
-  map<string, string> metadata = 5;
-}
-
-// Permission (HITL) Messages
-message PermissionApproval {
-  string user_id = 1;
-  string conversation_id = 2;
-  string session_id = 3;
-  string approval_decision = 4;  // "approved", "denied"
-  string operation_type = 5;  // "web_search", "web_crawl", etc.
-}
-
-message ApprovalResponse {
-  bool success = 1;
-  string message = 2;
-  string next_action = 3;
-}
-
-message PermissionRequest {
-  string user_id = 1;
-  string conversation_id = 2;
-}
-
-message PermissionList {
-  repeated PendingPermission permissions = 1;
-}
-
-message PendingPermission {
-  string operation_type = 1;
-  string query = 2;
-  string reasoning = 3;
-  string safety_level = 4;
-  string timestamp = 5;
-}
-
 // Health Check
 message HealthCheckRequest {}
 
@@ -266,3 +228,47 @@ message HealthCheckResponse {
   map<string, string> details = 2;
 }
 
+// Agent Factory: Action I/O Registry
+message GetActionsRequest {}
+
+// Single field in an action's input or output schema (for Workflow Composer wiring)
+message ActionField {
+  string name = 1;
+  string type = 2;        // text, number, boolean, date, record, list[T], file_ref, any
+  string description = 3;
+  bool required = 4;
+  string default_value = 5;
+}
+
+// Typed contract for one registered action (tool) for Agent Factory playbooks
+message ActionContract {
+  string name = 1;
+  string category = 2;
+  string description = 3;
+  repeated ActionField inputs = 4;
+  repeated ActionField outputs = 5;
+  repeated ActionField params = 6;  // Optional configuration (not wired from data flow)
+}
+
+message GetActionsResponse {
+  string actions_json = 1;  // JSON array (legacy); prefer actions for typed access
+  repeated ActionContract actions = 2;  // Typed action contracts for Workflow Composer
+}
+
+// Agent Factory: Plugins (Zone 4 - third-party SaaS integrations)
+message GetPluginsRequest {}
+
+message PluginConnectionField {
+  string key = 1;   // e.g. api_key, token
+  string label = 2; // Human-readable label for UI
+}
+
+message PluginInfo {
+  string name = 1;       // Plugin identifier e.g. trello, caldav
+  string version = 2;    // Semantic version
+  repeated PluginConnectionField connection_requirements = 3;  // Config keys and labels
+}
+
+message GetPluginsResponse {
+  repeated PluginInfo plugins = 1;
+}

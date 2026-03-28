@@ -201,6 +201,7 @@ typings/
 # Sensitive / local-only (do not commit)
 .env
 .env.*
+!.env.example
 .env.local
 .env.development
 .env.production
@@ -301,3 +302,6 @@ build/
 
 # Processed files storage (app-generated content)
 processed/
+
+# User Documentation (wiki content; not committed to repo)
+User Documentation/

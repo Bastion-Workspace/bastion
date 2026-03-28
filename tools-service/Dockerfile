@@ -16,7 +16,18 @@ RUN apt-get update && apt-get install -y \
     libasound2 \
     libpangocairo-1.0-0 \
     libgtk-3-0 \
+    ca-certificates \
+    gnupg \
     && rm -rf /var/lib/apt/lists/*
+
+# Runtime MCP servers: uvx (PyPI) and npx (npm) without baking packages into the image
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    ln -sf /root/.local/bin/uv /usr/local/bin/uv && \
+    ln -sf /root/.local/bin/uvx /usr/local/bin/uvx
+
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y nodejs && \
+    rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app
@@ -39,6 +50,7 @@ COPY backend /app/backend
 COPY tools-service /app/tools_service
 
 # Generate gRPC code from shared proto files
+# connections_service.proto required for SendOutboundMessage (notification/channel delivery)
 RUN python -m grpc_tools.protoc \
     -I/app \
     --python_out=/app \
@@ -49,7 +61,8 @@ RUN python -m grpc_tools.protoc \
     /app/protos/vector_service.proto \
     /app/protos/data_service.proto \
     /app/protos/crawl_service.proto \
-    /app/protos/image_vision.proto
+    /app/protos/image_vision.proto \
+    /app/protos/connections_service.proto
 
 # Create necessary directories
 RUN mkdir -p /app/uploads /app/logs

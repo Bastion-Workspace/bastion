@@ -62,6 +62,7 @@ class OrchesterRequest(BaseModel):
     active_pipeline_id: str = None
     locked_agent: str = None  # Agent routing lock
     base_checkpoint_id: str = None  # For conversation branching
+    agent_profile_id: str = None  # Agent Factory: route to custom agent when set
 
 
 async def stream_from_grpc_orchestrator(
@@ -127,40 +128,48 @@ async def stream_from_grpc_orchestrator(
             
             logger.info(f"Forwarding to gRPC orchestrator: {query[:100]}")
             
+            # Agent Factory custom agent runs: skip persistence only when there is no conversation
+            # (e.g. scheduled/headless run). When the user is chatting with a custom agent in the UI,
+            # we have a conversation_id and must persist so conversation history (and tool_call_summary
+            # for "pending operations") is available on the next turn.
+            is_custom_agent_request = bool(request_context and request_context.get("agent_profile_id"))
+            skip_persistence = is_custom_agent_request and not (conversation_id and str(conversation_id).strip())
+            if skip_persistence:
+                logger.info("Custom agent run (no conversation_id): skipping conversation persistence")
+            
             # Initialize title_updated flag before try block to avoid UnboundLocalError
             title_updated = False
             
-            # Save user message to conversation BEFORE processing
+            # Save user message to conversation BEFORE processing (skip only when no conversation_id)
             # This will also trigger title generation if it's the first message
-            try:
-                from services.conversation_service import ConversationService
-                conversation_service = ConversationService()
-                conversation_service.set_current_user(user_id)
-                
-                user_message_result = await conversation_service.add_message(
-                    conversation_id=conversation_id,
-                    user_id=user_id,
-                    role="user",
-                    content=query,
-                    metadata={"orchestrator_system": True, "streaming": True}
-                )
-                logger.info(f"✅ Saved user message to conversation {conversation_id}")
-                
-                # Check if title was updated (first message triggers title generation)
-                # The add_message method updates the title if it was "New Conversation"
-                # We'll emit a conversation_updated event after streaming completes
-                title_updated = True
-            except Exception as save_error:
-                logger.warning(f"⚠️ Failed to save user message: {save_error}")
-                # Continue even if message save fails
+            if not skip_persistence:
+                try:
+                    from services.conversation_service import ConversationService
+                    conversation_service = ConversationService()
+                    conversation_service.set_current_user(user_id)
+                    
+                    user_message_result = await conversation_service.add_message(
+                        conversation_id=conversation_id,
+                        user_id=user_id,
+                        role="user",
+                        content=query,
+                        metadata={"orchestrator_system": True, "streaming": True}
+                    )
+                    logger.info(f"✅ Saved user message to conversation {conversation_id}")
+                    
+                    # Check if title was updated (first message triggers title generation)
+                    # The add_message method updates the title if it was "New Conversation"
+                    # We'll emit a conversation_updated event after streaming completes
+                    title_updated = True
+                except Exception as save_error:
+                    logger.warning(f"⚠️ Failed to save user message: {save_error}")
+                    # Continue even if message save fails
             
             # Stream chunks from gRPC service
             chunk_count = 0
-            agent_name_used = None  # Track which agent was used
-            accumulated_response = ""  # Accumulate full response content
-            editor_operations_received = None  # Track editor operations for metadata
-            manuscript_edit_received = None  # Track manuscript edit for metadata
-            metadata_received = {}  # Track all metadata received from chunks
+            agent_name_used = None
+            accumulated_response = ""
+            metadata_received = {}
             
             async for chunk in stub.StreamChat(grpc_request):
                 chunk_count += 1
@@ -179,20 +188,42 @@ async def stream_from_grpc_orchestrator(
                 
                 # Convert gRPC chunk to SSE format using centralized JSON formatter
                 if chunk.type == "status":
-                    yield format_sse_message({
+                    status_sse = {
                         'type': 'status',
                         'content': chunk.message,
                         'agent': chunk.agent_name,
                         'timestamp': chunk.timestamp
-                    })
+                    }
+                    if chunk.metadata and chunk.metadata.get("agent_display_name"):
+                        status_sse['agent_display_name'] = chunk.metadata["agent_display_name"]
+                    yield format_sse_message(status_sse)
                 
                 elif chunk.type == "content":
-                    yield format_sse_message({
+                    content_sse = {
                         'type': 'content',
                         'content': chunk.message,
                         'agent': chunk.agent_name
-                    })
+                    }
+                    if chunk.metadata and chunk.metadata.get("agent_display_name"):
+                        content_sse['agent_display_name'] = chunk.metadata["agent_display_name"]
+                    yield format_sse_message(content_sse)
                 
+                elif chunk.type == "permission_request":
+                    try:
+                        payload = json.loads(chunk.message) if chunk.message else {}
+                    except (json.JSONDecodeError, TypeError):
+                        payload = {"prompt": chunk.message or "Approve to continue?"}
+                    sse_msg = {
+                        'type': 'permission_request',
+                        'requires_approval': True,
+                        'step_name': payload.get('step_name', ''),
+                        'prompt': payload.get('prompt', 'Approve to continue?'),
+                        'content': chunk.message,
+                    }
+                    if payload.get('pending_auth'):
+                        sse_msg['pending_auth'] = payload['pending_auth']
+                    yield format_sse_message(sse_msg)
+
                 elif chunk.type == "complete":
                     yield format_sse_message({
                         'type': 'complete',
@@ -205,130 +236,9 @@ async def stream_from_grpc_orchestrator(
                     yield format_sse_message({
                         'type': 'error',
                         'content': chunk.message,
+                        'message': chunk.message,
                         'agent': chunk.agent_name
                     })
-                
-                elif chunk.type == "editor_operations":
-                    # Parse JSON from message field and forward as editor_operations type
-                    try:
-                        logger.info(f"📥 PROXY: Received editor_operations chunk from gRPC orchestrator (message length: {len(chunk.message)})")
-                        editor_ops_data = json.loads(chunk.message)
-                        operations = editor_ops_data.get('operations', [])
-                        manuscript_edit = editor_ops_data.get('manuscript_edit')
-                        document_id = editor_ops_data.get('document_id')  # Extract document_id from payload
-                        filename = editor_ops_data.get('filename')  # Extract filename from payload
-                        
-                        # Store for saving to message metadata
-                        editor_operations_received = operations
-                        manuscript_edit_received = manuscript_edit
-                        
-                        logger.info(f"📥 PROXY: Parsed {len(operations)} operation(s) from editor_operations chunk (document_id={document_id}, filename={filename})")
-                        
-                        # **CRITICAL**: SSE messages have size limits (~16-64KB depending on proxy/browser)
-                        # If operations are large (e.g., full chapter generation), send them one at a time
-                        # to avoid message truncation
-                        
-                        # Calculate total size
-                        total_size = len(json.dumps(editor_ops_data))
-                        MAX_SSE_SIZE = 50000  # 50KB safety limit
-                        MAX_TEXT_CHUNK_SIZE = 8000  # 8K chars per chunk (keeps JSON under 16KB for nginx)
-                        
-                        # First pass: Split any large operations into multiple smaller ones
-                        operations_to_send = []
-                        for op in operations:
-                            text_field = op.get('text', '')
-                            
-                            # Check if text field is too large and should be split
-                            if len(text_field) > MAX_TEXT_CHUNK_SIZE:
-                                logger.info(f"✂️ Splitting large operation (text_length={len(text_field)}) into multiple chunks")
-                                
-                                # Split text into chunks at paragraph boundaries
-                                text_chunks = []
-                                
-                                # Split by paragraphs (double newlines), preserving separators
-                                # Use split with keepends to preserve the \n\n separators
-                                parts = text_field.split('\n\n')
-                                
-                                current_chunk = ""
-                                for i, para in enumerate(parts):
-                                    # Determine separator: \n\n between paragraphs, none for first
-                                    separator = '\n\n' if current_chunk else ''
-                                    potential_chunk = current_chunk + separator + para
-                                    
-                                    if len(potential_chunk) > MAX_TEXT_CHUNK_SIZE:
-                                        # Current chunk is full, save it
-                                        if current_chunk:
-                                            text_chunks.append(current_chunk)
-                                        
-                                        # If single paragraph exceeds limit, split it by characters
-                                        if len(para) > MAX_TEXT_CHUNK_SIZE:
-                                            logger.warning(f"⚠️ Paragraph exceeds chunk size ({len(para)} chars), splitting by characters")
-                                            for j in range(0, len(para), MAX_TEXT_CHUNK_SIZE):
-                                                text_chunks.append(para[j:j + MAX_TEXT_CHUNK_SIZE])
-                                            current_chunk = ""
-                                        else:
-                                            # Start new chunk with this paragraph
-                                            current_chunk = para
-                                    else:
-                                        # Add paragraph to current chunk
-                                        current_chunk = potential_chunk
-                                
-                                # Add remaining chunk
-                                if current_chunk:
-                                    text_chunks.append(current_chunk)
-                                
-                                logger.info(f"✂️ Split into {len(text_chunks)} text chunks at paragraph boundaries")
-                                
-                                # Create multiple operations from the chunks
-                                # Frontend now sorts by chunk_index, so send in natural order
-                                for chunk_idx, text_chunk in enumerate(text_chunks):
-                                    op_copy = op.copy()
-                                    op_copy['text'] = text_chunk
-                                    op_copy['is_text_chunk'] = True
-                                    op_copy['chunk_index'] = chunk_idx  # Natural order: 0, 1, 2...
-                                    op_copy['total_text_chunks'] = len(text_chunks)
-                                    op_copy['original_text_length'] = len(text_field)
-                                    operations_to_send.append(op_copy)
-                            else:
-                                # Operation is fine as-is
-                                operations_to_send.append(op)
-                        
-                        logger.info(f"📦 After splitting: {len(operations)} original operations became {len(operations_to_send)} operations to send")
-                        
-                        if total_size > MAX_SSE_SIZE or len(operations_to_send) > 1:
-                            # Send operations individually to avoid SSE size limits
-                            logger.info(f"📦 Editor operations need chunking ({total_size} bytes, {len(operations_to_send)} ops) - sending as separate messages")
-                            for idx, op in enumerate(operations_to_send):
-                                yield format_sse_message({
-                                    'type': 'editor_operations_chunk',
-                                    'chunk_index': idx,
-                                    'total_chunks': len(operations_to_send),
-                                    'operation': op,
-                                    'manuscript_edit': manuscript_edit if idx == len(operations_to_send) - 1 else None,  # Include metadata on last chunk only
-                                    'document_id': document_id,  # CRITICAL: Include document_id in every chunk
-                                    'filename': filename  # Include filename in every chunk
-                                })
-                                
-                                is_chunk = op.get('is_text_chunk', False)
-                                chunk_info = f" (text chunk {op.get('chunk_index', 0) + 1}/{op.get('total_text_chunks', 1)})" if is_chunk else ""
-                                logger.info(f"📦 Sent chunk {idx + 1}/{len(operations_to_send)} (op_type={op.get('op_type')}, text_length={len(op.get('text', ''))}){chunk_info}")
-                        else:
-                            # Small enough to send as single message
-                            logger.info(f"✅ PROXY: Sending {len(operations)} editor operation(s) as single SSE message (size: {total_size} bytes)")
-                            yield format_sse_message({
-                                'type': 'editor_operations',
-                                'operations': operations,
-                                'manuscript_edit': manuscript_edit,
-                                'document_id': document_id,  # CRITICAL: Include document_id
-                                'filename': filename  # Include filename
-                            })
-                            logger.info(f"✅ PROXY: Sent editor_operations SSE message to frontend")
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"Failed to parse editor_operations JSON: {e}")
-                    except Exception as e:
-                        logger.error(f"❌ PROXY: Error processing editor_operations chunk: {e}")
-                        import traceback
-                        logger.error(f"Traceback: {traceback.format_exc()}")
                 
                 elif chunk.type == "title":
                     # Forward title chunks immediately so frontend can update UI right away
@@ -363,27 +273,24 @@ async def stream_from_grpc_orchestrator(
             logger.info(f"Received {chunk_count} chunks from gRPC orchestrator")
             
             # Save assistant response to conversation AFTER streaming completes
-            if accumulated_response:
+            if accumulated_response and not skip_persistence:
                 try:
+                    from utils.message_sanitizer import strip_tool_actions_prefix
+                    accumulated_response = strip_tool_actions_prefix(accumulated_response)
                     from services.conversation_service import ConversationService
                     conversation_service = ConversationService()
                     conversation_service.set_current_user(user_id)
                     
-                    # Build metadata with editor operations if they were received
+                    # Build metadata: base fields + allowlisted keys only (no editor/images/charts)
+                    from utils.history_metadata import filter_history_safe_metadata
+                    safe_meta = filter_history_safe_metadata(metadata_received)
                     metadata = {
                         "orchestrator_system": True,
                         "streaming": True,
                         "delegated_agent": agent_name_used or "unknown",
                         "chunk_count": chunk_count,
-                        **metadata_received  # Include all metadata received from gRPC chunks
+                        **safe_meta,
                     }
-                    
-                    # Add editor_operations and manuscript_edit to metadata for persistence
-                    if editor_operations_received:
-                        metadata["editor_operations"] = editor_operations_received
-                        logger.info(f"💾 PROXY: Including {len(editor_operations_received)} editor_operations in message metadata")
-                    if manuscript_edit_received:
-                        metadata["manuscript_edit"] = manuscript_edit_received
                     
                     assistant_message_result = await conversation_service.add_message(
                         conversation_id=conversation_id,
@@ -397,15 +304,29 @@ async def stream_from_grpc_orchestrator(
                     # Save agent routing metadata to backend DB (source of truth)
                     if agent_name_used:
                         try:
-                            await conversation_service.update_agent_metadata(
-                                conversation_id=conversation_id,
-                                user_id=user_id,
-                                primary_agent_selected=agent_name_used,
-                                last_agent=agent_name_used
-                            )
-                            logger.info(f"✅ Saved agent metadata to backend DB: {agent_name_used}")
+                            if metadata_received.get("line_dispatch_session") == "true":
+                                await conversation_service.update_agent_metadata(
+                                    conversation_id=conversation_id,
+                                    user_id=user_id,
+                                    primary_agent_selected="line_dispatch",
+                                    last_agent=agent_name_used or "line_dispatch",
+                                    clear_agent_profile_id=True,
+                                )
+                                logger.info("Saved agent metadata for line dispatch session (no sticky CEO profile)")
+                            else:
+                                agent_profile_id_saved = metadata_received.get("agent_profile_id")
+                                await conversation_service.update_agent_metadata(
+                                    conversation_id=conversation_id,
+                                    user_id=user_id,
+                                    primary_agent_selected=agent_name_used,
+                                    last_agent=agent_name_used,
+                                    agent_profile_id=agent_profile_id_saved,
+                                )
+                                logger.info(f"✅ Saved agent metadata to backend DB: {agent_name_used}")
                         except Exception as agent_save_error:
                             logger.warning(f"⚠️ Failed to save agent metadata: {agent_save_error}")
+                    
+                    # Session-level memory: needs_session_summary is set in add_message; idle beat runs post_session_analysis
                     
                 except Exception as save_error:
                     logger.warning(f"⚠️ Failed to save assistant response: {save_error}")
@@ -414,19 +335,32 @@ async def stream_from_grpc_orchestrator(
             # NOTE: gRPC orchestrator handles its own state management via LangGraph checkpointing
             # No need to manually update backend orchestrator state
             
-            # Send final complete event with conversation update flag
-            # This signals the frontend to refresh the conversation list (title may have been updated)
-            yield format_sse_message({
+            # Send final complete event with conversation update flag (skip refresh for Agent Factory runs)
+            done_payload: Dict[str, Any] = {
                 'type': 'done',
                 'conversation_id': conversation_id,
-                'conversation_updated': True  # Signal that conversation metadata may have changed
-            })
+                'conversation_updated': not skip_persistence,
+            }
+            if conversation_id and user_id:
+                try:
+                    from services.conversation_service import ConversationService
+
+                    _cs = ConversationService()
+                    _am = await _cs.get_agent_metadata(conversation_id, user_id)
+                    if _am.get("active_line_id"):
+                        done_payload["active_line_id"] = _am["active_line_id"]
+                    if _am.get("active_line_name"):
+                        done_payload["active_line_name"] = _am["active_line_name"]
+                except Exception as done_meta_err:
+                    logger.debug("done event line metadata skipped: %s", done_meta_err)
+            yield format_sse_message(done_payload)
             
     except grpc.RpcError as e:
         logger.error(f"gRPC error: {e.code()} - {e.details()}")
         yield format_sse_message({
             'type': 'error',
-            'content': f"gRPC Orchestrator Error: {e.details()}"
+            'content': f"gRPC Orchestrator Error: {e.details()}",
+            'message': f"gRPC Orchestrator Error: {e.details()}"
         })
         # Send done event if title was updated (title generation happens before streaming)
         if title_updated:
@@ -442,7 +376,8 @@ async def stream_from_grpc_orchestrator(
         traceback.print_exc()
         yield format_sse_message({
             'type': 'error',
-            'content': f"Orchestrator error: {str(e)}"
+            'content': f"Orchestrator error: {str(e)}",
+            'message': f"Orchestrator error: {str(e)}"
         })
         # Send done event if title was updated (title generation happens before streaming)
         if title_updated:
@@ -473,8 +408,8 @@ async def stream_orchestrator_grpc(
     try:
         logger.info(f"gRPC Orchestrator Proxy: User {current_user.user_id} query: {request.query[:100]}")
         
-        # Use provided user_id or get from auth
-        target_user_id = request.user_id or current_user.user_id
+        # Always use authenticated user for security (ignore client-supplied user_id)
+        target_user_id = current_user.user_id
         
         # Build request context from frontend fields
         request_context = {
@@ -483,7 +418,8 @@ async def stream_orchestrator_grpc(
             "pipeline_preference": request.pipeline_preference,
             "active_pipeline_id": request.active_pipeline_id,
             "locked_agent": request.locked_agent,
-            "base_checkpoint_id": request.base_checkpoint_id
+            "base_checkpoint_id": request.base_checkpoint_id,
+            "agent_profile_id": request.agent_profile_id,
         }
         
         # Remove None values

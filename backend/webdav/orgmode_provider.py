@@ -225,7 +225,7 @@ class OrgModeDAVProvider(DAVProvider):
         """
         super().__init__()
         self.db_pool = db_pool
-        logger.info("📁 BULLY! OrgModeDAVProvider initialized")
+        logger.info("OrgModeDAVProvider initialized")
     
     def get_resource_inst(self, path, environ):
         """

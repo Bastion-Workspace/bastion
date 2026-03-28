@@ -6,7 +6,7 @@ Background task processing for the "Big Stick" Orchestrator
 import os
 import logging
 from celery import Celery
-from celery.signals import worker_ready, worker_shutdown
+from celery.signals import worker_ready, worker_shutdown, worker_process_init
 from kombu import Queue
 
 logger = logging.getLogger(__name__)
@@ -21,12 +21,24 @@ celery_app = Celery(
     broker=CELERY_BROKER_URL,
     backend=CELERY_RESULT_BACKEND,
     include=[
-        "services.celery_tasks.orchestrator_tasks",
         "services.celery_tasks.agent_tasks",
+        "services.celery_tasks.scheduled_agent_tasks",
         "services.celery_tasks.rss_tasks",
-        "services.celery_tasks.entertainment_sync_tasks",
         "services.celery_tasks.chat_attachment_tasks",
+        "services.celery_tasks.image_cleanup_tasks",
         "services.celery_tasks.document_tasks",
+        "services.celery_tasks.connection_health_tasks",
+        "services.celery_tasks.team_heartbeat_tasks",
+        "services.celery_tasks.browser_session_health_tasks",
+        "services.celery_tasks.proposal_cleanup_tasks",
+        "services.celery_tasks.scraper_tasks",
+        "services.celery_tasks.fact_tasks",
+        "services.celery_tasks.fact_extraction_task",
+        "services.celery_tasks.episode_tasks",
+        "services.celery_tasks.session_analysis_task",
+        "services.celery_tasks.document_version_tasks",
+        "services.celery_tasks.model_health_tasks",
+        "services.celery_tasks.audio_export_tasks",
     ]
 )
 
@@ -41,9 +53,10 @@ celery_app.conf.update(
     
     # Task routing
     task_routes={
-        "services.celery_tasks.orchestrator_tasks.*": {"queue": "orchestrator"},
         "services.celery_tasks.agent_tasks.*": {"queue": "agents"},
+        "services.celery_tasks.scheduled_agent_tasks.*": {"queue": "agents"},
         "services.celery_tasks.rss_tasks.*": {"queue": "rss"},
+        "services.celery_tasks.scraper_tasks.*": {"queue": "scrapers"},
     },
     
     # Queue configuration
@@ -55,6 +68,7 @@ celery_app.conf.update(
         Queue("research", routing_key="research"),
         Queue("coding", routing_key="coding"),
         Queue("rss", routing_key="rss"),
+        Queue("scrapers", routing_key="scrapers"),
     ),
     
     # Worker settings
@@ -101,20 +115,94 @@ celery_app.conf.update(
             'task': 'services.celery_tasks.rss_tasks.cleanup_stuck_rss_feeds_task',
             'schedule': 900.0,  # 15 minutes in seconds
         },
+        # Retry Crawl4AI full-content for articles still missing body (small batch, infrequent)
+        'rss-full-content-backfill': {
+            'task': 'services.celery_tasks.rss_tasks.scheduled_rss_full_content_backfill_task',
+            'schedule': 21600.0,  # 6 hours
+        },
         # Purge old synthesized news articles daily
         'purge-old-news-articles': {
             'task': 'services.celery_tasks.rss_tasks.purge_old_news_task',
             'schedule': 86400.0,  # 24 hours in seconds
         },
-        # Entertainment content sync - run every hour
-        'sync-entertainment-content': {
-            'task': 'services.celery_tasks.entertainment_sync_tasks.scheduled_entertainment_sync',
-            'schedule': 3600.0,  # 1 hour in seconds
-        },
         # Clean up old chat attachments - run daily
         'cleanup-old-chat-attachments': {
             'task': 'services.celery_tasks.chat_attachment_tasks.cleanup_old_chat_attachments_task',
             'schedule': 86400.0,  # 24 hours in seconds
+        },
+        'cleanup-orphaned-generated-images': {
+            'task': 'services.celery_tasks.image_cleanup_tasks.cleanup_orphaned_generated_images_task',
+            'schedule': 86400.0,  # 24 hours in seconds
+        },
+        # Agent Factory: check for due scheduled agents every 60 seconds
+        'check-agent-schedules': {
+            'task': 'services.celery_tasks.scheduled_agent_tasks.check_agent_schedules',
+            'schedule': 60.0,
+        },
+        # Agent Factory: check for due team heartbeats every 60 seconds
+        'check-team-heartbeats': {
+            'task': 'services.celery_tasks.team_heartbeat_tasks.check_team_heartbeats',
+            'schedule': 60.0,
+        },
+        # Agent Factory: check for teams with pending worker tasks every 60 seconds
+        'check-worker-dispatches': {
+            'task': 'services.celery_tasks.team_heartbeat_tasks.check_worker_dispatches',
+            'schedule': 60.0,
+        },
+        # Agent Factory: poll watched email accounts every 5 minutes
+        'poll-watched-emails': {
+            'task': 'services.celery_tasks.agent_tasks.poll_watched_emails',
+            'schedule': 300.0,
+        },
+        # Chat bot connections: check status and re-register stopped bots every 2 minutes
+        'sync-chat-bot-connections': {
+            'task': 'services.celery_tasks.connection_health_tasks.sync_chat_bot_connections',
+            'schedule': 120.0,
+        },
+        # OAuth (email) connections: refresh tokens expiring within 10 minutes every 30 minutes
+        'sync-oauth-connections': {
+            'task': 'services.celery_tasks.connection_health_tasks.sync_oauth_connections',
+            'schedule': 1800.0,
+        },
+        # Expired document edit proposals: cleanup hourly
+        'cleanup-expired-proposals': {
+            'task': 'services.celery_tasks.proposal_cleanup_tasks.cleanup_expired_proposals',
+            'schedule': 3600.0,
+        },
+        # User facts: purge expired facts hourly
+        'purge-expired-facts': {
+            'task': 'services.celery_tasks.fact_tasks.purge_expired_facts_task',
+            'schedule': 3600.0,
+        },
+        # Episodic memory: mark episodes older than 48h as aged (every 6 hours)
+        'mark-aged-episodes': {
+            'task': 'services.celery_tasks.episode_tasks.mark_episodes_aged_task',
+            'schedule': 21600.0,
+        },
+        # Episodic memory: graduate facts from 7d+ episodes then delete (daily)
+        'graduate-old-episodes': {
+            'task': 'services.celery_tasks.episode_tasks.graduate_and_purge_old_episodes_task',
+            'schedule': 86400.0,
+        },
+        # Session memory: enqueue post_session_analysis for idle conversations (every 5 minutes)
+        'detect-idle-session-summaries': {
+            'task': 'services.celery_tasks.session_analysis_task.detect_idle_sessions_task',
+            'schedule': 300.0,
+        },
+        # Document versions: prune old versions daily (retention 90 days, keep every 10th, max 200/doc)
+        'prune-document-versions': {
+            'task': 'services.celery_tasks.document_version_tasks.prune_document_versions_task',
+            'schedule': 86400.0,
+        },
+        # Browser session states: check saved sessions every 30 minutes, invalidate if login page detected
+        'check-browser-session-health': {
+            'task': 'services.celery_tasks.browser_session_health_tasks.check_browser_session_health',
+            'schedule': 1800.0,
+        },
+        # Admin LLM catalog: refresh and notify admins if enabled/role models are orphaned (6 hours)
+        'check-admin-llm-catalog-health': {
+            'task': 'services.celery_tasks.model_health_tasks.check_admin_llm_catalog_health_task',
+            'schedule': 21600.0,
         },
     },
     # Beat scheduler settings
@@ -170,16 +258,26 @@ def update_task_progress(task, current_step: int, total_steps: int, message: str
         # Continue execution even if progress update fails
 
 # Worker initialization hook
+@worker_process_init.connect
+def on_worker_process_init(sender=None, **kwargs):
+    """Create persistent event loop in each worker process."""
+    from services.celery_tasks.async_runner import init_worker_loop, run_async
+    from services.schema_guards import ensure_user_memory_schema_columns
+
+    init_worker_loop()
+    run_async(ensure_user_memory_schema_columns())
+
+
 @celery_app.task(bind=True, name="worker.warmup")
 def warmup_worker_task(self):
     """Task to warm up worker on startup"""
-    import asyncio
+    from services.celery_tasks.async_runner import run_async
     from services.worker_warmup import worker_warmup_service
-    
+
     logger.info("🔥 WORKER WARMUP TASK: Starting...")
-    
+
     try:
-        result = asyncio.run(worker_warmup_service.warmup_worker())
+        result = run_async(worker_warmup_service.warmup_worker())
         logger.info(f"🔥 WORKER WARMUP RESULT: {result}")
         return result
     except Exception as e:
@@ -212,20 +310,10 @@ def on_beat_ready(sender, **kwargs):
 def on_worker_shutdown(sender, **kwargs):
     """Clean up resources when worker shuts down"""
     logger.info("🛑 WORKER SHUTDOWN: Cleaning up resources...")
-    
-    # Close shared database pool
+
     try:
-        import asyncio
-        from utils.shared_db_pool import close_shared_db_pool
-        
-        # Run cleanup in event loop
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(close_shared_db_pool())
-        finally:
-            loop.close()
-            
+        from services.celery_tasks.async_runner import close_worker_loop
+        close_worker_loop()
         logger.info("✅ Worker shutdown cleanup completed")
     except Exception as e:
         logger.error(f"❌ Worker shutdown cleanup failed: {e}")

@@ -24,8 +24,11 @@ import {
   Paper,
   Radio,
   Badge,
-  Tabs,
-  Tab,
+  List,
+  ListItem,
+  ListItemButton,
+  ListItemIcon,
+  ListItemText,
   Button,
   Dialog,
   DialogTitle,
@@ -34,6 +37,9 @@ import {
   DialogActions,
   Snackbar,
   CircularProgress,
+  useTheme as useMuiTheme,
+  ToggleButtonGroup,
+  ToggleButton,
 } from '@mui/material';
 import { 
   Settings, 
@@ -47,23 +53,30 @@ import {
   Warning,
   Book,
   Person,
+  Add,
+  Edit as EditIcon,
   Description as DescriptionIcon,
   ListAlt,
   FolderOpen,
   MusicNote,
-  Movie,
+  RssFeed as RssFeedIcon,
   Info,
   Visibility,
   VisibilityOff,
   Email,
-  Link as LinkIcon
+  Link as LinkIcon,
+  Lock,
+  Palette,
+  BrightnessAuto,
 } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import apiService from '../services/apiService';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
-import { useThemeMode } from '../hooks/useThemeMode';
+import { ACCENT_IDS, DEFAULT_ACCENT_ID } from '../contexts/ThemeContext';
+import { ACCENT_PALETTES } from '../theme/themeConfig';
 import UserManagement from './UserManagement';
 import ClassificationModelSelector from './ClassificationModelSelector';
 import ImageGenerationModelSelector from './ImageGenerationModelSelector';
@@ -71,22 +84,25 @@ import TextCompletionModelSelector from './TextCompletionModelSelector';
 import { useModel } from '../contexts/ModelContext';
 import OrgModeSettingsTab from './OrgModeSettingsTab';
 import MediaSettingsTab from './music/MediaSettingsTab';
-import EntertainmentSyncManager from './EntertainmentSyncManager';
 import ExternalConnectionsSettings from './ExternalConnectionsSettings';
+import UserLLMProviders from './UserLLMProviders';
+import UserVoiceProviders from './UserVoiceProviders';
+import BrowserSessionManagement from './agent-factory/BrowserSessionManagement';
+import RSSFeedSettings from './RSSFeedSettings';
 
 // Model Status Display Component
 const ModelStatusDisplay = () => {
+  const muiTheme = useMuiTheme();
+  const isDark = muiTheme.palette.mode === 'dark';
+  const successBg = isDark ? 'success.dark' : 'success.light';
+  const warningBg = isDark ? 'warning.dark' : 'warning.light';
+
   const { data: classificationData, isLoading: loadingClassification } = useQuery(
     'classificationModel',
     () => apiService.get('/api/models/classification')
   );
 
-  const { data: currentModelData, isLoading: loadingCurrent } = useQuery(
-    'currentModel',
-    () => apiService.get('/api/models/current')
-  );
-
-  if (loadingClassification || loadingCurrent) {
+  if (loadingClassification) {
     return (
       <Box display="flex" alignItems="center" gap={2} p={2}>
         <CircularProgress size={20} />
@@ -98,7 +114,7 @@ const ModelStatusDisplay = () => {
   return (
     <Grid container spacing={2}>
       <Grid item xs={12} md={6}>
-        <Paper sx={{ p: 2, bgcolor: classificationData?.chat_model_is_fallback ? 'warning.light' : 'success.light' }}>
+        <Paper sx={{ p: 2, bgcolor: classificationData?.chat_model_is_fallback ? warningBg : successBg }}>
           <Typography variant="subtitle2" gutterBottom>
             Main Chat Model
             {classificationData?.chat_model_is_fallback && (
@@ -109,13 +125,13 @@ const ModelStatusDisplay = () => {
             {classificationData?.effective_chat_model || 'Not configured'}
           </Typography>
           <Typography variant="caption" color="text.secondary">
-            Used for general AI conversations and responses
+            Global default main model; chat usually uses sidebar selection and per-user preferences instead
           </Typography>
         </Paper>
       </Grid>
 
       <Grid item xs={12} md={6}>
-        <Paper sx={{ p: 2, bgcolor: classificationData?.classification_model_is_fallback ? 'warning.light' : 'success.light' }}>
+        <Paper sx={{ p: 2, bgcolor: classificationData?.classification_model_is_fallback ? warningBg : successBg }}>
           <Typography variant="subtitle2" gutterBottom>
             Classification Model
             {classificationData?.classification_model_is_fallback && (
@@ -126,7 +142,7 @@ const ModelStatusDisplay = () => {
             {classificationData?.effective_classification_model || 'Not configured'}
           </Typography>
           <Typography variant="caption" color="text.secondary">
-            Used for fast intent classification and routing
+            Org default for the fast model slot (metadata user_fast_model) when the user has no fast preference
           </Typography>
         </Paper>
       </Grid>
@@ -148,9 +164,18 @@ const ModelStatusDisplay = () => {
 
 const SettingsPage = () => {
   const queryClient = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const navigate = useNavigate();
   const { user, updateUser } = useAuth();
-  const { darkMode, toggleDarkMode } = useTheme();
-  const { systemPrefersDark, syncWithSystem, isSystemTheme } = useThemeMode();
+  const {
+    darkMode,
+    accentId,
+    setAccentId,
+    setAppearance,
+    themePreference,
+    setThemePreference,
+    systemPrefersDark,
+  } = useTheme();
   const [currentTab, setCurrentTab] = useState(0);
   const [enabledModels, setEnabledModels] = useState(new Set());
   const [selectedModel, setSelectedModel] = useState('');
@@ -174,9 +199,20 @@ const SettingsPage = () => {
   const [userTimeFormat, setUserTimeFormat] = useState('24h');
   const [userPreferredName, setUserPreferredName] = useState('');
   const [userAiContext, setUserAiContext] = useState('');
+  const [userFacts, setUserFacts] = useState([]);
+  const [newFactKey, setNewFactKey] = useState('');
+  const [newFactValue, setNewFactValue] = useState('');
+  const [factsInjectEnabled, setFactsInjectEnabled] = useState(true);
+  const [factsWriteEnabled, setFactsWriteEnabled] = useState(true);
+  const [userEpisodes, setUserEpisodes] = useState([]);
+  const [episodesInjectEnabled, setEpisodesInjectEnabled] = useState(true);
+  const [pendingFacts, setPendingFacts] = useState([]);
+  const [factHistory, setFactHistory] = useState([]);
   const [visionFeaturesEnabled, setVisionFeaturesEnabled] = useState(false);
   const [visionServiceAvailable, setVisionServiceAvailable] = useState(false);
   const [profileEmail, setProfileEmail] = useState('');
+  const [profilePhoneNumber, setProfilePhoneNumber] = useState('');
+  const [profileBirthday, setProfileBirthday] = useState('');
   const [profileDisplayName, setProfileDisplayName] = useState('');
   
   // Password change state
@@ -205,12 +241,24 @@ const SettingsPage = () => {
     historical_figures: []
   });
 
-  // Stock persona state
-  const [stockPersonaMode, setStockPersonaMode] = useState('custom'); // 'custom' or specific persona
+  // Stock persona state (legacy - kept for promptOptions.political_biases in persona form)
+  const [stockPersonaMode, setStockPersonaMode] = useState('custom');
   const [customSettings, setCustomSettings] = useState({
     ai_name: 'Alex',
     political_bias: 'neutral',
     persona_style: 'professional'
+  });
+
+  // Persona manager state
+  const [personaDialogOpen, setPersonaDialogOpen] = useState(false);
+  const [personaDialogMode, setPersonaDialogMode] = useState('create');
+  const [personaDialogEditingId, setPersonaDialogEditingId] = useState(null);
+  const [personaForm, setPersonaForm] = useState({
+    name: '',
+    ai_name: 'Alex',
+    style_instruction: '',
+    political_bias: 'neutral',
+    description: ''
   });
 
   // Sync profile fields from auth user (email and display_name editable in profile)
@@ -220,14 +268,6 @@ const SettingsPage = () => {
       setProfileDisplayName(user.display_name || '');
     }
   }, [user?.user_id, user?.email, user?.display_name]);
-
-  // Check for users tab from URL params
-  React.useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    if (urlParams.get('tab') === 'users' && user?.role === 'admin') {
-      setCurrentTab(9); // User Management tab index
-    }
-  }, [user]);
 
   // Handle OAuth callback redirect: connections=success | connections=error&message=...
   React.useEffect(() => {
@@ -249,6 +289,38 @@ const SettingsPage = () => {
       window.history.replaceState({}, '', newSearch ? `?${newSearch}` : window.location.pathname);
     }
   }, []);
+
+  const { data: useAdminModelsData } = useQuery(
+    'useAdminModels',
+    () => apiService.getUseAdminModels(),
+    { staleTime: 60000 }
+  );
+  const useOwnProviders = useAdminModelsData?.use_admin_models === false;
+
+  const { data: userModelRolesData, refetch: refetchUserModelRoles } = useQuery(
+    'userModelRoles',
+    () => apiService.getUserModelRoles(),
+    { enabled: useOwnProviders, staleTime: 60000 }
+  );
+  const userModelRoles = userModelRolesData || {
+    user_chat_model: '',
+    user_fast_model: '',
+    user_image_gen_model: '',
+    user_image_analysis_model: '',
+  };
+
+  const setUserModelRolesMutation = useMutation(
+    (roles) => apiService.setUserModelRoles(roles),
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('userModelRoles');
+      },
+    }
+  );
+
+  const handleUserModelRoleChange = (key, value) => {
+    setUserModelRolesMutation.mutate({ ...userModelRoles, [key]: value || '' });
+  };
 
   // Fetch enabled models from backend
   const { data: enabledModelsData, isLoading: enabledModelsLoading } = useQuery(
@@ -296,6 +368,46 @@ const SettingsPage = () => {
         }
       }
     }
+  );
+
+  const orphanedEnabledModels = useMemo(
+    () => enabledModelsData?.orphaned_enabled_models || [],
+    [enabledModelsData?.orphaned_enabled_models]
+  );
+
+  const orphanedRoleModelEntries = useMemo(() => {
+    const raw = enabledModelsData?.orphaned_role_models;
+    if (!raw || typeof raw !== 'object') return [];
+    return Object.entries(raw).filter(([, v]) => v);
+  }, [enabledModelsData?.orphaned_role_models]);
+
+  const enabledModelIds = useMemo(
+    () => new Set(enabledModelsData?.enabled_models || []),
+    [enabledModelsData?.enabled_models]
+  );
+  const enabledModelsList = useMemo(
+    () => (modelsData?.models || []).filter((m) => enabledModelIds.has(m.id)),
+    [modelsData?.models, enabledModelIds]
+  );
+  const imageGenerationModels = useMemo(
+    () =>
+      enabledModelsList.filter((m) => {
+        if (Array.isArray(m.output_modalities) && m.output_modalities.includes('image')) return true;
+        const id = (m.id || '').toLowerCase();
+        const name = (m.name || '').toLowerCase();
+        return id.includes('image') || id.includes('vision') || name.includes('image') || name.includes('vision') || id.includes('gemini') || name.includes('gemini');
+      }),
+    [enabledModelsList]
+  );
+  const imageAnalysisModels = useMemo(
+    () =>
+      enabledModelsList.filter((m) => {
+        if (Array.isArray(m.input_modalities) && m.input_modalities.includes('image')) return true;
+        const id = (m.id || '').toLowerCase();
+        const name = (m.name || '').toLowerCase();
+        return id.includes('vision') || name.includes('vision') || id.includes('gemini') || name.includes('gemini') || id.includes('gpt-4o') || id.includes('claude-3');
+      }),
+    [enabledModelsList]
   );
 
   // Fetch user timezone
@@ -362,6 +474,38 @@ const SettingsPage = () => {
     }
   );
 
+  // Fetch user phone number
+  const { refetch: refetchPhoneNumber } = useQuery(
+    'userPhoneNumber',
+    () => apiService.settings.getUserPhoneNumber(),
+    {
+      onSuccess: (data) => {
+        if (data?.phone_number !== undefined) {
+          setProfilePhoneNumber(data.phone_number || '');
+        }
+      },
+      onError: (error) => {
+        console.error('Failed to fetch user phone number:', error);
+      }
+    }
+  );
+
+  // Fetch user birthday
+  const { refetch: refetchBirthday } = useQuery(
+    'userBirthday',
+    () => apiService.settings.getUserBirthday(),
+    {
+      onSuccess: (data) => {
+        if (data?.birthday !== undefined) {
+          setProfileBirthday(data.birthday || '');
+        }
+      },
+      onError: (error) => {
+        console.error('Failed to fetch user birthday:', error);
+      }
+    }
+  );
+
   // Fetch user AI context
   const { data: aiContextData, refetch: refetchAiContext } = useQuery(
     'userAiContext',
@@ -378,7 +522,73 @@ const SettingsPage = () => {
     }
   );
 
-  // Fetch vision service status and user preference
+  const { data: userFactsData, refetch: refetchUserFacts } = useQuery(
+    'userFacts',
+    () => apiService.settings.getUserFacts(),
+    {
+      onSuccess: (data) => {
+        if (data?.facts && Array.isArray(data.facts)) {
+          setUserFacts(data.facts);
+        }
+      },
+      onError: (error) => {
+        console.error('Failed to fetch user facts:', error);
+      }
+    }
+  );
+
+  const { refetch: refetchFactsPreferences } = useQuery(
+    'factsPreferences',
+    () => apiService.settings.getFactsPreferences(),
+    {
+      onSuccess: (data) => {
+        if (data?.facts_inject_enabled !== undefined) setFactsInjectEnabled(data.facts_inject_enabled);
+        if (data?.facts_write_enabled !== undefined) setFactsWriteEnabled(data.facts_write_enabled);
+      }
+    }
+  );
+
+  const { data: episodesData, refetch: refetchEpisodes } = useQuery(
+    'userEpisodes',
+    () => apiService.settings.getEpisodes({ limit: 50, days: 30 }),
+    {
+      onSuccess: (data) => {
+        if (data?.episodes && Array.isArray(data.episodes)) setUserEpisodes(data.episodes);
+      }
+    }
+  );
+
+  const { refetch: refetchEpisodesPreferences } = useQuery(
+    'episodesPreferences',
+    () => apiService.settings.getEpisodesPreferences(),
+    {
+      onSuccess: (data) => {
+        if (data?.episodes_inject_enabled !== undefined) setEpisodesInjectEnabled(data.episodes_inject_enabled);
+      }
+    }
+  );
+
+  const { data: pendingFactsData, refetch: refetchPendingFacts } = useQuery(
+    'pendingFacts',
+    () => apiService.settings.getPendingFacts(),
+    {
+      onSuccess: (data) => {
+        if (data?.pending && Array.isArray(data.pending)) setPendingFacts(data.pending);
+      }
+    }
+  );
+
+  const { data: factHistoryData, refetch: refetchFactHistory } = useQuery(
+    'factHistory',
+    () => apiService.settings.getFactHistory({ limit: 30 }),
+    {
+      onSuccess: (data) => {
+        if (data?.history && Array.isArray(data.history)) setFactHistory(data.history);
+      }
+    }
+  );
+
+  // Fetch vision service status
   const { data: visionServiceStatusData } = useQuery(
     'visionServiceStatus',
     () => apiService.settings.getVisionServiceStatus(),
@@ -427,6 +637,111 @@ const SettingsPage = () => {
       }
     }
   );
+
+  const { data: personasData, refetch: refetchPersonas } = useQuery(
+    'personas',
+    () => apiService.settings.getPersonas(),
+    { staleTime: 60000 }
+  );
+  const personasList = personasData?.personas || [];
+
+  const { data: defaultPersonaData, refetch: refetchDefaultPersona } = useQuery(
+    'defaultPersona',
+    () => apiService.settings.getDefaultPersona(),
+    { staleTime: 60000 }
+  );
+  const defaultPersona = defaultPersonaData?.persona;
+
+  const setDefaultPersonaMutation = useMutation(
+    (personaId) => apiService.settings.setDefaultPersona(personaId),
+    {
+      onSuccess: () => {
+        refetchDefaultPersona();
+        queryClient.invalidateQueries('defaultPersona');
+        setSnackbar({ open: true, message: 'Default persona updated.', severity: 'success' });
+      },
+      onError: (err) => {
+        setSnackbar({ open: true, message: err?.message || 'Failed to set default persona', severity: 'error' });
+      }
+    }
+  );
+
+  const createPersonaMutation = useMutation(
+    (data) => apiService.settings.createPersona(data),
+    {
+      onSuccess: () => {
+        refetchPersonas();
+        refetchDefaultPersona();
+        queryClient.invalidateQueries('personas');
+        setPersonaDialogOpen(false);
+        setPersonaForm({ name: '', ai_name: 'Alex', style_instruction: '', political_bias: 'neutral', description: '' });
+        setSnackbar({ open: true, message: 'Persona created.', severity: 'success' });
+      },
+      onError: (err) => {
+        setSnackbar({ open: true, message: err?.message || 'Failed to create persona', severity: 'error' });
+      }
+    }
+  );
+
+  const updatePersonaMutation = useMutation(
+    ({ id, data }) => apiService.settings.updatePersona(id, data),
+    {
+      onSuccess: () => {
+        refetchPersonas();
+        refetchDefaultPersona();
+        queryClient.invalidateQueries('personas');
+        setPersonaDialogOpen(false);
+        setPersonaDialogEditingId(null);
+        setSnackbar({ open: true, message: 'Persona updated.', severity: 'success' });
+      },
+      onError: (err) => {
+        setSnackbar({ open: true, message: err?.message || 'Failed to update persona', severity: 'error' });
+      }
+    }
+  );
+
+  const deletePersonaMutation = useMutation(
+    (personaId) => apiService.settings.deletePersona(personaId),
+    {
+      onSuccess: () => {
+        refetchPersonas();
+        refetchDefaultPersona();
+        queryClient.invalidateQueries('personas');
+        setSnackbar({ open: true, message: 'Persona deleted.', severity: 'success' });
+      },
+      onError: (err) => {
+        setSnackbar({ open: true, message: err?.message || 'Failed to delete persona', severity: 'error' });
+      }
+    }
+  );
+
+  const handleOpenCreatePersona = () => {
+    setPersonaDialogMode('create');
+    setPersonaDialogEditingId(null);
+    setPersonaForm({ name: '', ai_name: 'Alex', style_instruction: '', political_bias: 'neutral', description: '' });
+    setPersonaDialogOpen(true);
+  };
+
+  const handleOpenEditPersona = (p) => {
+    setPersonaDialogMode('edit');
+    setPersonaDialogEditingId(p.id);
+    setPersonaForm({
+      name: p.name || '',
+      ai_name: p.ai_name || 'Alex',
+      style_instruction: p.style_instruction || '',
+      political_bias: p.political_bias || 'neutral',
+      description: p.description || ''
+    });
+    setPersonaDialogOpen(true);
+  };
+
+  const handleSavePersonaDialog = () => {
+    if (personaDialogMode === 'create') {
+      createPersonaMutation.mutate(personaForm);
+    } else {
+      updatePersonaMutation.mutate({ id: personaDialogEditingId, data: personaForm });
+    }
+  };
 
   // Fetch user prompt settings
   const { data: promptSettingsData, refetch: refetchPromptSettings } = useQuery(
@@ -497,6 +812,7 @@ const SettingsPage = () => {
           severity: 'success'
         });
         refetchTimezone();
+        queryClient.invalidateQueries('userTimezone');
       },
       onError: (error) => {
         setSnackbar({
@@ -596,6 +912,50 @@ const SettingsPage = () => {
     }
   );
 
+  // Phone number update mutation
+  const phoneNumberMutation = useMutation(
+    (phoneNumber) => apiService.settings.setUserPhoneNumber({ phone_number: phoneNumber }),
+    {
+      onSuccess: () => {
+        setSnackbar({
+          open: true,
+          message: 'Phone number updated successfully',
+          severity: 'success'
+        });
+        refetchPhoneNumber();
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to update phone number: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  // Birthday update mutation
+  const birthdayMutation = useMutation(
+    (birthday) => apiService.settings.setUserBirthday({ birthday }),
+    {
+      onSuccess: () => {
+        setSnackbar({
+          open: true,
+          message: 'Birthday updated successfully',
+          severity: 'success'
+        });
+        refetchBirthday();
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to update birthday: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
   // AI context update mutation
   const aiContextMutation = useMutation(
     (aiContext) => apiService.settings.setUserAiContext({ ai_context: aiContext }),
@@ -612,6 +972,130 @@ const SettingsPage = () => {
         setSnackbar({
           open: true,
           message: `Failed to update AI context: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  const addUserFactMutation = useMutation(
+    (data) => apiService.settings.addUserFact(data),
+    {
+      onSuccess: () => {
+        setSnackbar({ open: true, message: 'Fact saved', severity: 'success' });
+        setNewFactKey('');
+        setNewFactValue('');
+        refetchUserFacts();
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to save fact: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  const deleteUserFactMutation = useMutation(
+    (factKey) => apiService.settings.deleteUserFact(factKey),
+    {
+      onSuccess: () => {
+        setSnackbar({ open: true, message: 'Fact removed', severity: 'success' });
+        refetchUserFacts();
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to remove fact: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  const setFactsPreferencesMutation = useMutation(
+    (data) => apiService.settings.setFactsPreferences(data),
+    {
+      onSuccess: (data) => {
+        if (data?.facts_inject_enabled !== undefined) setFactsInjectEnabled(data.facts_inject_enabled);
+        if (data?.facts_write_enabled !== undefined) setFactsWriteEnabled(data.facts_write_enabled);
+        setSnackbar({ open: true, message: 'Facts preferences saved', severity: 'success' });
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to save preferences: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  const deleteEpisodeMutation = useMutation(
+    (episodeId) => apiService.settings.deleteEpisode(episodeId),
+    {
+      onSuccess: () => {
+        setSnackbar({ open: true, message: 'Activity removed', severity: 'success' });
+        refetchEpisodes();
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to remove: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  const deleteAllEpisodesMutation = useMutation(
+    () => apiService.settings.deleteAllEpisodes(),
+    {
+      onSuccess: (data) => {
+        const n = data?.deleted_count ?? 0;
+        setSnackbar({ open: true, message: `Cleared ${n} activity entries`, severity: 'success' });
+        refetchEpisodes();
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to clear: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  const setEpisodesPreferencesMutation = useMutation(
+    (data) => apiService.settings.setEpisodesPreferences(data),
+    {
+      onSuccess: (data) => {
+        if (data?.episodes_inject_enabled !== undefined) setEpisodesInjectEnabled(data.episodes_inject_enabled);
+        setSnackbar({ open: true, message: 'Activity preferences saved', severity: 'success' });
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed to save: ${error.response?.data?.detail || error.message}`,
+          severity: 'error'
+        });
+      }
+    }
+  );
+
+  const resolvePendingFactMutation = useMutation(
+    ({ historyId, action }) => apiService.settings.resolvePendingFact(historyId, action),
+    {
+      onSuccess: () => {
+        setSnackbar({ open: true, message: 'Update resolved', severity: 'success' });
+        refetchPendingFacts();
+        refetchUserFacts();
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: `Failed: ${error.response?.data?.detail || error.message}`,
           severity: 'error'
         });
       }
@@ -845,6 +1329,22 @@ const SettingsPage = () => {
       },
     }
   );
+
+  const handleRemoveOrphanedEnabledModels = (idsToRemove) => {
+    const removeSet = new Set(idsToRemove);
+    const next = new Set(enabledModels);
+    removeSet.forEach((id) => next.delete(id));
+    if (selectedModel && removeSet.has(selectedModel)) {
+      const remaining = Array.from(next);
+      const nextSel = remaining[0] || '';
+      setSelectedModel(nextSel);
+      if (nextSel) {
+        selectModelMutation.mutate(nextSel);
+      }
+    }
+    setEnabledModels(next);
+    saveEnabledModelsMutation.mutate(Array.from(next));
+  };
 
   // Database cleanup mutations
   const clearQdrantMutation = useMutation(
@@ -1111,6 +1611,13 @@ const SettingsPage = () => {
     return `$${cost.toFixed(3)}/token`;
   };
 
+  const getModelSourceTag = (model) => {
+    if (!model?.source) return null;
+    const sourceLabel = model.source === 'admin' ? 'Admin' : 'My providers';
+    const provider = (model.provider_type || '').replace(/-/g, ' ');
+    return provider ? `${sourceLabel} · ${provider}` : sourceLabel;
+  };
+
   const ModelCard = ({ model }) => {
     const isEnabled = enabledModels.has(model.id);
     const isSelected = selectedModel === model.id;
@@ -1138,6 +1645,15 @@ const SettingsPage = () => {
                   color="primary"
                   variant="outlined"
                 />
+                {getModelSourceTag(model) && (
+                  <Chip 
+                    label={getModelSourceTag(model)} 
+                    size="small" 
+                    sx={{ ml: 1 }}
+                    variant="outlined"
+                    color="default"
+                  />
+                )}
                 {isSelected && (
                   <Chip 
                     label="Active" 
@@ -1195,19 +1711,124 @@ const SettingsPage = () => {
   };
 
   const tabs = [
-    { label: 'User Profile', icon: <Person /> },
-    { label: 'AI Personality', icon: <Psychology /> },
-    { label: 'Models', icon: <Settings /> },
-    { label: 'News', icon: <DescriptionIcon /> },
-    { label: 'Org-Mode', icon: <ListAlt /> },
-    { label: 'Media', icon: <MusicNote /> },
-    { label: 'Entertainment', icon: <Movie /> },
-    { label: 'Connections', icon: <Email /> },
+    { id: 'profile', label: 'User Profile', icon: <Person /> },
+    { id: 'appearance', label: 'Appearance', icon: <Palette /> },
+    { id: 'personas', label: 'Personas', icon: <Psychology /> },
+    { id: 'models', label: 'Models', icon: <Settings /> },
+    { id: 'news', label: 'News', icon: <DescriptionIcon /> },
+    { id: 'rss-feeds', label: 'RSS Feeds', icon: <RssFeedIcon /> },
+    { id: 'org', label: 'Org-Mode', icon: <ListAlt /> },
+    { id: 'media', label: 'Media', icon: <MusicNote /> },
+    { id: 'connections', label: 'Connections', icon: <Email /> },
+    { id: 'sessions', label: 'Browser Sessions', icon: <Lock /> },
     ...(user?.role === 'admin' ? [
-      { label: 'Database', icon: <DeleteSweep /> },
-      { label: 'User Management', icon: <Security /> }
+      { id: 'database', label: 'Database', icon: <DeleteSweep /> },
+      { id: 'users', label: 'User Management', icon: <Security /> }
     ] : [])
   ];
+
+  // Sync currentTab from URL (e.g. /settings?tab=appearance)
+  React.useEffect(() => {
+    const tabId = searchParams.get('tab');
+    if (tabId === 'control-panes') {
+      navigate('/control-panes', { replace: true });
+      return;
+    }
+    if (tabId) {
+      const idx = tabs.findIndex(t => t.id === tabId);
+      if (idx >= 0) setCurrentTab(idx);
+    }
+  }, [searchParams, tabs, navigate]);
+
+  const handleTabSelect = (newIndex) => {
+    setCurrentTab(newIndex);
+    const nextTabId = tabs[newIndex]?.id;
+    if (!nextTabId) return;
+    setSearchParams((prev) => {
+      const params = new URLSearchParams(prev);
+      params.set('tab', nextTabId);
+      return params;
+    });
+  };
+
+  const modelsTabIndex = useMemo(() => tabs.findIndex((t) => t.id === 'models'), [tabs]);
+
+  const roleSettingSectionId = (roleKey) => {
+    const map = {
+      classification_model: 'settings-classification-model-card',
+      image_generation_model: 'settings-image-gen-model-card',
+      text_completion_model: 'settings-text-completion-model-card',
+      image_analysis_model: 'settings-image-analysis-model-card',
+    };
+    return map[roleKey] || null;
+  };
+
+  const scrollToRoleSettingSection = (roleKey) => {
+    if (modelsTabIndex >= 0) {
+      handleTabSelect(modelsTabIndex);
+    }
+    const elId = roleSettingSectionId(roleKey);
+    if (elId) {
+      setTimeout(() => {
+        document.getElementById(elId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 150);
+    }
+  };
+
+  const clearRoleOrphanMutation = useMutation(
+    async (roleKey) => {
+      if (roleKey === 'classification_model') {
+        await apiService.delete('/api/models/classification');
+      } else if (roleKey === 'text_completion_model') {
+        await apiService.settings.setSettingValue('text_completion_model', {
+          value: '',
+          description: 'Fast text-completion model for editor/proofreading tasks',
+          category: 'llm',
+        });
+      } else if (roleKey === 'image_generation_model') {
+        await apiService.settings.setSettingValue('image_generation_model', {
+          value: '',
+          description: 'OpenRouter model used for image generation',
+          category: 'llm',
+        });
+      } else if (roleKey === 'image_analysis_model') {
+        await apiService.settings.setSettingValue('image_analysis_model', {
+          value: '',
+          description: 'Vision model for image description and analysis',
+          category: 'llm',
+        });
+      }
+      await apiService.invalidateCatalogSlice();
+    },
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries('enabledModels');
+        queryClient.invalidateQueries('classificationModel');
+        queryClient.invalidateQueries('textCompletionModelSetting');
+        queryClient.invalidateQueries('imageGenerationModelSetting');
+        queryClient.invalidateQueries('imageAnalysisModelSetting');
+        setSnackbar({
+          open: true,
+          message: 'Setting cleared. Pick a new model in the section below.',
+          severity: 'success',
+        });
+      },
+      onError: (error) => {
+        setSnackbar({
+          open: true,
+          message: error?.response?.data?.detail || error?.message || 'Failed to clear setting',
+          severity: 'error',
+        });
+      },
+    }
+  );
+
+  const roleOrphanLabels = {
+    classification_model: 'Intent classification model',
+    image_generation_model: 'Image generation model',
+    text_completion_model: 'Text completion model',
+    image_analysis_model: 'Image analysis (vision) model',
+  };
 
   return (
     <Box>
@@ -1218,37 +1839,41 @@ const SettingsPage = () => {
         Configure your Bastion Workspace settings and manage users.
       </Typography>
 
-      {/* Tabs */}
-      <Box sx={{ borderBottom: 1, borderColor: 'divider', mb: 3 }}>
-        <Tabs 
-          value={currentTab} 
-          onChange={(_, newValue) => setCurrentTab(newValue)}
-          variant="scrollable"
-          scrollButtons="auto"
-          allowScrollButtonsMobile
+      <Box
+        sx={{
+          display: 'flex',
+          flexDirection: { xs: 'column', md: 'row' },
+          alignItems: 'flex-start',
+          gap: 3,
+        }}
+      >
+        <Paper
+          variant="outlined"
           sx={{
-            '& .MuiTabs-flexContainer': {
-              flexWrap: { xs: 'nowrap', sm: 'nowrap', md: 'wrap' },
-            },
-            '& .MuiTab-root': {
-              minWidth: { xs: 'auto', sm: 120 },
-              fontSize: { xs: '0.75rem', sm: '0.875rem' },
-              px: { xs: 1, sm: 2 },
-            }
+            width: { xs: '100%', md: 260 },
+            flexShrink: 0,
+            position: { md: 'sticky' },
+            top: { md: 16 },
+            maxHeight: { md: 'calc(100vh - 160px)' },
+            overflow: 'auto',
           }}
         >
-          {tabs.map((tab, index) => (
-            <Tab 
-              key={index}
-              label={tab.label} 
-              icon={tab.icon} 
-              iconPosition="start"
-            />
-          ))}
-        </Tabs>
-      </Box>
+          <List dense>
+            {tabs.map((tab, index) => (
+              <ListItemButton
+                key={tab.id}
+                selected={currentTab === index}
+                onClick={() => handleTabSelect(index)}
+              >
+                <ListItemIcon sx={{ minWidth: 32 }}>{tab.icon}</ListItemIcon>
+                <ListItemText primary={tab.label} />
+              </ListItemButton>
+            ))}
+          </List>
+        </Paper>
 
-      {/* Tab Content */}
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+      {/* Settings Content */}
       {currentTab === 0 && (
         <Grid container spacing={3}>
           {/* User Profile Settings */}
@@ -1265,92 +1890,366 @@ const SettingsPage = () => {
                     <Typography variant="h6">User Profile Settings</Typography>
                   </Box>
 
-                  <Alert severity="info" sx={{ mb: 3 }}>
-                    <strong>Personal Settings:</strong> Configure your personal preferences including timezone for accurate time displays.
-                  </Alert>
+                  <Grid container spacing={3} sx={{ mb: 3 }}>
+                    <Grid item xs={12} md={6}>
+                      <Typography variant="h6" gutterBottom>
+                        Preferred Name
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" paragraph>
+                        How would you like our AI agents to address you?
+                      </Typography>
+                      <TextField
+                        fullWidth
+                        label="Preferred Name"
+                        value={userPreferredName}
+                        onChange={(e) => setUserPreferredName(e.target.value)}
+                        sx={{ mb: 2 }}
+                        disabled={preferredNameMutation.isLoading}
+                      />
+                      <Button
+                        variant="contained"
+                        onClick={() => preferredNameMutation.mutate(userPreferredName)}
+                        disabled={preferredNameMutation.isLoading}
+                        startIcon={preferredNameMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
+                      >
+                        {preferredNameMutation.isLoading ? 'Updating...' : 'Update Preferred Name'}
+                      </Button>
+                    </Grid>
+                    <Grid item xs={12} md={6}>
+                      <Typography variant="h6" gutterBottom>
+                        Display Name
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" paragraph>
+                        Name shown across your profile and user-facing areas.
+                      </Typography>
+                      <TextField
+                        fullWidth
+                        label="Display Name"
+                        value={profileDisplayName}
+                        onChange={(e) => setProfileDisplayName(e.target.value)}
+                        sx={{ mb: 2 }}
+                        disabled={updateProfileMutation.isLoading}
+                        placeholder="Optional"
+                      />
+                      <Button
+                        variant="contained"
+                        onClick={() => {
+                          const email = profileEmail.trim();
+                          if (!email) {
+                            setSnackbar({ open: true, message: 'Email is required', severity: 'error' });
+                            return;
+                          }
+                          updateProfileMutation.mutate({ email, display_name: profileDisplayName.trim() || null });
+                        }}
+                        disabled={updateProfileMutation.isLoading}
+                        startIcon={updateProfileMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
+                      >
+                        {updateProfileMutation.isLoading ? 'Saving…' : 'Save Display Name'}
+                      </Button>
+                    </Grid>
+                  </Grid>
 
-                  {/* Preferred Name Setting */}
+                  <Grid container spacing={3} sx={{ mb: 3 }}>
+                    <Grid item xs={12} md={6}>
+                      {/* Account information */}
+                      <Box>
+                        <Typography variant="h6" gutterBottom>
+                          Account Information
+                        </Typography>
+                        <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                          <strong>Username:</strong> {user?.username} · <strong>Role:</strong> {user?.role}
+                        </Typography>
+                        <TextField
+                          fullWidth
+                          type="email"
+                          label="Email"
+                          value={profileEmail}
+                          onChange={(e) => setProfileEmail(e.target.value)}
+                          sx={{ mb: 2 }}
+                          disabled={updateProfileMutation.isLoading}
+                          helperText="Used for notifications and account communication."
+                        />
+                        <Button
+                          variant="contained"
+                          onClick={() => {
+                            const email = profileEmail.trim();
+                            if (!email) {
+                              setSnackbar({ open: true, message: 'Email is required', severity: 'error' });
+                              return;
+                            }
+                            updateProfileMutation.mutate({ email, display_name: profileDisplayName.trim() || null });
+                          }}
+                          disabled={updateProfileMutation.isLoading}
+                          startIcon={updateProfileMutation.isLoading ? <CircularProgress size={20} /> : <Email />}
+                          sx={{ mb: 2 }}
+                        >
+                          {updateProfileMutation.isLoading ? 'Saving…' : 'Save Email'}
+                        </Button>
+
+                        <TextField
+                          fullWidth
+                          label="Phone Number"
+                          value={profilePhoneNumber}
+                          onChange={(e) => setProfilePhoneNumber(e.target.value)}
+                          sx={{ mb: 2 }}
+                          disabled={phoneNumberMutation.isLoading}
+                          placeholder="Optional"
+                          helperText="Optional, for future notification channels."
+                        />
+                        <Button
+                          variant="contained"
+                          onClick={() => phoneNumberMutation.mutate(profilePhoneNumber.trim())}
+                          disabled={phoneNumberMutation.isLoading}
+                          startIcon={phoneNumberMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
+                          sx={{ mb: 2 }}
+                        >
+                          {phoneNumberMutation.isLoading ? 'Saving…' : 'Save Phone Number'}
+                        </Button>
+
+                        <TextField
+                          fullWidth
+                          type="date"
+                          label="Birthday"
+                          value={profileBirthday}
+                          onChange={(e) => setProfileBirthday(e.target.value)}
+                          sx={{ mb: 2 }}
+                          disabled={birthdayMutation.isLoading}
+                          InputLabelProps={{ shrink: true }}
+                          helperText="Optional"
+                        />
+                        <Button
+                          variant="contained"
+                          onClick={() => birthdayMutation.mutate(profileBirthday)}
+                          disabled={birthdayMutation.isLoading}
+                          startIcon={birthdayMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
+                        >
+                          {birthdayMutation.isLoading ? 'Saving…' : 'Save Birthday'}
+                        </Button>
+                      </Box>
+                    </Grid>
+
+                    <Grid item xs={12} md={6}>
+                      {/* AI Context Setting */}
+                      <Box>
+                        <Box display="flex" alignItems="center" mb={1}>
+                          <Typography variant="h6" gutterBottom sx={{ mb: 0, mr: 1 }}>
+                            AI Context
+                          </Typography>
+                          <Tooltip title={
+                            <Box>
+                              <Typography variant="body2" gutterBottom>Examples:</Typography>
+                              <Typography variant="body2">• "I'm a software developer working in Python and React"</Typography>
+                              <Typography variant="body2">• "I prefer detailed technical explanations"</Typography>
+                              <Typography variant="body2">• "I'm learning programming - explain step-by-step"</Typography>
+                              <Typography variant="body2">• "I have ADHD - concise responses help me focus"</Typography>
+                            </Box>
+                          } arrow placement="right">
+                            <Info sx={{ fontSize: 18, color: 'text.secondary', cursor: 'help' }} />
+                          </Tooltip>
+                        </Box>
+
+                        <TextField
+                          fullWidth
+                          multiline
+                          rows={6}
+                          label="Tell your AI about yourself"
+                          value={userAiContext}
+                          onChange={(e) => {
+                            if (e.target.value.length <= 500) {
+                              setUserAiContext(e.target.value);
+                            }
+                          }}
+                          inputProps={{ maxLength: 500 }}
+                          sx={{ mb: 2 }}
+                          disabled={aiContextMutation.isLoading}
+                          helperText={`${userAiContext.length}/500 characters`}
+                        />
+
+                        <Alert severity="warning" sx={{ mb: 2 }}>
+                          <strong>Privacy Notice:</strong> This information will be included in all agent conversations
+                          and may be transmitted to external AI providers (OpenAI, Anthropic, etc.) as part of system prompts.
+                        </Alert>
+
+                        <Button
+                          variant="contained"
+                          onClick={() => aiContextMutation.mutate(userAiContext)}
+                          disabled={aiContextMutation.isLoading}
+                          startIcon={aiContextMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
+                        >
+                          {aiContextMutation.isLoading ? 'Updating...' : 'Update AI Context'}
+                        </Button>
+                      </Box>
+                    </Grid>
+                  </Grid>
+
+                  {/* Remembered Facts */}
                   <Box mb={3}>
                     <Typography variant="h6" gutterBottom>
-                      Preferred Name
+                      Remembered Facts
                     </Typography>
                     <Typography variant="body2" color="text.secondary" paragraph>
-                      How would you like our AI agents to address you?
+                      Facts stored here are included in your AI context automatically. You can add or remove them below; agents can also save facts when you ask them to remember something.
                     </Typography>
-                    
-                    <TextField
-                      fullWidth
-                      label="Preferred Name"
-                      value={userPreferredName}
-                      onChange={(e) => setUserPreferredName(e.target.value)}
-                      sx={{ mb: 2 }}
-                      disabled={preferredNameMutation.isLoading}
-                    />
-
-                    <Button
-                      variant="contained"
-                      onClick={() => preferredNameMutation.mutate(userPreferredName)}
-                      disabled={preferredNameMutation.isLoading}
-                      startIcon={preferredNameMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
-                    >
-                      {preferredNameMutation.isLoading ? 'Updating...' : 'Update Preferred Name'}
-                    </Button>
-                  </Box>
-
-                  {/* AI Context Setting */}
-                  <Box mb={3}>
-                    <Box display="flex" alignItems="center" mb={1}>
-                      <Typography variant="h6" gutterBottom sx={{ mb: 0, mr: 1 }}>
-                        AI Context
-                      </Typography>
-                      <Tooltip title={
-                        <Box>
-                          <Typography variant="body2" gutterBottom>Examples:</Typography>
-                          <Typography variant="body2">• "I'm a software developer working in Python and React"</Typography>
-                          <Typography variant="body2">• "I prefer detailed technical explanations"</Typography>
-                          <Typography variant="body2">• "I'm learning programming - explain step-by-step"</Typography>
-                          <Typography variant="body2">• "I have ADHD - concise responses help me focus"</Typography>
-                        </Box>
-                      } arrow placement="right">
-                        <Info sx={{ fontSize: 18, color: 'text.secondary', cursor: 'help' }} />
-                      </Tooltip>
-                    </Box>
-                    
-                    <Typography variant="body2" color="text.secondary" paragraph>
-                      Provide context to help AI agents tailor their responses to your needs.
-                    </Typography>
-
-                    <Alert severity="warning" sx={{ mb: 2 }}>
-                      <strong>Privacy Notice:</strong> This information will be included in all agent conversations 
-                      and may be transmitted to external AI providers (OpenAI, Anthropic, etc.) as part of system prompts.
-                    </Alert>
-                    
-                    <TextField
-                      fullWidth
-                      multiline
-                      rows={4}
-                      label="Tell your AI about yourself"
-                      value={userAiContext}
-                      onChange={(e) => {
-                        if (e.target.value.length <= 500) {
-                          setUserAiContext(e.target.value);
+                    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, mb: 2 }}>
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={factsInjectEnabled}
+                            onChange={(e) => {
+                              const v = e.target.checked;
+                              setFactsInjectEnabled(v);
+                              setFactsPreferencesMutation.mutate({ facts_inject_enabled: v, facts_write_enabled: factsWriteEnabled });
+                            }}
+                            color="primary"
+                          />
                         }
-                      }}
-                      inputProps={{ maxLength: 500 }}
-                      sx={{ mb: 1 }}
-                      disabled={aiContextMutation.isLoading}
-                      helperText={`${userAiContext.length}/500 characters`}
-                    />
-
-                    <Button
-                      variant="contained"
-                      onClick={() => aiContextMutation.mutate(userAiContext)}
-                      disabled={aiContextMutation.isLoading}
-                      startIcon={aiContextMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
-                    >
-                      {aiContextMutation.isLoading ? 'Updating...' : 'Update AI Context'}
-                    </Button>
+                        label="Include facts in AI conversations"
+                      />
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={factsWriteEnabled}
+                            onChange={(e) => {
+                              const v = e.target.checked;
+                              setFactsWriteEnabled(v);
+                              setFactsPreferencesMutation.mutate({ facts_inject_enabled: factsInjectEnabled, facts_write_enabled: v });
+                            }}
+                            color="primary"
+                          />
+                        }
+                        label="Allow agents to save new facts"
+                      />
+                    </Box>
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 2 }}>
+                      {userFacts.map((f) => (
+                        <Chip
+                          key={f.fact_key}
+                          label={`${f.fact_key}: ${f.value}`}
+                          onDelete={() => deleteUserFactMutation.mutate(f.fact_key)}
+                          disabled={deleteUserFactMutation.isLoading}
+                          size="small"
+                        />
+                      ))}
+                    </Box>
+                    <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <TextField
+                        size="small"
+                        placeholder="Key (e.g. job_title)"
+                        value={newFactKey}
+                        onChange={(e) => setNewFactKey(e.target.value)}
+                        sx={{ minWidth: 140 }}
+                      />
+                      <TextField
+                        size="small"
+                        placeholder="Value"
+                        value={newFactValue}
+                        onChange={(e) => setNewFactValue(e.target.value)}
+                        sx={{ minWidth: 180 }}
+                      />
+                      <Button
+                        variant="outlined"
+                        size="small"
+                        onClick={() => {
+                          if (newFactKey.trim() && newFactValue.trim()) {
+                            addUserFactMutation.mutate({
+                              fact_key: newFactKey.trim(),
+                              value: newFactValue.trim(),
+                              category: 'general'
+                            });
+                          }
+                        }}
+                        disabled={addUserFactMutation.isLoading || !newFactKey.trim() || !newFactValue.trim()}
+                      >
+                        Add Fact
+                      </Button>
+                    </Box>
                   </Box>
+
+                  {/* Activity History (episodic memory) */}
+                  <Box mb={3}>
+                    <Typography variant="h6" gutterBottom>
+                      Activity History
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" paragraph>
+                      Recent conversation activity is stored to help the AI remember what you worked on. You can clear entries below.
+                    </Typography>
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={episodesInjectEnabled}
+                          onChange={(e) => {
+                            const v = e.target.checked;
+                            setEpisodesInjectEnabled(v);
+                            setEpisodesPreferencesMutation.mutate({ episodes_inject_enabled: v });
+                          }}
+                          color="primary"
+                        />
+                      }
+                      label="Track activity for AI context"
+                    />
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, mb: 1, mt: 1 }}>
+                      {userEpisodes.slice(0, 20).map((ep) => (
+                        <Chip
+                          key={ep.id}
+                          label={ep.summary?.slice(0, 40) + (ep.summary?.length > 40 ? '...' : '')}
+                          onDelete={() => deleteEpisodeMutation.mutate(ep.id)}
+                          disabled={deleteEpisodeMutation.isLoading}
+                          size="small"
+                          variant="outlined"
+                        />
+                      ))}
+                    </Box>
+                    {userEpisodes.length > 0 && (
+                      <Button
+                        size="small"
+                        color="secondary"
+                        onClick={() => deleteAllEpisodesMutation.mutate()}
+                        disabled={deleteAllEpisodesMutation.isLoading}
+                      >
+                        Clear all activity
+                      </Button>
+                    )}
+                  </Box>
+
+                  {/* Pending Fact Updates */}
+                  {pendingFacts.length > 0 && (
+                    <Box mb={3}>
+                      <Typography variant="h6" gutterBottom>
+                        Pending Fact Updates
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" paragraph>
+                        The AI suggested changes to facts you set. Accept or reject below.
+                      </Typography>
+                      {pendingFacts.map((p) => (
+                        <Box key={p.id} sx={{ mb: 2, p: 1.5, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                          <Typography variant="body2"><strong>{p.fact_key}</strong></Typography>
+                          <Typography variant="body2" color="text.secondary">Current (yours): {p.old_value}</Typography>
+                          <Typography variant="body2" color="text.secondary">Proposed: {p.new_value}</Typography>
+                          <Box sx={{ mt: 1, display: 'flex', gap: 1 }}>
+                            <Button size="small" variant="contained" onClick={() => resolvePendingFactMutation.mutate({ historyId: p.id, action: 'accept' })} disabled={resolvePendingFactMutation.isLoading}>Accept</Button>
+                            <Button size="small" variant="outlined" onClick={() => resolvePendingFactMutation.mutate({ historyId: p.id, action: 'reject' })} disabled={resolvePendingFactMutation.isLoading}>Reject</Button>
+                          </Box>
+                        </Box>
+                      ))}
+                    </Box>
+                  )}
+
+                  {/* Fact Change History */}
+                  {factHistory.length > 0 && (
+                    <Box mb={3}>
+                      <Typography variant="h6" gutterBottom>
+                        Fact Change History
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" paragraph>
+                        Recent changes to your remembered facts.
+                      </Typography>
+                      {factHistory.slice(0, 10).map((h) => (
+                        <Typography key={h.id} variant="body2" sx={{ mb: 0.5 }}>
+                          <strong>{h.fact_key}</strong>: {h.old_value} → {h.new_value} ({h.resolution || 'updated'})
+                        </Typography>
+                      ))}
+                    </Box>
+                  )}
 
                   {/* Vision Features Setting */}
                   <Box mb={3}>
@@ -1395,46 +2294,70 @@ const SettingsPage = () => {
                     )}
                   </Box>
 
-                  {/* Timezone Setting */}
+                  {/* Time and Locale Settings */}
                   <Box mb={3}>
                     <Typography variant="h6" gutterBottom>
-                      Timezone
+                      Time and Locale
                     </Typography>
                     <Typography variant="body2" color="text.secondary" paragraph>
-                      Set your timezone to ensure accurate time displays when asking questions like "what time is it?"
+                      Configure timezone and time display format for status bar and AI time-aware responses.
                     </Typography>
-                    
-                    <FormControl fullWidth sx={{ mb: 2 }}>
-                      <InputLabel>Timezone</InputLabel>
-                      <Select
-                        value={userTimezone}
-                        onChange={(e) => setUserTimezone(e.target.value)}
-                        label="Timezone"
-                        disabled={timezoneMutation.isLoading}
-                      >
-                        <MenuItem value="UTC">UTC (Coordinated Universal Time)</MenuItem>
-                        <MenuItem value="America/New_York">Eastern Time (ET)</MenuItem>
-                        <MenuItem value="America/Chicago">Central Time (CT)</MenuItem>
-                        <MenuItem value="America/Denver">Mountain Time (MT)</MenuItem>
-                        <MenuItem value="America/Los_Angeles">Pacific Time (PT)</MenuItem>
-                        <MenuItem value="Europe/London">London (GMT/BST)</MenuItem>
-                        <MenuItem value="Europe/Paris">Paris (CET/CEST)</MenuItem>
-                        <MenuItem value="Europe/Berlin">Berlin (CET/CEST)</MenuItem>
-                        <MenuItem value="Asia/Tokyo">Tokyo (JST)</MenuItem>
-                        <MenuItem value="Asia/Shanghai">Shanghai (CST)</MenuItem>
-                        <MenuItem value="Australia/Sydney">Sydney (AEST/AEDT)</MenuItem>
-                        <MenuItem value="Pacific/Auckland">Auckland (NZST/NZDT)</MenuItem>
-                      </Select>
-                    </FormControl>
-
-                    <Button
-                      variant="contained"
-                      onClick={() => timezoneMutation.mutate(userTimezone)}
-                      disabled={timezoneMutation.isLoading}
-                      startIcon={timezoneMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
-                    >
-                      {timezoneMutation.isLoading ? 'Updating...' : 'Update Timezone'}
-                    </Button>
+                    <Grid container spacing={2}>
+                      <Grid item xs={12} md={6}>
+                        <FormControl fullWidth sx={{ mb: 2 }}>
+                          <InputLabel>Timezone</InputLabel>
+                          <Select
+                            value={userTimezone}
+                            onChange={(e) => setUserTimezone(e.target.value)}
+                            label="Timezone"
+                            disabled={timezoneMutation.isLoading}
+                          >
+                            <MenuItem value="UTC">UTC (Coordinated Universal Time)</MenuItem>
+                            <MenuItem value="America/New_York">Eastern Time (ET)</MenuItem>
+                            <MenuItem value="America/Chicago">Central Time (CT)</MenuItem>
+                            <MenuItem value="America/Denver">Mountain Time (MT)</MenuItem>
+                            <MenuItem value="America/Los_Angeles">Pacific Time (PT)</MenuItem>
+                            <MenuItem value="Europe/London">London (GMT/BST)</MenuItem>
+                            <MenuItem value="Europe/Paris">Paris (CET/CEST)</MenuItem>
+                            <MenuItem value="Europe/Berlin">Berlin (CET/CEST)</MenuItem>
+                            <MenuItem value="Asia/Tokyo">Tokyo (JST)</MenuItem>
+                            <MenuItem value="Asia/Shanghai">Shanghai (CST)</MenuItem>
+                            <MenuItem value="Australia/Sydney">Sydney (AEST/AEDT)</MenuItem>
+                            <MenuItem value="Pacific/Auckland">Auckland (NZST/NZDT)</MenuItem>
+                          </Select>
+                        </FormControl>
+                        <Button
+                          variant="contained"
+                          onClick={() => timezoneMutation.mutate(userTimezone)}
+                          disabled={timezoneMutation.isLoading}
+                          startIcon={timezoneMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
+                        >
+                          {timezoneMutation.isLoading ? 'Updating...' : 'Update Timezone'}
+                        </Button>
+                      </Grid>
+                      <Grid item xs={12} md={6}>
+                        <FormControl fullWidth sx={{ mb: 2 }}>
+                          <InputLabel>Time Format</InputLabel>
+                          <Select
+                            value={userTimeFormat}
+                            onChange={(e) => setUserTimeFormat(e.target.value)}
+                            label="Time Format"
+                            disabled={timeFormatMutation.isLoading}
+                          >
+                            <MenuItem value="12h">12-hour (AM/PM)</MenuItem>
+                            <MenuItem value="24h">24-hour (Military)</MenuItem>
+                          </Select>
+                        </FormControl>
+                        <Button
+                          variant="contained"
+                          onClick={() => timeFormatMutation.mutate(userTimeFormat)}
+                          disabled={timeFormatMutation.isLoading}
+                          startIcon={timeFormatMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
+                        >
+                          {timeFormatMutation.isLoading ? 'Updating...' : 'Update Time Format'}
+                        </Button>
+                      </Grid>
+                    </Grid>
                   </Box>
 
                   {/* Zip Code Setting */}
@@ -1477,38 +2400,6 @@ const SettingsPage = () => {
                       startIcon={zipCodeMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
                     >
                       {zipCodeMutation.isLoading ? 'Updating...' : 'Update Zip Code'}
-                    </Button>
-                  </Box>
-
-                  {/* Time Format Setting */}
-                  <Box mb={3}>
-                    <Typography variant="h6" gutterBottom>
-                      Time Format
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary" paragraph>
-                      Choose how time is displayed in the status bar: 12-hour format (AM/PM) or 24-hour format (Military).
-                    </Typography>
-                    
-                    <FormControl fullWidth sx={{ mb: 2 }}>
-                      <InputLabel>Time Format</InputLabel>
-                      <Select
-                        value={userTimeFormat}
-                        onChange={(e) => setUserTimeFormat(e.target.value)}
-                        label="Time Format"
-                        disabled={timeFormatMutation.isLoading}
-                      >
-                        <MenuItem value="12h">12-hour (AM/PM)</MenuItem>
-                        <MenuItem value="24h">24-hour (Military)</MenuItem>
-                      </Select>
-                    </FormControl>
-
-                    <Button
-                      variant="contained"
-                      onClick={() => timeFormatMutation.mutate(userTimeFormat)}
-                      disabled={timeFormatMutation.isLoading}
-                      startIcon={timeFormatMutation.isLoading ? <CircularProgress size={20} /> : <Settings />}
-                    >
-                      {timeFormatMutation.isLoading ? 'Updating...' : 'Update Time Format'}
                     </Button>
                   </Box>
 
@@ -1595,51 +2486,6 @@ const SettingsPage = () => {
                     </Button>
                   </Box>
 
-                  <Divider sx={{ my: 3 }} />
-
-                  {/* Account information – email and display name editable; same field admins see in User Management */}
-                  <Box>
-                    <Typography variant="h6" gutterBottom>
-                      Account Information
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                      <strong>Username:</strong> {user?.username} · <strong>Role:</strong> {user?.role}
-                    </Typography>
-                    <TextField
-                      fullWidth
-                      type="email"
-                      label="Email"
-                      value={profileEmail}
-                      onChange={(e) => setProfileEmail(e.target.value)}
-                      sx={{ mb: 2 }}
-                      disabled={updateProfileMutation.isLoading}
-                      helperText="Same email admins see in User Management. Used for test emails and notifications."
-                    />
-                    <TextField
-                      fullWidth
-                      label="Display name"
-                      value={profileDisplayName}
-                      onChange={(e) => setProfileDisplayName(e.target.value)}
-                      sx={{ mb: 2 }}
-                      disabled={updateProfileMutation.isLoading}
-                      placeholder="Optional"
-                    />
-                    <Button
-                      variant="contained"
-                      onClick={() => {
-                        const email = profileEmail.trim();
-                        if (!email) {
-                          setSnackbar({ open: true, message: 'Email is required', severity: 'error' });
-                          return;
-                        }
-                        updateProfileMutation.mutate({ email, display_name: profileDisplayName.trim() || null });
-                      }}
-                      disabled={updateProfileMutation.isLoading}
-                      startIcon={updateProfileMutation.isLoading ? <CircularProgress size={20} /> : <Email />}
-                    >
-                      {updateProfileMutation.isLoading ? 'Saving…' : 'Save email & display name'}
-                    </Button>
-                  </Box>
                 </CardContent>
               </Card>
             </motion.div>
@@ -1649,7 +2495,6 @@ const SettingsPage = () => {
 
       {currentTab === 1 && (
         <Grid container spacing={3}>
-          {/* AI Personality Settings */}
           <Grid item xs={12}>
             <motion.div
               initial={{ opacity: 0, y: 20 }}
@@ -1659,148 +2504,79 @@ const SettingsPage = () => {
               <Card>
                 <CardContent>
                   <Box display="flex" alignItems="center" mb={3}>
-                    <Psychology sx={{ mr: 2, color: 'primary.main' }} />
-                    <Typography variant="h6">AI Personality Settings</Typography>
+                    <Palette sx={{ mr: 2, color: 'primary.main' }} />
+                    <Typography variant="h6">Appearance</Typography>
                   </Box>
+                  <Typography variant="body2" color="text.secondary" paragraph>
+                    Choose theme mode and accent color. Changes apply immediately.
+                  </Typography>
 
-                  <Alert severity="info" sx={{ mb: 3 }}>
-                    <strong>Customize Your AI:</strong> Configure the personality, political bias, and communication style of your AI assistant. 
-                    Note: You must change the AI name from "Alex" when using non-default bias or persona settings.
-                  </Alert>
-
-                  {/* Stock Persona Selection */}
                   <Box mb={3}>
-                    <Typography variant="h6" gutterBottom>
-                      Stock Personas
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary" paragraph>
-                      Choose a pre-configured historical figure persona, or select "Custom" to configure individual settings.
-                    </Typography>
-                    
-                    <FormControl fullWidth sx={{ mb: 2 }}>
-                      <InputLabel>Stock Persona</InputLabel>
-                      <Select
-                        value={stockPersonaMode}
-                        onChange={(e) => handleStockPersonaChange(e.target.value)}
-                        label="Stock Persona"
-                      >
-                        <MenuItem value="custom">
-                          <strong>Custom</strong> - Configure individual settings
-                        </MenuItem>
-                        <Divider />
-                        {promptOptions.historical_figures.map((figure) => (
-                          <MenuItem key={figure.value} value={figure.value}>
-                            <strong>{figure.label}</strong> - {getStockPersonaDescription(figure.value)}
-                          </MenuItem>
-                        ))}
-                      </Select>
-                    </FormControl>
+                    <Typography variant="subtitle2" gutterBottom>Theme mode</Typography>
+                    <ToggleButtonGroup
+                      value={themePreference}
+                      exclusive
+                      onChange={(_, value) => {
+                        if (value !== null) setThemePreference(value);
+                      }}
+                      aria-label="Theme mode"
+                      size="small"
+                    >
+                      <ToggleButton value="light" aria-label="Light">Light</ToggleButton>
+                      <ToggleButton value="dark" aria-label="Dark">Dark</ToggleButton>
+                      <ToggleButton value="system" aria-label="Match system">
+                        <BrightnessAuto sx={{ mr: 0.75, fontSize: '1.125rem', verticalAlign: 'text-bottom' }} />
+                        System
+                      </ToggleButton>
+                    </ToggleButtonGroup>
+                    {themePreference === 'system' && (
+                      <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 1 }}>
+                        Matches this device ({systemPrefersDark ? 'dark' : 'light'} right now). Quick light/dark toggle
+                        is hidden from the user menu until you choose Light or Dark here.
+                      </Typography>
+                    )}
                   </Box>
 
-                  {/* Custom Settings (only shown when Custom is selected) */}
-                  {stockPersonaMode === 'custom' && (
-                    <>
-                      {/* AI Name */}
-                      <Box mb={3}>
-                        <Typography variant="h6" gutterBottom>
-                          AI Assistant Name
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary" paragraph>
-                          Choose a name for your AI assistant. "Alex" is always neutral and professional.
-                        </Typography>
-                        
-                        <TextField
-                          fullWidth
-                          label="AI Name"
-                          value={promptSettings.ai_name}
-                          onChange={(e) => handleCustomSettingChange('ai_name', e.target.value)}
-                          sx={{ mb: 2 }}
-                        />
-                      </Box>
-
-                      {/* Political Bias */}
-                      <Box mb={3}>
-                        <Typography variant="h6" gutterBottom>
-                          Political Bias
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary" paragraph>
-                          Choose the political perspective that will influence your AI's analysis and responses. Extreme biases may twist facts to suit their worldview.
-                        </Typography>
-                        
-                        <FormControl fullWidth sx={{ mb: 2 }}>
-                          <InputLabel>Political Bias</InputLabel>
-                          <Select
-                            value={promptSettings.political_bias}
-                            onChange={(e) => handleCustomSettingChange('political_bias', e.target.value)}
-                            label="Political Bias"
-                          >
-                            {promptOptions.political_biases.map((bias) => (
-                              <MenuItem key={bias.value} value={bias.value}>
-                                {bias.label}
-                              </MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                      </Box>
-
-                      {/* Persona Style */}
-                      <Box mb={3}>
-                        <Typography variant="h6" gutterBottom>
-                          Communication Style
-                        </Typography>
-                        <Typography variant="body2" color="text.secondary" paragraph>
-                          Choose how your AI communicates and interacts with you.
-                        </Typography>
-                        
-                        <FormControl fullWidth sx={{ mb: 2 }}>
-                          <InputLabel>Persona Style</InputLabel>
-                          <Select
-                            value={promptSettings.persona_style}
-                            onChange={(e) => handleCustomSettingChange('persona_style', e.target.value)}
-                            label="Persona Style"
-                          >
-                            {promptOptions.persona_styles.filter(persona => 
-                              !promptOptions.historical_figures.some(figure => figure.value === persona.value)
-                            ).map((persona) => (
-                              <MenuItem key={persona.value} value={persona.value}>
-                                {persona.label}
-                              </MenuItem>
-                            ))}
-                          </Select>
-                        </FormControl>
-                      </Box>
-                    </>
-                  )}
-
-                  {/* Stock Persona Info (shown when stock persona is selected) */}
-                  {stockPersonaMode !== 'custom' && (
-                    <Box mb={3}>
-                      <Alert severity="info">
-                        <Typography variant="h6" gutterBottom>
-                          {promptOptions.historical_figures.find(f => f.value === stockPersonaMode)?.label}
-                        </Typography>
-                        <Typography variant="body2">
-                          <strong>AI Name:</strong> {promptSettings.ai_name}<br />
-                          <strong>Political Bias:</strong> {promptOptions.political_biases.find(b => b.value === promptSettings.political_bias)?.label}<br />
-                          <strong>Communication Style:</strong> {promptOptions.historical_figures.find(f => f.value === stockPersonaMode)?.label}
-                        </Typography>
-                        <Typography variant="body2" sx={{ mt: 1 }}>
-                          {getStockPersonaDescription(stockPersonaMode)}
-                        </Typography>
-                      </Alert>
+                  <Box mb={3}>
+                    <Typography variant="subtitle2" gutterBottom sx={{ mb: 1 }}>Accent color</Typography>
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                      {ACCENT_IDS.map((id) => {
+                        const palette = ACCENT_PALETTES[id];
+                        const mainColor = darkMode ? palette?.dark?.primary?.main : palette?.light?.primary?.main;
+                        const isSelected = accentId === id;
+                        return (
+                          <Tooltip key={id} title={id.charAt(0).toUpperCase() + id.slice(1)}>
+                            <Box
+                              component="button"
+                              type="button"
+                              onClick={() => setAccentId(id)}
+                              aria-label={`Accent ${id}`}
+                              aria-pressed={isSelected}
+                              sx={{
+                                width: 40,
+                                height: 40,
+                                borderRadius: '50%',
+                                border: 2,
+                                borderColor: isSelected ? 'primary.main' : 'divider',
+                                bgcolor: mainColor || '#1976d2',
+                                cursor: 'pointer',
+                                p: 0,
+                                '&:hover': { opacity: 0.9 },
+                                '&:focus-visible': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: 2 },
+                              }}
+                            />
+                          </Tooltip>
+                        );
+                      })}
                     </Box>
-                  )}
+                  </Box>
 
-                  <Divider sx={{ my: 3 }} />
-
-                  {/* Save Button */}
                   <Button
-                    variant="contained"
-                    onClick={() => promptSettingsMutation.mutate(promptSettings)}
-                    disabled={promptSettingsMutation.isLoading}
-                    startIcon={promptSettingsMutation.isLoading ? <CircularProgress size={20} /> : <Psychology />}
+                    variant="outlined"
+                    size="small"
+                    onClick={() => setAppearance({ mode: false, accentId: DEFAULT_ACCENT_ID })}
                   >
-                    {promptSettingsMutation.isLoading ? 'Updating...' : 'Save AI Personality Settings'}
+                    Reset to default (Light, Blue)
                   </Button>
                 </CardContent>
               </Card>
@@ -1811,24 +2587,294 @@ const SettingsPage = () => {
 
       {currentTab === 2 && (
         <Grid container spacing={3}>
+          <Grid item xs={12}>
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.05 }}
+            >
+              <Card>
+                <CardContent>
+                  <Box display="flex" alignItems="center" justifyContent="space-between" mb={3}>
+                    <Box display="flex" alignItems="center">
+                      <Psychology sx={{ mr: 2, color: 'primary.main' }} />
+                      <Typography variant="h6">Personas</Typography>
+                    </Box>
+                    <Button
+                      variant="outlined"
+                      startIcon={<Add />}
+                      onClick={handleOpenCreatePersona}
+                    >
+                      Create persona
+                    </Button>
+                  </Box>
 
-        {/* Current Model Status - Shows what agents are actually using */}
-        <Grid item xs={12}>
-          <Card sx={{ mb: 3 }}>
-            <CardContent>
-              <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
-                <Psychology sx={{ mr: 1 }} />
-                Current AI Model Configuration
-              </Typography>
-              <Typography variant="body2" color="text.secondary" gutterBottom>
-                This shows the models currently being used by AI agents. Models marked with "Fallback" are system defaults.
-              </Typography>
+                  <Alert severity="info" sx={{ mb: 3 }}>
+                    <strong>Default persona:</strong> This is used for main chat and for Agent Factory agents that use &quot;default persona&quot;. You can also create custom personas and assign a specific one per agent.
+                  </Alert>
 
-              {/* We'll add the model status display here */}
-              <ModelStatusDisplay />
-            </CardContent>
-          </Card>
+                  <Box mb={3}>
+                    <Typography variant="subtitle1" gutterBottom>Default persona</Typography>
+                    <FormControl fullWidth sx={{ maxWidth: 400 }}>
+                      <InputLabel>Default persona</InputLabel>
+                      <Select
+                        value={defaultPersona?.id ?? ''}
+                        onChange={(e) => setDefaultPersonaMutation.mutate(e.target.value || null)}
+                        label="Default persona"
+                        disabled={setDefaultPersonaMutation.isLoading}
+                      >
+                        <MenuItem value="">
+                          <em>None (use first built-in)</em>
+                        </MenuItem>
+                        {personasList.map((p) => (
+                          <MenuItem key={p.id} value={p.id}>
+                            {p.name}{p.is_builtin ? ' (built-in)' : ''}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  </Box>
+
+                  <Typography variant="subtitle1" gutterBottom sx={{ mt: 3 }}>Your custom personas</Typography>
+                  {personasList.filter((p) => !p.is_builtin).length === 0 ? (
+                    <Typography variant="body2" color="text.secondary">
+                      No custom personas yet. Create one to use your own name, style instructions, and political bias.
+                    </Typography>
+                  ) : (
+                    <Box display="flex" flexDirection="column" gap={1}>
+                      {personasList.filter((p) => !p.is_builtin).map((p) => (
+                        <Paper key={p.id} variant="outlined" sx={{ p: 2, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <Box>
+                            <Typography fontWeight="medium">{p.name}</Typography>
+                            <Typography variant="body2" color="text.secondary">
+                              AI name: {p.ai_name} · Bias: {promptOptions.political_biases?.find(b => b.value === p.political_bias)?.label || p.political_bias}
+                            </Typography>
+                            {p.style_instruction && (
+                              <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5, maxWidth: 600 }} noWrap>
+                                {p.style_instruction.slice(0, 80)}...
+                              </Typography>
+                            )}
+                          </Box>
+                          <Box>
+                            <IconButton size="small" onClick={() => handleOpenEditPersona(p)} title="Edit">
+                              <EditIcon fontSize="small" />
+                            </IconButton>
+                            <IconButton size="small" onClick={() => deletePersonaMutation.mutate(p.id)} title="Delete">
+                              <DeleteSweep fontSize="small" />
+                            </IconButton>
+                          </Box>
+                        </Paper>
+                      ))}
+                    </Box>
+                  )}
+                </CardContent>
+              </Card>
+            </motion.div>
+          </Grid>
         </Grid>
+      )}
+
+      {/* Create/Edit Persona Dialog */}
+      <Dialog open={personaDialogOpen} onClose={() => setPersonaDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>{personaDialogMode === 'create' ? 'Create persona' : 'Edit persona'}</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Persona name"
+            fullWidth
+            value={personaForm.name}
+            onChange={(e) => setPersonaForm((f) => ({ ...f, name: e.target.value }))}
+          />
+          <TextField
+            margin="dense"
+            label="AI name"
+            fullWidth
+            value={personaForm.ai_name}
+            onChange={(e) => setPersonaForm((f) => ({ ...f, ai_name: e.target.value }))}
+          />
+          <TextField
+            margin="dense"
+            label="Style instruction (free-form)"
+            fullWidth
+            multiline
+            rows={4}
+            value={personaForm.style_instruction}
+            onChange={(e) => setPersonaForm((f) => ({ ...f, style_instruction: e.target.value }))}
+            placeholder="e.g. Speak like a pirate captain who loves cooking."
+          />
+          <FormControl fullWidth margin="dense">
+            <InputLabel>Political bias</InputLabel>
+            <Select
+              value={personaForm.political_bias}
+              label="Political bias"
+              onChange={(e) => setPersonaForm((f) => ({ ...f, political_bias: e.target.value }))}
+            >
+              {(promptOptions.political_biases || []).map((b) => (
+                <MenuItem key={b.value} value={b.value}>{b.label}</MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <TextField
+            margin="dense"
+            label="Description (optional)"
+            fullWidth
+            multiline
+            rows={2}
+            value={personaForm.description}
+            onChange={(e) => setPersonaForm((f) => ({ ...f, description: e.target.value }))}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPersonaDialogOpen(false)}>Cancel</Button>
+          <Button
+            variant="contained"
+            onClick={handleSavePersonaDialog}
+            disabled={!personaForm.name.trim() || createPersonaMutation.isLoading || updatePersonaMutation.isLoading}
+          >
+            {personaDialogMode === 'create' ? 'Create' : 'Save'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {currentTab === 3 && (
+        <Grid container spacing={3}>
+
+        {/* User-level LLM providers (toggle + own API keys / models) */}
+        <Grid item xs={12}>
+          <UserLLMProviders />
+        </Grid>
+
+        <Grid item xs={12}>
+          <UserVoiceProviders />
+        </Grid>
+
+        {/* Global model status (admin): reflects shared settings table, not per-user chat/sidebar choice */}
+        {user?.role === 'admin' && (
+          <Grid item xs={12}>
+            <Card sx={{ mb: 3 }}>
+              <CardContent>
+                <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
+                  <Psychology sx={{ mr: 1 }} />
+                  Current AI Model Configuration
+                </Typography>
+                <Typography variant="body2" color="text.secondary" gutterBottom>
+                  Server-wide defaults from the shared settings store. Per-user chat uses the sidebar and model
+                  preference keys, not this summary.
+                </Typography>
+                <ModelStatusDisplay />
+              </CardContent>
+            </Card>
+          </Grid>
+        )}
+
+        {/* My Model Preferences - non-admin, own providers only */}
+        {useOwnProviders && (
+          <Grid item xs={12}>
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.05 }}
+            >
+              <Card>
+                <CardContent>
+                  <Typography variant="h6" gutterBottom sx={{ display: 'flex', alignItems: 'center' }}>
+                    <Psychology sx={{ mr: 1 }} />
+                    My Model Preferences
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" gutterBottom>
+                    Set which model to use for each role. Only your enabled models are shown. Leave as &quot;Use admin default&quot; to inherit system defaults.
+                  </Typography>
+                  <Grid container spacing={2} sx={{ mt: 1 }}>
+                    <Grid item xs={12} md={6}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Main chat model</InputLabel>
+                        <Select
+                          value={userModelRoles.user_chat_model || ''}
+                          onChange={(e) => handleUserModelRoleChange('user_chat_model', e.target.value)}
+                          label="Main chat model"
+                          disabled={setUserModelRolesMutation.isLoading}
+                        >
+                          <MenuItem value="">
+                            <em>Use admin default</em>
+                          </MenuItem>
+                          {enabledModelsList.map((m) => (
+                            <MenuItem key={m.id} value={m.id}>
+                              {m.name || m.id}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                      <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5 }}>
+                        Default for chat; you can change it in the chat sidebar.
+                      </Typography>
+                    </Grid>
+                    <Grid item xs={12} md={6}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Fast / classification model</InputLabel>
+                        <Select
+                          value={userModelRoles.user_fast_model || ''}
+                          onChange={(e) => handleUserModelRoleChange('user_fast_model', e.target.value)}
+                          label="Fast / classification model"
+                          disabled={setUserModelRolesMutation.isLoading}
+                        >
+                          <MenuItem value="">
+                            <em>Use admin default</em>
+                          </MenuItem>
+                          {enabledModelsList.map((m) => (
+                            <MenuItem key={m.id} value={m.id}>
+                              {m.name || m.id}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    <Grid item xs={12} md={6}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Image generation model</InputLabel>
+                        <Select
+                          value={userModelRoles.user_image_gen_model || ''}
+                          onChange={(e) => handleUserModelRoleChange('user_image_gen_model', e.target.value)}
+                          label="Image generation model"
+                          disabled={setUserModelRolesMutation.isLoading}
+                        >
+                          <MenuItem value="">
+                            <em>Use admin default</em>
+                          </MenuItem>
+                          {imageGenerationModels.map((m) => (
+                            <MenuItem key={m.id} value={m.id}>
+                              {m.name || m.id}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                    <Grid item xs={12} md={6}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Image analysis model</InputLabel>
+                        <Select
+                          value={userModelRoles.user_image_analysis_model || ''}
+                          onChange={(e) => handleUserModelRoleChange('user_image_analysis_model', e.target.value)}
+                          label="Image analysis model"
+                          disabled={setUserModelRolesMutation.isLoading}
+                        >
+                          <MenuItem value="">
+                            <em>Use admin default</em>
+                          </MenuItem>
+                          {imageAnalysisModels.map((m) => (
+                            <MenuItem key={m.id} value={m.id}>
+                              {m.name || m.id}
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      </FormControl>
+                    </Grid>
+                  </Grid>
+                </CardContent>
+              </Card>
+            </motion.div>
+          </Grid>
+        )}
 
         {/* Classification Model Selection - Admin Only */}
         {user?.role === 'admin' && (
@@ -1838,7 +2884,7 @@ const SettingsPage = () => {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.05 }}
             >
-              <Card sx={{ border: '2px solid #2196f3', borderRadius: 2 }}>
+              <Card id="settings-classification-model-card" sx={{ border: '2px solid #2196f3', borderRadius: 2 }}>
                 <CardContent>
                   <Box display="flex" alignItems="center" mb={3}>
                     <Speed sx={{ mr: 2, color: 'primary.main' }} />
@@ -1877,7 +2923,7 @@ const SettingsPage = () => {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.06 }}
             >
-              <Card sx={{ border: '2px solid #4caf50', borderRadius: 2 }}>
+              <Card id="settings-image-gen-model-card" sx={{ border: '2px solid #4caf50', borderRadius: 2 }}>
                 <CardContent>
                   <Box display="flex" alignItems="center" mb={3}>
                     <Psychology sx={{ mr: 2, color: 'success.main' }} />
@@ -1915,7 +2961,7 @@ const SettingsPage = () => {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.05 }}
             >
-              <Card sx={{ border: '2px solid #00bcd4', borderRadius: 2 }}>
+              <Card id="settings-text-completion-model-card" sx={{ border: '2px solid #00bcd4', borderRadius: 2 }}>
                 <CardContent>
                   <Box display="flex" alignItems="center" mb={3}>
                     <Speed sx={{ mr: 2, color: 'info.main' }} />
@@ -1954,7 +3000,7 @@ const SettingsPage = () => {
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.05 }}
             >
-              <Card sx={{ border: '2px solid #9c27b0', borderRadius: 2 }}>
+              <Card id="settings-image-analysis-model-card" sx={{ border: '2px solid #9c27b0', borderRadius: 2 }}>
                 <CardContent>
                   <Box display="flex" alignItems="center" mb={3}>
                     <Visibility sx={{ mr: 2, color: 'secondary.main' }} />
@@ -2012,6 +3058,101 @@ const SettingsPage = () => {
                     </Tooltip>
                   </Box>
                 </Box>
+
+                {orphanedEnabledModels.length > 0 && (
+                  <Alert
+                    severity="warning"
+                    sx={{ mb: 2 }}
+                    action={
+                      <Button
+                        color="inherit"
+                        size="small"
+                        disabled={saveEnabledModelsMutation.isLoading}
+                        onClick={() => handleRemoveOrphanedEnabledModels(orphanedEnabledModels)}
+                      >
+                        Remove all stale
+                      </Button>
+                    }
+                  >
+                    <Typography variant="subtitle2" gutterBottom>
+                      {orphanedEnabledModels.length} enabled model ID(s) are no longer returned by the live provider catalog
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                      They remain in the enabled list until removed. Use Remove on each row or clear all at once.
+                    </Typography>
+                    <List dense disablePadding sx={{ bgcolor: 'action.hover', borderRadius: 1 }}>
+                      {orphanedEnabledModels.map((id) => (
+                        <ListItem
+                          key={id}
+                          secondaryAction={
+                            <Button
+                              size="small"
+                              disabled={saveEnabledModelsMutation.isLoading}
+                              onClick={() => handleRemoveOrphanedEnabledModels([id])}
+                            >
+                              Remove
+                            </Button>
+                          }
+                        >
+                          <ListItemText
+                            primary={id}
+                            primaryTypographyProps={{ variant: 'body2', fontFamily: 'monospace' }}
+                          />
+                        </ListItem>
+                      ))}
+                    </List>
+                  </Alert>
+                )}
+
+                {orphanedRoleModelEntries.length > 0 && (
+                  <Alert severity="warning" sx={{ mb: 2 }} id="settings-stale-role-models">
+                    <Typography variant="subtitle2" gutterBottom>
+                      Role-specific model settings point at IDs not in the current provider catalog
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                      Jump to the section to pick a valid model, or clear the saved value (classification resets to follow chat model).
+                    </Typography>
+                    <List dense disablePadding>
+                      {orphanedRoleModelEntries.map(([key, modelId]) => (
+                        <ListItem
+                          key={key}
+                          secondaryAction={
+                            <Box display="flex" gap={0.5} flexWrap="wrap" justifyContent="flex-end">
+                              <Button
+                                size="small"
+                                onClick={() => scrollToRoleSettingSection(key)}
+                              >
+                                Jump
+                              </Button>
+                              <Button
+                                size="small"
+                                color="warning"
+                                disabled={clearRoleOrphanMutation.isLoading}
+                                onClick={() => clearRoleOrphanMutation.mutate(key)}
+                              >
+                                Clear
+                              </Button>
+                            </Box>
+                          }
+                        >
+                          <ListItemText
+                            primary={roleOrphanLabels[key] || key}
+                            secondary={modelId}
+                            secondaryTypographyProps={{ variant: 'body2', fontFamily: 'monospace' }}
+                          />
+                        </ListItem>
+                      ))}
+                    </List>
+                  </Alert>
+                )}
+
+                {enabledModelsData?.catalog_verified === false &&
+                  (enabledModelsData?.enabled_models?.length ?? 0) > 0 && (
+                    <Alert severity="info" sx={{ mb: 2 }}>
+                      The provider catalog is empty or could not be loaded, so stale enabled entries cannot be detected.
+                      Fix connectivity or API keys, then use Refresh — or remove models manually from the list.
+                    </Alert>
+                  )}
 
                 {/* Search and Filter Controls */}
                 <Box mb={3}>
@@ -2169,8 +3310,9 @@ const SettingsPage = () => {
                 <Divider sx={{ my: 3 }} />
                 
                 <Typography variant="body2" color="text.secondary">
-                  💡 <strong>Tip:</strong> Enable multiple models to have options available in chat. 
-                  Only one model can be active at a time. Models are fetched live from OpenRouter API.
+                  💡 <strong>Tip:</strong> Enable multiple models to have options available in chat.
+                  Only one model can be active at a time. Models are fetched live from the provider API.
+                  Stale IDs that disappear from the catalog appear above with one-click removal.
                 </Typography>
               </CardContent>
             </Card>
@@ -2178,8 +3320,8 @@ const SettingsPage = () => {
         </Grid>
         )}
 
-        {/* Model Information for Non-Admin Users */}
-        {user?.role !== 'admin' && (
+        {/* Model catalog for non-admins on shared (admin) models only — BYOK users enable models per provider in My AI Providers */}
+        {user?.role !== 'admin' && !useOwnProviders && (
           <Grid item xs={12}>
             <motion.div
               initial={{ opacity: 0, y: 20 }}
@@ -2197,9 +3339,17 @@ const SettingsPage = () => {
                   </Box>
 
                   <Alert severity="info" sx={{ mb: 3 }}>
-                    <strong>Note:</strong> Model management is restricted to administrators. 
-                    You can select from the enabled models in the chat interface.
+                    Model management is restricted to administrators. You can select from the enabled models in the chat interface.
                   </Alert>
+
+                  {orphanedEnabledModels.length > 0 && (
+                    <Alert severity="warning" sx={{ mb: 3 }}>
+                      <Typography variant="body2">
+                        Some enabled models are no longer returned by the provider catalog. Ask an administrator to open
+                        AI Models settings and remove stale entries ({orphanedEnabledModels.length}).
+                      </Typography>
+                    </Alert>
+                  )}
 
                   {modelsLoading ? (
                     <Box display="flex" alignItems="center" gap={2} p={3}>
@@ -2253,7 +3403,7 @@ const SettingsPage = () => {
       )}
 
       {/* News Settings Tab */}
-      {currentTab === 3 && (
+      {currentTab === 4 && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
             <motion.div
@@ -2383,7 +3533,7 @@ const SettingsPage = () => {
                   </Box>
 
                   <Alert severity="info" sx={{ mb: 2 }}>
-                    Manage your RSS feeds in the RSS manager; the news agent will use feeds tagged for News. Toggle "Include in News synthesis" on a feed.
+                    Manage feeds in Settings → RSS Feeds. The news agent uses feeds tagged for News; toggle &quot;Include in News synthesis&quot; on a feed where supported.
                   </Alert>
                 </CardContent>
               </Card>
@@ -2392,8 +3542,18 @@ const SettingsPage = () => {
         </Grid>
       )}
 
+      {currentTab === 5 && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+        >
+          <RSSFeedSettings />
+        </motion.div>
+      )}
+
       {/* Org-Mode Settings Tab */}
-      {currentTab === 4 && (
+      {currentTab === 6 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -2404,7 +3564,7 @@ const SettingsPage = () => {
       )}
 
       {/* Media Settings Tab */}
-      {currentTab === 5 && (
+      {currentTab === 7 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -2414,19 +3574,8 @@ const SettingsPage = () => {
         </motion.div>
       )}
 
-      {/* Entertainment Sync Tab */}
-      {currentTab === 6 && (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3 }}
-        >
-          <EntertainmentSyncManager />
-        </motion.div>
-      )}
-
       {/* Connections Tab */}
-      {currentTab === 7 && (
+      {currentTab === 8 && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -2436,8 +3585,19 @@ const SettingsPage = () => {
         </motion.div>
       )}
 
+      {/* Browser Sessions Tab */}
+      {currentTab === 9 && (
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3 }}
+        >
+          <BrowserSessionManagement />
+        </motion.div>
+      )}
+
       {/* Database Management Tab */}
-      {currentTab === 8 && user?.role === 'admin' && (
+      {currentTab === 10 && user?.role === 'admin' && (
         <Grid container spacing={3}>
           <Grid item xs={12}>
         <motion.div
@@ -2686,7 +3846,7 @@ const SettingsPage = () => {
       )}
 
       {/* User Management Tab */}
-      {currentTab === 9 && user?.role === 'admin' && (
+      {currentTab === 11 && user?.role === 'admin' && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -2965,6 +4125,8 @@ const SettingsPage = () => {
           {snackbar.message}
         </Alert>
       </Snackbar>
+        </Box>
+      </Box>
     </Box>
   );
 };

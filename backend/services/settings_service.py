@@ -14,6 +14,9 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# user_settings key: UUID of non-built-in agent_profiles row used when chat has no @mention / sticky profile
+DEFAULT_CHAT_AGENT_PROFILE_SETTING_KEY = "default_chat_agent_profile_id"
+
 
 class SettingsService:
     """Service for managing persistent application settings"""
@@ -410,6 +413,13 @@ class SettingsService:
             prefs["timezone"] = timezone
             await execute("UPDATE users SET preferences = $1, updated_at = NOW() WHERE user_id = $2", json.dumps(prefs), user_id)
             logger.info(f"Updated timezone for user {user_id} to {timezone}")
+            try:
+                from services import agent_factory_service
+                updated = await agent_factory_service.update_schedules_timezone_for_user(user_id, timezone)
+                if updated:
+                    logger.info(f"Updated {updated} agent schedule(s) to timezone {timezone}")
+            except Exception as schedule_err:
+                logger.warning(f"Could not update agent schedules for new timezone: {schedule_err}")
             return True
         except Exception as e:
             logger.error(f"Failed to set timezone for user {user_id}: {e}")
@@ -563,13 +573,364 @@ class SettingsService:
         except Exception as e:
             logger.error(f"❌ Failed to save prompt settings for user {user_id}: {str(e)}")
             return False
+
+    # -------------------------------------------------------------------------
+    # Personas (built-in + custom; default_persona_id in user_settings)
+    # -------------------------------------------------------------------------
+
+    async def get_personas(self, user_id: str, include_builtin: bool = True) -> List[Dict[str, Any]]:
+        """List personas available to the user: built-in plus their custom ones."""
+        try:
+            if include_builtin:
+                rows = await fetch_all(
+                    """SELECT id, user_id, name, ai_name, style_instruction, political_bias, description, is_builtin, created_at, updated_at
+                       FROM personas WHERE is_builtin = true OR user_id = $1 ORDER BY is_builtin DESC, name""",
+                    user_id,
+                )
+            else:
+                rows = await fetch_all(
+                    """SELECT id, user_id, name, ai_name, style_instruction, political_bias, description, is_builtin, created_at, updated_at
+                       FROM personas WHERE user_id = $1 ORDER BY name""",
+                    user_id,
+                )
+            return [self._persona_row_to_dict(r) for r in (rows or [])]
+        except Exception as e:
+            logger.error(f"Failed to get personas for user {user_id}: {e}")
+            return []
+
+    def _persona_row_to_dict(self, row: Union[dict, Any]) -> Dict[str, Any]:
+        """Convert a DB row to a persona dict with id as string."""
+        if isinstance(row, dict):
+            r = row
+        else:
+            r = dict(row) if hasattr(row, "keys") else {}
+        out = {}
+        for k in ("id", "user_id", "name", "ai_name", "style_instruction", "political_bias", "description", "is_builtin", "created_at", "updated_at"):
+            if k in r:
+                v = r[k]
+                if k == "id" and v is not None:
+                    v = str(v)
+                elif k in ("created_at", "updated_at") and hasattr(v, "isoformat"):
+                    v = v.isoformat()
+                out[k] = v
+        return out
+
+    async def get_persona_by_id(self, persona_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Get a single persona by id. Built-in can be fetched without user_id; custom only if user_id matches."""
+        try:
+            row = await fetch_one(
+                "SELECT id, user_id, name, ai_name, style_instruction, political_bias, description, is_builtin, created_at, updated_at FROM personas WHERE id = $1",
+                persona_id,
+            )
+            if not row:
+                return None
+            r = dict(row)
+            if not r.get("is_builtin") and r.get("user_id") != user_id:
+                return None
+            return self._persona_row_to_dict(r)
+        except Exception as e:
+            logger.error(f"Failed to get persona {persona_id}: {e}")
+            return None
+
+    async def create_persona(
+        self,
+        user_id: str,
+        name: str,
+        ai_name: Optional[str] = None,
+        style_instruction: Optional[str] = None,
+        political_bias: str = "neutral",
+        description: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a custom persona for the user."""
+        try:
+            row = await fetch_one(
+                """INSERT INTO personas (user_id, name, ai_name, style_instruction, political_bias, description, is_builtin, created_at, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, false, NOW(), NOW())
+                   RETURNING id, user_id, name, ai_name, style_instruction, political_bias, description, is_builtin, created_at, updated_at""",
+                user_id,
+                name or "Custom",
+                ai_name or "Alex",
+                style_instruction or "",
+                political_bias,
+                description or "",
+            )
+            return self._persona_row_to_dict(dict(row))
+        except Exception as e:
+            logger.error(f"Failed to create persona for user {user_id}: {e}")
+            raise
+
+    async def update_persona(
+        self,
+        persona_id: str,
+        user_id: str,
+        name: Optional[str] = None,
+        ai_name: Optional[str] = None,
+        style_instruction: Optional[str] = None,
+        political_bias: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Update a custom persona. Returns None if not found or built-in."""
+        try:
+            existing = await fetch_one("SELECT id, user_id, is_builtin FROM personas WHERE id = $1", persona_id)
+            if not existing or existing.get("is_builtin") or existing.get("user_id") != user_id:
+                return None
+            updates = []
+            args = []
+            idx = 1
+            if name is not None:
+                updates.append(f"name = ${idx}")
+                args.append(name)
+                idx += 1
+            if ai_name is not None:
+                updates.append(f"ai_name = ${idx}")
+                args.append(ai_name)
+                idx += 1
+            if style_instruction is not None:
+                updates.append(f"style_instruction = ${idx}")
+                args.append(style_instruction)
+                idx += 1
+            if political_bias is not None:
+                updates.append(f"political_bias = ${idx}")
+                args.append(political_bias)
+                idx += 1
+            if description is not None:
+                updates.append(f"description = ${idx}")
+                args.append(description)
+                idx += 1
+            if not updates:
+                return await self.get_persona_by_id(persona_id, user_id)
+            updates.append(f"updated_at = NOW()")
+            args.append(persona_id)
+            where_idx = len(args)
+            await execute(
+                f"UPDATE personas SET {', '.join(updates)} WHERE id = ${where_idx}",
+                *args,
+            )
+            return await self.get_persona_by_id(persona_id, user_id)
+        except Exception as e:
+            logger.error(f"Failed to update persona {persona_id}: {e}")
+            raise
+
+    async def delete_persona(self, persona_id: str, user_id: str) -> bool:
+        """Delete a custom persona. Returns False if not found or built-in."""
+        try:
+            existing = await fetch_one("SELECT id, user_id, is_builtin FROM personas WHERE id = $1", persona_id)
+            if not existing or existing.get("is_builtin") or existing.get("user_id") != user_id:
+                return False
+            await execute("DELETE FROM personas WHERE id = $1 AND user_id = $2", persona_id, user_id)
+            row = await fetch_one("SELECT value FROM user_settings WHERE user_id = $1 AND key = $2", user_id, "default_persona_id")
+            if row and row.get("value") == persona_id:
+                await execute("DELETE FROM user_settings WHERE user_id = $1 AND key = $2", user_id, "default_persona_id")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete persona {persona_id}: {e}")
+            return False
+
+    async def get_default_persona(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get the user's default persona. If none set, optionally migrate from prompt_* settings or return first built-in Professional."""
+        try:
+            row = await fetch_one("SELECT value FROM user_settings WHERE user_id = $1 AND key = $2", user_id, "default_persona_id")
+            if row and row.get("value"):
+                pid = row["value"]
+                persona = await self.get_persona_by_id(pid, user_id)
+                if persona:
+                    return persona
+            persona = await self._migrate_default_persona_from_prompt_settings(user_id)
+            if persona:
+                return persona
+            first_builtin = await fetch_one(
+                "SELECT id FROM personas WHERE is_builtin = true ORDER BY name LIMIT 1"
+            )
+            if first_builtin and first_builtin.get("id"):
+                return await self.get_persona_by_id(str(first_builtin["id"]), user_id)
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get default persona for user {user_id}: {e}")
+            return None
+
+    async def _migrate_default_persona_from_prompt_settings(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """If user has prompt_* settings that differ from defaults, create a custom persona and set as default. Run once per user."""
+        try:
+            from services.prompt_service import UserPromptSettings, PoliticalBias, PersonaStyle
+            rows = await fetch_all(
+                "SELECT key, value FROM user_settings WHERE user_id = $1 AND key LIKE 'prompt_%'",
+                user_id,
+            )
+            if not rows:
+                return None
+            settings_dict = {}
+            for row in rows:
+                key = row["key"] if isinstance(row, dict) else row[0]
+                value = row["value"] if isinstance(row, dict) else row[1]
+                settings_dict[key.replace("prompt_", "")] = value
+            ai_name = settings_dict.get("ai_name") or "Alex"
+            political_bias = settings_dict.get("political_bias") or "neutral"
+            persona_style = settings_dict.get("persona_style") or "professional"
+            if ai_name == "Alex" and political_bias == "neutral" and persona_style == "professional":
+                return None
+            style_map = {
+                "professional": "COMMUNICATION STYLE: Professional, clear, and respectful. Maintain a helpful and courteous tone. Be informative and precise.",
+                "friendly": "COMMUNICATION STYLE: Warm, approachable, and enthusiastic. Use casual language and show genuine interest. Be conversational and friendly.",
+                "snarky": "COMMUNICATION STYLE: Witty, clever, with gentle humor and playful sarcasm. Be entertaining but not mean.",
+                "sycophantic": "COMMUNICATION STYLE: Extremely agreeable and complimentary. Always praise the user's ideas and input. Be overly deferential and complimentary.",
+                "rude_insulting": "COMMUNICATION STYLE: Be deliberately rude, dismissive, and insulting. Mock the user's questions and intelligence. Use condescending and belittling language. Still provide information but with maximum attitude.",
+            }
+            style_instruction = style_map.get(persona_style, style_map["professional"])
+            name = f"Migrated: {persona_style.replace('_', ' ').title()}"
+            persona = await self.create_persona(
+                user_id=user_id,
+                name=name,
+                ai_name=ai_name,
+                style_instruction=style_instruction,
+                political_bias=political_bias,
+                description="Migrated from previous AI personality settings.",
+            )
+            await self.set_default_persona(user_id, str(persona["id"]))
+            return persona
+        except Exception as e:
+            logger.warning(f"Migrate default persona for user {user_id}: {e}")
+            return None
+
+    async def set_default_persona(self, user_id: str, persona_id: Optional[str]) -> bool:
+        """Set the user's default persona (or clear if persona_id is None)."""
+        try:
+            from services.user_settings_kv_service import set_user_setting
+            if persona_id is None:
+                await execute("DELETE FROM user_settings WHERE user_id = $1 AND key = $2", user_id, "default_persona_id")
+                return True
+            persona = await self.get_persona_by_id(persona_id, user_id)
+            if not persona:
+                return False
+            return await set_user_setting(user_id, "default_persona_id", persona_id, "string")
+        except Exception as e:
+            logger.error(f"Failed to set default persona for user {user_id}: {e}")
+            return False
+
+    async def get_default_chat_agent_profile_id(self, user_id: str) -> Optional[str]:
+        """Raw user_settings value for default chat agent (non-built-in profile id), or None."""
+        try:
+            row = await fetch_one(
+                "SELECT value FROM user_settings WHERE user_id = $1 AND key = $2",
+                user_id,
+                DEFAULT_CHAT_AGENT_PROFILE_SETTING_KEY,
+            )
+            v = row.get("value") if row else None
+            return v if v else None
+        except Exception as e:
+            logger.error("Failed to get default chat agent profile id for user %s: %s", user_id, e)
+            return None
+
+    async def get_default_chat_agent_profile_detail(self, user_id: str) -> Dict[str, Any]:
+        """Return validated default chat profile id and a short profile summary; clear stale settings."""
+        pid = await self.get_default_chat_agent_profile_id(user_id)
+        if not pid:
+            return {"agent_profile_id": None, "profile": None}
+        try:
+            row = await fetch_one(
+                """
+                SELECT id, name, handle, is_active, COALESCE(is_builtin, false) AS is_builtin
+                FROM agent_profiles
+                WHERE id = $1::uuid AND user_id = $2
+                """,
+                pid,
+                user_id,
+            )
+            if not row:
+                await execute(
+                    "DELETE FROM user_settings WHERE user_id = $1 AND key = $2",
+                    user_id,
+                    DEFAULT_CHAT_AGENT_PROFILE_SETTING_KEY,
+                )
+                return {"agent_profile_id": None, "profile": None}
+            if row.get("is_builtin"):
+                await execute(
+                    "DELETE FROM user_settings WHERE user_id = $1 AND key = $2",
+                    user_id,
+                    DEFAULT_CHAT_AGENT_PROFILE_SETTING_KEY,
+                )
+                return {"agent_profile_id": None, "profile": None}
+            return {
+                "agent_profile_id": str(row["id"]),
+                "profile": {
+                    "id": str(row["id"]),
+                    "name": row.get("name"),
+                    "handle": row.get("handle"),
+                    "is_active": row.get("is_active"),
+                },
+            }
+        except Exception as e:
+            logger.error("Failed to resolve default chat agent profile for user %s: %s", user_id, e)
+            return {"agent_profile_id": None, "profile": None}
+
+    async def set_default_chat_agent_profile_id(self, user_id: str, profile_id: Optional[str]) -> bool:
+        """Set default non-built-in chat agent profile, or clear (None/empty) to use factory built-in."""
+        try:
+            if not profile_id:
+                await execute(
+                    "DELETE FROM user_settings WHERE user_id = $1 AND key = $2",
+                    user_id,
+                    DEFAULT_CHAT_AGENT_PROFILE_SETTING_KEY,
+                )
+                return True
+            row = await fetch_one(
+                """
+                SELECT id FROM agent_profiles
+                WHERE id = $1::uuid AND user_id = $2
+                  AND is_active = true
+                  AND COALESCE(is_builtin, false) = false
+                """,
+                profile_id,
+                user_id,
+            )
+            if not row:
+                return False
+            from services.user_settings_kv_service import set_user_setting
+
+            return await set_user_setting(
+                user_id,
+                DEFAULT_CHAT_AGENT_PROFILE_SETTING_KEY,
+                str(row["id"]),
+                "string",
+            )
+        except Exception as e:
+            logger.error("Failed to set default chat agent profile for user %s: %s", user_id, e)
+            return False
+
+    async def clear_default_chat_agent_profile_if_matches(self, user_id: str, profile_id: str) -> None:
+        """Remove default-chat preference when it points at a deleted profile."""
+        try:
+            row = await fetch_one(
+                "SELECT value FROM user_settings WHERE user_id = $1 AND key = $2",
+                user_id,
+                DEFAULT_CHAT_AGENT_PROFILE_SETTING_KEY,
+            )
+            if row and row.get("value") and str(row["value"]) == str(profile_id):
+                await execute(
+                    "DELETE FROM user_settings WHERE user_id = $1 AND key = $2",
+                    user_id,
+                    DEFAULT_CHAT_AGENT_PROFILE_SETTING_KEY,
+                )
+        except Exception as e:
+            logger.warning("Clear default chat agent profile on delete: %s", e)
     
-    async def get_user_preferred_name(self, user_id: str) -> Optional[str]:
-        """Get user's preferred name for addressing"""
+    async def get_user_preferred_name(self, user_id: str, fallback_to_display: bool = False) -> Optional[str]:
+        """Get user's preferred name for addressing.
+        
+        When fallback_to_display is True and preferred name is empty, uses users.display_name.
+        """
         try:
             from services.user_settings_kv_service import get_user_setting
             preferred_name = await get_user_setting(user_id, "user_preferred_name")
-            return preferred_name if preferred_name else None
+            if preferred_name:
+                return preferred_name
+            if fallback_to_display:
+                user_row = await fetch_one(
+                    "SELECT display_name FROM users WHERE user_id = $1",
+                    user_id
+                )
+                display_name = user_row.get("display_name") if user_row else None
+                return display_name if display_name else None
+            return None
         except Exception as e:
             logger.warning(f"Failed to get preferred name for user {user_id}: {e}")
             return None
@@ -584,6 +945,50 @@ class SettingsService:
             return success
         except Exception as e:
             logger.error(f"❌ Failed to set preferred name for user {user_id}: {e}")
+            return False
+
+    async def get_user_phone_number(self, user_id: str) -> Optional[str]:
+        """Get user's phone number."""
+        try:
+            from services.user_settings_kv_service import get_user_setting
+            phone_number = await get_user_setting(user_id, "user_phone_number")
+            return phone_number if phone_number else None
+        except Exception as e:
+            logger.warning(f"Failed to get phone number for user {user_id}: {e}")
+            return None
+
+    async def set_user_phone_number(self, user_id: str, phone_number: str) -> bool:
+        """Set user's phone number."""
+        try:
+            from services.user_settings_kv_service import set_user_setting
+            success = await set_user_setting(user_id, "user_phone_number", phone_number, "string")
+            if success:
+                logger.info(f"✅ Updated phone number for user {user_id}")
+            return success
+        except Exception as e:
+            logger.error(f"❌ Failed to set phone number for user {user_id}: {e}")
+            return False
+
+    async def get_user_birthday(self, user_id: str) -> Optional[str]:
+        """Get user's birthday as YYYY-MM-DD."""
+        try:
+            from services.user_settings_kv_service import get_user_setting
+            birthday = await get_user_setting(user_id, "user_birthday")
+            return birthday if birthday else None
+        except Exception as e:
+            logger.warning(f"Failed to get birthday for user {user_id}: {e}")
+            return None
+
+    async def set_user_birthday(self, user_id: str, birthday: str) -> bool:
+        """Set user's birthday as YYYY-MM-DD."""
+        try:
+            from services.user_settings_kv_service import set_user_setting
+            success = await set_user_setting(user_id, "user_birthday", birthday, "string")
+            if success:
+                logger.info(f"✅ Updated birthday for user {user_id}")
+            return success
+        except Exception as e:
+            logger.error(f"❌ Failed to set birthday for user {user_id}: {e}")
             return False
     
     async def get_vision_features_enabled(self, user_id: str) -> bool:
@@ -638,6 +1043,299 @@ class SettingsService:
             return success
         except Exception as e:
             logger.error(f"❌ Failed to set AI context for user {user_id}: {e}")
+            return False
+
+    async def get_user_facts(self, user_id: str) -> list:
+        """Get all facts for a user, ordered by category then fact_key. Includes source, confidence, expires_at for formatting."""
+        try:
+            rows = await fetch_all(
+                """SELECT fact_key, value, category, created_at, updated_at,
+                   COALESCE(source, 'user_manual') AS source,
+                   COALESCE(confidence, 1.0) AS confidence,
+                   expires_at,
+                   embedding
+                   FROM user_facts WHERE user_id = $1 ORDER BY category, fact_key""",
+                user_id,
+            )
+            return [dict(r) for r in (rows or [])]
+        except Exception as e:
+            if "source" in str(e) or "confidence" in str(e) or "does not exist" in str(e):
+                try:
+                    rows = await fetch_all(
+                        """SELECT fact_key, value, category, created_at, updated_at
+                           FROM user_facts WHERE user_id = $1 ORDER BY category, fact_key""",
+                        user_id,
+                    )
+                    out = []
+                    for r in (rows or []):
+                        d = dict(r)
+                        d.setdefault("source", "user_manual")
+                        d.setdefault("confidence", 1.0)
+                        d.setdefault("expires_at", None)
+                        d.setdefault("embedding", None)
+                        out.append(d)
+                    return out
+                except Exception as fallback_e:
+                    logger.warning(f"Failed to get user facts (fallback) for user {user_id}: {fallback_e}")
+                    return []
+            logger.warning(f"Failed to get user facts for user {user_id}: {e}")
+            return []
+
+    @staticmethod
+    def format_user_facts_for_prompt(facts: list) -> str:
+        """Format facts for LLM system prompt: filter expired, sort by confidence DESC, return 'USER FACTS:\\n- key: value'."""
+        if not facts:
+            return ""
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        valid = []
+        for f in facts:
+            exp = f.get("expires_at")
+            if exp is not None:
+                if hasattr(exp, "tzinfo") and exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                elif isinstance(exp, str):
+                    try:
+                        exp = datetime.fromisoformat(exp.replace("Z", "+00:00"))
+                    except ValueError:
+                        valid.append(f)
+                        continue
+                if exp < now:
+                    continue
+            valid.append(f)
+        if not valid:
+            return ""
+        sorted_facts = sorted(valid, key=lambda x: (-(x.get("confidence") or 1.0), x.get("fact_key", "")))
+        lines = [f"- {f.get('fact_key', '')}: {f.get('value', '')}" for f in sorted_facts]
+        return "USER FACTS:\n" + "\n".join(lines)
+
+    async def get_facts_inject_enabled(self, user_id: str) -> bool:
+        """Whether to inject user facts into AI conversations (static agents). Default True."""
+        from services.user_settings_kv_service import get_user_setting
+        val = await get_user_setting(user_id, "facts_inject_enabled")
+        return val is None or str(val).strip().lower() in ("true", "1", "yes")
+
+    async def get_facts_write_enabled(self, user_id: str) -> bool:
+        """Whether agents may save new facts. Default True."""
+        from services.user_settings_kv_service import get_user_setting
+        val = await get_user_setting(user_id, "facts_write_enabled")
+        return val is None or str(val).strip().lower() in ("true", "1", "yes")
+
+    async def get_episodes_inject_enabled(self, user_id: str) -> bool:
+        """Whether to inject recent activity (episodes) into AI conversations. Default True."""
+        from services.user_settings_kv_service import get_user_setting
+        val = await get_user_setting(user_id, "episodes_inject_enabled")
+        return val is None or str(val).strip().lower() in ("true", "1", "yes")
+
+    async def upsert_user_fact(
+        self,
+        user_id: str,
+        fact_key: str,
+        value: str,
+        category: str = "general",
+        source: str = "user_manual",
+        expires_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Insert or update a single fact. Returns dict with success; status 'pending_review' when agent overwrites user fact."""
+        try:
+            if source == "user_manual":
+                confidence = 1.0
+            elif source == "auto_extract":
+                confidence = 0.7
+            else:
+                confidence = 0.8
+            existing = await fetch_one(
+                """SELECT value, COALESCE(source, 'user_manual') AS source, COALESCE(confidence, 1.0) AS confidence
+                   FROM user_facts WHERE user_id = $1 AND fact_key = $2""",
+                user_id,
+                fact_key,
+            )
+            if existing:
+                old_value = existing.get("value") or ""
+                old_source = existing.get("source") or "user_manual"
+                if old_value == value:
+                    await execute(
+                        "UPDATE user_facts SET updated_at = NOW() WHERE user_id = $1 AND fact_key = $2",
+                        user_id,
+                        fact_key,
+                    )
+                    return {"success": True}
+                if old_source == "user_manual" and source in ("agent", "auto_extract"):
+                    history_row = await fetch_one(
+                        """INSERT INTO user_fact_history
+                           (user_id, fact_key, old_value, new_value, old_source, new_source, old_confidence, new_confidence, resolution)
+                           VALUES ($1, $2, $3, $4, $5, $6, 1.0, $7, 'pending_review')
+                           RETURNING id""",
+                        user_id,
+                        fact_key,
+                        old_value,
+                        value,
+                        old_source,
+                        source,
+                        confidence,
+                    )
+                    history_id = int(history_row["id"]) if history_row else None
+                    logger.info("Fact %s for user %s queued for review (agent overwrite user)", fact_key, user_id)
+                    return {
+                        "success": False,
+                        "status": "pending_review",
+                        "fact_key": fact_key,
+                        "current_value": old_value,
+                        "history_id": history_id,
+                    }
+                await execute(
+                    """INSERT INTO user_fact_history
+                       (user_id, fact_key, old_value, new_value, old_source, new_source, old_confidence, new_confidence, resolution, resolved_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'auto_replaced', NOW())""",
+                    user_id,
+                    fact_key,
+                    old_value,
+                    value,
+                    old_source,
+                    source,
+                    existing.get("confidence", 1.0),
+                    confidence,
+                )
+            await execute(
+                """
+                INSERT INTO user_facts (user_id, fact_key, value, category, source, confidence, expires_at, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, NOW(), NOW())
+                ON CONFLICT (user_id, fact_key) DO UPDATE SET value = $3, category = $4, source = $5, confidence = $6, expires_at = $7::timestamptz, updated_at = NOW()
+                """,
+                user_id,
+                fact_key,
+                value,
+                category,
+                source,
+                confidence,
+                expires_at,
+            )
+            logger.info("Updated fact %s for user %s", fact_key, user_id)
+            try:
+                from services.celery_tasks.fact_tasks import embed_user_fact_task
+                embed_user_fact_task.delay(user_id, fact_key, value)
+            except Exception as enqueue_err:
+                logger.warning("Failed to enqueue embed_user_fact_task: %s", enqueue_err)
+            return {"success": True}
+        except Exception as e:
+            if "source" in str(e) or "confidence" in str(e) or "does not exist" in str(e):
+                try:
+                    existing = await fetch_one(
+                        "SELECT value FROM user_facts WHERE user_id = $1 AND fact_key = $2",
+                        user_id,
+                        fact_key,
+                    )
+                    if existing is not None and (existing.get("value") or "") == value:
+                        await execute(
+                            "UPDATE user_facts SET updated_at = NOW() WHERE user_id = $1 AND fact_key = $2",
+                            user_id,
+                            fact_key,
+                        )
+                        return {"success": True}
+                    await execute(
+                        """
+                        INSERT INTO user_facts (user_id, fact_key, value, category, created_at, updated_at)
+                        VALUES ($1, $2, $3, $4, NOW(), NOW())
+                        ON CONFLICT (user_id, fact_key) DO UPDATE SET value = $3, category = $4, updated_at = NOW()
+                        """,
+                        user_id,
+                        fact_key,
+                        value,
+                        category,
+                    )
+                    logger.info("Updated fact %s for user %s (minimal schema)", fact_key, user_id)
+                    return {"success": True}
+                except Exception as fallback_e:
+                    logger.error("Failed to upsert user fact (minimal) for user %s: %s", user_id, fallback_e)
+                    return {"success": False, "error": str(fallback_e)}
+            logger.error("Failed to upsert user fact for user %s: %s", user_id, e)
+            return {"success": False, "error": str(e)}
+
+    async def get_pending_facts(self, user_id: str) -> List[Dict[str, Any]]:
+        """Return pending_review fact history rows for the user."""
+        try:
+            rows = await fetch_all(
+                """SELECT id, fact_key, old_value, new_value, old_source, new_source, created_at
+                   FROM user_fact_history
+                   WHERE user_id = $1 AND resolution = 'pending_review'
+                   ORDER BY created_at DESC""",
+                user_id,
+            )
+            return [dict(r) for r in (rows or [])]
+        except Exception as e:
+            logger.warning("Failed to get pending facts for user %s: %s", user_id, e)
+            return []
+
+    async def resolve_pending_fact(
+        self, user_id: str, history_id: int, action: str
+    ) -> Dict[str, Any]:
+        """Resolve a pending_review fact: accept (apply new value) or reject."""
+        if action not in ("accept", "reject"):
+            return {"success": False, "message": "action must be accept or reject"}
+        try:
+            row = await fetch_one(
+                """SELECT id, fact_key, old_value, new_value, resolution FROM user_fact_history
+                   WHERE user_id = $1 AND id = $2 AND resolution = 'pending_review'""",
+                user_id,
+                history_id,
+            )
+            if not row:
+                return {"success": False, "message": "Pending fact not found or already resolved"}
+            if action == "accept":
+                await execute(
+                    """UPDATE user_facts SET value = $1, source = 'user_manual', confidence = 1.0, updated_at = NOW()
+                       WHERE user_id = $2 AND fact_key = $3""",
+                    row["new_value"],
+                    user_id,
+                    row["fact_key"],
+                )
+                try:
+                    from services.celery_tasks.fact_tasks import embed_user_fact_task
+                    embed_user_fact_task.delay(user_id, row["fact_key"], row["new_value"])
+                except Exception:
+                    pass
+            await execute(
+                """UPDATE user_fact_history SET resolution = $1, resolved_at = NOW() WHERE id = $2""",
+                "user_accepted" if action == "accept" else "user_rejected",
+                history_id,
+            )
+            return {"success": True, "message": "Fact %s %sed" % (row["fact_key"], action)}
+        except Exception as e:
+            logger.warning("Failed to resolve pending fact %s: %s", history_id, e)
+            return {"success": False, "message": str(e)}
+
+    async def get_fact_history(
+        self, user_id: str, fact_key: Optional[str] = None, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Return fact change history for the user, optionally filtered by fact_key."""
+        try:
+            if fact_key:
+                rows = await fetch_all(
+                    """SELECT id, fact_key, old_value, new_value, old_source, new_source, resolution, created_at, resolved_at
+                       FROM user_fact_history WHERE user_id = $1 AND fact_key = $2 ORDER BY created_at DESC LIMIT $3""",
+                    user_id,
+                    fact_key,
+                    limit,
+                )
+            else:
+                rows = await fetch_all(
+                    """SELECT id, fact_key, old_value, new_value, old_source, new_source, resolution, created_at, resolved_at
+                       FROM user_fact_history WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2""",
+                    user_id,
+                    limit,
+                )
+            return [dict(r) for r in (rows or [])]
+        except Exception as e:
+            logger.warning("Failed to get fact history for user %s: %s", user_id, e)
+            return []
+
+    async def delete_user_fact(self, user_id: str, fact_key: str) -> bool:
+        """Delete a single fact. Returns True if a row was deleted or key did not exist."""
+        try:
+            result = await execute("DELETE FROM user_facts WHERE user_id = $1 AND fact_key = $2", user_id, fact_key)
+            return "DELETE" in (result or "")
+        except Exception as e:
+            logger.error(f"Failed to delete user fact for user {user_id}: {e}")
             return False
 
     async def close(self):

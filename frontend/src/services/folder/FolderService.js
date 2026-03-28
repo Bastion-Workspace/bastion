@@ -3,8 +3,9 @@ import ApiServiceBase from '../base/ApiServiceBase';
 class FolderService extends ApiServiceBase {
   // ===== FOLDER MANAGEMENT METHODS =====
 
-  getFolderTree = async (collectionType = 'user') => {
-    return this.get(`/api/folders/tree?collection_type=${collectionType}`);
+  getFolderTree = async (collectionType = 'user', shallow = true) => {
+    const s = shallow ? 'true' : 'false';
+    return this.get(`/api/folders/tree?collection_type=${collectionType}&shallow=${s}`);
   }
 
   getFolderContents = async (folderId, limit = 250, offset = 0) => {
@@ -54,7 +55,7 @@ class FolderService extends ApiServiceBase {
    */
   downloadLibrary = async () => {
     const token = localStorage.getItem('auth_token');
-    const baseUrl = process.env.REACT_APP_API_URL || '';
+    const baseUrl = import.meta.env.VITE_API_URL || '';
     const resp = await fetch(`${baseUrl}/api/folders/library/download`, {
       method: 'GET',
       headers: token ? { Authorization: `Bearer ${token}` } : {},

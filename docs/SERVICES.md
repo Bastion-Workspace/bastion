@@ -179,9 +179,10 @@ Main application backend providing:
 
 ### Frontend Web UI
 
-**Container:** `frontend`  
+**Container:** `frontend` (Compose profile `prod`)  
 **Build:** `./frontend/Dockerfile`  
-**Port:** `3051:80` (Nginx serving React app)
+**Port:** `3051:80` (Nginx serving React app)  
+**Dev (Vite HMR):** `frontend-dev` (profile `dev`), same host port `3051`. Use `docker compose --profile dev up --build` for a full stack with the dev UI; ensure `COMPOSE_PROFILES` in `.env` does not include `prod` when using `dev`, or both services contend for port 3051. For production nginx UI on a normal `docker compose up`, set `COMPOSE_PROFILES=prod` (see `.env.example`).
 
 **Purpose:**
 React-based web interface providing:
@@ -200,8 +201,10 @@ React-based web interface providing:
 - Responsive design
 
 **Environment Variables:**
-- `REACT_APP_APP_NAME` - Application name
-- `REACT_APP_VERSION` - Version display
+- `VITE_APP_NAME` - Application name (embedded at build time)
+- `VITE_VERSION` - Version display (embedded at build time)
+- `VITE_API_URL` - Optional API base URL (empty uses same-origin `/api` via nginx)
+- `VITE_PMTILES_URL`, `VITE_MAP_TILE_URL`, `VITE_MAP_DARK_STYLE` - Map configuration
 
 **Dependencies:**
 - `backend` (API endpoints)

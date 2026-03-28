@@ -69,9 +69,15 @@ async def serve():
             logger.error(f"Database initialization failed: {e}")
             raise
         
+        _max_msg = 50 * 1024 * 1024
+        _grpc_opts = [
+            ("grpc.max_send_message_length", _max_msg),
+            ("grpc.max_receive_message_length", _max_msg),
+        ]
         # Create gRPC server
         server = grpc.aio.server(
-            futures.ThreadPoolExecutor(max_workers=10)
+            futures.ThreadPoolExecutor(max_workers=10),
+            options=_grpc_opts,
         )
         
         # Register data service

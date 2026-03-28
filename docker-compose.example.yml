@@ -17,8 +17,8 @@ services:
       - PGDATA=/var/lib/postgresql/data/pgdata
     command: >
       postgres
-      -c max_connections=200
-      -c shared_buffers=256MB
+      -c max_connections=400
+      -c shared_buffers=512MB
       -c effective_cache_size=1GB
       -c maintenance_work_mem=64MB
       -c checkpoint_completion_target=0.9
@@ -125,6 +125,8 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
       - OSRM_BASE_URL=${OSRM_BASE_URL:-http://osrm:5000}
+      - VALHALLA_BASE_URL=${VALHALLA_BASE_URL:-http://valhalla:8002}
+      - ROUTING_PROVIDER=${ROUTING_PROVIDER:-valhalla}
       - USE_VECTOR_SERVICE=true
       - UPLOAD_MAX_SIZE=${UPLOAD_MAX_SIZE:-1500MB}
       - QUALITY_THRESHOLD=${QUALITY_THRESHOLD:-0.7}
@@ -148,12 +150,17 @@ services:
       - IMAGE_VISION_SERVICE_PORT=50056
       - CONNECTIONS_SERVICE_HOST=connections-service
       - CONNECTIONS_SERVICE_PORT=50057
+      - VOICE_SERVICE_HOST=voice-service
+      - VOICE_SERVICE_PORT=50059
+      - DOCUMENT_SERVICE_HOST=document-service
+      - DOCUMENT_SERVICE_PORT=50058
       - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
       - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-common}
       - MICROSOFT_REDIRECT_URI=${MICROSOFT_REDIRECT_URI:-}
       - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-changeme-internal-key}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-jwt-secret}
+      - SECRET_KEY=${SECRET_KEY:-bastion-secret-key-change-in-production}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@localhost}
@@ -177,6 +184,8 @@ services:
         - BUILDKIT_INLINE_CACHE=1
     image: ${COMPOSE_PROJECT_NAME:-bastion}-tools-service:latest
     container_name: ${COMPOSE_PROJECT_NAME:-bastion}-tools-service
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     logging:
         driver: "journald"
         options:
@@ -189,6 +198,8 @@ services:
       searxng:
         condition: service_healthy
       crawl4ai-service:
+        condition: service_healthy
+      vector-service:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://bastion_user:${POSTGRES_APP_PASSWORD:-changeme}@postgres:5432/bastion_knowledge_base
@@ -206,11 +217,14 @@ services:
       - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
       - GRPC_TOOL_SERVICE_PORT=50052
       - LOG_LEVEL=${TOOLS_SERVICE_LOG_LEVEL:-INFO}
+      - SECRET_KEY=${SECRET_KEY:-bastion-secret-key-change-in-production}
     ports:
       - "50062:50052"
     volumes:
       - ./uploads:/app/uploads
       - ./logs:/app/logs
+      - mcp-uv-cache:/root/.cache/uv
+      - mcp-npm-cache:/root/.npm
     networks:
       - default
     restart: unless-stopped
@@ -220,6 +234,44 @@ services:
       timeout: 10s
       start_period: 40s
       retries: 3
+
+  cli-worker:
+    build:
+      context: .
+      dockerfile: cli-worker/Dockerfile
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: ${COMPOSE_PROJECT_NAME:-bastion}-cli-worker:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-cli-worker
+    read_only: true
+    tmpfs:
+      - /scratch:size=2G
+      - /tmp:size=256M
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+    logging:
+      driver: "journald"
+      options:
+        tag: "bastion-cli-worker"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(5); s.connect(('localhost',50060)); s.close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    environment:
+      - CLI_WORKER_PORT=50060
+      - CLI_SCRATCH_DIR=/scratch
+      - CLI_DEFAULT_TIMEOUT=120
+      - CLI_MAX_OUTPUT_MB=100
+      - YTDLP_MAX_FILESIZE_MB=500
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    networks:
+      - default
 
   celery_worker:
     build:
@@ -260,6 +312,10 @@ services:
       - DEBUG=${DEBUG:-true}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-jwt-secret}
       - LOG_LEVEL=${CELERY_WORKER_LOG_LEVEL:-INFO}
+      - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID:-}
+      - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET:-}
+      - MICROSOFT_TENANT_ID=${MICROSOFT_TENANT_ID:-common}
+      - SECRET_KEY=${SECRET_KEY:-bastion-secret-key-change-in-production}
       - CELERY_WORKER_TYPE=orchestrator
     volumes:
       - ./uploads:/app/uploads
@@ -295,6 +351,7 @@ services:
       - DEBUG=${DEBUG:-true}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-changeme-jwt-secret}
       - LOG_LEVEL=${CELERY_BEAT_LOG_LEVEL:-INFO}
+      - SECRET_KEY=${SECRET_KEY:-bastion-secret-key-change-in-production}
     volumes:
       - ./logs:/app/logs
     restart: unless-stopped
@@ -324,11 +381,19 @@ services:
     restart: unless-stopped
 
   frontend:
+    profiles:
+      - prod
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
         - BUILDKIT_INLINE_CACHE=1
+        - VITE_API_URL=${VITE_API_URL:-}
+        - VITE_APP_NAME=${VITE_APP_NAME:-Bastion}
+        - VITE_VERSION=${VITE_VERSION:-0.50.0}
+        - VITE_MAP_TILE_URL=${VITE_MAP_TILE_URL:-}
+        - VITE_PMTILES_URL=${VITE_PMTILES_URL:-/pmtiles/world.pmtiles}
+        - VITE_MAP_DARK_STYLE=${VITE_MAP_DARK_STYLE:-}
     image: ${COMPOSE_PROJECT_NAME:-bastion}-frontend:latest
     logging:
         driver: "journald"
@@ -341,10 +406,50 @@ services:
     ports:
       - "0.0.0.0:3051:80"
     environment:
-      - REACT_APP_APP_NAME=Bastion
-      - REACT_APP_VERSION=0.20.0
-      - REACT_APP_MAP_TILE_URL=${REACT_APP_MAP_TILE_URL:-http://localhost:8080}
+      - VITE_APP_NAME=Bastion
+      - VITE_VERSION=0.50.0
+      - VITE_MAP_TILE_URL=${VITE_MAP_TILE_URL:-}
+      - VITE_PMTILES_URL=${VITE_PMTILES_URL:-/pmtiles/world.pmtiles}
+    volumes:
+      - ${PMTILES_DATA_PATH:-./pmtiles-data}:/data/pmtiles:ro
     restart: unless-stopped
+
+  # Vite dev server (HMR). Profile `dev`. Same host port 3051 as `frontend`.
+  # Full stack + dev UI: docker compose --profile dev up --build
+  # (Ensure COMPOSE_PROFILES does not include `prod` when using dev, or port 3051 conflicts.)
+  frontend-dev:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: ${COMPOSE_PROJECT_NAME:-bastion}-frontend-dev:latest
+    logging:
+        driver: "journald"
+        options:
+          tag: "bastion-frontend-dev"
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-frontend-dev
+    depends_on:
+      - backend
+      - webdav
+    ports:
+      - "0.0.0.0:3051:3000"
+    environment:
+      - VITE_API_URL=${VITE_API_URL:-}
+      - VITE_APP_NAME=${VITE_APP_NAME:-Bastion}
+      - VITE_VERSION=${VITE_VERSION:-0.50.0}
+      - VITE_MAP_TILE_URL=${VITE_MAP_TILE_URL:-}
+      - VITE_PMTILES_URL=${VITE_PMTILES_URL:-/pmtiles/world.pmtiles}
+      - VITE_MAP_DARK_STYLE=${VITE_MAP_DARK_STYLE:-}
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.mjs:/app/vite.config.mjs
+      - ${PMTILES_DATA_PATH:-./pmtiles-data}:/data/pmtiles:ro
+    restart: unless-stopped
+    profiles:
+      - dev
 
   webdav:
     build:
@@ -391,6 +496,8 @@ services:
         condition: service_healthy
       tools-service:
         condition: service_healthy
+      cli-worker:
+        condition: service_healthy
     environment:
       - SERVICE_NAME=llm-orchestrator
       - GRPC_PORT=50051
@@ -402,6 +509,10 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_APP_PASSWORD:-changeme}
       - BACKEND_TOOL_SERVICE_HOST=tools-service
       - BACKEND_TOOL_SERVICE_PORT=50052
+      - CLI_WORKER_HOST=cli-worker
+      - CLI_WORKER_PORT=50060
+      - VOICE_SERVICE_HOST=voice-service
+      - VOICE_SERVICE_PORT=50059
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
       - DEFAULT_MODEL=${DEFAULT_MODEL:-anthropic/claude-3.5-sonnet}
@@ -438,10 +549,19 @@ services:
       - GRPC_PORT=50053
       - LOG_LEVEL=${VECTOR_SERVICE_LOG_LEVEL:-INFO}
       - QDRANT_URL=${QDRANT_URL:-http://localhost:6333}
+      - EMBEDDING_PROVIDER=${EMBEDDING_PROVIDER:-openai}
+      - EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS:-3072}
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - OPENAI_EMBEDDING_MODEL=text-embedding-3-large
+      - OPENAI_EMBEDDING_MODEL=${OPENAI_EMBEDDING_MODEL:-text-embedding-3-large}
       - OPENAI_MAX_RETRIES=3
       - OPENAI_TIMEOUT=30
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENROUTER_EMBEDDING_MODEL=${OPENROUTER_EMBEDDING_MODEL:-openai/text-embedding-3-large}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434}
+      - OLLAMA_EMBEDDING_MODEL=${OLLAMA_EMBEDDING_MODEL:-nomic-embed-text}
+      - VLLM_BASE_URL=${VLLM_BASE_URL:-http://vllm:8000/v1}
+      - VLLM_EMBEDDING_MODEL=${VLLM_EMBEDDING_MODEL:-}
+      - VLLM_API_KEY=${VLLM_API_KEY:-}
       - PARALLEL_WORKERS=4
       - BATCH_SIZE=100
       - MAX_TEXT_LENGTH=8000
@@ -475,7 +595,7 @@ services:
     command: >
       postgres
       -c max_connections=100
-      -c shared_buffers=256MB
+      -c shared_buffers=512MB
       -c work_mem=8MB
     volumes:
       - bastion_data_workspace_db:/var/lib/postgresql/data
@@ -538,7 +658,7 @@ services:
     environment:
       - SERVICE_NAME=image-vision-service
       - GRPC_PORT=50056
-      - SERVICE_VERSION=0.20.0
+      - SERVICE_VERSION=0.50.0
       - LOG_LEVEL=${IMAGE_VISION_SERVICE_LOG_LEVEL:-INFO}
       - DEVICE=${IMAGE_VISION_DEVICE:-auto}
       - MAX_WORKERS=4
@@ -578,6 +698,8 @@ services:
       - MICROSOFT_GRAPH_BASE=https://graph.microsoft.com/v1.0
       - BACKEND_URL=http://backend:8000
       - INTERNAL_SERVICE_KEY=${INTERNAL_SERVICE_KEY:-changeme-internal-key}
+      - VOICE_SERVICE_HOST=voice-service
+      - VOICE_SERVICE_PORT=50059
     ports:
       - "50058:50057"
     networks:
@@ -588,6 +710,68 @@ services:
       interval: 30s
       timeout: 10s
       start_period: 20s
+      retries: 3
+
+  voice-service:
+    build:
+      context: .
+      dockerfile: ./voice-service/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-voice-service
+    logging:
+      driver: "journald"
+      options:
+        tag: "bastion-voice-service"
+    environment:
+      - SERVICE_NAME=voice-service
+      - GRPC_PORT=50059
+      - LOG_LEVEL=${VOICE_SERVICE_LOG_LEVEL:-INFO}
+      - VOICE_STT_PROVIDER=whisper
+      - VOICE_TTS_PROVIDER=${VOICE_TTS_PROVIDER:-elevenlabs}
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-small}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-auto}
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - PIPER_VOICE=${PIPER_VOICE:-en_US-arctic-medium}
+      - PIPER_BOOTSTRAP=${PIPER_BOOTSTRAP:-1}
+    ports:
+      - "50060:50059"
+    volumes:
+      - voice-models:/app/models
+    networks:
+      - default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(5); s.connect((\"localhost\", 50059)); s.close()' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+  document-service:
+    build:
+      context: .
+      dockerfile: ./document-service/Dockerfile
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-document-service
+    logging:
+      driver: "journald"
+      options:
+        tag: "bastion-document-service"
+    environment:
+      - SERVICE_NAME=document-service
+      - GRPC_PORT=50058
+      - LOG_LEVEL=${DOCUMENT_SERVICE_LOG_LEVEL:-INFO}
+      - GLINER_MODEL=${GLINER_MODEL:-fastino/gliner2-base-v1}
+      - MAX_TEXT_LENGTH=${DOCUMENT_SERVICE_MAX_TEXT_LENGTH:-1000000}
+    ports:
+      - "50059:50058"
+    networks:
+      - default
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import socket; s = socket.socket(); s.settimeout(10); s.connect((\"localhost\", 50058)); s.close()' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
       retries: 3
 
   crawl4ai-service:
@@ -623,47 +807,33 @@ services:
       start_period: 40s
       retries: 3
 
-  osrm:
-    image: ghcr.io/project-osrm/osrm-backend:latest
-    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-osrm
+  # Valhalla routing: optional. Requires one-time data setup (see scripts/setup_valhalla_data.sh).
+  # Start with: docker compose --profile routing up -d valhalla
+  valhalla:
+    profiles:
+      - routing
+    image: ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-valhalla
     ports:
-      - "5000:5000"
+      - "8002:8002"
     volumes:
-      - ${OSRM_DATA_PATH:-./osrm-data}:/data:ro
-    command: ["sh", "-c", "if [ -f /data/map.osrm ]; then BASE=/data/map.osrm; elif [ -f /data/map.osrm.cnbg ]; then BASE=/data/map.osrm; elif [ -f /data/us-latest.osrm ]; then BASE=/data/us-latest.osrm; elif [ -f /data/us-latest.osrm.cnbg ]; then BASE=/data/us-latest.osrm; else echo 'Waiting for OSRM data (run: scripts/setup_osrm_data.sh)'; exec sleep infinity; fi; if [ -z \"$$BASE\" ]; then echo 'BASE not set'; exec sleep infinity; fi; exec osrm-routed \"$$BASE\" --algorithm mld --max-table-size 10000"]
-    restart: unless-stopped
-    logging:
-      driver: "journald"
-      options:
-        tag: "bastion-osrm"
-    healthcheck:
-      test: ["CMD-SHELL", "( test -f /data/map.osrm -o -f /data/map.osrm.cnbg -o -f /data/us-latest.osrm -o -f /data/us-latest.osrm.cnbg ) && wget -q --spider http://localhost:5000/route/v1/driving/-118.2437,34.0522;-118.2537,34.0622 || exit 0"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-  map-tiles:
-    image: maptiler/tileserver-gl:latest
-    container_name: ${COMPOSE_PROJECT_NAME:-bastion}-map-tiles
-    ports:
-      - "8080:8080"
-    volumes:
-      - ${OSRM_DATA_PATH:-./osrm-data}:/data:ro
+      - ${VALHALLA_DATA_PATH:-./valhalla-data}:/custom_files
     environment:
-      - NODE_ENV=production
-    command: ["sh", "-c", "if [ -f /data/map.mbtiles ]; then exec tileserver-gl --file /data/map.mbtiles --verbose --bind 0.0.0.0; else echo 'Waiting for /data/map.mbtiles (run: scripts/setup_osrm_data.sh)'; exec sleep infinity; fi"]
+      - use_tiles_ignore_pbf=True
+      - build_elevation=False
+      - build_admins=False
+      - build_time_zones=False
     restart: unless-stopped
     logging:
       driver: "journald"
       options:
-        tag: "bastion-map-tiles"
+        tag: "bastion-valhalla"
     healthcheck:
-      test: ["CMD-SHELL", "test -f /data/map.mbtiles && wget -q -O- http://localhost:8080/ >/dev/null || exit 0"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:8002/status || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: "300s"
 
 volumes:
   bastion_redis_data:
@@ -672,8 +842,12 @@ volumes:
     driver: local
   bastion_data_workspace_db:
     driver: local
-  osrm_data:
-    name: ${COMPOSE_PROJECT_NAME:-bastion}_osrm_data
+  voice-models:
+    driver: local
+  mcp-uv-cache:
+    driver: local
+  mcp-npm-cache:
+    driver: local
 networks:
   default:
     name: bastion-network

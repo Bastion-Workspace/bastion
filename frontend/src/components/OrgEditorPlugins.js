@@ -1,5 +1,6 @@
 import { Decoration, ViewPlugin, EditorView } from '@codemirror/view';
 import { foldService, foldState, foldEffect, unfoldEffect, codeFolding } from '@codemirror/language';
+import { ACCENT_PALETTES } from '../theme/themeConfig';
 
 const TODO_STATES = ['TODO', 'NEXT', 'STARTED', 'WAITING', 'HOLD'];
 const DONE_STATES = ['DONE', 'CANCELED', 'CANCELLED', 'WONTFIX', 'FIXED'];
@@ -43,11 +44,11 @@ export function findOrgFoldRange(state, startLine) {
     
     // Strict validation for folds (replacement decorations must be non-empty and valid)
     if (typeof from !== 'number' || typeof to !== 'number' || isNaN(from) || isNaN(to)) {
-       console.warn('❌ ROOSEVELT: Invalid fold positions (NaN/type)', { from, to });
+       console.warn('Invalid fold positions (NaN/type)', { from, to });
        return null;
     }
     if (from < 0 || to > doc.length) {
-       console.warn('❌ ROOSEVELT: Fold range out of bounds', { from, to, docLen: doc.length });
+       console.warn('Fold range out of bounds', { from, to, docLen: doc.length });
        return null;
     }
     if (from >= to) {
@@ -56,7 +57,7 @@ export function findOrgFoldRange(state, startLine) {
        // from = end of header line. to = end of end line.
        // If endLine > startLine, range includes at least one newline.
        // So from < to should be true.
-       console.warn('❌ ROOSEVELT: Empty or inverted fold range', { from, to });
+       console.warn('Empty or inverted fold range', { from, to });
        return null;
     }
     
@@ -1264,7 +1265,12 @@ export function createContentIndentationPlugin(enabled) {
   }, { decorations: v => v.decorations });
 }
 
-export const createBaseTheme = (darkMode) => EditorView.baseTheme({
+export const createBaseTheme = (darkMode, accentId = 'blue') => {
+  const palette = ACCENT_PALETTES[accentId] || ACCENT_PALETTES.blue;
+  const accent = darkMode ? palette.dark : palette.light;
+  const primaryMain = accent?.primary?.main ?? (darkMode ? '#90caf9' : '#1976d2');
+  const selectionBg = darkMode ? '#264f78' : '#b3d7ff';
+  return EditorView.baseTheme({
   '&': {
     backgroundColor: darkMode ? '#1e1e1e' : '#ffffff',
     color: darkMode ? '#d4d4d4' : '#212121',
@@ -1305,13 +1311,13 @@ export const createBaseTheme = (darkMode) => EditorView.baseTheme({
     backgroundColor: darkMode ? '#2d2d2d' : '#f0f8ff'
   },
   '.cm-selectionBackground, ::selection': {
-    backgroundColor: darkMode ? '#264f78' : '#b3d7ff'
+    backgroundColor: selectionBg
   },
   '.cm-cursor': {
     borderLeftColor: darkMode ? '#ffffff' : '#000000'
   },
   '&.cm-focused .cm-selectionBackground, &.cm-focused ::selection': {
-    backgroundColor: darkMode ? '#264f78' : '#b3d7ff'
+    backgroundColor: selectionBg
   },
   '.cm-line': {
     caretColor: darkMode ? '#ffffff' : '#000000'
@@ -1323,7 +1329,7 @@ export const createBaseTheme = (darkMode) => EditorView.baseTheme({
   '.cm-line.org-level-4': { fontSize: '14px', paddingLeft: '36px' },
   '.cm-line.org-current-heading': { 
     backgroundColor: darkMode ? '#264f78' : '#e3f2fd', 
-    borderLeft: darkMode ? '3px solid #90caf9' : '3px solid #1976d2' 
+    borderLeft: `3px solid ${primaryMain}` 
   },
   '.org-checkbox': { 
     backgroundColor: darkMode ? '#424242' : '#e5e7eb', 
@@ -1333,12 +1339,12 @@ export const createBaseTheme = (darkMode) => EditorView.baseTheme({
   '.org-todo-mark': { color: darkMode ? '#f44336' : '#c62828', fontWeight: '700' },
   '.org-done-mark': { color: darkMode ? '#66bb6a' : '#2e7d32', fontWeight: '700' },
   '.org-link': { 
-    color: darkMode ? '#90caf9' : '#1976d2', 
+    color: primaryMain, 
     textDecoration: 'underline', 
     cursor: 'pointer' 
   },
   '.org-progress-indicator': {
-    color: darkMode ? '#90caf9' : '#1976d2',
+    color: primaryMain,
     fontWeight: '600',
     marginLeft: '8px'
   },
@@ -1355,3 +1361,4 @@ export const createBaseTheme = (darkMode) => EditorView.baseTheme({
     // Indentation applied via inline style
   }
 });
+};

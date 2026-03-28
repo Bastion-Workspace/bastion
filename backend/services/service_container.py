@@ -119,8 +119,8 @@ class ServiceContainer:
         
         # Single WebSocket manager instance (optional: not available in Celery worker - no FastAPI)
         try:
-            from utils.websocket_manager import WebSocketManager
-            self.websocket_manager = WebSocketManager()
+            from utils.websocket_manager import get_websocket_manager
+            self.websocket_manager = get_websocket_manager()
         except ImportError:
             self.websocket_manager = None
             logger.debug("WebSocket manager unavailable (e.g. Celery worker); real-time updates disabled")
@@ -138,12 +138,12 @@ class ServiceContainer:
         self.db_context = get_db_context()
         
         # Now initialize authentication service with shared pool
-        logger.info("🔧 ROOSEVELT'S AUTH INITIALIZATION: Starting auth service initialization...")
+        logger.info("Starting auth service initialization")
         await self._retry_with_backoff(
             lambda: auth_service.initialize(self.db_pool), 
             "AuthenticationService"
         )
-        logger.info("✅ ROOSEVELT'S AUTH INITIALIZATION: Auth service initialized successfully!")
+        logger.info("Auth service initialized successfully")
         
         # Initialize embedding service wrapper (singleton)
         from services.embedding_service_wrapper import get_embedding_service

@@ -236,24 +236,38 @@ class FileManagerService:
                 "source_metadata": request.source_metadata
             }
             
-            # Save as physical file on disk for RSS, web sources, and manual creation
+            # Save as physical file on disk for RSS, web sources, manual creation, or binary (e.g. browser download)
             markdown_file_path = None
-            if request.source_type in [SourceType.RSS, SourceType.WEB_SCRAPING, SourceType.MANUAL]:
+            if getattr(request, "content_bytes", None):
+                file_path_str = await self.folder_service.get_document_file_path(
+                    filename=filename,
+                    folder_id=folder_id,
+                    user_id=request.user_id,
+                    collection_type=request.collection_type,
+                )
+                from pathlib import Path
+                file_path = Path(file_path_str)
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_bytes(request.content_bytes)
+                markdown_file_path = str(file_path)
+                logger.info(f"📝 Saved binary file: {markdown_file_path} ({len(request.content_bytes)} bytes)")
+            elif request.source_type in [SourceType.RSS, SourceType.WEB_SCRAPING, SourceType.MANUAL]:
                 markdown_file_path = await self._save_as_markdown_file(
                     request, document_id, filename, folder_id, document_metadata
                 )
                 logger.info(f"📝 Saved content as file: {markdown_file_path}")
-            
+
             # Store document using document service
             if self.document_service is None:
                 logger.error("❌ Document service is None - cannot create document")
                 raise Exception("Document service not initialized")
             
             logger.info(f"📄 Creating document with service: {type(self.document_service).__name__}")
+            content_for_store = request.content if not getattr(request, "content_bytes", None) else ""
             success = await self.document_service.store_text_document(
-                document_id, request.content, document_metadata, filename,
+                document_id, content_for_store, document_metadata, filename,
                 user_id=final_user_id, collection_type=final_collection_type, folder_id=folder_id,
-                file_path=markdown_file_path  # Pass file path for disk storage
+                file_path=markdown_file_path  # Pass file path for disk storage (or binary file path)
             )
             
             if not success:
@@ -789,7 +803,10 @@ class FileManagerService:
     def _generate_document_id(self, request: FilePlacementRequest) -> str:
         """Generate a unique document ID"""
         # Use content hash + timestamp for uniqueness
-        content_hash = hashlib.md5(request.content.encode()).hexdigest()[:8]
+        if getattr(request, "content_bytes", None):
+            content_hash = hashlib.md5(request.content_bytes).hexdigest()[:8]
+        else:
+            content_hash = hashlib.md5(request.content.encode()).hexdigest()[:8]
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         return f"{content_hash}_{timestamp}"
     
@@ -910,12 +927,44 @@ class FileManagerService:
                 return str(file_path)
                 
             elif request.source_type == SourceType.RSS:
-                # RSS articles go in web_sources/rss_articles/{feed_name}/
-                feed_name = request.source_metadata.get('feed_name', 'unknown_feed')
-                safe_feed_name = re.sub(r'[^\w\s-]', '', feed_name.lower())
-                safe_feed_name = re.sub(r'[-\s]+', '_', safe_feed_name)
-                
-                file_dir = upload_dir / "web_sources" / "rss_articles" / safe_feed_name
+                # Align on-disk path with resolved folder_id (including custom import targets)
+                markdown_filename = formatter.generate_filename(
+                    document_id,
+                    request.title,
+                    "rss",
+                    request.source_metadata.get("feed_name"),
+                )
+                file_path_str = await self.folder_service.get_document_file_path(
+                    filename=markdown_filename,
+                    folder_id=folder_id,
+                    user_id=request.user_id,
+                    collection_type=request.collection_type,
+                )
+                file_path = Path(file_path_str)
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                pub_raw = request.source_metadata.get("published_date")
+                parsed_pub = None
+                if pub_raw:
+                    try:
+                        parsed_pub = datetime.fromisoformat(str(pub_raw).replace("Z", "+00:00"))
+                    except (ValueError, TypeError):
+                        parsed_pub = None
+                markdown_content = formatter.format_rss_article(
+                    content=request.content,
+                    metadata=document_metadata,
+                    document_id=document_id,
+                    title=request.title,
+                    source_url=request.source_metadata.get("article_url"),
+                    feed_name=request.source_metadata.get("feed_name"),
+                    author=request.author,
+                    published_date=parsed_pub,
+                    folder_id=folder_id,
+                    images=request.source_metadata.get("images", []),
+                )
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(markdown_content)
+                logger.info(f"✅ Saved Markdown file: {file_path} ({len(markdown_content)} characters)")
+                return str(file_path)
             else:
                 # Web scraped content goes in web_sources/scraped_content/{domain}/
                 source_url = request.source_metadata.get('article_url', '')
@@ -923,46 +972,24 @@ class FileManagerService:
                 
                 file_dir = upload_dir / "web_sources" / "scraped_content" / domain
             
-            # Create directory if it doesn't exist
+            # Create directory if it doesn't exist (web scraping only; RSS returns above)
             file_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Generate markdown filename
-            if request.source_type == SourceType.RSS:
-                markdown_filename = formatter.generate_filename(
-                    document_id, request.title, "rss", 
-                    request.source_metadata.get('feed_name')
-                )
-            else:
-                markdown_filename = formatter.generate_filename(
-                    document_id, request.title, "web"
-                )
-            
+
+            markdown_filename = formatter.generate_filename(
+                document_id, request.title, "web"
+            )
+
             file_path = file_dir / markdown_filename
-            
-            # Format content as Markdown
-            if request.source_type == SourceType.RSS:
-                markdown_content = formatter.format_rss_article(
-                    content=request.content,
-                    metadata=document_metadata,
-                    document_id=document_id,
-                    title=request.title,
-                    source_url=request.source_metadata.get('article_url'),
-                    feed_name=request.source_metadata.get('feed_name'),
-                    author=request.author,
-                    published_date=datetime.fromisoformat(request.source_metadata.get('published_date')) if request.source_metadata.get('published_date') else None,
-                    folder_id=folder_id,
-                    images=request.source_metadata.get('images', [])
-                )
-            else:
-                markdown_content = formatter.format_web_content(
-                    content=request.content,
-                    metadata=document_metadata,
-                    document_id=document_id,
-                    title=request.title,
-                    source_url=request.source_metadata.get('source_url', ''),
-                    folder_id=folder_id,
-                    images=request.source_metadata.get('images', [])
-                )
+
+            markdown_content = formatter.format_web_content(
+                content=request.content,
+                metadata=document_metadata,
+                document_id=document_id,
+                title=request.title,
+                source_url=request.source_metadata.get('source_url', ''),
+                folder_id=folder_id,
+                images=request.source_metadata.get('images', [])
+            )
             
             # Write markdown file to disk
             with open(file_path, 'w', encoding='utf-8') as f:

@@ -46,6 +46,7 @@ class UnifiedSearchTools:
         return {
             "search_local": self.search_local,
             "get_document": self.get_document,
+            "fulltext_search": self.fulltext_search,
         }
     
     def get_schemas(self) -> List[Dict[str, Any]]:
@@ -55,12 +56,12 @@ class UnifiedSearchTools:
                 "type": "function",
                 "function": {
                     "name": "search_local",
-                    "description": "Unified search across all local resources (documents, entity knowledge graph) - NO PERMISSION REQUIRED. Supports filtering by document tags and categories.",
+                    "description": "Unified search across local TEXT documents and entity knowledge graph — NOT for images, comics, photos, artwork, or visual content (use search_images for those). NO PERMISSION REQUIRED. Supports filtering by document tags and categories.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "query": {"type": "string", "description": "Search query"},
-                            "search_types": {"type": "array", "items": {"type": "string"}, "description": "Types of search to perform: 'vector' (documents), 'entities' (knowledge graph), 'filename'", "default": ["vector", "entities"]},
+                            "search_types": {"type": "array", "items": {"type": "string"}, "description": "Types of search to perform: 'vector' (semantic), 'entities' (knowledge graph), 'filename', 'fulltext' (exact phrase/term match)", "default": ["vector", "entities"]},
                             "limit": {"type": "integer", "description": "Maximum number of results per search type", "default": 200},
                             "filter_tags": {"type": "array", "items": {"type": "string"}, "description": "OPTIONAL: Filter documents by tags (e.g. ['founding', 'historical']). Use when user mentions specific document collections or categories in their query."},
                             "filter_category": {"type": "string", "description": "OPTIONAL: Filter documents by category (e.g. 'technical', 'academic'). Use when user specifies a document type."}
@@ -80,6 +81,24 @@ class UnifiedSearchTools:
                             "document_id": {"type": "string", "description": "Document ID to retrieve"},
                         },
                         "required": ["document_id"]
+                    }
+                }
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "fulltext_search",
+                    "description": "Search documents by exact phrase or terms (PostgreSQL full-text). Use when the user wants to find a specific phrase, name, or quote. For meaning-based search use search_local with vector.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Exact phrase (wrap in quotes) or space-separated terms"},
+                            "exact_phrase": {"type": "boolean", "description": "If true, treat query as exact phrase", "default": False},
+                            "limit": {"type": "integer", "description": "Max results", "default": 20},
+                            "file_types": {"type": "array", "items": {"type": "string"}, "description": "Filter by file type (e.g. pdf, md)"},
+                            "folder_id": {"type": "string", "description": "Filter by folder ID"},
+                        },
+                        "required": ["query"]
                     }
                 }
             }
@@ -138,6 +157,9 @@ class UnifiedSearchTools:
             
             if "vector" in search_types:
                 search_tasks.append(self._search_vector(query, limit, user_id, filter_category, filter_tags, team_ids))
+            
+            if "fulltext" in search_types:
+                search_tasks.append(self._search_fulltext(query, limit, user_id, filter_category, filter_tags, team_ids))
             
             if "entities" in search_types:
                 search_tasks.append(self._search_entities(query, limit))
@@ -263,14 +285,98 @@ class UnifiedSearchTools:
             }
             
         except Exception as e:
-            logger.error(f"❌ Vector search failed: {e}")
+            logger.error(f"Vector search failed: {e}")
             return {
                 "success": False,
                 "error": str(e),
                 "results": [],
                 "search_type": "vector"
             }
-    
+
+    async def _search_fulltext(
+        self,
+        query: str,
+        limit: int,
+        user_id: str = None,
+        filter_category: str = None,
+        filter_tags: List[str] = None,
+        team_ids: List[str] = None,
+        folder_id: str = None,
+        file_types: List[str] = None,
+    ) -> Dict[str, Any]:
+        """Full-text search (exact phrase/term) via PostgreSQL document_chunks. RLS enforces user/global/team."""
+        try:
+            from services.direct_search_service import DirectSearchService
+            search_service = DirectSearchService()
+            search_result = await search_service.search_documents(
+                query=query,
+                limit=limit,
+                search_mode="fulltext",
+                user_id=user_id,
+                team_ids=team_ids,
+                categories=[filter_category] if filter_category else None,
+                tags=filter_tags if filter_tags else None,
+                folder_id=folder_id,
+                file_types=file_types,
+                include_metadata=True,
+            )
+            if not search_result.get("success"):
+                return {
+                    "success": True,
+                    "results": [],
+                    "search_type": "fulltext",
+                    "message": search_result.get("error", "Full-text search failed"),
+                }
+            results = search_result.get("results", [])
+            enhanced_results = []
+            for r in results:
+                doc_meta = r.get("document", {})
+                document_id = r.get("document_id", "")
+                enhanced = dict(r)
+                enhanced["content"] = r.get("text", "")
+                enhanced["metadata"] = doc_meta
+                enhanced["citation_url"] = self._generate_document_url(document_id, doc_meta)
+                enhanced["citation_title"] = self._extract_citation_title(doc_meta)
+                enhanced["citation_reference"] = self._generate_document_reference(document_id, doc_meta)
+                enhanced["source_type"] = "document"
+                enhanced_results.append(enhanced)
+            return {
+                "success": True,
+                "results": enhanced_results,
+                "search_type": "fulltext",
+            }
+        except Exception as e:
+            logger.error(f"Full-text search failed: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "results": [],
+                "search_type": "fulltext",
+            }
+
+    async def fulltext_search(
+        self,
+        query: str,
+        exact_phrase: bool = False,
+        limit: int = 20,
+        user_id: str = None,
+        file_types: List[str] = None,
+        folder_id: str = None,
+    ) -> Dict[str, Any]:
+        """Full-text search for exact phrase or terms. Use when user wants to find a specific phrase or name."""
+        if exact_phrase and not (query.startswith('"') and query.endswith('"')):
+            query = f'"{query}"'
+        return await self._search_fulltext(
+            query=query,
+            limit=limit,
+            user_id=user_id,
+            filter_category=None,
+            filter_tags=None,
+            team_ids=None,
+            folder_id=folder_id,
+            file_types=file_types,
+        )
+
     async def _search_entities(self, query: str, limit: int) -> Dict[str, Any]:
         """Search using entity relationships"""
         try:
@@ -972,3 +1078,36 @@ async def get_document_content(document_id: str, user_id: str = None) -> str:
     ]
     
     return "\n".join(formatted_output)
+
+
+async def fulltext_search(
+    query: str,
+    exact_phrase: bool = False,
+    limit: int = 20,
+    user_id: str = None,
+    file_types: List[str] = None,
+    folder_id: str = None,
+) -> str:
+    """LangGraph tool function: Full-text search for exact phrase or terms in documents. Returns formatted string for LLM."""
+    search_instance = await _get_unified_search()
+    result = await search_instance.fulltext_search(
+        query=query,
+        exact_phrase=exact_phrase,
+        limit=limit,
+        user_id=user_id,
+        file_types=file_types,
+        folder_id=folder_id,
+    )
+    if not result.get("success"):
+        return f"Full-text search failed: {result.get('error', 'Unknown error')}"
+    results = result.get("results", [])
+    if not results:
+        return f"No documents found matching '{query}'."
+    lines = [f"Found {len(results)} document(s) matching '{query}':", ""]
+    for i, r in enumerate(results[:15], 1):
+        title = (r.get("document") or {}).get("title") or (r.get("document") or {}).get("filename") or r.get("document_id", "")[:8]
+        snippet = (r.get("text") or r.get("content") or "")[:400]
+        lines.append(f"{i}. **{title}**")
+        lines.append(f"   {snippet}...")
+        lines.append("")
+    return "\n".join(lines)

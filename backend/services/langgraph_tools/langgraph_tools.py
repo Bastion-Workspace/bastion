@@ -159,7 +159,7 @@ async def crawl_web_content(url: Optional[str] = None, urls: Optional[List[str]]
     try:
         from services.langgraph_tools.crawl4ai_web_tools import crawl_web_content as crawl_func
         
-        logger.info(f"🕷️ Roosevelt's Web Crawler: Processing URL(s)")
+        logger.info("Web crawler: processing URL(s)")
         
         result = await crawl_func(url=url, urls=urls, user_id=user_id)
         

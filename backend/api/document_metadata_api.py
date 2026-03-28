@@ -302,6 +302,7 @@ async def generate_document_summary(
     extension = file_path.suffix.lower()
     doc_type_map = {
         ".pdf": "pdf", ".txt": "txt", ".md": "md", ".docx": "docx", ".doc": "docx",
+        ".pptx": "pptx", ".ppt": "pptx",
         ".epub": "epub", ".html": "html", ".htm": "html", ".eml": "eml",
         ".zip": "zip", ".srt": "srt",
     }

@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package document_service;
+
+// Document Service - Entity extraction via spaCy
+service DocumentService {
+  rpc ExtractEntities(ExtractEntitiesRequest) returns (ExtractEntitiesResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message ExtractEntitiesRequest {
+  string text = 1;
+  int32 max_length = 2;  // optional, defaults to 1000000
+}
+
+message ExtractEntitiesResponse {
+  repeated ExtractedEntity entities = 1;
+  bool success = 2;
+  string error = 3;
+}
+
+message ExtractedEntity {
+  string name = 1;
+  string entity_type = 2;
+  float confidence = 3;
+  string context = 4;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  string status = 1;
+  string service_version = 2;
+  bool gliner_loaded = 3;
+}

@@ -180,7 +180,7 @@ const MyComponent = () => {
 ## Implementation Details
 
 ### 1. Theme Provider Setup
-The theme provider is set up in `src/index.js` with a dynamic theme provider that responds to theme changes:
+The theme provider is set up in `src/index.jsx` with a dynamic theme provider that responds to theme changes:
 
 ```javascript
 const DynamicThemeProvider = ({ children }) => {

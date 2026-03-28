@@ -1,286 +1,57 @@
 ---
 globs: backend/services/langgraph_*.py,backend/services/*_service.py
-description: LangGraph agent architecture and service patterns
+description: Agent architecture and service patterns (llm-orchestrator primary)
 ---
 
-# Agent Architecture Patterns - Separation of Powers
+# Agent Architecture Patterns
 
-Follow industry-standard agent architecture with clear separation between Intent Classification, Orchestration, and Agent Execution.
+Interactive chat and research run in the **llm-orchestrator** service over gRPC. The backend exposes HTTP/WebSocket APIs, gathers context, and calls the orchestrator; it does **not** host the main LangGraph chat/research graphs.
 
-## Three-Tier Architecture
+## Production request path
 
-### Three-Tier Agent System
+1. **API / proxy** – [backend/api/async_orchestrator_api.py](mdc:backend/api/async_orchestrator_api.py), [backend/api/grpc_orchestrator_proxy.py](mdc:backend/api/grpc_orchestrator_proxy.py), [backend/services/grpc_context_gatherer.py](mdc:backend/services/grpc_context_gatherer.py) build `ChatRequest` and stream `StreamChat`.
+2. **Orchestration** – [llm-orchestrator/orchestrator/grpc_service.py](mdc:llm-orchestrator/orchestrator/grpc_service.py) merges metadata, applies route eligibility, then dispatches.
+3. **Routing** – [llm-orchestrator/orchestrator/routes/route_registry.py](mdc:llm-orchestrator/orchestrator/routes/route_registry.py), [llm-orchestrator/orchestrator/routes/definitions/](mdc:llm-orchestrator/orchestrator/routes/definitions/) (static routes + auto-routable Agent Factory profiles).
+4. **Dispatch** – [llm-orchestrator/orchestrator/engines/unified_dispatch.py](mdc:llm-orchestrator/orchestrator/engines/unified_dispatch.py):
+   - `CONVERSATIONAL` → [conversational_engine.py](mdc:llm-orchestrator/orchestrator/engines/conversational_engine.py) → [chat_agent.py](mdc:llm-orchestrator/orchestrator/agents/chat_agent.py)
+   - `RESEARCH` → [research_engine.py](mdc:llm-orchestrator/orchestrator/engines/research_engine.py) → [full_research_agent](mdc:llm-orchestrator/orchestrator/agents/research/full_research_agent.py)
+   - `CUSTOM_AGENT` / explicit `agent_profile_id` → [custom_agent_runner.py](mdc:llm-orchestrator/orchestrator/agents/custom_agent_runner.py) (Agent Factory: playbook graph + [pipeline_executor.py](mdc:llm-orchestrator/orchestrator/engines/pipeline_executor.py))
 
-**1. Intent Classification Layer** - [backend/services/smart_intent_classifier.py](mdc:backend/services/smart_intent_classifier.py)
-- **Fast, lightweight** LLM calls for intent detection
-- **Multilingual support** for permission grants
-- **Heuristic fallbacks** for reliability
-- **Single responsibility**: What does the user want?
+**Agent Factory** = DB-backed profiles and playbooks executed by `CustomAgentRunner`; skills are data consumed inside the pipeline, not a separate execution engine.
 
-**2. Orchestration Layer** - [backend/services/langgraph_official_orchestrator.py](mdc:backend/services/langgraph_official_orchestrator.py)  
-- **Workflow management** and state coordination
-- **Agent routing** based on intent decisions
-- **Pending operation** lifecycle management
-- **Single responsibility**: How should we handle this intent?
+## Backend agent code (narrow scope)
 
-**3. Agent Execution Layer** - [backend/services/langgraph_agents/](mdc:backend/services/langgraph_agents/)
-- **Specialized domain experts** (research, coding, chat, direct)
-- **Tool access** and execution
-- **Task completion** assessment
-- **Single responsibility**: Execute the specific task type
+[backend/services/langgraph_agents/](mdc:backend/services/langgraph_agents/) is **deprecated for new work**; only [base_agent.py](mdc:backend/services/langgraph_agents/base_agent.py) remains for legacy subclasses if any.
 
-### No Monolithic Orchestrators
+- **RSS** – Polling and ingestion run in Celery via [backend/services/rss_polling_service.py](mdc:backend/services/rss_polling_service.py) ([rss_tasks.py](mdc:backend/services/celery_tasks/rss_tasks.py)). Interactive RSS management uses the **rss** tool pack ([rss_tools.py](mdc:llm-orchestrator/orchestrator/tools/rss_tools.py)) and optional built-in **RSS Manager** Agent Factory profile; REST remains under `/api/rss`.
+- New agents and orchestration belong under **llm-orchestrator** per [langgraph-best-practices.mdc](mdc:.cursor/rules/langgraph-best-practices.mdc).
 
-**ABSOLUTELY NO:**
-- Single orchestrator handling intent classification AND execution
-- Massive agents trying to do everything
-- String-based routing in orchestrators
-- Complex decision trees in single functions
+## Separation of concerns
 
-**ALWAYS USE:**
-- Dedicated services for each architectural concern
-- LLM-based semantic understanding where appropriate
-- Structured data flow between layers
-- Clear responsibility boundaries
+**Prefer:**
 
-## LangGraph State Management
+- Structured routing (routes, `EngineType`, metadata) over string-matching in orchestrator code.
+- LangGraph state and checkpoints in the orchestrator; backend owns persistence for conversations and documents.
+- Tools that touch Bastion data in [backend/services/grpc_tool_service.py](mdc:backend/services/grpc_tool_service.py) with thin orchestrator wrappers ([langgraph-tool-placement.mdc](mdc:.cursor/rules/langgraph-tool-placement.mdc)).
 
-### StateGraph Architecture
+**Avoid:**
 
-**Use conditional routing for workflow control:**
+- New “backend orchestrator” or intent-classifier layers duplicating llm-orchestrator routing.
+- Monolithic nodes that embed large routing trees instead of graph edges and registries.
 
-```python
-# ✅ CORRECT: Clean conditional routing
-self.graph.add_conditional_edges(
-    "smart_router",
-    get_route_decision,  # Pure function based on state
-    {
-        RouteDecision.RESEARCH_AGENT.value: "research_agent",
-        RouteDecision.CHAT_AGENT.value: "chat_agent", 
-        RouteDecision.END_CONVERSATION.value: END
-    }
-)
-```
+## LangGraph state (orchestrator agents)
 
-**Avoid complex routing logic in nodes:**
+Use conditional edges and clear state contracts; preserve critical keys across nodes (see [langgraph-best-practices.mdc](mdc:.cursor/rules/langgraph-best-practices.mdc) for checkpoint merge order and state preservation).
 
-```python
-# ❌ WRONG: Complex routing inside node
-async def _smart_router_node(self, state):
-    if some_complex_condition:
-        return await self._route_to_research(state)
-    elif another_complex_condition:
-        return await self._route_to_chat(state)
-    # ... more complexity
-```
+## Tool access (backend tools used by agents)
 
-### State Flow Principles
+LangGraph tools for the backend live in [backend/services/langgraph_tools/centralized_tool_registry.py](mdc:backend/services/langgraph_tools/centralized_tool_registry.py). Register tools there and scope them by agent type where applicable.
 
-**State updates MUST be atomic:**
-- Each node updates state completely for its responsibility
-- No partial state updates that require follow-up
-- Clear state contracts between nodes
+## Document batch editing
 
-**State should be additive:**
-- New nodes add their results to state
-- Previous results remain accessible
-- State history maintains conversation context
+When applying multiple document edits from agent logic, use [llm-orchestrator/orchestrator/utils/document_batch_editor.py](mdc:llm-orchestrator/orchestrator/utils/document_batch_editor.py) (`DocumentEditBatch`) for a single read and atomic write—see existing examples in this rule file’s history or the module docstring.
 
-**Example state flow:**
-```python
-# Intent Classifier adds decision
-state["intent_decision"] = intent_result
+## Async and resources
 
-# Orchestrator adds routing decision  
-state["orchestrator_routing_decision"] = routing_decision
-
-# Agent adds execution results
-state["agent_results"] = execution_results
-```
-
-## Agent Specialization
-
-### Research Agent Responsibilities
-- **Local-first search** across all knowledge sources
-- **Permission-based web search** when local insufficient
-- **Source citation** and result synthesis
-- **Research quality assessment**
-
-### Chat Agent Responsibilities  
-- **Conversational responses** for general queries
-- **Context maintenance** across turns
-- **Clarification requests** when needed
-- **Natural interaction** management
-
-### Coding Agent Responsibilities
-- **Code generation** and modification
-- **Technical analysis** and debugging  
-- **Architecture recommendations**
-- **Development workflow** guidance
-
-### Direct Agent Responsibilities
-- **Simple factual queries** from knowledge base
-- **Quick lookups** without complex reasoning
-- **High-confidence** direct answers
-- **Performance optimization** for simple cases
-
-## Tool Access Patterns
-
-### Centralized Tool Registry
-All tools MUST be registered in [backend/services/langgraph_tools/tool_registry.py](mdc:backend/services/langgraph_tools/tool_registry.py):
-
-```python
-# Agent gets tools from registry
-available_tools = ToolRegistry.get_tools_for_agent("research_agent")
-```
-
-**Benefits:**
-- **Consistent tool access** across agents
-- **Permission control** per agent type
-- **Tool versioning** and updates
-- **Testing** with mock tools
-
-### Agent-Specific Tool Sets
-
-**Research Agent tools:**
-- `search_local`, `search_web`, `get_document`
-- `analyze_and_ingest`, `crawl_web_content`
-- `summarize_content`, `analyze_documents`
-
-**Coding Agent tools:**
-- File system tools, code analysis tools
-- Testing and execution tools
-- Documentation tools
-
-**Never give agents tools they don't need** - follow principle of least privilege!
-
-## Document Batch Editing Pattern
-
-### Universal Batch Editor for Multiple Edits
-
-When agents need to make multiple edits to a single document, **ALWAYS use** the `DocumentEditBatch` class from [llm-orchestrator/orchestrator/utils/document_batch_editor.py](llm-orchestrator/orchestrator/utils/document_batch_editor.py).
-
-**Why batch editing?**
-- **Atomic operations**: All edits applied in a single write (no race conditions)
-- **Efficiency**: 1 write instead of N writes (6x faster for 6 edits)
-- **Reliability**: No partial updates if operations fail mid-stream
-- **No duplicates**: Prevents duplicate frontmatter blocks from sequential updates
-
-### Batch Editor Usage Pattern
-
-```python
-from orchestrator.utils.document_batch_editor import DocumentEditBatch
-
-# Group edits by document_id first
-edits_by_doc = {}
-for edit in routing_items:
-    doc_id = resolve_document_id(edit["target_file"], ...)
-    if doc_id not in edits_by_doc:
-        edits_by_doc[doc_id] = []
-    edits_by_doc[doc_id].append(edit)
-
-# Process each document with batch editor
-for doc_id, edits in edits_by_doc.items():
-    batch = DocumentEditBatch(doc_id, user_id, "agent_name")
-    await batch.initialize()  # Reads content once
-    
-    # Queue all operations
-    for edit in edits:
-        if edit["section"].lower() == "frontmatter":
-            # Parse YAML and add frontmatter update
-            batch.add_frontmatter_update(scalar_fields, list_fields)
-        elif edit["action"] == "replace":
-            batch.add_section_replace(edit["section"], edit["content"])
-        elif edit["action"] == "append":
-            batch.add_section_append(edit["section"], edit["content"])
-        elif edit["action"] == "remove":
-            batch.add_section_delete(edit["section"])
-    
-    # Apply all edits atomically (single write)
-    result = await batch.apply()
-```
-
-### Operation Types
-
-**Frontmatter updates:**
-```python
-batch.add_frontmatter_update(
-    field_updates={"title": "New Title", "status": "active"},
-    list_updates={"files": ["./file1.md", "./file2.md"]}
-)
-```
-
-**Section operations:**
-```python
-batch.add_section_replace("Requirements", "New requirements content...")
-batch.add_section_append("Tasks", "- New task item")
-batch.add_section_delete("Obsolete Section")
-```
-
-### Error Handling
-
-The batch editor uses **best-effort** error handling:
-- Individual operation failures are logged but don't stop other operations
-- Returns detailed metrics: `operations_succeeded`, `operations_failed`, `failed_operations`
-- Only writes if content actually changed
-
-### Anti-Pattern: Sequential Edits
-
-**❌ NEVER DO THIS:**
-```python
-# Sequential read-modify-write cycles (BAD!)
-for edit in edits:
-    content = await get_document_content_tool(doc_id, user_id)
-    # ... modify content ...
-    await update_document_content_tool(doc_id, modified_content, user_id)
-```
-
-**Problems:**
-- Race conditions (stale reads between operations)
-- Inefficient (N writes for N edits)
-- Risk of partial updates
-- Duplicate frontmatter blocks
-
-**✅ ALWAYS DO THIS:**
-```python
-# Batch editor (GOOD!)
-batch = DocumentEditBatch(doc_id, user_id, "agent_name")
-await batch.initialize()
-# ... queue all operations ...
-await batch.apply()  # Single atomic write
-```
-
-## Performance and Scalability
-
-### Async-First Design
-All agent operations MUST be async for scalability:
-
-```python
-# ✅ CORRECT: Async agent processing
-async def process(self, state: ConversationState) -> ConversationState:
-    result = await self._execute_async_operation(state)
-    return state
-```
-
-### Stateless Agent Design
-Agents should be stateless - all context in ConversationState:
-
-```python
-# ✅ CORRECT: Stateless agent
-class ResearchAgent(BaseAgent):
-    def __init__(self):
-        # Only configuration, no instance state
-        self.config = load_config()
-    
-    async def process(self, state):
-        # All context from state parameter
-        query = self._get_latest_user_message(state)
-```
-
-### Resource Management
-- **Tool timeouts** for web operations
-- **Result caching** for expensive operations  
-- **Graceful degradation** when tools fail
-- **Memory limits** for large document processing
-
-**Remember: "A well-architected agent system is like a well-organized government - each branch has clear responsibilities and proper checks and balances!"**
+- Prefer async end-to-end for I/O-bound agent steps.
+- Use timeouts and graceful degradation for external tools.

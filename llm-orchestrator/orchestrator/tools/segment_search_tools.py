@@ -10,13 +10,40 @@ import logging
 import re
 from typing import List, Dict, Any, Optional
 
+from pydantic import BaseModel, Field
+
 from orchestrator.tools.document_tools import (
     search_within_document_tool,
-    search_documents_structured,
+    search_documents_tool,
     get_document_content_tool
 )
+from orchestrator.utils.action_io_registry import register_action
 
 logger = logging.getLogger(__name__)
+
+
+# ── I/O models for search_segments_across_documents_tool ─────────────────────
+
+class SearchSegmentsInputs(BaseModel):
+    """Required inputs for segment search."""
+    queries: List[str] = Field(description="List of search queries")
+
+
+class SearchSegmentsParams(BaseModel):
+    """Optional parameters."""
+    limit_per_query: int = Field(default=5, description="Max matches per query per document")
+    max_queries: int = Field(default=3, description="Max number of queries to process")
+    prioritize_project_docs: bool = Field(default=True, description="Prioritize project documents")
+    context_window: int = Field(default=500, description="Character context around matches")
+
+
+class SearchSegmentsOutputs(BaseModel):
+    """Typed outputs for search_segments_across_documents_tool."""
+    segments: List[Dict[str, Any]] = Field(description="List of segment dicts with document_id, content, source, relevance_score")
+    documents_found_count: int = Field(description="Number of unique documents found")
+    project_doc_count: int = Field(description="Segments from project documents")
+    library_doc_count: int = Field(description="Segments from library documents")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
 
 
 def extract_relevant_content_section(
@@ -148,7 +175,7 @@ async def search_segments_across_documents_tool(
     
     **Workflow:**
     1. First searches within project documents (if provided) using `search_within_document_tool`
-    2. Then performs semantic search across library documents using `search_documents_structured`
+    2. Then performs semantic search across library documents using `search_documents_tool`
     3. Extracts relevant segments from library documents
     4. Deduplicates and ranks segments (project docs prioritized)
     
@@ -229,7 +256,8 @@ async def search_segments_across_documents_tool(
                 "segments": [],
                 "documents_found_count": 0,
                 "project_doc_count": 0,
-                "library_doc_count": 0
+                "library_doc_count": 0,
+                "formatted": "No valid queries provided. Please provide at least one search query."
             }
         
         logger.info(f"🔍 Searching for segments with {len(normalized_queries)} queries")
@@ -284,21 +312,22 @@ async def search_segments_across_documents_tool(
         # Phase 2: Perform semantic search across library documents
         for search_query in normalized_queries:
             try:
-                search_result = await search_documents_structured(
+                search_result = await search_documents_tool(
                     query=search_query,
                     limit=10,
                     user_id=user_id
                 )
                 
-                if search_result.get('total_count', 0) > 0:
-                    for doc in search_result.get('results', []):
+                if search_result.get('count', 0) > 0:
+                    for doc in search_result.get('documents', []):
                         doc_id = doc.get('document_id')
                         if not doc_id or doc_id in documents_found:
                             continue  # Already processed or in project docs
                         
                         # Get document content to extract relevant segments
                         try:
-                            content = await get_document_content_tool(doc_id, user_id)
+                            content_result = await get_document_content_tool(doc_id, user_id)
+                            content = content_result.get("content", content_result) if isinstance(content_result, dict) else content_result
                             
                             if content and not content.startswith("Error"):
                                 # Extract relevant section using semantic matching
@@ -357,11 +386,35 @@ async def search_segments_across_documents_tool(
         logger.info(f"✅ Found {len(segments_list)} relevant segments across {len(documents_found)} documents "
                    f"({project_doc_count} project, {library_doc_count} library)")
         
+        formatted_parts = [f"Found {len(segments_list)} relevant segment(s) across {len(documents_found)} document(s) "
+                           f"({project_doc_count} from project, {library_doc_count} from library)."]
+        for i, seg in enumerate(segments_list[:10], 1):
+            fn = seg.get("filename", "?")
+            doc_id = seg.get("document_id", "")
+            section = seg.get("section_name") or "section"
+            source = seg.get("source", "")
+            relevance = seg.get("relevance_score")
+            content = (seg.get("content") or "")[:500]
+            content_display = content.replace("\n", "\n   ")
+            if len((seg.get("content") or "")) > 500:
+                content_display += "\n   ..."
+            line = f"{i}. **{fn}** (ID: {doc_id}) — {section}"
+            if source:
+                line += f" [source: {source}]"
+            if relevance is not None:
+                line += f" [relevance: {relevance:.3f}]"
+            formatted_parts.append(line)
+            formatted_parts.append(f"   {content_display}")
+        if len(segments_list) > 10:
+            formatted_parts.append(f"... and {len(segments_list) - 10} more segments.")
+        formatted = "\n".join(formatted_parts)
+
         return {
             "segments": segments_list,
             "documents_found_count": len(documents_found),
             "project_doc_count": project_doc_count,
-            "library_doc_count": library_doc_count
+            "library_doc_count": library_doc_count,
+            "formatted": formatted
         }
         
     except Exception as e:
@@ -373,8 +426,21 @@ async def search_segments_across_documents_tool(
             "documents_found_count": 0,
             "project_doc_count": 0,
             "library_doc_count": 0,
-            "error": str(e)
+            "error": str(e),
+            "formatted": f"Segment search failed: {str(e)}"
         }
+
+
+register_action(
+    name="search_segments_across_documents",
+    category="search",
+    description="Search for relevant segments across multiple documents (project and library)",
+    short_description="Search segments across documents",
+    inputs_model=SearchSegmentsInputs,
+    params_model=SearchSegmentsParams,
+    outputs_model=SearchSegmentsOutputs,
+    tool_function=search_segments_across_documents_tool,
+)
 
 
 # Tool registry

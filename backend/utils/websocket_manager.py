@@ -2,9 +2,10 @@
 WebSocket connection manager for real-time updates
 """
 
+import asyncio
 import json
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 from datetime import datetime
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -21,18 +22,26 @@ class WebSocketManager:
         self.conversation_connections: Dict[str, List[WebSocket]] = {}  # Track connections by conversation_id for agent status
         self.user_connections: Dict[str, List[WebSocket]] = {}  # Track connections by user_id for out-of-band updates
         self.room_connections: Dict[str, List[Dict[str, Any]]] = {}  # Track connections by room_id with user context
+        self.line_timeline_connections: Dict[str, List[WebSocket]] = {}  # line_id -> WebSockets for timeline updates
+        # Device proxy (Bastion Local Proxy daemon): user_id -> {device_id -> ws}
+        self.device_connections: Dict[str, Dict[str, WebSocket]] = {}
+        self.device_capabilities: Dict[str, Dict[str, List[str]]] = {}  # user_id -> {device_id -> [capabilities]}
+        self.pending_device_invocations: Dict[str, Tuple[str, asyncio.Future]] = {}  # request_id -> (user_id, future)
     
     async def connect(self, websocket: WebSocket, session_id: str = None):
-        """Accept a new WebSocket connection"""
+        """Accept a new WebSocket connection. session_id is normalized to str so DB UUID and JWT string match."""
         await websocket.accept()
+        self._register_connection(websocket, session_id)
+    
+    def _register_connection(self, websocket: WebSocket, session_id: str = None):
+        """Add an already-accepted WebSocket to tracking (no accept). Used by device proxy after auth."""
         self.active_connections.append(websocket)
-        
-        if session_id:
-            if session_id not in self.session_connections:
-                self.session_connections[session_id] = []
-            self.session_connections[session_id].append(websocket)
-        
-        logger.info(f"📡 WebSocket connected (session: {session_id})")
+        key = str(session_id) if session_id is not None else None
+        if key:
+            if key not in self.session_connections:
+                self.session_connections[key] = []
+            self.session_connections[key].append(websocket)
+        logger.info(f"📡 WebSocket connected (session: {key})")
     
     async def connect_to_job(self, websocket: WebSocket, job_id: str):
         """Accept a WebSocket connection for job progress tracking"""
@@ -77,24 +86,29 @@ class WebSocketManager:
         except Exception as e:
             logger.error(f"❌ Failed to connect WebSocket to conversation {conversation_id}: {e}")
             raise
-    
+
+    async def connect_to_line_timeline(self, websocket: WebSocket, line_id: str):
+        """Accept WebSocket for line timeline live updates."""
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        if line_id not in self.line_timeline_connections:
+            self.line_timeline_connections[line_id] = []
+        self.line_timeline_connections[line_id].append(websocket)
+
     def disconnect(self, websocket: WebSocket, session_id: str = None):
-        """Remove a WebSocket connection"""
-        logger.info(f"🔌 Disconnecting WebSocket (session: {session_id})")
-        
+        """Remove a WebSocket connection. session_id normalized to str for consistent lookup."""
+        key = str(session_id) if session_id is not None else None
+        logger.info(f"🔌 Disconnecting WebSocket (session: {key})")
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
             logger.info(f"🧹 Removed from active connections")
-        
-        if session_id and session_id in self.session_connections:
-            if websocket in self.session_connections[session_id]:
-                self.session_connections[session_id].remove(websocket)
-                logger.info(f"🧹 Removed from session connections for {session_id}")
-            
-            # Clean up empty session lists
-            if not self.session_connections[session_id]:
-                del self.session_connections[session_id]
-                logger.info(f"🧹 Cleaned up empty session {session_id}")
+        if key and key in self.session_connections:
+            if websocket in self.session_connections[key]:
+                self.session_connections[key].remove(websocket)
+                logger.info(f"🧹 Removed from session connections for {key}")
+            if not self.session_connections[key]:
+                del self.session_connections[key]
+                logger.info(f"🧹 Cleaned up empty session {key}")
         
         # Also clean up from job connections
         disconnected_jobs = []
@@ -129,12 +143,27 @@ class WebSocketManager:
             if websocket in connections:
                 connections.remove(websocket)
                 logger.info(f"🧹 Removed from user connections for {user_id}")
+
+        # Clean up from team timeline connections
+        if hasattr(self, 'line_timeline_connections'):
+            for lid, connections in list(self.line_timeline_connections.items()):
+                if websocket in connections:
+                    connections.remove(websocket)
+                if not connections:
+                    self.line_timeline_connections.pop(lid, None)
         
         # Clean up empty user connection lists
         empty_users = [uid for uid, connections in self.user_connections.items() if not connections]
         for uid in empty_users:
             del self.user_connections[uid]
             logger.info(f"🧹 Cleaned up empty user connections for {uid}")
+        
+        # Clean up device proxy connections
+        for user_id, devices in list(self.device_connections.items()):
+            for device_id, ws in list(devices.items()):
+                if ws == websocket:
+                    self.unregister_device(user_id, device_id)
+                    logger.info(f"🧹 Removed device {device_id} for user {user_id}")
         
         if disconnected_jobs:
             logger.info(f"📡 WebSocket disconnected from jobs: {disconnected_jobs}")
@@ -156,11 +185,11 @@ class WebSocketManager:
                 self.active_connections.remove(websocket)
 
     async def send_to_session(self, message: Any, session_id: str):
-        """Send a message to all connections in a session"""
-        if session_id in self.session_connections:
+        """Send a message to all connections in a session. session_id is normalized to str for consistent lookup (JWT may use str, DB may return UUID)."""
+        key = str(session_id) if session_id is not None else None
+        if key and key in self.session_connections:
             broken_connections = []
-            
-            for websocket in self.session_connections[session_id]:
+            for websocket in self.session_connections[key]:
                 try:
                     if isinstance(message, dict):
                         message_str = json.dumps(message)
@@ -168,12 +197,10 @@ class WebSocketManager:
                         message_str = str(message)
                     await websocket.send_text(message_str)
                 except Exception as e:
-                    logger.error(f"❌ Failed to send message to session {session_id}: {e}")
+                    logger.error(f"❌ Failed to send message to session {key}: {e}")
                     broken_connections.append(websocket)
-            
-            # Clean up broken connections
             for websocket in broken_connections:
-                self.disconnect(websocket, session_id)
+                self.disconnect(websocket, key)
 
     async def send_to_job(self, message: Any, job_id: str):
         """Send a message to all connections tracking a specific job"""
@@ -252,17 +279,19 @@ class WebSocketManager:
             logger.error(f"❌ Failed to send folder update: {e}")
 
     async def send_document_status_update(self, document_id: str, status: str, folder_id: str = None, user_id: str = None, filename: str = None, proposal_data: Dict[str, Any] = None):
-        """Send document status update to appropriate sessions - **BULLY!** Now with filename for toast notifications!"""
+        """Send document status update to appropriate sessions. Includes filename for toasts and has_pending_proposals for file tree indicator."""
         try:
             message = {
                 "type": "document_status_update",
                 "document_id": document_id,
                 "status": status,
                 "folder_id": folder_id,
-                "filename": filename,  # **ROOSEVELT FIX**: Include filename for UI toast notifications!
+                "filename": filename,
                 "timestamp": datetime.now().isoformat()
             }
-            
+            if proposal_data is not None and "has_pending_proposals" in proposal_data:
+                message["has_pending_proposals"] = proposal_data["has_pending_proposals"]
+
             # If status is edit_proposal and proposal_data is provided, send as separate message
             if status == "edit_proposal" and proposal_data:
                 proposal_message = {
@@ -383,6 +412,37 @@ class WebSocketManager:
                 
         except Exception as e:
             logger.error(f"❌ Failed to send agent status: {e}")
+
+    async def send_line_agent_chat_update(
+        self,
+        conversation_id: str,
+        user_id: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        """Push a persisted line sub-agent assistant message to chat clients (out-of-band from SSE)."""
+        try:
+            message = {
+                "type": "line_agent_message",
+                "conversation_id": conversation_id,
+                "timestamp": datetime.now().isoformat(),
+                **(payload or {}),
+            }
+            sent = False
+            if conversation_id in self.conversation_connections:
+                for websocket in list(self.conversation_connections[conversation_id]):
+                    try:
+                        await websocket.send_text(json.dumps(message))
+                        sent = True
+                    except Exception as e:
+                        logger.error("Failed to send line_agent_message to conversation %s: %s", conversation_id, e)
+            if not sent and user_id in self.user_connections:
+                for websocket in list(self.user_connections[user_id]):
+                    try:
+                        await websocket.send_text(json.dumps(message))
+                    except Exception as e:
+                        logger.error("Failed to send line_agent_message to user %s: %s", user_id, e)
+        except Exception as e:
+            logger.error("Failed to send line_agent_chat_update: %s", e)
     
     # =====================
     # ROOSEVELT'S MESSAGING CAVALRY
@@ -631,6 +691,94 @@ class WebSocketManager:
         
         if sent_count > 0:
             logger.info(f"✅ Broadcast message type '{message.get('type')}' to {sent_count} user connections")
+
+    async def send_line_timeline_update(self, line_id: str, message: Dict[str, Any]):
+        """Send a timeline update to all WebSockets subscribed to this line's timeline."""
+        if not line_id or line_id not in self.line_timeline_connections:
+            return
+        for websocket in list(self.line_timeline_connections[line_id]):
+            try:
+                await websocket.send_json(message)
+            except Exception:
+                pass
+
+    # =====================
+    # Device proxy (Bastion Local Proxy daemon)
+    # =====================
+
+    def register_device(self, user_id: str, device_id: str, websocket: WebSocket, capabilities: List[str]):
+        """Register a connected device proxy (daemon) for a user."""
+        if user_id not in self.device_connections:
+            self.device_connections[user_id] = {}
+            self.device_capabilities[user_id] = {}
+        self.device_connections[user_id][device_id] = websocket
+        self.device_capabilities[user_id][device_id] = list(capabilities) if capabilities else []
+        logger.info(f"Device registered: user={user_id}, device={device_id}, capabilities={capabilities}")
+
+    def unregister_device(self, user_id: str, device_id: str):
+        """Remove a device from the registry."""
+        if user_id in self.device_connections and device_id in self.device_connections[user_id]:
+            del self.device_connections[user_id][device_id]
+            if not self.device_connections[user_id]:
+                del self.device_connections[user_id]
+        if user_id in self.device_capabilities and device_id in self.device_capabilities[user_id]:
+            del self.device_capabilities[user_id][device_id]
+            if not self.device_capabilities[user_id]:
+                del self.device_capabilities[user_id]
+
+    async def invoke_device_tool(
+        self,
+        user_id: str,
+        tool: str,
+        args: dict,
+        device_id: str = None,
+        timeout: int = 30,
+    ) -> dict:
+        """
+        Send a tool invocation to a connected device and wait for the result.
+        If device_id is None, use the first connected device for the user.
+        """
+        import uuid
+        request_id = str(uuid.uuid4())
+        devices = self.device_connections.get(user_id) or {}
+        if not devices:
+            return {"success": False, "error": "No device connected", "formatted": "No device connected for this user."}
+        target_device_id = device_id if device_id and device_id in devices else next(iter(devices))
+        ws = devices[target_device_id]
+        caps = (self.device_capabilities.get(user_id) or {}).get(target_device_id) or []
+        if tool not in caps:
+            return {"success": False, "error": f"Device does not support capability: {tool}", "formatted": f"Device does not support {tool}."}
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        self.pending_device_invocations[request_id] = (user_id, future)
+        try:
+            await ws.send_json({
+                "type": "invoke",
+                "request_id": request_id,
+                "tool": tool,
+                "args": args,
+            })
+            result = await asyncio.wait_for(future, timeout=timeout)
+            return result
+        except asyncio.TimeoutError:
+            return {"success": False, "error": "Device invocation timed out", "formatted": "Request timed out."}
+        finally:
+            self.pending_device_invocations.pop(request_id, None)
+
+    def resolve_device_invocation(self, request_id: str, result: dict, user_id: str):
+        """Resolve a pending device invocation with the result from the daemon. Verifies user_id matches."""
+        entry = self.pending_device_invocations.get(request_id)
+        if entry:
+            stored_user_id, future = entry
+            if stored_user_id == user_id and not future.done():
+                future.set_result(result)
+            self.pending_device_invocations.pop(request_id, None)
+
+    def get_user_devices(self, user_id: str) -> List[dict]:
+        """List connected devices for a user."""
+        devices = self.device_connections.get(user_id) or {}
+        caps = self.device_capabilities.get(user_id) or {}
+        return [{"device_id": did, "capabilities": caps.get(did, [])} for did in devices]
 
     def get_connection_count(self) -> int:
         """Get the number of active connections"""

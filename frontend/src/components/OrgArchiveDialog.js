@@ -110,7 +110,7 @@ const OrgArchiveDialog = ({
     setSuccess(false);
 
     try {
-      console.log('📦 ROOSEVELT: Archiving entry:', {
+      console.log('Archiving entry:', {
         sourceFile,
         sourceLine,
         sourceHeading,

@@ -20,7 +20,6 @@ import {
   DialogActions,
   TextField,
   Chip,
-  Slider,
   Paper,
   Autocomplete,
 } from '@mui/material';
@@ -28,14 +27,10 @@ import { Add, Public, Lock, Route, DirectionsCar, Delete, PlayArrow, Search, MyL
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import apiService from '../../services/apiService';
 import { useTheme } from '../../contexts/ThemeContext';
+import { MapLayerProvider, useMapLayer } from '../../contexts/MapLayerContext';
 import LocationsList from './LocationsList';
 import InteractiveMap from './InteractiveMap';
 import LocationDialog from './LocationDialog';
-
-const MAP_STYLE_KEY = 'mapStyle';
-
-const mapStyleFromValue = (v) => (v === 0 ? 'light' : v === 1 ? 'auto' : 'dark');
-const valueFromMapStyle = (s) => (s === 'light' ? 0 : s === 'auto' ? 1 : 2);
 
 function flattenSteps(legs) {
   if (!legs || !Array.isArray(legs)) return [];
@@ -144,29 +139,19 @@ function mergeConsecutiveSteps(steps) {
   return out.map(({ roadNameRaw, ...rest }) => ({ ...rest }));
 }
 
-const MapPage = () => {
+const MapPage = () => (
+  <MapLayerProvider defaultStyle="auto">
+    <MapPageContent />
+  </MapLayerProvider>
+);
+
+const MapPageContent = () => {
   const queryClient = useQueryClient();
   const { darkMode: appDarkMode } = useTheme();
+  const { stylePreference, setStylePreference, themes } = useMapLayer();
   const [activeTab, setActiveTab] = useState(0);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingLocation, setEditingLocation] = useState(null);
-  const [mapStylePreference, setMapStylePreference] = useState(() => {
-    try {
-      const saved = localStorage.getItem(MAP_STYLE_KEY);
-      return saved === 'light' || saved === 'auto' || saved === 'dark' ? saved : 'auto';
-    } catch {
-      return 'auto';
-    }
-  });
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(MAP_STYLE_KEY, mapStylePreference);
-    } catch {
-      // ignore
-    }
-  }, [mapStylePreference]);
-
   const [fromLocationId, setFromLocationId] = useState('');
   const [toLocationId, setToLocationId] = useState('');
   const [fromManual, setFromManual] = useState(null);
@@ -681,7 +666,8 @@ const MapPage = () => {
                     routeGeometry={routeGeometry}
                     searchCenter={searchCenter}
                     onSearchCenterApplied={handleSearchCenterApplied}
-                    darkMap={mapStylePreference === 'auto' ? appDarkMode : mapStylePreference === 'dark'}
+                    darkMap={stylePreference === 'auto' ? appDarkMode : stylePreference === 'dark'}
+                    stylePreference={stylePreference}
                   />
                   <Paper
                     elevation={2}
@@ -700,26 +686,20 @@ const MapPage = () => {
                     <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
                       Map style
                     </Typography>
-                    <Slider
-                      value={valueFromMapStyle(mapStylePreference)}
-                      onChange={(_, v) => setMapStylePreference(mapStyleFromValue(v))}
-                      min={0}
-                      max={2}
-                      step={1}
-                      marks={[
-                        { value: 0, label: 'Light' },
-                        { value: 1, label: 'Auto' },
-                        { value: 2, label: 'Dark' },
-                      ]}
-                      valueLabelDisplay="off"
-                      size="small"
-                      sx={{
-                        mt: 0.5,
-                        width: 'calc(100% - 16px)',
-                        mx: 1,
-                        '& .MuiSlider-markLabel': { fontSize: '0.7rem', maxWidth: 48 },
-                      }}
-                    />
+                    <FormControl size="small" fullWidth>
+                      <Select
+                        value={stylePreference}
+                        onChange={(e) => setStylePreference(e.target.value)}
+                        displayEmpty
+                        sx={{ mt: 0.5, minHeight: 36 }}
+                      >
+                        {themes.map((t) => (
+                          <MenuItem key={t} value={t}>
+                            {t.charAt(0).toUpperCase() + t.slice(1)}
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
                   </Paper>
                 </Box>
                 {currentRoute && routeSteps.length > 0 && (

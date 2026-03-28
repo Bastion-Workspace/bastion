@@ -17,12 +17,15 @@ import re
 from typing import Dict, Any, List, Optional, Tuple
 from datetime import datetime
 
+from pydantic import BaseModel, Field
+
 from orchestrator.tools.document_tools import get_document_content_tool
 from orchestrator.tools.document_editing_tools import (
     update_document_content_tool,
     propose_document_edit_tool
 )
 from orchestrator.tools.file_creation_tools import create_user_file_tool
+from orchestrator.utils.action_io_registry import register_action
 from orchestrator.utils.project_utils import (
     sanitize_filename,
     generate_filename_from_content,
@@ -31,6 +34,23 @@ from orchestrator.utils.project_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ── I/O models for append_project_content ───────────────────────────────────
+
+class AppendProjectContentInputs(BaseModel):
+    """Required inputs for append_project_content."""
+    document_id: str = Field(description="Document ID to append to")
+    section_name: str = Field(description="Name of the section to add")
+    content: str = Field(description="Content to append")
+    user_id: str = Field(default="system", description="User ID")
+
+
+class AppendProjectContentOutputs(BaseModel):
+    """Outputs for append_project_content."""
+    success: bool = Field(description="Whether append/propose succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
 
 
 def extract_structured_content(
@@ -501,7 +521,8 @@ async def _save_content_to_file(
             return
         
         # Get existing content to check for updates
-        existing_content = await get_document_content_tool(document_id, user_id)
+        _r = await get_document_content_tool(document_id, user_id)
+        existing_content = _r.get("content", _r) if isinstance(_r, dict) else _r
         
         if existing_content.startswith("Error"):
             logger.warning(f"⚠️ Could not read existing content: {existing_content}")
@@ -774,7 +795,8 @@ async def enrich_documents_with_metadata(
                         if doc_id:
                             try:
                                 # Get full document content to extract title and description
-                                content = await get_document_content_tool(doc_id, user_id)
+                                _r = await get_document_content_tool(doc_id, user_id)
+                                content = _r.get("content", _r) if isinstance(_r, dict) else _r
                                 if not content.startswith("Error"):
                                     # Parse frontmatter for title and description
                                     frontmatter_match = re.match(r"^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n", content)
@@ -804,7 +826,8 @@ async def enrich_documents_with_metadata(
         if doc_id and doc_id != "active_editor":
             try:
                 # Get full document content to extract title and description
-                content = await get_document_content_tool(doc_id, user_id)
+                _r = await get_document_content_tool(doc_id, user_id)
+                content = _r.get("content", _r) if isinstance(_r, dict) else _r
                 if not content.startswith("Error"):
                     # Parse frontmatter for title and description
                     frontmatter_match = re.match(r"^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n", content)
@@ -838,7 +861,8 @@ async def enrich_documents_with_metadata(
                     if doc_id and doc_id not in [d.get("document_id") for d in enriched]:
                         try:
                             # Get content to extract metadata
-                            content = await get_document_content_tool(doc_id, user_id)
+                            _r = await get_document_content_tool(doc_id, user_id)
+                            content = _r.get("content", _r) if isinstance(_r, dict) else _r
                             if not content.startswith("Error"):
                                 # Parse frontmatter
                                 frontmatter_match = re.match(r"^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n", content)
@@ -1032,191 +1056,6 @@ async def check_if_new_file_needed(
         return None
 
 
-async def create_new_project_file(
-    file_suggestion: Dict[str, Any],
-    project_plan_document_id: str,
-    initial_content: str,
-    project_plan_frontmatter: Dict[str, Any],
-    user_id: str,
-    metadata: Dict[str, Any]
-) -> Optional[Dict[str, Any]]:
-    """
-    Create a new project file based on user approval.
-    
-    Creates the file in the same folder as the project plan and updates
-    the project plan frontmatter to include the new file reference.
-    
-    Args:
-        file_suggestion: Dict with suggested_filename, suggested_title, etc.
-        project_plan_document_id: Document ID of the main project plan
-        initial_content: Content to add to the new file
-        project_plan_frontmatter: Frontmatter from project plan
-        user_id: User ID
-        metadata: Metadata dict containing shared_memory, active_editor
-        
-    Returns:
-        Dict with document_id, filename, title, file_type, or None if failed
-    """
-    try:
-        filename = file_suggestion.get("suggested_filename")
-        title = file_suggestion.get("suggested_title")
-        description = file_suggestion.get("suggested_description", "")
-        file_type = file_suggestion.get("file_type")
-        frontmatter_key = file_suggestion.get("frontmatter_key")
-        
-        if not filename or not title:
-            logger.error("❌ Missing filename or title in file suggestion")
-            return None
-        
-        # Get project plan folder_id from active_editor or document metadata
-        shared_memory = metadata.get("shared_memory", {})
-        active_editor = shared_memory.get("active_editor", {})
-        
-        folder_id = None
-        folder_path = None
-        
-        # **PRIORITY 1**: Try to get folder_id from active_editor
-        if active_editor:
-            folder_id = active_editor.get("folder_id")
-            if folder_id:
-                logger.info(f"📁 Using folder_id from active_editor: {folder_id}")
-        
-        # **PRIORITY 2**: Get folder_id from document metadata (MOST RELIABLE)
-        if not folder_id and project_plan_document_id:
-            try:
-                from orchestrator.backend_tool_client import get_backend_tool_client
-                client = await get_backend_tool_client()
-                doc_info = await client.get_document(project_plan_document_id, user_id)
-                if doc_info and doc_info.get("metadata"):
-                    metadata_dict = doc_info["metadata"]
-                    folder_id = metadata_dict.get("folder_id")
-                    if folder_id:
-                        logger.info(f"📁 Got folder_id from document metadata: {folder_id}")
-            except Exception as e:
-                logger.warning(f"⚠️ Could not get folder_id from document: {e}")
-        
-        # **PRIORITY 3**: Extract folder_path from canonical_path (fallback)
-        if not folder_id:
-            canonical_path = active_editor.get("canonical_path", "")
-            if not canonical_path and project_plan_document_id:
-                # Try to get canonical_path from document metadata
-                try:
-                    from orchestrator.backend_tool_client import get_backend_tool_client
-                    client = await get_backend_tool_client()
-                    doc_info = await client.get_document(project_plan_document_id, user_id)
-                    if doc_info and doc_info.get("metadata"):
-                        canonical_path = doc_info["metadata"].get("canonical_path", "")
-                except Exception:
-                    pass
-            
-            if canonical_path:
-                from pathlib import Path
-                try:
-                    # Parse canonical_path to get folder hierarchy
-                    # Format: /app/uploads/Users/{username}/Projects/Allen Organ Controls/project_plan.md
-                    path_parts = Path(canonical_path).parts
-                    
-                    # Find "Users" to start folder path
-                    if "Users" in path_parts:
-                        users_idx = path_parts.index("Users")
-                        if users_idx + 2 < len(path_parts) - 1:  # username + at least one folder + filename
-                            # Get folder parts (skip username and filename)
-                            folder_parts = path_parts[users_idx + 2:-1]
-                            if folder_parts:
-                                folder_path = "/".join(folder_parts)
-                                logger.info(f"📁 Extracted folder_path from canonical_path: {folder_path}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Failed to extract folder_path from canonical_path: {e}")
-        
-        if not folder_id and not folder_path:
-            logger.error(f"❌ Could not determine folder_id or folder_path for project file creation")
-            return None
-        
-        # Create file content with frontmatter
-        content = f"""---
-type: electronics
-title: {title}
-description: {description}
-tags: [electronics, {file_type}]
-category: electronics
----
-
-# {title}
-
-{description if description else "<!-- Content will be added here -->"}
-
-<!-- Content will be added here -->
-"""
-        
-        # Create the file - use folder_id if available, otherwise folder_path
-        result = await create_user_file_tool(
-            filename=filename,
-            content=content,
-            folder_id=folder_id,  # Prefer folder_id over folder_path
-            folder_path=folder_path if not folder_id else None,
-            title=title,
-            tags=["electronics", file_type],
-            category="electronics",
-            user_id=user_id
-        )
-        
-        if not result.get("success"):
-            logger.error(f"❌ Failed to create new file: {result.get('error')}")
-            return None
-        
-        new_file_document_id = result.get("document_id")
-        logger.info(f"✅ Created new project file: {filename} ({new_file_document_id})")
-        
-        # Update project plan frontmatter to include this new file
-        try:
-            # Get current project plan content
-            project_plan_content = await get_document_content_tool(project_plan_document_id, user_id)
-            if not project_plan_content.startswith("Error"):
-                # Use reusable frontmatter utility to add file reference
-                from orchestrator.utils.frontmatter_utils import add_to_frontmatter_list
-                
-                new_entry = f"./{filename}"
-                updated_content, success = await add_to_frontmatter_list(
-                    content=project_plan_content,
-                    list_key=frontmatter_key,
-                    new_items=[new_entry],
-                    also_update_files=True  # Also add to 'files' list for active editor context
-                )
-                
-                if success:
-                    # Update project plan
-                    update_result = await update_document_content_tool(
-                        document_id=project_plan_document_id,
-                        content=updated_content,
-                        user_id=user_id,
-                        append=False
-                    )
-                    
-                    if update_result.get("success"):
-                        logger.info(f"✅ Updated project plan frontmatter with new file reference: {filename} (preserved all existing fields)")
-                    else:
-                        logger.warning(f"⚠️ Failed to update project plan frontmatter: {update_result.get('error')}")
-                else:
-                    logger.warning(f"⚠️ Failed to parse/update frontmatter for project plan")
-        except Exception as e:
-            logger.warning(f"⚠️ Could not update project plan frontmatter: {e}")
-            import traceback
-            logger.debug(f"Traceback: {traceback.format_exc()}")
-            # Continue - file was created successfully
-        
-        return {
-            "document_id": new_file_document_id,
-            "filename": filename,
-            "title": title,
-            "file_type": file_type
-        }
-        
-    except Exception as e:
-        logger.error(f"❌ Error creating new project file: {e}")
-        return None
-
-
-def _is_placeholder_content(content: str) -> bool:
     """
     Check if content is a placeholder that should be replaced.
     
@@ -1582,17 +1421,17 @@ async def append_project_content(
     document_id: str,
     section_name: str,
     content: str,
-    user_id: str,
+    user_id: str = "system",
     active_editor: Optional[Dict[str, Any]] = None,
     auto_apply_if_closed: bool = True
-) -> None:
+) -> Dict[str, Any]:
     """
     Append new content to a project file.
-    
+
     Adds a new section with timestamp to the end of the document.
     If file is open in editor, proposes edit for inline suggestions.
     If file is closed, auto-applies the edit.
-    
+
     Args:
         document_id: Document ID to append to
         section_name: Name of the section to add
@@ -1600,14 +1439,17 @@ async def append_project_content(
         user_id: User ID
         active_editor: Active editor context (optional)
         auto_apply_if_closed: If True, auto-apply when file is not open
+
+    Returns:
+        Dict with success, error, formatted
     """
     try:
         # Format the content to append
         content_to_add = f"\n\n## {section_name}\n\n*Added on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n{content}\n"
-        
+
         # Check if document is open in editor
         is_open = _is_document_open_in_editor(document_id, active_editor)
-        
+
         if is_open or not auto_apply_if_closed:
             # Document is open - propose edit for inline suggestions
             edit_result = await propose_document_edit_tool(
@@ -1623,12 +1465,21 @@ async def append_project_content(
                 requires_preview=False,  # Append is safe to auto-apply if small
                 user_id=user_id
             )
-            
+
             if edit_result.get("success"):
-                logger.info(f"✅ Proposed append of {section_name} section (file is open - showing inline suggestions)")
-                # WebSocket notification is handled by backend's propose_document_edit_tool
-            else:
-                logger.warning(f"⚠️ Failed to propose append: {edit_result.get('error')}")
+                logger.info("Proposed append of %s section (file is open - showing inline suggestions)", section_name)
+                return {
+                    "success": True,
+                    "error": None,
+                    "formatted": f"Proposed append of '{section_name}' section for review.",
+                }
+            err = edit_result.get("error", "Unknown error")
+            logger.warning("Failed to propose append: %s", err)
+            return {
+                "success": False,
+                "error": err,
+                "formatted": f"Failed to propose append: {err}",
+            }
         else:
             # Document is not open - auto-apply the edit
             logger.info(f"🔌 Auto-appending {section_name} section (file is not open)")
@@ -1637,7 +1488,8 @@ async def append_project_content(
             from orchestrator.utils.frontmatter_utils import parse_frontmatter
             
             # **FRONTMATTER PRESERVATION**: Read existing content and frontmatter BEFORE append
-            existing_content = await get_document_content_tool(document_id, user_id)
+            _r = await get_document_content_tool(document_id, user_id)
+            existing_content = _r.get("content", _r) if isinstance(_r, dict) else _r
             existing_frontmatter = {}
             existing_body = ""
             if not existing_content.startswith("Error"):
@@ -1659,7 +1511,8 @@ async def append_project_content(
                 # **FRONTMATTER VALIDATION**: Verify frontmatter is still intact after append
                 if existing_frontmatter:
                     try:
-                        updated_content = await get_document_content_tool(document_id, user_id)
+                        _r = await get_document_content_tool(document_id, user_id)
+                        updated_content = _r.get("content", _r) if isinstance(_r, dict) else _r
                         if not updated_content.startswith("Error"):
                             updated_frontmatter, _ = await parse_frontmatter(updated_content)
                             updated_fields = set(updated_frontmatter.keys())
@@ -1707,11 +1560,27 @@ async def append_project_content(
                     except Exception as validate_error:
                         logger.warning(f"⚠️ Could not validate frontmatter after append: {validate_error}")
                 
-                logger.info(f"✅ Auto-appended {section_name} section")
-            else:
-                logger.warning(f"⚠️ Failed to auto-append section: {update_result.get('error')}")
-            
+                logger.info("Auto-appended %s section", section_name)
+                return {
+                    "success": True,
+                    "error": None,
+                    "formatted": f"Appended '{section_name}' section to document.",
+                }
+            err = update_result.get("error", "Unknown error")
+            logger.warning("Failed to auto-append section: %s", err)
+            return {
+                "success": False,
+                "error": err,
+                "formatted": f"Failed to append section: {err}",
+            }
+
     except Exception as e:
-        logger.error(f"❌ Error appending project content: {e}")
+        logger.error("Error appending project content: %s", e)
+        return {
+            "success": False,
+            "error": str(e),
+            "formatted": f"Error appending content: {e}",
+        }
 
 
+# append_project_content: not registered (internal use by plan nodes only)

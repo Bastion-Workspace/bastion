@@ -23,6 +23,7 @@ import {
   Menu,
   MenuItem,
   ListItemIcon,
+  ListSubheader,
   TextField,
   InputAdornment,
   Button,
@@ -43,7 +44,6 @@ import {
 import { useQuery } from 'react-query';
 import apiService from '../services/apiService';
 import { useMusic } from '../contexts/MediaContext';
-import DeezerSearch from './music/DeezerSearch';
 
 const MediaPage = () => {
   // Load persisted state from localStorage on mount
@@ -93,7 +93,6 @@ const MediaPage = () => {
   const [contextMenu, setContextMenu] = useState(null); // Context menu state
   const [searchQuery, setSearchQuery] = useState(initialState.searchQuery); // Search filter
   const [itemsToShow, setItemsToShow] = useState(initialState.itemsToShow); // Pagination: show first 200 items
-  const [searchDialogOpen, setSearchDialogOpen] = useState(false); // Deezer search dialog
   const [trackSortField, setTrackSortField] = useState(() => {
     // Load from localStorage
     try {
@@ -145,14 +144,12 @@ const MediaPage = () => {
   const sources = sourcesData?.sources || [];
   const subsonicSource = sources.find(s => s.service_type === 'subsonic');
   const audiobookshelfSource = sources.find(s => s.service_type === 'audiobookshelf');
-  const deezerSource = sources.find(s => s.service_type === 'deezer');
 
   // Determine which service type to use based on active tab
   const getServiceType = () => {
     if (activeTab === 0) {
-      // Music tab - use SubSonic if available, then Deezer, otherwise fall back to first available source
+      // Music tab - use SubSonic if available, otherwise fall back to first available source
       if (subsonicSource) return 'subsonic';
-      if (deezerSource) return 'deezer';
       return sources.length > 0 ? sources[0].service_type : null;
     }
     if (activeTab === 1 || activeTab === 2) {
@@ -164,9 +161,6 @@ const MediaPage = () => {
   };
 
   const serviceType = getServiceType();
-  
-  // Check if current service supports search (streaming services)
-  const isStreamingService = serviceType === 'deezer';
 
   // Fetch library for the active tab's service
   const { data: library, isLoading: loadingLibrary, error: libraryError } = useQuery(
@@ -209,6 +203,16 @@ const MediaPage = () => {
     () => apiService.music.getSeriesByAuthor(selectedAuthor, serviceType),
     {
       enabled: !!selectedAuthor && !!serviceType && activeTab === 1, // Only for Audiobooks tab
+      refetchOnWindowFocus: false,
+    }
+  );
+
+  // Books for selected author (Audiobooks author drill-in; mirrors Music "albums by artist")
+  const { data: authorBooksData, isLoading: loadingAuthorBooks } = useQuery(
+    ['authorBooks', selectedAuthor, serviceType],
+    () => apiService.music.getAlbumsByArtist(selectedAuthor, serviceType),
+    {
+      enabled: !!selectedAuthor && !!serviceType && activeTab === 1 && !selectedSeries,
       refetchOnWindowFocus: false,
     }
   );
@@ -450,14 +454,14 @@ const MediaPage = () => {
       );
     }
 
-    // If an author is selected in Audiobooks, show their series
+    // If an author is selected in Audiobooks, show their books and optional series
     if (activeTab === 1 && selectedAuthor && !selectedSeries) {
       const author = library?.artists?.find(a => a.id === selectedAuthor);
       const series = seriesData?.series || [];
-      
+      const authorBooks = authorBooksData?.albums ?? [];
+
       return (
         <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-          {/* Back button and header - fixed */}
           <Box sx={{ flexShrink: 0 }}>
             <List>
               <ListItem disablePadding>
@@ -470,20 +474,19 @@ const MediaPage = () => {
             <Divider sx={{ my: 1 }} />
             <List>
               <ListItem disablePadding>
-                <ListItemText 
+                <ListItemText
                   primary={<strong>{author?.name || 'Author'}</strong>}
-                  secondary="Series"
+                  secondary="Books"
                   sx={{ px: 2, py: 1 }}
                 />
               </ListItem>
             </List>
             <Divider sx={{ my: 1 }} />
           </Box>
-          
-          {/* Series list - scrollable */}
-          <Box 
-            sx={{ 
-              flex: 1, 
+
+          <Box
+            sx={{
+              flex: 1,
               overflowY: 'auto',
               overflowX: 'hidden',
               minHeight: 0,
@@ -500,35 +503,62 @@ const MediaPage = () => {
               },
             }}
           >
-            {loadingSeries ? (
+            {loadingAuthorBooks && authorBooks.length === 0 ? (
               <Box display="flex" justifyContent="center" p={2}>
                 <CircularProgress size={24} />
               </Box>
-            ) : series.length > 0 ? (
-              <List sx={{ padding: 0 }}>
-                {series.map((seriesItem) => (
-                  <ListItem key={seriesItem.id} disablePadding>
-                    <ListItemButton 
-                      onClick={() => {
-                        setSelectedSeries(seriesItem.name);
-                        setSelectedItem(null);
-                        setSelectedItemType(null);
-                      }}
-                      sx={{ py: 0.5 }}
-                    >
-                      <ListItemText 
-                        primary={seriesItem.name}
-                        secondary={`${seriesItem.book_count || 0} books`}
-                      />
-                    </ListItemButton>
-                  </ListItem>
-                ))}
-              </List>
             ) : (
-              <List>
-                <ListItem>
-                  <ListItemText primary="No series found" secondary="This author has no series" />
-                </ListItem>
+              <List sx={{ padding: 0 }} subheader={<li />}>
+                <ListSubheader component="div" sx={{ lineHeight: 2, bgcolor: 'background.paper' }}>
+                  Books
+                </ListSubheader>
+                {authorBooks.length > 0 ? (
+                  authorBooks.map((album) => (
+                    <ListItem key={album.id} disablePadding>
+                      <ListItemButton
+                        selected={selectedItem === album.id}
+                        onClick={() => handleAlbumFromArtistClick(album)}
+                        onDoubleClick={() => handleItemDoubleClick(album, 'album')}
+                        sx={{ py: 0.5 }}
+                      >
+                        <ListItemText primary={album.title} secondary={album.artist} />
+                      </ListItemButton>
+                    </ListItem>
+                  ))
+                ) : !loadingAuthorBooks ? (
+                  <ListItem>
+                    <ListItemText primary="No books found" secondary="Try refreshing the media cache" />
+                  </ListItem>
+                ) : null}
+
+                {loadingSeries && series.length === 0 ? (
+                  <Box display="flex" justifyContent="center" p={2}>
+                    <CircularProgress size={24} />
+                  </Box>
+                ) : series.length > 0 ? (
+                  <>
+                    <ListSubheader component="div" sx={{ lineHeight: 2, bgcolor: 'background.paper' }}>
+                      Series
+                    </ListSubheader>
+                    {series.map((seriesItem) => (
+                      <ListItem key={seriesItem.id} disablePadding>
+                        <ListItemButton
+                          onClick={() => {
+                            setSelectedSeries(seriesItem.name);
+                            setSelectedItem(null);
+                            setSelectedItemType(null);
+                          }}
+                          sx={{ py: 0.5 }}
+                        >
+                          <ListItemText
+                            primary={seriesItem.name}
+                            secondary={`${seriesItem.book_count || 0} books`}
+                          />
+                        </ListItemButton>
+                      </ListItem>
+                    ))}
+                  </>
+                ) : null}
               </List>
             )}
           </Box>
@@ -1010,7 +1040,7 @@ const MediaPage = () => {
                 const isSelected = selectedTracks.has(track.id);
                 return (
                   <TableRow
-                    key={track.id}
+                    key={`${track.id}-${index}`}
                     hover
                     selected={isSelected}
                     onDoubleClick={() => handleTrackDoubleClick(track)}
@@ -1082,11 +1112,10 @@ const MediaPage = () => {
   // Check if sources are configured
   const hasSubsonic = !!subsonicSource;
   const hasAudiobookshelf = !!audiobookshelfSource;
-  const hasDeezer = !!deezerSource;
 
   // Filter available tabs based on configured sources
   const availableTabs = [
-    { label: 'Music', icon: <LibraryMusic />, enabled: hasSubsonic || hasDeezer },
+    { label: 'Music', icon: <LibraryMusic />, enabled: hasSubsonic },
     { label: 'Audiobooks', icon: <Headphones />, enabled: hasAudiobookshelf },
     { label: 'Podcasts', icon: <Podcasts />, enabled: hasAudiobookshelf },
   ].filter(tab => tab.enabled);
@@ -1113,20 +1142,66 @@ const MediaPage = () => {
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, overflow: 'hidden' }}>
-      {/* Tabs - right against the top, no scrollbar */}
-      <Box sx={{ borderBottom: 1, borderColor: 'divider', flexShrink: 0, display: 'flex', alignItems: 'center', px: 1.3125 }}>
-        <Tabs 
-          value={activeTab} 
-          onChange={handleTabChange} 
+      {/* Category bar — match Documents / Agent Factory tab strip (44px, paper, chat header alignment) */}
+      <Box
+        sx={{
+          flexShrink: 0,
+          boxSizing: 'border-box',
+          height: 44,
+          minHeight: 44,
+          pl: 0.5,
+          pr: 2,
+          display: 'flex',
+          alignItems: 'center',
+          backgroundColor: 'background.paper',
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+        }}
+      >
+        <Tabs
+          value={activeTab}
+          onChange={handleTabChange}
           aria-label="media tabs"
+          textColor="inherit"
           sx={{
             flex: 1,
-            minHeight: 48,
+            minHeight: 44,
             '& .MuiTabs-scroller': {
               overflow: 'hidden !important',
             },
             '& .MuiTabs-indicator': {
               display: 'none',
+            },
+            '& .MuiTabs-flexContainer': {
+              alignItems: 'stretch',
+              minHeight: 44,
+              gap: 3,
+            },
+            '& .MuiTab-root': {
+              minWidth: 'auto',
+              minHeight: 44,
+              maxHeight: 44,
+              boxSizing: 'border-box',
+              px: 1.5,
+              py: 0,
+              textTransform: 'none',
+              fontSize: 13,
+              fontWeight: 500,
+              color: 'text.primary',
+              opacity: 1,
+              borderRadius: 0.75,
+              '&.Mui-selected': {
+                color: 'text.primary',
+                fontWeight: 600,
+                backgroundColor: 'background.default',
+                boxShadow: (t) => `inset 0 -2px 0 ${t.palette.primary.main}`,
+              },
+              '&.Mui-disabled': { opacity: 0.45 },
+            },
+            '& .MuiTab-iconWrapper': {
+              marginBottom: '0 !important',
+              marginRight: 1,
+              color: 'primary.main',
             },
           }}
         >
@@ -1137,26 +1212,9 @@ const MediaPage = () => {
               icon={tab.icon}
               iconPosition="start"
               disabled={!tab.enabled}
-              sx={{
-                minHeight: 48,
-                textTransform: 'none',
-                fontWeight: activeTab === index ? 600 : 400,
-              }}
             />
           ))}
         </Tabs>
-        {isStreamingService && (
-          <Box sx={{ pr: 0.5 }}>
-            <Button
-              variant="outlined"
-              startIcon={<Search />}
-              onClick={() => setSearchDialogOpen(true)}
-              size="small"
-            >
-              Search
-            </Button>
-          </Box>
-        )}
       </Box>
 
       <Box sx={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
@@ -1229,24 +1287,6 @@ const MediaPage = () => {
           </Box>
         </Box>
       </Box>
-      
-      {/* Deezer Search Dialog */}
-      {isStreamingService && (
-        <DeezerSearch
-          open={searchDialogOpen}
-          onClose={() => setSearchDialogOpen(false)}
-          serviceType={serviceType}
-        />
-      )}
-      
-      {/* Deezer Search Dialog */}
-      {isStreamingService && (
-        <DeezerSearch
-          open={searchDialogOpen}
-          onClose={() => setSearchDialogOpen(false)}
-          serviceType={serviceType}
-        />
-      )}
     </Box>
   );
 };

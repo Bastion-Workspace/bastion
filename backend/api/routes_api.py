@@ -1,5 +1,5 @@
 """
-Routes API: compute road routes via OSRM and CRUD for saved routes.
+Routes API: compute road routes via routing service (Valhalla or OSRM) and CRUD for saved routes.
 """
 
 import json
@@ -14,7 +14,8 @@ from models.route_models import (
     SavedRouteResponse,
 )
 from services.database_manager.database_helpers import execute, fetch_all, fetch_one
-from services.osrm_service import OSRMError, get_route
+from services.routing_service import get_route, get_isochrone
+from services.osrm_service import OSRMError
 
 from api.location_api import require_maps_access
 
@@ -93,6 +94,27 @@ async def compute_route(
         raise HTTPException(status_code=503, detail=e.message or "Routing service error") from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.get("/api/routes/isochrone")
+async def compute_isochrone(
+    current_user: AuthenticatedUserResponse = Depends(require_maps_access),
+    lat: float = Query(..., description="Origin latitude"),
+    lng: float = Query(..., description="Origin longitude"),
+    costing: str = Query("auto", description="Valhalla costing: auto, pedestrian, bicycle, truck"),
+    contours_minutes: str | None = Query(None, description="Comma-separated minutes, e.g. 15,30,45"),
+):
+    """Return isochrone polygons (areas reachable within given drive/walk times). Valhalla only."""
+    origin = (lat, lng)
+    contours = None
+    if contours_minutes:
+        try:
+            minutes = [int(x.strip()) for x in contours_minutes.split(",") if x.strip()]
+            contours = [{"time": m} for m in minutes]
+        except ValueError:
+            contours = [{"time": 15}, {"time": 30}]
+    result = await get_isochrone(origin, costing=costing, contours=contours)
+    return result
 
 
 @router.post("/api/routes", response_model=SavedRouteResponse)

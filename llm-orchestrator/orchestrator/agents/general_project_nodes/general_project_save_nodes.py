@@ -163,76 +163,25 @@ class GeneralProjectSaveNodes:
                 logger.info(f"Creating new reference file: {suggested_filename} ({file_summary})")
                 
                 try:
-                    # Determine folder from active_editor
-                    # PRIORITY 1: Use folder_id if available (most reliable)
-                    folder_id = None
-                    folder_path = None
-                    
-                    if active_editor:
-                        folder_id = active_editor.get("folder_id")
-                        if folder_id:
-                            logger.info(f"Using folder_id from active_editor: {folder_id}")
-                    
-                    # PRIORITY 2: Extract relative folder_path from canonical_path
-                    if not folder_id and active_editor and active_editor.get("canonical_path"):
-                        from pathlib import Path
-                        canonical_path = active_editor.get("canonical_path")
-                        try:
-                            # Parse canonical_path to get folder hierarchy
-                            # Format: /app/uploads/Users/{username}/Projects/NGen Oscillators/project_plan.md
-                            path_parts = Path(canonical_path).parts
-                            
-                            # Find "Users" to start folder path
-                            if "Users" in path_parts:
-                                users_idx = path_parts.index("Users")
-                                if users_idx + 2 < len(path_parts) - 1:  # username + at least one folder + filename
-                                    # Get folder parts (skip username and filename)
-                                    folder_parts = path_parts[users_idx + 2:-1]
-                                    if folder_parts:
-                                        folder_path = "/".join(folder_parts)
-                                        logger.info(f"Extracted folder_path from canonical_path: {folder_path}")
-                        except Exception as e:
-                            logger.warning(f"⚠️ Failed to extract folder_path from canonical_path: {e}")
-                    
+                    from orchestrator.tools.document_creation_tools import resolve_folder_from_context, create_typed_document_tool
+                    folder_id, folder_path = await resolve_folder_from_context(active_editor, project_plan_doc_id, user_id)
                     if not folder_id and not folder_path:
-                        logger.warning("⚠️ Could not determine folder_id or folder_path - file will be created in My Documents root")
-                    
-                    # Create the new file with initial frontmatter
-                    from orchestrator.tools.file_creation_tools import create_user_file_tool
-                    initial_content = f"""---
-type: general
-summary: {file_summary}
----
-
-# {suggested_filename.replace('.md', '').replace('-', ' ').title()}
-
-{item.get('content', '')}
-"""
-                    
-                    new_doc_id = await create_user_file_tool(
-                        filename=suggested_filename,
-                        content=initial_content,
-                        user_id=user_id,
+                        logger.warning("Could not determine folder_id or folder_path - file will be created in My Documents root")
+                    title = item.get("title") or suggested_filename.replace(".md", "").replace("-", " ").title()
+                    create_result = await create_typed_document_tool(
+                        doc_type="project_child",
+                        title=title,
                         folder_id=folder_id,
-                        folder_path=folder_path
+                        folder_path=folder_path,
+                        hub_document_id=project_plan_doc_id,
+                        user_id=user_id,
                     )
-                    
-                    logger.info(f"✅ Created new reference file: {suggested_filename} (doc_id: {new_doc_id})")
-                    
-                    # Add to project plan frontmatter if we have a project plan doc_id
-                    if project_plan_doc_id:
-                        from orchestrator.utils.document_batch_editor import DocumentEditBatch
-                        plan_batch = DocumentEditBatch(project_plan_doc_id, user_id, "general_project_agent")
-                        await plan_batch.initialize()
-                        plan_batch.add_frontmatter_update({}, {"files": [f"./{suggested_filename}"]})
-                        await plan_batch.apply()
-                        logger.info(f"✅ Added {suggested_filename} reference to project plan frontmatter")
-                    
-                    new_files_created.append(suggested_filename)
-                    
-                    # Remove this item from routing_items since we already saved the content
+                    if not create_result.get("success"):
+                        logger.warning(f"Failed to create file {suggested_filename}: {create_result.get('error', 'Unknown error')}")
+                        continue
+                    logger.info(f"Created new reference file: {create_result.get('filename', suggested_filename)} (doc_id: {create_result.get('document_id')})")
+                    new_files_created.append(create_result.get("filename") or suggested_filename)
                     routing_items.remove(item)
-                    
                 except Exception as e:
                     logger.error(f"Failed to create new reference file {suggested_filename}: {e}")
                     import traceback
@@ -443,14 +392,8 @@ summary: {file_summary}
                     logger.info(f"Reloading referenced context after file creation/updates...")
                     from orchestrator.tools.reference_file_loader import load_referenced_files
                     
-                    # General project reference configuration
-                    reference_config = {
-                        "specifications": ["specifications", "spec", "specs", "specification"],
-                        "design": ["design", "design_docs", "architecture"],
-                        "tasks": ["tasks", "task", "todo", "checklist"],
-                        "notes": ["notes", "note", "documentation", "docs"],
-                        "other": ["references", "reference", "files", "related", "documents"]
-                    }
+                    from orchestrator.utils.document_type_registry import get_reference_config
+                    reference_config = get_reference_config("project")
                     
                     # Reload referenced files from updated frontmatter
                     reload_result = await load_referenced_files(

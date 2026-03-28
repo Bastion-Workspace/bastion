@@ -863,13 +863,22 @@ async def assess_reference_quality_node(state: Dict[str, Any]) -> Dict[str, Any]
         # Build additional guidance to add to LLM context
         reference_guidance = "".join(guidance_additions) if guidance_additions else ""
         
-        has_references_final = state.get("has_references", False)
-        
-        # Preserve current_request and other important state from earlier nodes
+        # Explicitly pass reference keys so routing never loses them (belt-and-suspenders)
         return preserve_fiction_state(state, {
             "reference_quality": reference_quality,
             "reference_warnings": warnings,
             "reference_guidance": reference_guidance,
+            "outline_body": state.get("outline_body"),
+            "rules_body": state.get("rules_body"),
+            "style_body": state.get("style_body"),
+            "characters_bodies": state.get("characters_bodies", []),
+            "series_body": state.get("series_body"),
+            "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+            "outline_prev_chapter_text": state.get("outline_prev_chapter_text"),
+            "story_overview": state.get("story_overview"),
+            "book_map": state.get("book_map"),
+            "loaded_references": state.get("loaded_references", {}),
+            "has_references": state.get("has_references", False),
         })
         
     except Exception as e:
@@ -879,6 +888,17 @@ async def assess_reference_quality_node(state: Dict[str, Any]) -> Dict[str, Any]
             "reference_warnings": [],
             "reference_guidance": "",
             "error": str(e),
+            "outline_body": state.get("outline_body"),
+            "rules_body": state.get("rules_body"),
+            "style_body": state.get("style_body"),
+            "characters_bodies": state.get("characters_bodies", []),
+            "series_body": state.get("series_body"),
+            "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+            "outline_prev_chapter_text": state.get("outline_prev_chapter_text"),
+            "story_overview": state.get("story_overview"),
+            "book_map": state.get("book_map"),
+            "loaded_references": state.get("loaded_references", {}),
+            "has_references": state.get("has_references", False),
         })
 
 

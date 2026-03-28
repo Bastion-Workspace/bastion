@@ -108,7 +108,7 @@ const OrgContactsView = ({ onOpenDocument }) => {
       return;
     }
 
-    console.log('✅ ROOSEVELT: Opening org file:', item.document_id);
+    console.log('Opening org file:', item.document_id);
     
     onOpenDocument({
       documentId: item.document_id,
@@ -626,7 +626,7 @@ const OrgContactsView = ({ onOpenDocument }) => {
           onClose={(result) => {
             setRefileDialogOpen(false);
             if (result?.success) {
-              console.log('✅ ROOSEVELT: Refile completed, refreshing contacts...');
+              console.log('Refile completed, refreshing contacts');
               loadContacts();
             }
           }}

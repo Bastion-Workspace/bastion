@@ -4,6 +4,7 @@ Embedding Service Wrapper
 Unified interface for embedding generation and storage using Vector Service.
 All embedding generation routed through dedicated Vector Service microservice.
 All storage operations handled by VectorStoreService.
+Full-text search: chunks are also stored in PostgreSQL document_chunks table.
 """
 
 import logging
@@ -16,6 +17,9 @@ from models.api_models import Chunk
 from qdrant_client.models import PointStruct
 
 logger = logging.getLogger(__name__)
+
+# Batch size for PostgreSQL chunk inserts
+DOCUMENT_CHUNKS_INSERT_BATCH = 50
 
 
 class EmbeddingServiceWrapper:
@@ -82,7 +86,8 @@ class EmbeddingServiceWrapper:
         document_tags: Optional[List[str]] = None,
         document_title: Optional[str] = None,
         document_author: Optional[str] = None,
-        document_filename: Optional[str] = None
+        document_filename: Optional[str] = None,
+        is_image_sidecar: bool = False,
     ):
         """
         Generate embeddings for chunks and store in vector database
@@ -97,6 +102,7 @@ class EmbeddingServiceWrapper:
             document_title: Document title
             document_author: Document author
             document_filename: Document filename
+            is_image_sidecar: If True, payload is tagged so document search can exclude it
         """
         if not self._initialized:
             await self.initialize()
@@ -115,7 +121,8 @@ class EmbeddingServiceWrapper:
             document_tags=document_tags,
             document_title=document_title,
             document_author=document_author,
-            document_filename=document_filename
+            document_filename=document_filename,
+            is_image_sidecar=is_image_sidecar,
         )
     
     async def search_similar(
@@ -181,24 +188,36 @@ class EmbeddingServiceWrapper:
         user_id: Optional[str] = None
     ) -> bool:
         """
-        Delete all embeddings for a document from vector database
-        
-        Uses VectorStoreService for deletion operations.
-        
-        Args:
-            document_id: Document ID to delete chunks for
-            user_id: Optional user ID for user-specific collection
-            
-        Returns:
-            True if successful, False otherwise
+        Remove document from all search indexes: Qdrant vectors and PostgreSQL
+        document_chunks (full-text search). Optionally zeros chunk_count on
+        document_metadata.
         """
         if not self._initialized:
             await self.initialize()
-        
-        return await self.vector_store.delete_points_by_filter(
+
+        result = await self.vector_store.delete_points_by_filter(
             document_id=document_id,
             user_id=user_id
         )
+
+        # Remove from PostgreSQL full-text search index (admin context for writes)
+        try:
+            from services.database_manager.database_helpers import execute
+            rls_context = {"user_id": "", "user_role": "admin"}
+            await execute(
+                "DELETE FROM document_chunks WHERE document_id = $1",
+                document_id,
+                rls_context=rls_context,
+            )
+            await execute(
+                "UPDATE document_metadata SET chunk_count = 0 WHERE document_id = $1",
+                document_id,
+                rls_context=rls_context,
+            )
+        except Exception as e:
+            logger.warning("Failed to delete document_chunks or update chunk_count for %s: %s", document_id, e)
+
+        return result
     
     async def get_collection_stats(self, collection_name: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -225,7 +244,8 @@ class EmbeddingServiceWrapper:
         document_tags: Optional[List[str]] = None,
         document_title: Optional[str] = None,
         document_author: Optional[str] = None,
-        document_filename: Optional[str] = None
+        document_filename: Optional[str] = None,
+        is_image_sidecar: bool = False,
     ):
         """
         Store pre-generated embeddings in vector database with metadata
@@ -319,6 +339,8 @@ class EmbeddingServiceWrapper:
                     payload["document_author"] = document_author
                 if document_filename:
                     payload["document_filename"] = document_filename
+                if is_image_sidecar:
+                    payload["is_image_sidecar"] = "true"
                 
                 point = PointStruct(
                     id=content_hash,
@@ -350,12 +372,78 @@ class EmbeddingServiceWrapper:
                     f"Stored {len(points)} unique embeddings in "
                     f"{collection_type} collection"
                 )
+                # Store chunks in PostgreSQL for full-text search (admin context for writes)
+                pg_collection_type = "global" if not user_id and not team_id else "user"
+                await self._store_chunks_postgres(
+                    chunks=unique_chunks,
+                    user_id=user_id,
+                    team_id=team_id,
+                    collection_type=pg_collection_type,
+                    is_image_sidecar=is_image_sidecar,
+                )
             else:
                 logger.error("Failed to store embeddings")
             
         except Exception as e:
             logger.error(f"Failed to store embeddings with metadata for {'team ' + team_id if team_id else ('user ' + user_id if user_id else 'system')}: {e}")
             raise
+    
+    async def _store_chunks_postgres(
+        self,
+        chunks: List[Chunk],
+        user_id: Optional[str] = None,
+        team_id: Optional[str] = None,
+        collection_type: str = "user",
+        is_image_sidecar: bool = False,
+    ) -> None:
+        """
+        Persist chunks to document_chunks table for full-text search.
+        Uses admin RLS context so backend can write regardless of current user.
+        """
+        if not chunks:
+            return
+        try:
+            from services.database_manager.database_helpers import execute
+            rls_context = {"user_id": "", "user_role": "admin"}
+            # Remove existing chunks for this document (reprocess may have different count)
+            document_id = chunks[0].document_id
+            await execute(
+                "DELETE FROM document_chunks WHERE document_id = $1",
+                document_id,
+                rls_context=rls_context,
+            )
+            # Batch insert with ON CONFLICT DO UPDATE for idempotent reprocessing
+            for i in range(0, len(chunks), DOCUMENT_CHUNKS_INSERT_BATCH):
+                batch = chunks[i : i + DOCUMENT_CHUNKS_INSERT_BATCH]
+                placeholders = []
+                args = []
+                for idx, ch in enumerate(batch):
+                    base = idx * 10
+                    placeholders.append(
+                        f"(${base+1}, ${base+2}, ${base+3}, ${base+4}, ${base+5}, ${base+6}, ${base+7}, ${base+8}, ${base+9}, ${base+10})"
+                    )
+                    args.extend([
+                        ch.chunk_id,
+                        ch.document_id,
+                        ch.content,
+                        ch.chunk_index,
+                        user_id,
+                        collection_type,
+                        team_id,
+                        is_image_sidecar,
+                        ch.metadata.get("page_start"),
+                        ch.metadata.get("page_end"),
+                    ])
+                values_sql = ", ".join(placeholders)
+                sql = f"""
+                    INSERT INTO document_chunks (chunk_id, document_id, content, chunk_index, user_id, collection_type, team_id, is_image_sidecar, page_start, page_end)
+                    VALUES {values_sql}
+                """
+                await execute(sql, *args, rls_context=rls_context)
+            logger.debug(f"Stored {len(chunks)} chunks in document_chunks for full-text search")
+        except Exception as e:
+            logger.error(f"Failed to store chunks in document_chunks: {e}")
+            # Do not raise: vector store is source of truth; full-text is additive
     
     async def close(self):
         """Clean up resources"""

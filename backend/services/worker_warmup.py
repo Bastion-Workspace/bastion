@@ -31,7 +31,7 @@ class WorkerWarmupService:
             return {"status": "already_warm", "services": list(self.services.keys())}
         
         self.warmup_start_time = datetime.now()
-        logger.info("🔥 ROOSEVELT'S WORKER WARMUP: Starting service pre-initialization...")
+        logger.info("Worker warmup: starting service pre-initialization...")
         
         # Initialize shared database pool first
         try:
@@ -51,6 +51,7 @@ class WorkerWarmupService:
             self._warmup_settings_service(),
             self._warmup_conversation_service(),
             self._warmup_category_service(),
+            self._warmup_document_index_check(),
         ])
         
         # Execute all warmup tasks in parallel
@@ -60,7 +61,7 @@ class WorkerWarmupService:
         successful_services = []
         failed_services = []
         
-        service_names = ["settings", "conversation", "category"]
+        service_names = ["settings", "conversation", "category", "document_index_check"]
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 failed_services.append(f"{service_names[i]}: {result}")
@@ -82,7 +83,7 @@ class WorkerWarmupService:
             }
         else:
             self.is_warmed_up = True
-            logger.info(f"✅ ROOSEVELT'S WORKER WARMUP: All services warmed up successfully in {warmup_duration:.2f}s")
+            logger.info(f"Worker warmup: all services warmed up successfully in {warmup_duration:.2f}s")
             return {
                 "status": "success",
                 "services": successful_services,
@@ -191,6 +192,35 @@ class WorkerWarmupService:
         except Exception as e:
             logger.error(f"❌ Category service warmup failed: {e}")
             raise
+    
+    async def _warmup_document_index_check(self) -> Dict[str, Any]:
+        """
+        Check if any completed, non-exempt documents lack document_chunks (FTS index).
+        If so, queue the backfill Celery task so workers will index them.
+        """
+        try:
+            if not self._shared_db_pool:
+                return {"status": "skipped", "reason": "no_db_pool"}
+            async with self._shared_db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT d.document_id FROM document_metadata d
+                    LEFT JOIN document_chunks c ON c.document_id = d.document_id
+                    WHERE d.processing_status = 'completed'
+                      AND d.exempt_from_vectorization = FALSE
+                      AND c.document_id IS NULL
+                    LIMIT 1
+                    """
+                )
+            if not row:
+                return {"status": "success", "document_index_check": "all_indexed"}
+            from services.celery_tasks.document_tasks import backfill_document_chunks_task
+            backfill_document_chunks_task.delay(limit=5000, batch_size=50, delay=0.3)
+            logger.info("Queued backfill_document_chunks_task: some documents missing FTS index")
+            return {"status": "success", "document_index_check": "backfill_queued"}
+        except Exception as e:
+            logger.warning("Document index check failed (non-fatal): %s", e)
+            return {"status": "skipped", "reason": str(e)}
     
     def get_service(self, service_name: str) -> Optional[Any]:
         """Get a pre-warmed service"""

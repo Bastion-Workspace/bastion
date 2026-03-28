@@ -22,8 +22,11 @@ import PyPDF2
 import pdfplumber
 from pydantic import BaseModel
 
+import asyncpg
+
 from config import settings
 from services.service_container import service_container
+from services.schema_guards import ensure_user_memory_schema_columns
 from version import __version__
 from utils.string_utils import strip_yaml_frontmatter
 
@@ -31,10 +34,9 @@ from utils.string_utils import strip_yaml_frontmatter
 from services.celery_app import celery_app
 
 # Import Celery tasks to ensure they are registered
-# Note: orchestrator_tasks.process_orchestrator_query removed - deprecated task
-import services.celery_tasks.orchestrator_tasks
 import services.celery_tasks.agent_tasks
 import services.celery_tasks.rss_tasks
+import services.celery_tasks.audio_export_tasks
 
 
 from services.settings_service import settings_service
@@ -64,6 +66,15 @@ from models.conversation_models import (
 from utils.logging_config import setup_logging
 from utils.websocket_manager import WebSocketManager
 from utils.auth_middleware import get_current_user, get_current_user_optional, require_admin
+from services.user_settings_kv_service import get_user_setting
+from services.user_llm_provider_service import user_llm_provider_service
+from services.model_source_resolver import (
+    get_available_models as resolver_get_available_models,
+    get_chat_selectable_model_ids_for_user,
+    get_enabled_models as resolver_get_enabled_models,
+    get_enabled_models_catalog_slice,
+)
+from services.admin_provider_registry import admin_provider_registry
 
 # Setup logging
 from utils.logging_config import setup_logging
@@ -93,6 +104,65 @@ from api.learning_api import router as learning_router
 # Import FileManager service
 from services.file_manager import get_file_manager
 from services.file_manager.models.file_placement_models import FolderStructureRequest
+
+async def _ensure_agent_profiles_context_columns() -> None:
+    """Ensure agent_profiles has context columns and model metadata (migrations 060/061/065/066, 081)."""
+    logger.info("Ensuring agent_profiles context and model columns")
+    try:
+        conn = await asyncpg.connect(settings.DATABASE_URL)
+        try:
+            for column_name, default_sql in (
+                ("include_user_context", "BOOLEAN NOT NULL DEFAULT false"),
+                ("include_datetime_context", "BOOLEAN NOT NULL DEFAULT true"),
+                ("include_user_facts", "BOOLEAN NOT NULL DEFAULT false"),
+                ("include_facts_categories", "JSONB DEFAULT '[]'::jsonb"),
+                ("model_source", "VARCHAR(50)"),
+                ("model_provider_type", "VARCHAR(50)"),
+            ):
+                exists = await conn.fetchval(
+                    """
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = 'agent_profiles' AND column_name = $1
+                    """,
+                    column_name,
+                )
+                if not exists:
+                    await conn.execute(
+                        f"ALTER TABLE agent_profiles ADD COLUMN IF NOT EXISTS {column_name} {default_sql}"
+                    )
+                    logger.info("Added missing column agent_profiles.%s", column_name)
+        finally:
+            await conn.close()
+    except Exception as e:
+        logger.error("Could not ensure agent_profiles context columns: %s", e)
+
+
+async def _refresh_oauth_tokens_on_startup() -> None:
+    """Background task: refresh expired OAuth (email) tokens shortly after backend is ready."""
+    await asyncio.sleep(3)
+    max_attempts = 10
+    delay = 5.0
+    for attempt in range(max_attempts):
+        try:
+            from services.external_connections_service import external_connections_service
+            result = await external_connections_service.refresh_all_expired_oauth_tokens()
+            if result.get("refreshed") or result.get("failed"):
+                logger.info(
+                    "OAuth startup refresh: %s refreshed, %s failed",
+                    result.get("refreshed", 0),
+                    result.get("failed", 0),
+                )
+            return
+        except Exception as e:
+            logger.warning(
+                "OAuth token refresh attempt %s/%s failed: %s",
+                attempt + 1,
+                max_attempts,
+                e,
+            )
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(delay)
+
 
 async def _get_user_integer_id(user_uuid: str) -> int:
     """Convert user UUID to integer primary key from users table"""
@@ -194,9 +264,52 @@ async def lifespan(app: FastAPI):
         if migration_result["errors"]:
             for error in migration_result["errors"]:
                 logger.error(f"❌ Migration error: {error}")
-        
 
-        
+        await _ensure_agent_profiles_context_columns()
+        await ensure_user_memory_schema_columns()
+
+        # Seed Agent Factory built-in skills (idempotent; no-op if table not yet migrated)
+        try:
+            from services.agent_skills_service import seed_builtin_skills
+            await seed_builtin_skills()
+            logger.info("Agent Factory built-in skills seeded")
+        except Exception as e:
+            logger.debug("Agent Factory skills seed skipped or failed (table may not exist yet): %s", e)
+
+        async def _sync_builtin_skill_vectors():
+            await asyncio.sleep(3)
+            try:
+                from services.skill_vector_service import sync_all_skills
+                count = await sync_all_skills(user_id=None, upsert_only=True)
+                logger.info("Built-in skills vector sync: embedded %d skills", count)
+            except Exception as e:
+                logger.warning("Built-in skills vector sync failed (non-fatal): %s", e)
+
+        asyncio.create_task(_sync_builtin_skill_vectors())
+
+        async def _sync_help_docs():
+            await asyncio.sleep(5)
+            try:
+                from services.help_docs_sync_service import HelpDocsSyncService
+                await HelpDocsSyncService().sync()
+                logger.info("Help docs vector sync complete")
+            except Exception as e:
+                logger.warning("Help docs vector sync failed (non-fatal): %s", e)
+
+        asyncio.create_task(_sync_help_docs())
+
+        # Seed default built-in agent profile for all users (idempotent)
+        try:
+            from services.agent_factory_service import (
+                seed_default_agent_profiles,
+                seed_rss_manager_profiles,
+            )
+            await seed_default_agent_profiles()
+            await seed_rss_manager_profiles()
+            logger.info("Default and RSS Manager agent profiles seeded")
+        except Exception as e:
+            logger.debug("Default agent profile seed skipped or failed: %s", e)
+
         # Initialize settings service (if not already initialized by service container)
         try:
             if not hasattr(settings_service, '_initialized') or not settings_service._initialized:
@@ -222,7 +335,7 @@ async def lifespan(app: FastAPI):
         try:
             from services.messaging.messaging_service import messaging_service
             await messaging_service.initialize(service_container.db_pool)
-            logger.info("💬 BULLY! Messaging Service initialized")
+            logger.info("Messaging service initialized")
         except Exception as e:
             logger.error(f"❌ Messaging Service initialization failed: {e}")
             # Don't raise here as the app can still function without messaging
@@ -259,19 +372,16 @@ async def lifespan(app: FastAPI):
             # Don't raise here as the app can still function without teams
 
         
-        # Initialize available models from OpenRouter on startup
-        logger.info("🔍 Fetching available models from OpenRouter on startup...")
+        # Initialize available models from admin providers on startup
+        logger.info("Fetching available models from admin providers on startup...")
         try:
-            available_models = await chat_service.get_available_models()
-            logger.info(f"✅ Fetched {len(available_models)} models from OpenRouter")
-            
-            # Check if any models are enabled
+            available_models = await admin_provider_registry.get_all_admin_models()
+            logger.info("Fetched %s models from admin registry", len(available_models))
             enabled_models = await settings_service.get_enabled_models()
             if len(enabled_models) == 0:
-                logger.warning("⚠️ No models are currently enabled. Admin must configure models in Settings before chat functionality will work.")
-                
+                logger.warning("No models are currently enabled. Admin must configure models in Settings before chat functionality will work.")
         except Exception as e:
-            logger.warning(f"⚠️ Failed to fetch models on startup: {e}")
+            logger.warning("Failed to fetch models on startup: %s", e)
         
         # Get system status after migration
         try:
@@ -298,38 +408,11 @@ async def lifespan(app: FastAPI):
             logger.error(f"❌ Failed to start File System Watcher: {e}")
             file_watcher = None
 
-        # Sync active chat_bot connections to connections-service (Telegram/Discord)
-        try:
-            from services.database_manager.database_helpers import fetch_all
-            from services.external_connections_service import external_connections_service
-            from clients.connections_service_client import get_connections_service_client
-            rows = await fetch_all("SELECT user_id FROM users")
-            user_ids = [r["user_id"] for r in rows] if rows else []
-            client = await get_connections_service_client()
-            synced = 0
-            for uid in user_ids:
-                conns = await external_connections_service.get_user_connections(
-                    uid, connection_type="chat_bot", active_only=True,
-                    rls_context={"user_id": uid},
-                )
-                for conn in conns:
-                    token = await external_connections_service.get_valid_access_token(
-                        conn["id"], rls_context={"user_id": uid}
-                    )
-                    if token:
-                        result = await client.register_bot(
-                            connection_id=conn["id"],
-                            user_id=uid,
-                            provider=conn.get("provider", ""),
-                            bot_token=token,
-                            display_name=conn.get("display_name") or conn.get("account_identifier") or "",
-                        )
-                        if result.get("success"):
-                            synced += 1
-            if synced:
-                logger.info("Synced %s chat bot connection(s) to connections-service", synced)
-        except Exception as e:
-            logger.warning("Chat bot sync on startup failed (connections-service may be unavailable): %s", e)
+        # Chat bot connections are self-restored by connections-service on startup
+        # and periodically re-synced by Celery Beat (sync_chat_bot_connections).
+
+        # Proactively refresh expired OAuth (email) tokens on startup
+        asyncio.create_task(_refresh_oauth_tokens_on_startup())
 
         # gRPC Tool Service moved to dedicated tools-service container
         
@@ -672,6 +755,21 @@ logger.debug("✅ Resilient embedding API routes registered")
 # Include settings API routes
 app.include_router(settings_router)
 
+from api.dashboard_api import router as dashboard_router
+app.include_router(dashboard_router)
+logger.debug("Home dashboard API routes registered")
+from api.device_proxy_api import router as device_proxy_router
+app.include_router(device_proxy_router)
+
+# User LLM providers (per-user API keys and models)
+from api.user_llm_provider_api import router as user_llm_provider_router
+app.include_router(user_llm_provider_router)
+logger.debug("User LLM provider API routes registered")
+
+from api.user_voice_provider_api import router as user_voice_provider_router
+app.include_router(user_voice_provider_router)
+logger.debug("User voice provider API routes registered")
+
 # Template management removed - functionality not in use
 logger.debug("✅ Settings API routes registered")
 
@@ -695,6 +793,16 @@ from api.org_capture_api import router as org_capture_router
 app.include_router(org_capture_router)
 logger.debug("✅ Org Capture API routes registered")
 
+# Org Journal API (journal-for-the-day get/update)
+from api.org_journal_api import router as org_journal_router
+app.include_router(org_journal_router)
+logger.debug("✅ Org Journal API routes registered")
+
+# Universal Org Todo API
+from api.org_todo_api import router as org_todo_router
+app.include_router(org_todo_router)
+logger.debug("✅ Org Todo API routes registered")
+
 # Include org settings API
 from api.org_settings_api import router as org_settings_router
 app.include_router(org_settings_router)
@@ -704,6 +812,16 @@ logger.debug("✅ Org Settings API routes registered")
 from api.org_tag_api import router as org_tag_router
 app.include_router(org_tag_router)
 logger.debug("✅ Org Tag API routes registered")
+
+# Calendar API (Agenda view: O365, future CalDAV)
+from api.calendar_api import router as calendar_router
+app.include_router(calendar_router)
+logger.debug("Calendar API routes registered")
+
+# Contacts API (Contacts view: O365 + org-mode)
+from api.contacts_api import router as contacts_router
+app.include_router(contacts_router)
+logger.debug("Contacts API routes registered")
 
 # Include editor API
 from api.editor_api import router as editor_router
@@ -731,6 +849,27 @@ from api.grpc_orchestrator_proxy import router as grpc_orchestrator_proxy_router
 app.include_router(grpc_orchestrator_proxy_router)
 logger.debug("✅ gRPC Orchestrator Proxy routes registered (Phase 5)")
 
+# Agent Factory (Workflow Composer action registry)
+from api.agent_factory_api import router as agent_factory_router
+from api.agent_line_api import router as agent_line_router
+from api.agent_line_analytics_api import router as agent_line_analytics_router
+from api.mcp_servers_api import router as mcp_servers_router
+app.include_router(agent_factory_router)
+app.include_router(mcp_servers_router)
+app.include_router(agent_line_router, prefix="/api/agent-factory")
+app.include_router(agent_line_analytics_router, prefix="/api/agent-factory")
+logger.debug("✅ Agent Factory API routes registered")
+
+# Control Panes (status bar custom controls)
+from api.control_panes_api import router as control_panes_router
+app.include_router(control_panes_router)
+logger.debug("✅ Control Panes API routes registered")
+
+# Browser Auth (interactive login capture for playbooks)
+from api.browser_auth_api import router as browser_auth_router
+app.include_router(browser_auth_router)
+logger.debug("✅ Browser Auth API routes registered")
+
 # Include Conversation API routes (moved from main)
 from api.conversation_api import router as conversation_router
 app.include_router(conversation_router)
@@ -743,6 +882,9 @@ app.include_router(conversation_sharing_router)
 # Include Document API routes
 from api.document_api import router as document_router, check_document_access
 app.include_router(document_router)
+# Document version history (list, content, diff, rollback)
+from api.document_version_api import router as document_version_router
+app.include_router(document_version_router)
 logger.debug("✅ Document API routes registered")
 
 # Include Graph API routes (link-graph for file relation cloud)
@@ -784,6 +926,11 @@ from api.location_api import router as location_router
 app.include_router(location_router)
 logger.debug("✅ Location API routes registered")
 
+# Include GeoJSON API routes (map layers: locations, future articles/events)
+from api.geojson_api import router as geojson_router
+app.include_router(geojson_router)
+logger.debug("✅ GeoJSON API routes registered")
+
 # Include Routes API (OSRM routing and saved routes)
 from api.routes_api import router as routes_router
 app.include_router(routes_router)
@@ -813,9 +960,13 @@ logger.debug("✅ Category API routes registered")
 from api.rss_api import router as rss_router
 app.include_router(rss_router)
 
-from api.entertainment_sync_api import router as entertainment_sync_router
-app.include_router(entertainment_sync_router)
 logger.debug("✅ RSS API routes registered")
+
+if settings.GREADER_API_ENABLED:
+    from api.greader_api import router as greader_router
+
+    app.include_router(greader_router, prefix="/api/greader")
+    logger.debug("✅ GReader API routes registered")
 
 
 # Include News API routes
@@ -839,7 +990,7 @@ logger.debug("✅ Authentication API routes registered")
 # ROOSEVELT'S MESSAGING CAVALRY API
 from api.messaging_api import router as messaging_router
 app.include_router(messaging_router)
-logger.debug("✅ BULLY! Messaging API routes registered")
+logger.debug("Messaging API routes registered")
 
 # Teams API
 from api.teams_api import router as teams_router
@@ -859,6 +1010,21 @@ try:
 except Exception as e:
     logger.warning(f"⚠️ Failed to register Audio API routes: {e}")
 
+# Include Voice API routes (TTS)
+try:
+    from api.voice_api import router as voice_router
+    app.include_router(voice_router)
+    logger.debug("✅ Voice API routes registered")
+except Exception as e:
+    logger.warning("⚠️ Failed to register Voice API routes: %s", e)
+
+try:
+    from api.audio_export_api import router as audio_export_router
+    app.include_router(audio_export_router)
+    logger.debug("✅ Audio export API routes registered")
+except Exception as e:
+    logger.warning("⚠️ Failed to register Audio export API routes: %s", e)
+
 # Include Projects API routes
 from api.projects_api import router as projects_router
 app.include_router(projects_router)
@@ -868,6 +1034,11 @@ logger.debug("✅ Projects API routes registered")
 from api.status_bar_api import router as status_bar_router
 app.include_router(status_bar_router)
 logger.debug("✅ Status Bar API routes registered")
+
+# Include Help API routes
+from api.help_api import router as help_router
+app.include_router(help_router)
+logger.debug("✅ Help API routes registered")
 
 # Include Music API routes
 from api.music_api import router as music_router
@@ -1028,43 +1199,76 @@ async def document_processor_health():
 # ===== MODEL CONFIGURATION ENDPOINTS =====
 
 @app.get("/api/models/available", response_model=AvailableModelsResponse)
-async def get_available_models():
-    """Get list of available OpenRouter models"""
+async def get_available_models(
+    current_user: Optional[AuthenticatedUserResponse] = Depends(get_current_user_optional),
+):
+    """Get list of available models. When user has use_admin_models=false, returns models from their
+    own providers; otherwise returns admin provider registry (OpenRouter, OpenAI, Groq from env)."""
     try:
-        # Get available models from chat service
-        models = await chat_service.get_available_models()
-        return AvailableModelsResponse(models=models)
-        
+        user_id = current_user.user_id if current_user else None
+        try:
+            models = await resolver_get_available_models(user_id)
+            return AvailableModelsResponse(models=models)
+        except Exception as e:
+            logger.warning("Resolver get_available_models failed, returning empty: %s", e)
+            return AvailableModelsResponse(models=[])
     except Exception as e:
-        logger.error(f"❌ Failed to get available models: {str(e)}")
+        logger.error("Failed to get available models: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/models/enabled")
-async def get_enabled_models():
-    """Get full list of enabled model IDs. Also returns image_generation_model so
-    the frontend can exclude it from the chat dropdown while showing it as enabled in Settings."""
+async def get_enabled_models(
+    current_user: Optional[AuthenticatedUserResponse] = Depends(get_current_user_optional),
+):
+    """Get full list of enabled model IDs. When user has use_admin_models=false, returns their
+    own enabled models; otherwise returns admin-enabled models. Also returns image_generation_model."""
     try:
-        enabled_models = await settings_service.get_enabled_models()
         image_generation_model = await settings_service.get_image_generation_model()
+        user_id = current_user.user_id if current_user else None
+        enabled_models = await resolver_get_enabled_models(user_id)
+        catalog_slice = await get_enabled_models_catalog_slice(
+            user_id, image_generation_model or ""
+        )
         return {
             "enabled_models": enabled_models,
             "image_generation_model": image_generation_model or "",
+            "orphaned_enabled_models": catalog_slice["orphaned_enabled_models"],
+            "catalog_verified": catalog_slice["catalog_verified"],
+            "effective_enabled_models": catalog_slice["effective_enabled_models"],
+            "selectable_chat_models": catalog_slice["selectable_chat_models"],
+            "orphaned_role_models": catalog_slice.get("orphaned_role_models") or {},
         }
     except Exception as e:
-        logger.error(f"❌ Failed to get enabled models: {str(e)}")
+        logger.error("Failed to get enabled models: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/models/refresh")
 async def refresh_available_models():
-    """Force refresh the cached available models from OpenRouter"""
+    """Force refresh the cached available models (admin provider registry)."""
     try:
-        models = await chat_service.refresh_available_models()
+        admin_provider_registry.refresh()
+        if chat_service:
+            await chat_service.refresh_available_models()
+        models = await admin_provider_registry.get_all_admin_models()
         return {"message": f"Successfully refreshed {len(models)} models", "models": len(models)}
 
     except Exception as e:
         logger.error(f"❌ Failed to refresh models: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/models/catalog-slice/invalidate")
+async def invalidate_catalog_slice(
+    current_user: AuthenticatedUserResponse = Depends(require_admin()),
+):
+    """Recompute org catalog slice on next read (after role model settings change, etc.)."""
+    try:
+        admin_provider_registry.invalidate_slice()
+        return {"status": "success"}
+    except Exception as e:
+        logger.error("Failed to invalidate catalog slice: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1098,6 +1302,7 @@ async def set_enabled_models(
         success = await settings_service.set_enabled_models(model_ids)
         
         if success:
+            admin_provider_registry.invalidate_slice()
             logger.info(f"✅ Admin {current_user.username} successfully updated enabled models: {model_ids}")
             return {"status": "success", "enabled_models": model_ids}
         else:
@@ -1118,7 +1323,14 @@ async def select_model(
         model_name = request.get("model_name")
         if not model_name:
             raise HTTPException(status_code=400, detail="model_name is required")
-        
+
+        selectable = await get_chat_selectable_model_ids_for_user(current_user.user_id)
+        if model_name not in selectable:
+            raise HTTPException(
+                status_code=400,
+                detail="That model is not available from your AI provider or is not enabled for chat.",
+            )
+
         # Update the chat service's current model
         if chat_service:
             chat_service.current_model = model_name
@@ -1435,6 +1647,60 @@ async def websocket_agent_status(websocket: WebSocket, conversation_id: str):
         try:
             await websocket.close(code=4000, reason="Connection failed")
         except:
+            pass
+
+
+@app.websocket("/api/ws/line-timeline/{line_id}")
+async def websocket_line_timeline(websocket: WebSocket, line_id: str):
+    """WebSocket endpoint for line timeline live updates (inter-agent messages)."""
+    logger.info(f"Line timeline WebSocket connection attempt for line: {line_id}")
+    try:
+        token = websocket.query_params.get("token")
+        if not token:
+            await websocket.close(code=4001, reason="Missing token")
+            return
+        try:
+            from utils.auth_middleware import decode_jwt_token
+            payload = decode_jwt_token(token)
+            user_id = payload.get("user_id")
+            if not user_id:
+                await websocket.close(code=4003, reason="Invalid token")
+                return
+        except Exception as e:
+            logger.error("Team timeline WebSocket token validation failed: %s", e)
+            await websocket.close(code=4003, reason="Invalid token")
+            return
+        from services import agent_line_service
+        team = await agent_line_service.get_line(line_id, user_id)
+        if not team:
+            await websocket.close(code=4043, reason="Line not found")
+            return
+        await websocket_manager.connect_to_line_timeline(websocket, line_id)
+        await websocket.send_json({
+            "type": "line_timeline_connected",
+            "line_id": line_id,
+            "timestamp": datetime.now().isoformat(),
+        })
+        try:
+            while True:
+                data = await websocket.receive_text()
+                await websocket.send_json({
+                    "type": "line_timeline_echo",
+                    "line_id": line_id,
+                    "data": data,
+                    "timestamp": datetime.now().isoformat(),
+                })
+        except WebSocketDisconnect:
+            pass
+        except Exception as e:
+            logger.error("Team timeline WebSocket error: %s", e)
+        finally:
+            websocket_manager.disconnect(websocket, session_id=None)
+    except Exception as e:
+        logger.error("Team timeline WebSocket connection failed: %s", e)
+        try:
+            await websocket.close(code=4000, reason="Connection failed")
+        except Exception:
             pass
 
 

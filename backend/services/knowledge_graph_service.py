@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 from neo4j import AsyncGraphDatabase
 
 from config import settings
-from models.api_models import Entity
+from models.api_models import Entity, Chunk
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +47,10 @@ class KnowledgeGraphService:
             queries = [
                 "CREATE CONSTRAINT entity_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE",
                 "CREATE CONSTRAINT document_id IF NOT EXISTS FOR (d:Document) REQUIRE d.id IS UNIQUE",
+                "CREATE CONSTRAINT chunk_id IF NOT EXISTS FOR (c:Chunk) REQUIRE c.id IS UNIQUE",
                 "CREATE INDEX entity_type IF NOT EXISTS FOR (e:Entity) ON (e.type)",
-                "CREATE INDEX document_title IF NOT EXISTS FOR (d:Document) ON (d.title)"
+                "CREATE INDEX document_title IF NOT EXISTS FOR (d:Document) ON (d.title)",
+                "CREATE INDEX chunk_document IF NOT EXISTS FOR (c:Chunk) ON (c.document_id)",
             ]
             
             for query in queries:
@@ -58,25 +60,160 @@ class KnowledgeGraphService:
                     # Constraint might already exist
                     logger.debug(f"Schema setup query failed (expected): {e}")
     
-    async def store_entities(self, entities: List[Entity], document_id: str):
-        """Store extracted entities in the knowledge graph"""
+    async def store_entities(
+        self,
+        entities: List[Entity],
+        document_id: str,
+        chunks: Optional[List[Chunk]] = None,
+    ):
+        """Store extracted entities with optional chunk-level links for co-occurrence.
+        When chunks are provided, creates Chunk nodes, PART_OF->Document, and APPEARS_IN
+        from entities to chunks so co-occurrence can be computed at chunk level.
+        """
         async with self.driver.session() as session:
+            if chunks:
+                for ch in chunks:
+                    await session.run(
+                        """
+                        MERGE (d:Document {id: $doc_id})
+                        MERGE (c:Chunk {id: $chunk_id})
+                        SET c.document_id = $doc_id, c.chunk_index = $chunk_index
+                        MERGE (c)-[:PART_OF]->(d)
+                        """,
+                        doc_id=document_id,
+                        chunk_id=ch.chunk_id,
+                        chunk_index=ch.chunk_index,
+                    )
             for entity in entities:
+                context = (entity.metadata or {}).get("context", "") or ""
                 await session.run(
                     """
                     MERGE (e:Entity {name: $name})
                     SET e.type = $type, e.confidence = $confidence
                     WITH e
-                    MATCH (d:Document {id: $doc_id})
-                    MERGE (e)-[:MENTIONED_IN]->(d)
+                    MERGE (d:Document {id: $doc_id})
+                    MERGE (e)-[r:MENTIONED_IN]->(d)
+                    SET r.context = $context
                     """,
                     name=entity.name,
                     type=entity.entity_type,
                     confidence=entity.confidence,
-                    doc_id=document_id
+                    doc_id=document_id,
+                    context=context[:2000] if context else "",
                 )
-        
+                chunk_ids = (entity.metadata or {}).get("chunk_ids", [])
+                if chunks and chunk_ids:
+                    for cid in chunk_ids:
+                        await session.run(
+                            """
+                            MATCH (e:Entity {name: $name})
+                            MATCH (c:Chunk {id: $chunk_id})
+                            WHERE c.document_id = $doc_id
+                            MERGE (e)-[:APPEARS_IN]->(c)
+                            """,
+                            name=entity.name,
+                            chunk_id=cid,
+                            doc_id=document_id,
+                        )
         logger.info(f"🔗 Stored {len(entities)} entities for document {document_id}")
+
+    async def get_entity_detail(
+        self, entity_name: str, user_document_ids: List[str]
+    ) -> Dict[str, Any]:
+        """Return entity type/confidence, per-document mentions with context, and co-occurring entities."""
+        if not user_document_ids:
+            return {
+                "name": entity_name,
+                "entity_type": None,
+                "confidence": None,
+                "document_mentions": [],
+                "co_occurring_entities": [],
+            }
+        try:
+            async with self.driver.session() as session:
+                # Entity + per-doc mentions with context
+                result = await session.run(
+                    """
+                    MATCH (e:Entity {name: $name})-[r:MENTIONED_IN]->(d:Document)
+                    WHERE d.id IN $doc_ids
+                    RETURN e.type AS entity_type, e.confidence AS confidence,
+                           d.id AS document_id, r.context AS context
+                    """,
+                    name=entity_name,
+                    doc_ids=user_document_ids,
+                )
+                entity_type = None
+                confidence = None
+                document_mentions = []
+                doc_mention_map = {}
+                async for record in result:
+                    if entity_type is None:
+                        entity_type = record["entity_type"]
+                        confidence = record["confidence"]
+                    doc_id = record["document_id"]
+                    doc_mention_map[doc_id] = {
+                        "document_id": doc_id,
+                        "context": (record["context"] or "").strip(),
+                        "chunks": [],
+                    }
+
+                # Chunk-level mentions (when APPEARS_IN exists)
+                chunk_result = await session.run(
+                    """
+                    MATCH (e:Entity {name: $name})-[:APPEARS_IN]->(c:Chunk)-[:PART_OF]->(d:Document)
+                    WHERE d.id IN $doc_ids
+                    RETURN d.id AS document_id, c.id AS chunk_id, c.chunk_index AS chunk_index
+                    ORDER BY d.id, c.chunk_index
+                    """,
+                    name=entity_name,
+                    doc_ids=user_document_ids,
+                )
+                async for record in chunk_result:
+                    doc_id = record["document_id"]
+                    if doc_id in doc_mention_map:
+                        doc_mention_map[doc_id]["chunks"].append({
+                            "chunk_id": record["chunk_id"],
+                            "chunk_index": record["chunk_index"],
+                        })
+                document_mentions = list(doc_mention_map.values())
+
+                # Co-occurring entities (prefer same chunk, then same docs)
+                co_result = await session.run(
+                    """
+                    MATCH (e:Entity {name: $name})-[:MENTIONED_IN]->(d:Document)<-[:MENTIONED_IN]-(co:Entity)
+                    WHERE d.id IN $doc_ids AND co.name <> $name
+                    WITH co.name AS name, co.type AS entity_type, count(DISTINCT d) AS shared_docs
+                    RETURN name, entity_type, shared_docs
+                    ORDER BY shared_docs DESC
+                    LIMIT 10
+                    """,
+                    name=entity_name,
+                    doc_ids=user_document_ids,
+                )
+                co_occurring = []
+                async for record in co_result:
+                    co_occurring.append({
+                        "name": record["name"],
+                        "entity_type": record["entity_type"] or "MISC",
+                        "shared_docs": record["shared_docs"],
+                    })
+
+                return {
+                    "name": entity_name,
+                    "entity_type": entity_type,
+                    "confidence": confidence,
+                    "document_mentions": document_mentions,
+                    "co_occurring_entities": co_occurring,
+                }
+        except Exception as e:
+            logger.error(f"Failed to get entity detail for {entity_name}: {e}")
+            return {
+                "name": entity_name,
+                "entity_type": None,
+                "confidence": None,
+                "document_mentions": [],
+                "co_occurring_entities": [],
+            }
     
     async def get_entities(self, entity_type: str = None, limit: int = 100) -> List[Dict[str, Any]]:
         """Get entities from the knowledge graph"""
@@ -224,6 +361,106 @@ class KnowledgeGraphService:
                 "total_documents": 0,
                 "total_relationships": 0,
                 "entity_types": {}
+            }
+
+    async def get_entity_graph_for_documents(
+        self,
+        document_ids: List[str],
+        entity_limit: int = 100,
+    ) -> Dict[str, Any]:
+        """
+        Return entity nodes and co-occurrence edges for the given document set.
+        Used by the entity graph visualization; document_ids are typically
+        the current user's documents (RLS applied by caller).
+        """
+        if not document_ids:
+            return {
+                "entity_nodes": [],
+                "document_ids": [],
+                "co_occurrence_edges": [],
+            }
+        try:
+            async with self.driver.session() as session:
+                entity_result = await session.run(
+                    """
+                    MATCH (e:Entity)-[:MENTIONED_IN]->(d:Document)
+                    WHERE d.id IN $document_ids
+                    WITH e, collect(d.id) AS doc_ids, count(d) AS doc_count
+                    RETURN e.name AS name, e.type AS type, doc_ids, doc_count
+                    ORDER BY doc_count DESC
+                    LIMIT $entity_limit
+                    """,
+                    document_ids=document_ids,
+                    entity_limit=entity_limit,
+                )
+                entity_nodes = []
+                all_doc_ids = set()
+                async for record in entity_result:
+                    doc_ids_list = record["doc_ids"] or []
+                    all_doc_ids.update(doc_ids_list)
+                    entity_nodes.append({
+                        "name": record["name"],
+                        "type": record["type"] or "MISC",
+                        "doc_ids": doc_ids_list,
+                        "doc_count": record["doc_count"] or 0,
+                    })
+                entity_names = [n["name"] for n in entity_nodes]
+                if not entity_names:
+                    return {
+                        "entity_nodes": [],
+                        "document_ids": list(all_doc_ids),
+                        "co_occurrence_edges": [],
+                    }
+                # Prefer chunk-level co-occurrence (entities in same chunk); fall back to document-level
+                edge_result = await session.run(
+                    """
+                    MATCH (e1:Entity)-[:APPEARS_IN]->(c:Chunk)<-[:APPEARS_IN]-(e2:Entity)
+                    WHERE c.document_id IN $document_ids AND e1.name IN $entity_names AND e2.name IN $entity_names
+                    AND e1.name < e2.name
+                    WITH e1.name AS source, e2.name AS target, count(DISTINCT c) AS weight
+                    RETURN source, target, weight
+                    ORDER BY weight DESC
+                    """,
+                    document_ids=document_ids,
+                    entity_names=entity_names,
+                )
+                co_occurrence_edges = []
+                async for record in edge_result:
+                    co_occurrence_edges.append({
+                        "source": record["source"],
+                        "target": record["target"],
+                        "weight": record["weight"] or 0,
+                    })
+                if not co_occurrence_edges:
+                    doc_edge_result = await session.run(
+                        """
+                        MATCH (e1:Entity)-[:MENTIONED_IN]->(d:Document)<-[:MENTIONED_IN]-(e2:Entity)
+                        WHERE d.id IN $document_ids AND e1.name IN $entity_names AND e2.name IN $entity_names
+                        AND e1.name < e2.name
+                        WITH e1.name AS source, e2.name AS target, count(d) AS weight
+                        RETURN source, target, weight
+                        ORDER BY weight DESC
+                        """,
+                        document_ids=document_ids,
+                        entity_names=entity_names,
+                    )
+                    async for record in doc_edge_result:
+                        co_occurrence_edges.append({
+                            "source": record["source"],
+                            "target": record["target"],
+                            "weight": record["weight"] or 0,
+                        })
+                return {
+                    "entity_nodes": entity_nodes,
+                    "document_ids": list(all_doc_ids),
+                    "co_occurrence_edges": co_occurrence_edges,
+                }
+        except Exception as e:
+            logger.error(f"Failed to get entity graph for documents: {e}")
+            return {
+                "entity_nodes": [],
+                "document_ids": [],
+                "co_occurrence_edges": [],
             }
 
     async def check_health(self) -> bool:

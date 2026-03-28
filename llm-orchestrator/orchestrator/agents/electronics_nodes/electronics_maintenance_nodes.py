@@ -116,7 +116,8 @@ class ElectronicsMaintenanceNodes:
                         continue
                     
                     # Get existing content
-                    existing_content = await get_document_content_tool(doc_id, user_id)
+                    _r = await get_document_content_tool(doc_id, user_id)
+                    existing_content = _r.get("content", _r) if isinstance(_r, dict) else _r
                     if existing_content.startswith("Error"):
                         logger.warning(f"⚠️ Could not read content for {file_path}")
                         continue

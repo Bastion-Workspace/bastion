@@ -2,9 +2,15 @@ import grpc
 import logging
 import json
 import os
-from typing import List, Optional, Dict, Any
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+_GRPC_MAX_MESSAGE_BYTES = 50 * 1024 * 1024
+_GRPC_CHANNEL_OPTIONS = [
+    ("grpc.max_send_message_length", _GRPC_MAX_MESSAGE_BYTES),
+    ("grpc.max_receive_message_length", _GRPC_MAX_MESSAGE_BYTES),
+]
 
 # Import generated protobuf code
 try:
@@ -38,7 +44,7 @@ class DataWorkspaceGRPCClient:
         """Establish gRPC connection"""
         try:
             address = f"{self.host}:{self.port}"
-            self.channel = grpc.aio.insecure_channel(address)
+            self.channel = grpc.aio.insecure_channel(address, options=_GRPC_CHANNEL_OPTIONS)
             self.stub = data_service_pb2_grpc.DataServiceStub(self.channel)
             logger.info(f"Connected to data-service at {address}")
         except Exception as e:
@@ -314,7 +320,8 @@ class DataWorkspaceGRPCClient:
         offset: int = 0,
         limit: int = 100,
         user_id: Optional[str] = None,
-        user_team_ids: Optional[List[str]] = None
+        user_team_ids: Optional[List[str]] = None,
+        database_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """Get table data"""
         try:
@@ -323,14 +330,25 @@ class DataWorkspaceGRPCClient:
                 offset=offset,
                 limit=limit,
                 user_id=user_id or "",
-                user_team_ids=user_team_ids or []
+                user_team_ids=user_team_ids or [],
+                database_id=database_id or "",
+                prefer_arrow=True,
             )
             
             response = await self.stub.GetTableData(request)
-            
-            return {
-                'table_id': response.table_id,
-                'rows': [
+
+            if getattr(response, "has_arrow_data", False) and response.arrow_data:
+                from utils.data_workspace_arrow import (
+                    decode_native_table_arrow,
+                    decode_table_page_arrow,
+                )
+
+                if getattr(response, "native_arrow", False):
+                    rows = decode_native_table_arrow(bytes(response.arrow_data))
+                else:
+                    rows = decode_table_page_arrow(bytes(response.arrow_data))
+            else:
+                rows = [
                     {
                         'row_id': row.row_id,
                         'row_data': json.loads(row.row_data_json),
@@ -339,7 +357,11 @@ class DataWorkspaceGRPCClient:
                         'formula_data': json.loads(row.formula_data_json) if hasattr(row, 'formula_data_json') and row.formula_data_json else {}
                     }
                     for row in response.rows
-                ],
+                ]
+            
+            return {
+                'table_id': response.table_id,
+                'rows': rows,
                 'total_rows': response.total_rows,
                 'offset': offset,
                 'limit': limit,
@@ -348,7 +370,27 @@ class DataWorkspaceGRPCClient:
         except grpc.RpcError as e:
             logger.error(f"gRPC error getting table data: {e}")
             raise
-    
+
+    async def export_table_data_stream(
+        self,
+        table_id: str,
+        user_id: str,
+        fmt: str = "csv",
+        user_team_ids: Optional[List[str]] = None,
+        database_id: Optional[str] = None,
+    ) -> AsyncIterator[bytes]:
+        """Stream export chunks from data-service (CSV, parquet, or arrow_ipc)."""
+        request = data_service_pb2.ExportTableDataRequest(
+            table_id=table_id,
+            user_id=user_id or "",
+            format=fmt,
+            user_team_ids=user_team_ids or [],
+            database_id=database_id or "",
+        )
+        async for chunk in self.stub.ExportTableData(request):
+            if chunk.data:
+                yield bytes(chunk.data)
+
     # Table management methods
     async def create_table(
         self,
@@ -356,7 +398,8 @@ class DataWorkspaceGRPCClient:
         name: str,
         user_id: str,
         description: Optional[str] = None,
-        table_schema: Optional[Dict[str, Any]] = None
+        table_schema: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Create a new table"""
         try:
@@ -365,7 +408,8 @@ class DataWorkspaceGRPCClient:
                 name=name,
                 user_id=user_id,
                 description=description or "",
-                schema_json=json.dumps(table_schema) if table_schema else "{}"
+                schema_json=json.dumps(table_schema) if table_schema else "{}",
+                metadata_json=json.dumps(metadata) if metadata else "{}"
             )
             
             response = await self.stub.CreateTable(request)
@@ -398,14 +442,16 @@ class DataWorkspaceGRPCClient:
         self, 
         table_id: str,
         user_id: Optional[str] = None,
-        user_team_ids: Optional[List[str]] = None
+        user_team_ids: Optional[List[str]] = None,
+        database_id: Optional[str] = None
     ) -> Optional[Dict[str, Any]]:
-        """Get a single table"""
+        """Get a single table. Pass database_id to resolve schema-only (DDL-created) tables."""
         try:
             request = data_service_pb2.GetTableRequest(
                 table_id=table_id,
                 user_id=user_id or "",
-                user_team_ids=user_team_ids or []
+                user_team_ids=user_team_ids or [],
+                database_id=database_id or ""
             )
             response = await self.stub.GetTable(request)
             return self._table_response_to_dict(response)
@@ -413,6 +459,35 @@ class DataWorkspaceGRPCClient:
             if e.code() == grpc.StatusCode.NOT_FOUND:
                 return None
             logger.error(f"gRPC error getting table: {e}")
+            raise
+    
+    async def update_table(
+        self,
+        table_id: str,
+        user_id: str,
+        user_team_ids: Optional[List[str]] = None,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        table_schema: Optional[Dict[str, Any]] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> Optional[Dict[str, Any]]:
+        """Update table metadata (name, description, schema/columns, metadata)"""
+        try:
+            request = data_service_pb2.UpdateTableRequest(
+                table_id=table_id,
+                user_id=user_id,
+                user_team_ids=user_team_ids or [],
+                name=name or "",
+                description=description or "",
+                schema_json=json.dumps(table_schema) if table_schema else "",
+                metadata_json=json.dumps(metadata) if metadata else ""
+            )
+            response = await self.stub.UpdateTable(request)
+            return self._table_response_to_dict(response)
+        except grpc.RpcError as e:
+            if e.code() == grpc.StatusCode.NOT_FOUND:
+                return None
+            logger.error(f"gRPC error updating table: {e}")
             raise
     
     async def delete_table(
@@ -606,28 +681,56 @@ class DataWorkspaceGRPCClient:
         query: str,
         user_id: str,
         limit: int = 1000,
-        user_team_ids: Optional[List[str]] = None
+        params: Optional[List[Any]] = None,
+        user_team_ids: Optional[List[str]] = None,
+        read_only: bool = False,
     ) -> Dict[str, Any]:
         """Execute SQL query against workspace databases"""
         try:
+            import json
+            params_json = json.dumps(params) if params else ""
             request = data_service_pb2.SQLQueryRequest(
                 workspace_id=workspace_id,
                 sql_query=query,
                 limit=limit,
                 user_id=user_id,
-                user_team_ids=user_team_ids or []
+                user_team_ids=user_team_ids or [],
+                params_json=params_json,
+                read_only=read_only,
+                prefer_arrow=True,
             )
             
             response = await self.stub.ExecuteSQLQuery(request)
-            
+
+            arrow_bytes = b""
+            has_arrow = False
+            if getattr(response, "has_arrow_data", False) and response.arrow_results:
+                from utils.data_workspace_arrow import decode_query_arrow
+
+                arrow_bytes = bytes(response.arrow_results)
+                has_arrow = True
+                rows = decode_query_arrow(arrow_bytes)
+                results_json = json.dumps(rows)
+                structured_results = rows
+            else:
+                results_json = response.results_json or ""
+                structured_results = (
+                    json.loads(results_json) if results_json else []
+                )
+
             return {
                 'query_id': response.query_id,
                 'column_names': list(response.column_names),
-                'results_json': response.results_json,
+                'results': structured_results,
+                'results_json': results_json,
+                'has_arrow_data': has_arrow,
+                'arrow_results': arrow_bytes,
                 'result_count': response.result_count,
                 'execution_time_ms': response.execution_time_ms,
                 'generated_sql': response.generated_sql,
-                'error_message': response.error_message if response.error_message else None
+                'error_message': response.error_message if response.error_message else None,
+                'rows_affected': getattr(response, 'rows_affected', 0) or 0,
+                'returning_rows_json': getattr(response, 'returning_rows_json', None) or ""
             }
         except grpc.RpcError as e:
             logger.error(f"gRPC error executing SQL query: {e}")
@@ -639,7 +742,8 @@ class DataWorkspaceGRPCClient:
         natural_query: str,
         user_id: str,
         include_documents: bool = False,
-        user_team_ids: Optional[List[str]] = None
+        user_team_ids: Optional[List[str]] = None,
+        read_only: bool = False,
     ) -> Dict[str, Any]:
         """Execute natural language query"""
         try:
@@ -648,15 +752,36 @@ class DataWorkspaceGRPCClient:
                 natural_language_query=natural_query,
                 include_documents=include_documents,
                 user_id=user_id,
-                user_team_ids=user_team_ids or []
+                user_team_ids=user_team_ids or [],
+                read_only=read_only,
+                prefer_arrow=True,
             )
             
             response = await self.stub.ExecuteNaturalLanguageQuery(request)
-            
+
+            arrow_bytes = b""
+            has_arrow = False
+            if getattr(response, "has_arrow_data", False) and response.arrow_results:
+                from utils.data_workspace_arrow import decode_query_arrow
+
+                arrow_bytes = bytes(response.arrow_results)
+                has_arrow = True
+                rows = decode_query_arrow(arrow_bytes)
+                results_json = json.dumps(rows)
+                structured_results = rows
+            else:
+                results_json = response.results_json or ""
+                structured_results = (
+                    json.loads(results_json) if results_json else []
+                )
+
             return {
                 'query_id': response.query_id,
                 'column_names': list(response.column_names),
-                'results_json': response.results_json,
+                'results': structured_results,
+                'results_json': results_json,
+                'has_arrow_data': has_arrow,
+                'arrow_results': arrow_bytes,
                 'result_count': response.result_count,
                 'execution_time_ms': response.execution_time_ms,
                 'generated_sql': response.generated_sql,

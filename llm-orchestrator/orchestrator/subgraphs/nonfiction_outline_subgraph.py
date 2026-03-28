@@ -25,11 +25,11 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from orchestrator.models.agent_response_contract import AgentResponse, ManuscriptEditMetadata
 from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
+from orchestrator.middleware.message_preprocessor import MessagePreprocessor
 from orchestrator.utils.writing_subgraph_utilities import (
     preserve_critical_state,
     create_writing_error_response,
     extract_user_request,
-    sanitize_ai_response_for_history,
     strip_frontmatter_block,
     slice_hash,
     build_response_text_for_question,
@@ -202,52 +202,6 @@ def _assess_reference_quality(content: str, ref_type: str) -> Tuple[float, List[
         if any(kw in content.lower() for kw in ref_keywords):
             quality_score += 0.1
     return min(1.0, quality_score), warnings
-
-
-def _extract_conversation_history(messages: List[Any], limit: int = 10) -> List[Dict[str, str]]:
-    """Extract conversation history from LangChain messages."""
-    try:
-        history = []
-        for msg in messages[-limit:]:
-            if hasattr(msg, "content"):
-                role = "assistant" if getattr(msg, "type", None) == "ai" else "user"
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                if role == "assistant":
-                    content = sanitize_ai_response_for_history(content)
-                history.append({"role": role, "content": content})
-        return history
-    except Exception as e:
-        logger.error(f"Failed to extract conversation history: {e}")
-        return []
-
-
-def _build_editing_agent_messages(
-    system_prompt: str,
-    context_parts: List[str],
-    current_request: str,
-    messages_list: List[Any],
-    get_datetime_context: Callable,
-    look_back_limit: int = 6,
-) -> List[Any]:
-    """Build message list for editing agents with conversation history."""
-    messages = [
-        SystemMessage(content=system_prompt),
-        SystemMessage(content=get_datetime_context()),
-    ]
-    if messages_list:
-        conversation_history = _extract_conversation_history(messages_list, limit=look_back_limit)
-        if conversation_history and conversation_history[-1].get("content") == current_request:
-            conversation_history = conversation_history[:-1]
-        for msg in conversation_history:
-            if msg["role"] == "user":
-                messages.append(HumanMessage(content=msg["content"]))
-            elif msg["role"] == "assistant":
-                messages.append(AIMessage(content=msg["content"]))
-    if context_parts:
-        messages.append(HumanMessage(content="".join(context_parts)))
-    if current_request:
-        messages.append(HumanMessage(content=current_request))
-    return messages
 
 
 def _determine_reference_mode(
@@ -703,12 +657,13 @@ async def generate_edit_plan_node(
 
         request_with_instructions = f"=== USER REQUEST ===\n{current_request}\n\nGenerate ManuscriptEdit JSON. Use insert_after_heading for new content, replace_range to change existing text, delete_range to remove. Section format: ## <Section Name>."
         llm = llm_factory(temperature=0.3, state=state)
-        messages = _build_editing_agent_messages(
-            system_prompt,
-            context_parts,
-            request_with_instructions,
-            state.get("messages", []),
-            get_datetime_context,
+        messages = MessagePreprocessor.build_editing_messages(
+            system_prompt=system_prompt,
+            context_parts=context_parts,
+            current_request=request_with_instructions,
+            messages_list=state.get("messages", []),
+            datetime_context=get_datetime_context(),
+            sanitize_ai_responses=True,
         )
         response = await llm.ainvoke(messages)
         content = response.content if hasattr(response, "content") else str(response)

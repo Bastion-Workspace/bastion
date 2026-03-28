@@ -482,6 +482,10 @@ const UserManagement = () => {
                   control={<Switch checked={!!capabilities['feature.maps.view']} onChange={(e) => setCapabilities(prev => ({ ...prev, 'feature.maps.view': e.target.checked }))} />}
                   label="Maps: View"
                 />
+                <FormControlLabel
+                  control={<Switch checked={!!capabilities['feature.games.view']} onChange={(e) => setCapabilities(prev => ({ ...prev, 'feature.games.view': e.target.checked }))} />}
+                  label="Games: View"
+                />
               </Box>
             </Box>
           )}

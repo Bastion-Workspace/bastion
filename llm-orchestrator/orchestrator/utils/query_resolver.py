@@ -77,9 +77,9 @@ async def resolve_follow_up_query(
         if not content or len(content) > 800:
             continue
         if isinstance(msg, AIMessage) or (isinstance(msg, dict) and msg.get("role") == "assistant"):
-            context_parts.append(f"Assistant: {content}")
+            context_parts.append(f"ASSISTANT: {content}")
         else:
-            context_parts.append(f"User: {content}")
+            context_parts.append(f"USER: {content}")
 
     if not context_parts:
         return query_stripped

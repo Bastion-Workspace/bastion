@@ -11,13 +11,14 @@ from datetime import datetime
 
 from langgraph.graph import StateGraph, END
 from .base_agent import BaseAgent, TaskStatus
+from orchestrator.middleware.message_preprocessor import MessagePreprocessor
 from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
 from config.settings import settings
 from orchestrator.tools.document_tools import (
     get_document_content_tool,
-    search_documents_structured
+    search_documents_tool
 )
-from orchestrator.tools.web_tools import search_web_structured
+from orchestrator.tools.web_tools import search_web_tool
 from orchestrator.tools.file_creation_tools import (
     create_user_file_tool,
     create_user_folder_tool
@@ -33,16 +34,13 @@ from orchestrator.tools.project_content_tools import (
     determine_content_target,
     enrich_documents_with_metadata,
     check_if_new_file_needed,
-    create_new_project_file,
     should_update_existing_section,
     propose_section_update,
     append_project_content,
     _is_placeholder_content
 )
-from orchestrator.tools.project_structure_tools import (
-    execute_project_structure_plan
-)
 from orchestrator.tools.reference_file_loader import load_referenced_files
+from orchestrator.utils.document_type_registry import get_reference_config
 from orchestrator.utils.project_utils import sanitize_filename
 
 # Import Pydantic models for structured outputs
@@ -925,7 +923,8 @@ Return ONLY valid JSON:
             if electronics_document_id:
                 # Explicit electronics document ID provided (e.g., from Org Agent)
                 from orchestrator.tools.document_tools import get_document_content_tool
-                electronics_content = await get_document_content_tool(electronics_document_id, user_id)
+                electronics_content_result = await get_document_content_tool(electronics_document_id, user_id)
+                electronics_content = electronics_content_result.get("content", electronics_content_result) if isinstance(electronics_content_result, dict) else electronics_content_result
                 if electronics_content.startswith("Error"):
                     logger.warning(f"Could not load explicit electronics document {electronics_document_id}")
                     electronics_content = ""
@@ -983,17 +982,7 @@ Return ONLY valid JSON:
                     except:
                         pass
             
-            # Electronics reference configuration
-            reference_config = {
-                "components": ["components", "component", "component_docs"],
-                "protocols": ["protocols", "protocol", "protocol_docs"],
-                "schematics": ["schematics", "schematic", "schematic_docs"],
-                "specifications": ["specifications", "spec", "specs", "specification"],
-                "firmware": ["firmware", "code", "software"],
-                "bom": ["bom", "bill_of_materials", "parts_list"],
-                "other": ["references", "reference", "docs", "documents", "related", "files"]
-            }
-            
+            reference_config = get_reference_config("electronics")
             result = await load_referenced_files(
                 active_editor=editor_for_loader,
                 user_id=user_id,
@@ -1779,12 +1768,17 @@ While you don't have specific electronics documents in your library yet, I can p
                 # Build system prompt
                 system_prompt = self._build_electronics_prompt()
 
-                # Build messages with conversation history using standardized helper
-                llm_messages = self._build_conversational_agent_messages(
+                ctx_state = {
+                    "metadata": metadata or {},
+                    "shared_memory": (metadata or {}).get("shared_memory", {}),
+                }
+                llm_messages = MessagePreprocessor.build_conversational_messages(
                     system_prompt=system_prompt,
-                    user_prompt=prompt,  # prompt already has all context embedded
+                    user_prompt=prompt,
                     messages_list=messages,
-                    look_back_limit=10
+                    look_back_limit=10,
+                    datetime_context=self._get_datetime_context(ctx_state),
+                    sanitize_ai_responses=False,
                 )
 
                 logger.info("🤖 Calling LLM for general electronics guidance")
@@ -1972,12 +1966,17 @@ While you don't have specific electronics documents in your library yet, I can p
             # Build system prompt
             system_prompt = self._build_electronics_prompt()
 
-            # Build messages with conversation history using standardized helper
-            llm_messages = self._build_conversational_agent_messages(
+            ctx_state = {
+                "metadata": metadata or {},
+                "shared_memory": (metadata or {}).get("shared_memory", {}),
+            }
+            llm_messages = MessagePreprocessor.build_conversational_messages(
                 system_prompt=system_prompt,
-                user_prompt=prompt,  # prompt already has all context embedded
+                user_prompt=prompt,
                 messages_list=messages,
-                look_back_limit=10
+                look_back_limit=10,
+                datetime_context=self._get_datetime_context(ctx_state),
+                sanitize_ai_responses=False,
             )
 
             logger.info(f"🤖 Calling LLM for electronics response")
@@ -2014,7 +2013,7 @@ While you don't have specific electronics documents in your library yet, I can p
     # - determine_content_target()
     # - enrich_documents_with_metadata()
     # - check_if_new_file_needed()
-    # - create_new_project_file()
+    # - create_typed_document_tool() (document_creation_tools) for new project files
     # - should_update_existing_section()
     # - propose_section_update()
     # - append_project_content()
@@ -2042,9 +2041,9 @@ While you don't have specific electronics documents in your library yet, I can p
             # Web search is always permitted when deemed necessary
             
             # Build search queries
-            from orchestrator.tools.enhancement_tools import expand_query_tool
-            expansion_result = await expand_query_tool(query, num_variations=3)
-            expanded_queries = expansion_result.get('expanded_queries', [query])
+            from orchestrator.tools.enhancement_tools import enhance_query_tool
+            expansion_result = await enhance_query_tool(query, mode="basic", num_variations=3)
+            expanded_queries = expansion_result.get('expanded_queries', expansion_result.get('queries', [query]))
             
             query_lower = query.lower()
             explicit_web_search_keywords = [
@@ -2069,16 +2068,17 @@ While you don't have specific electronics documents in your library yet, I can p
             try:
                 for search_query in web_search_queries:
                     logger.info(f"🔌 Executing web search: {search_query[:100]}")
-                    web_search_result = await search_web_structured(
+                    web_search_result = await search_web_tool(
                         query=search_query,
                         max_results=5
                     )
                     
-                    if web_search_result and len(web_search_result) > 0:
-                        logger.info(f"✅ Found {len(web_search_result)} web results")
+                    results_list = web_search_result.get("results", []) if isinstance(web_search_result, dict) else (web_search_result or [])
+                    if results_list:
+                        logger.info(f"✅ Found {len(results_list)} web results")
                         
                         # Add web results as documents
-                        for i, result in enumerate(web_search_result[:3]):  # Limit to 3 web results
+                        for i, result in enumerate(results_list[:3]):  # Limit to 3 web results
                             if isinstance(result, dict):
                                 web_doc = {
                                     "document_id": f"web_{i}",
@@ -2343,16 +2343,7 @@ Return ONLY the JSON object, no markdown, no code blocks."""
                     shared_memory = metadata.get("shared_memory", {})
                     active_editor = shared_memory.get("active_editor", {})
                     
-                    # Electronics reference configuration
-                    reference_config = {
-                        "components": ["components", "component", "component_docs"],
-                        "protocols": ["protocols", "protocol", "protocol_docs"],
-                        "schematics": ["schematics", "schematic", "schematic_docs"],
-                        "specifications": ["specifications", "spec", "specs", "specification"],
-                        "other": ["references", "reference", "docs", "documents", "related", "files"]
-                    }
-                    
-                    # Reload referenced files with latest content
+                    reference_config = get_reference_config("electronics")
                     reload_result = await load_referenced_files(
                         active_editor=active_editor,
                         user_id=user_id,

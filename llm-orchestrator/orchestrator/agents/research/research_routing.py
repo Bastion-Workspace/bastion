@@ -91,3 +91,20 @@ def route_from_synthesis(state: ResearchState) -> str:
         logger.info("Routing to post-processing (formatting and/or visualization)")
         return "post_process"
     return "complete"
+
+
+def route_from_evaluation(state: ResearchState) -> str:
+    """Route from evaluation: re-synthesize once on poor quality, else post_process or complete."""
+    evaluation_result = state.get("evaluation_result", "sufficient")
+    synthesis_attempt = state.get("synthesis_attempt", 0)
+    if evaluation_result in ("insufficient", "off_topic") and synthesis_attempt < 1:
+        logger.info("Evaluation: %s - routing back to final_synthesis with feedback", evaluation_result)
+        return "re_synthesize"
+    if state.get("formatting_recommendations") and (
+        state.get("formatting_recommendations", {}).get("table_recommended")
+        or state.get("formatting_recommendations", {}).get("chart_recommended")
+        or state.get("formatting_recommendations", {}).get("timeline_recommended")
+    ):
+        logger.info("Evaluation passed - routing to post-processing")
+        return "post_process"
+    return "complete"

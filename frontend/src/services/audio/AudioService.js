@@ -1,13 +1,17 @@
 import ApiServiceBase from '../base/ApiServiceBase';
 
 class AudioService extends ApiServiceBase {
-  transcribeAudio = async (blob) => {
+  transcribeAudio = async (blob, options = {}) => {
     const token = localStorage.getItem('auth_token');
+    const { prompt } = options;
 
     const form = new FormData();
     // Provide a filename for better server/provider handling
     const file = new File([blob], 'recording.webm', { type: blob.type || 'audio/webm' });
     form.append('file', file);
+    if (prompt != null && String(prompt).trim() !== '') {
+      form.append('prompt', String(prompt).trim());
+    }
 
     const response = await fetch(`${this.baseURL}/api/audio/transcribe`, {
       method: 'POST',

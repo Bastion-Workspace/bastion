@@ -5,8 +5,8 @@ grpcio-health-checking==1.76.0
 grpcio-reflection==1.76.0
 
 # LangGraph and LangChain (match backend versions)
-langgraph==0.6.3
-langgraph-checkpoint-postgres>=2.0.0
+langgraph>=1.0.0,<2.0.0
+langgraph-checkpoint-postgres>=3.0.0
 langchain==0.3.27
 langchain-core==0.3.72
 langchain-openai==0.3.28
@@ -25,13 +25,17 @@ httpx==0.28.1
 aiofiles==24.1.0
 
 # Data validation (match backend versions)
-pydantic==2.10.3
+pydantic==2.12.5
 pydantic-settings==2.6.1
 
 # Utilities
 python-dotenv==1.0.1
+python-dateutil>=2.8.2
 numpy==1.26.4
 pytz==2024.1
 
 # Vector Database
 qdrant-client==1.12.0
+
+# Data workspace Arrow IPC decode (tools-service passthrough)
+pyarrow>=15.0.0

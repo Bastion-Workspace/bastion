@@ -354,14 +354,8 @@ class ElectronicsSaveNodes:
                     logger.info(f"🔌 Reloading referenced context after file creation/updates...")
                     from orchestrator.tools.reference_file_loader import load_referenced_files
                     
-                    # Electronics reference configuration
-                    reference_config = {
-                        "components": ["components", "component", "component_docs"],
-                        "protocols": ["protocols", "protocol", "protocol_docs"],
-                        "schematics": ["schematics", "schematic", "schematic_docs"],
-                        "specifications": ["specifications", "spec", "specs", "specification"],
-                        "other": ["references", "reference", "docs", "documents", "related", "files"]
-                    }
+                    from orchestrator.utils.document_type_registry import get_reference_config
+                    reference_config = get_reference_config("electronics")
                     
                     # Reload referenced files from updated frontmatter
                     reload_result = await load_referenced_files(

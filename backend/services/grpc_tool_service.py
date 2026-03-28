@@ -5,7 +5,7 @@ Provides document, RSS, entity, weather, and org-mode data via gRPC
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import asyncio
 import json
 import uuid
@@ -17,8 +17,44 @@ from protos import tool_service_pb2, tool_service_pb2_grpc
 from repositories.document_repository import DocumentRepository
 from services.direct_search_service import DirectSearchService
 from services.embedding_service_wrapper import get_embedding_service
+from services.vector_store_service import VectorStoreService
 
 logger = logging.getLogger(__name__)
+
+
+def _rss_article_to_pb(art: Any, feed_name_fallback: str = "") -> tool_service_pb2.RSSArticle:
+    """Map tools_service RSSArticle (or compatible) to gRPC RSSArticle."""
+    content = (getattr(art, "description", None) or "")[:5000]
+    full = getattr(art, "full_content", None) or ""
+    if full and len(full) > len(content):
+        content = full[:5000]
+    fn = feed_name_fallback or (getattr(art, "feed_name", None) or "")
+    pub = getattr(art, "published_date", None)
+    pd = pub.isoformat() if pub else ""
+    cr = getattr(art, "created_at", None)
+    ca = cr.isoformat() if cr else ""
+    return tool_service_pb2.RSSArticle(
+        article_id=getattr(art, "article_id", "") or "",
+        title=getattr(art, "title", "") or "",
+        content=content,
+        url=getattr(art, "link", "") or "",
+        published_at=pd,
+        feed_id=getattr(art, "feed_id", "") or "",
+        feed_name=fn,
+        is_read=bool(getattr(art, "is_read", False)),
+        is_starred=bool(getattr(art, "is_starred", False)),
+        is_imported=bool(getattr(art, "is_processed", False)),
+        created_at=ca,
+    )
+
+
+def _json_default(value: Any) -> str:
+    """JSON serializer for non-primitive values returned from DB/service layers."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    return str(value)
 
 
 class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
@@ -65,22 +101,47 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         try:
             logger.info(f"SearchDocuments: user={request.user_id}, query={request.query[:100]}")
             
-            # Parse filters for tags and categories
+            # Parse filters for tags, categories, scope, folder_id, file_types, min_score, mode
             tags = []
             categories = []
+            collection_scope = ""
+            folder_id_filter = None
+            file_types_filter = []
+            min_score = 0.3
+            search_mode = "hybrid"
             for filter_str in request.filters:
                 if filter_str.startswith("tag:"):
                     tags.append(filter_str[4:])
                 elif filter_str.startswith("category:"):
                     categories.append(filter_str[9:])
-            
+                elif filter_str.startswith("scope:"):
+                    collection_scope = (filter_str[6:] or "").strip()
+                elif filter_str.startswith("folder_id:"):
+                    folder_id_filter = (filter_str[10:] or "").strip() or None
+                elif filter_str.startswith("file_type:"):
+                    ft = (filter_str[10:] or "").strip()
+                    if ft and ft not in file_types_filter:
+                        file_types_filter.append(ft)
+                elif filter_str.startswith("min_score:"):
+                    try:
+                        min_score = float(filter_str[10:].strip())
+                        min_score = max(0.0, min(1.0, min_score))
+                    except (ValueError, TypeError):
+                        pass
+                elif filter_str.startswith("mode:"):
+                    mode_val = (filter_str[5:] or "").strip().lower()
+                    if mode_val in ("hybrid", "semantic", "fulltext"):
+                        search_mode = mode_val
+
             if tags or categories:
                 logger.info(f"SearchDocuments: Filtering by tags={tags}, categories={categories}")
-            
+            if collection_scope or folder_id_filter or file_types_filter:
+                logger.info(f"SearchDocuments: scope={collection_scope}, folder_id={folder_id_filter}, file_types={file_types_filter}")
+
             # Get user's team IDs for hybrid search (user + team + global collections)
             team_ids = None
             user_id = request.user_id if request.user_id and request.user_id != "system" else None
-            if user_id:
+            if user_id and collection_scope != "global_docs":
                 try:
                     from services.team_service import TeamService
                     team_service = TeamService()
@@ -92,22 +153,30 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 except Exception as e:
                     logger.warning(f"SearchDocuments: Failed to get user teams for {user_id}: {e} - continuing without team collections")
                     team_ids = None
-            
+
+            if collection_scope == "my_docs":
+                team_ids = []
+            elif collection_scope == "global_docs":
+                user_id = None
+                team_ids = None
+
             # Get search service
             search_service = await self._get_search_service()
-            
-            # Perform direct search with optional tag/category filtering
-            # Includes hybrid search across user, team, and global collections
+
+            # Perform direct search with optional tag/category/scope/folder/file_type filtering
             exclude_ids = list(request.exclude_document_ids) if request.exclude_document_ids else None
             search_result = await search_service.search_documents(
                 query=request.query,
                 limit=request.limit or 10,
-                similarity_threshold=0.3,  # Lowered from 0.7 for better recall
+                similarity_threshold=min_score,
+                search_mode=search_mode,
                 user_id=user_id,
                 team_ids=team_ids,
                 tags=tags if tags else None,
                 categories=categories if categories else None,
                 exclude_document_ids=exclude_ids,
+                folder_id=folder_id_filter,
+                file_types=file_types_filter if file_types_filter else None,
             )
             
             if not search_result.get("success"):
@@ -166,7 +235,8 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                     document_id, filename, title, category, tags, description,
                     author, language, publication_date, doc_type, file_size,
                     file_hash, processing_status, upload_date, quality_score,
-                    page_count, chunk_count, entity_count, user_id, collection_type
+                    page_count, chunk_count, entity_count, user_id, collection_type,
+                    folder_id
                 FROM document_metadata
                 WHERE tags @> $1
                 ORDER BY upload_date DESC
@@ -182,12 +252,34 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 total_count=len(documents)
             )
 
+            preview_extensions = ('.txt', '.md', '.markdown', '.org', '.csv', '.json', '.yaml', '.yml', '.log', '.rst')
             for doc in documents:
+                content_preview = ""
+                filename = doc.get('filename') or ''
+                if filename and any(filename.lower().endswith(ext) for ext in preview_extensions):
+                    try:
+                        from pathlib import Path
+                        from services.service_container import get_service_container
+                        container = await get_service_container()
+                        folder_service = container.folder_service
+                        file_path_str = await folder_service.get_document_file_path(
+                            filename=filename,
+                            folder_id=doc.get('folder_id'),
+                            user_id=doc.get('user_id'),
+                            collection_type=doc.get('collection_type', 'user')
+                        )
+                        file_path = Path(file_path_str)
+                        if file_path.exists():
+                            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                                content_preview = f.read(800)
+                    except Exception as e:
+                        logger.debug(f"FindDocumentsByTags: Could not load preview for {doc.get('document_id')}: {e}")
+
                 doc_result = tool_service_pb2.DocumentResult(
                     document_id=str(doc.get('document_id', '')),
                     title=doc.get('title', doc.get('filename', '')),
                     filename=doc.get('filename', ''),
-                    content_preview="",  # No preview for metadata-only search
+                    content_preview=content_preview,
                     relevance_score=1.0  # All matches are equally relevant
                 )
                 # Add metadata
@@ -195,7 +287,8 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                     'tags': str(doc.get('tags', [])),
                     'category': doc.get('category', ''),
                     'user_id': doc.get('user_id', ''),
-                    'collection_type': doc.get('collection_type', '')
+                    'collection_type': doc.get('collection_type', ''),
+                    'doc_type': doc.get('doc_type', ''),
                 })
                 response.results.append(doc_result)
 
@@ -304,13 +397,14 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                                 logger.info(f"GetDocumentContent: Loaded {len(full_content)} chars from plain text file {file_path}")
                             
                             # Binary document formats need special processing
-                            elif file_ext in ['.docx', '.pdf', '.epub', '.html', '.htm', '.eml']:
+                            elif file_ext in ['.docx', '.pptx', '.pdf', '.epub', '.html', '.htm', '.eml']:
                                 logger.info(f"GetDocumentContent: Using DocumentProcessor for {file_ext} file")
                                 doc_processor = DocumentProcessor()
                                 
                                 # Map extension to doc_type
                                 doc_type_map = {
                                     '.docx': 'docx',
+                                    '.pptx': 'pptx',
                                     '.pdf': 'pdf',
                                     '.epub': 'epub',
                                     '.html': 'html',
@@ -323,13 +417,17 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                                 if doc_type == 'docx':
                                     full_content = await doc_processor._process_docx(str(file_path))
                                 elif doc_type == 'pdf':
-                                    full_content, _ = await doc_processor._process_pdf(str(file_path), request.document_id)
+                                    full_content, _, _, _ = await doc_processor._process_pdf(
+                                        str(file_path), request.document_id
+                                    )
                                 elif doc_type == 'epub':
                                     full_content = await doc_processor._process_epub(str(file_path))
                                 elif doc_type == 'html':
                                     full_content = await doc_processor._process_html(str(file_path))
                                 elif doc_type == 'eml':
                                     full_content = await doc_processor._process_eml(str(file_path))
+                                elif doc_type == 'pptx':
+                                    full_content = await doc_processor._process_pptx(str(file_path))
                                 
                                 logger.info(f"GetDocumentContent: Extracted {len(full_content)} chars from {doc_type} file")
                             
@@ -676,35 +774,112 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         request: tool_service_pb2.RSSSearchRequest,
         context: grpc.aio.ServicerContext
     ) -> tool_service_pb2.RSSSearchResponse:
-        """Search RSS feeds and articles"""
+        """Search RSS feeds and articles by query (title, description, content)."""
         try:
-            logger.info(f"SearchRSSFeeds: user={request.user_id}, query={request.query}")
-            
-            # Placeholder implementation - Phase 2 will wire up real RSS service
+            logger.info(f"SearchRSSFeeds: user={request.user_id}, query={request.query[:80]}")
+            from tools_service.services.rss_service import get_rss_service
+
+            rss_service = await get_rss_service()
+            limit = request.limit or 20
+            articles = await rss_service.search_articles(
+                user_id=request.user_id or "system",
+                query=request.query or "",
+                limit=limit,
+                unread_only=bool(request.unread_only),
+                starred_only=bool(request.starred_only),
+            )
             response = tool_service_pb2.RSSSearchResponse()
-            logger.info(f"SearchRSSFeeds: Returning placeholder response")
+            for art in articles:
+                response.articles.append(_rss_article_to_pb(art))
+            logger.info(f"SearchRSSFeeds: Found {len(response.articles)} articles")
             return response
-            
         except Exception as e:
             logger.error(f"SearchRSSFeeds error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"RSS search failed: {str(e)}")
-    
+
     async def GetRSSArticles(
         self,
         request: tool_service_pb2.RSSArticlesRequest,
         context: grpc.aio.ServicerContext
     ) -> tool_service_pb2.RSSArticlesResponse:
-        """Get articles from RSS feed"""
+        """Get articles from a specific RSS feed."""
         try:
             logger.info(f"GetRSSArticles: feed_id={request.feed_id}")
-            
-            # Placeholder implementation
+            from tools_service.services.rss_service import get_rss_service
+
+            rss_service = await get_rss_service()
+            feed = await rss_service.get_feed(request.feed_id)
+            if not feed:
+                return tool_service_pb2.RSSArticlesResponse()
+            if feed.user_id is not None and feed.user_id != request.user_id:
+                return tool_service_pb2.RSSArticlesResponse()
+            limit = request.limit or 20
+            uid = request.user_id or "system"
+            unread_only = bool(request.unread_only)
+            starred_only = bool(request.starred_only)
+            if unread_only or starred_only:
+                articles = await rss_service.get_feed_articles_filtered(
+                    feed_id=request.feed_id,
+                    user_id=uid,
+                    limit=limit,
+                    unread_only=unread_only,
+                    starred_only=starred_only,
+                )
+            else:
+                articles = await rss_service.get_feed_articles(
+                    feed_id=request.feed_id,
+                    user_id=uid,
+                    limit=limit,
+                )
+            feed_name = feed.feed_name or ""
             response = tool_service_pb2.RSSArticlesResponse()
+            for art in articles:
+                response.articles.append(_rss_article_to_pb(art, feed_name_fallback=feed_name))
+            logger.info(f"GetRSSArticles: Returned {len(response.articles)} articles")
             return response
-            
         except Exception as e:
             logger.error(f"GetRSSArticles error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Get articles failed: {str(e)}")
+
+    async def ListStarredRSSArticles(
+        self,
+        request: tool_service_pb2.ListStarredRSSArticlesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListStarredRSSArticlesResponse:
+        """List starred RSS articles for the user across all feeds."""
+        try:
+            uid = (request.user_id or "").strip()
+            if not uid:
+                await context.abort(
+                    grpc.StatusCode.INVALID_ARGUMENT, "user_id is required"
+                )
+            from tools_service.services.rss_service import get_rss_service
+
+            rss_service = await get_rss_service()
+            limit = int(request.limit) if request.limit else 50
+            limit = max(1, min(limit, 500))
+            offset = max(0, int(request.offset))
+            articles = await rss_service.get_starred_articles(
+                user_id=uid, limit=limit, offset=offset
+            )
+            response = tool_service_pb2.ListStarredRSSArticlesResponse()
+            for art in articles:
+                response.articles.append(_rss_article_to_pb(art))
+            logger.info(
+                "ListStarredRSSArticles: user=%s limit=%s offset=%s count=%s",
+                uid,
+                limit,
+                offset,
+                len(response.articles),
+            )
+            return response
+        except (grpc.RpcError, grpc._cython.cygrpc.AbortError):
+            raise
+        except Exception as e:
+            logger.error("ListStarredRSSArticles error: %s", e)
+            await context.abort(
+                grpc.StatusCode.INTERNAL, f"List starred articles failed: {str(e)}"
+            )
     
     # ===== RSS Management Operations =====
     
@@ -789,7 +964,8 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 success=True,
                 count=len(feeds)
             )
-            
+            counts_map = await rss_service.get_unread_count(request.user_id or "system")
+
             for feed in feeds:
                 # Get article count for this feed
                 from services.database_manager.database_helpers import fetch_value
@@ -798,17 +974,22 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                         "SELECT COUNT(*) FROM rss_articles WHERE feed_id = $1",
                         feed.feed_id
                     ) or 0
-                except:
+                except Exception:
                     article_count = 0
-                
+                last_chk = getattr(feed, "last_check", None) or getattr(
+                    feed, "last_poll_date", None
+                )
+                last_polled_s = last_chk.isoformat() if last_chk else ""
+
                 feed_details = tool_service_pb2.RSSFeedDetails(
                     feed_id=feed.feed_id,
                     feed_name=feed.feed_name,
                     feed_url=feed.feed_url,
                     category=feed.category or "general",
                     is_global=(feed.user_id is None),
-                    last_polled=feed.last_poll_date.isoformat() if feed.last_poll_date else "",
-                    article_count=int(article_count)
+                    last_polled=last_polled_s,
+                    article_count=int(article_count),
+                    unread_count=int(counts_map.get(feed.feed_id, 0)),
                 )
                 response.feeds.append(feed_details)
             
@@ -929,7 +1110,197 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 success=False,
                 error=f"Failed to delete RSS feed: {str(e)}"
             )
-    
+
+    async def MarkArticleRead(
+        self,
+        request: tool_service_pb2.MarkArticleReadRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.MarkArticleReadResponse:
+        """Mark an RSS article as read for the requesting user."""
+        try:
+            uid = request.user_id or "system"
+            aid = (request.article_id or "").strip()
+            if not aid:
+                return tool_service_pb2.MarkArticleReadResponse(
+                    success=False,
+                    message="",
+                    error="article_id is required",
+                )
+            from tools_service.services.rss_service import get_rss_service
+
+            rss_service = await get_rss_service()
+            ok = await rss_service.mark_article_read(aid, uid)
+            if not ok:
+                return tool_service_pb2.MarkArticleReadResponse(
+                    success=False,
+                    message="",
+                    error="Failed to mark article read",
+                )
+            return tool_service_pb2.MarkArticleReadResponse(
+                success=True,
+                message="Article marked as read",
+            )
+        except Exception as e:
+            logger.error("MarkArticleRead error: %s", e)
+            return tool_service_pb2.MarkArticleReadResponse(
+                success=False,
+                message="",
+                error=str(e),
+            )
+
+    async def MarkArticleUnread(
+        self,
+        request: tool_service_pb2.MarkArticleUnreadRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.MarkArticleUnreadResponse:
+        """Mark an RSS article as unread for the requesting user."""
+        try:
+            uid = request.user_id or "system"
+            aid = (request.article_id or "").strip()
+            if not aid:
+                return tool_service_pb2.MarkArticleUnreadResponse(
+                    success=False,
+                    message="",
+                    error="article_id is required",
+                )
+            from tools_service.services.rss_service import get_rss_service
+
+            rss_service = await get_rss_service()
+            ok = await rss_service.mark_article_unread(aid, uid)
+            if not ok:
+                return tool_service_pb2.MarkArticleUnreadResponse(
+                    success=False,
+                    message="",
+                    error="Failed to mark article unread",
+                )
+            return tool_service_pb2.MarkArticleUnreadResponse(
+                success=True,
+                message="Article marked as unread",
+            )
+        except Exception as e:
+            logger.error("MarkArticleUnread error: %s", e)
+            return tool_service_pb2.MarkArticleUnreadResponse(
+                success=False,
+                message="",
+                error=str(e),
+            )
+
+    async def SetArticleStarred(
+        self,
+        request: tool_service_pb2.SetArticleStarredRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.SetArticleStarredResponse:
+        """Set RSS article starred flag for the requesting user."""
+        try:
+            uid = request.user_id or "system"
+            aid = (request.article_id or "").strip()
+            if not aid:
+                return tool_service_pb2.SetArticleStarredResponse(
+                    success=False,
+                    message="",
+                    error="article_id is required",
+                )
+            from tools_service.services.rss_service import get_rss_service
+
+            rss_service = await get_rss_service()
+            ok = await rss_service.set_article_starred(aid, uid, request.starred)
+            if not ok:
+                return tool_service_pb2.SetArticleStarredResponse(
+                    success=False,
+                    message="",
+                    error="Failed to update starred state",
+                )
+            state = "starred" if request.starred else "unstarred"
+            return tool_service_pb2.SetArticleStarredResponse(
+                success=True,
+                message=f"Article {state}",
+            )
+        except Exception as e:
+            logger.error("SetArticleStarred error: %s", e)
+            return tool_service_pb2.SetArticleStarredResponse(
+                success=False,
+                message="",
+                error=str(e),
+            )
+
+    async def GetUnreadCounts(
+        self,
+        request: tool_service_pb2.GetUnreadCountsRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.GetUnreadCountsResponse:
+        """Per-feed unread article counts for the user."""
+        try:
+            uid = request.user_id or "system"
+            from tools_service.services.rss_service import get_rss_service
+
+            rss_service = await get_rss_service()
+            counts_map = await rss_service.get_unread_count(uid)
+            response = tool_service_pb2.GetUnreadCountsResponse(success=True)
+            for feed_id, cnt in (counts_map or {}).items():
+                response.counts.append(
+                    tool_service_pb2.UnreadCountEntry(
+                        feed_id=feed_id,
+                        count=int(cnt),
+                    )
+                )
+            return response
+        except Exception as e:
+            logger.error("GetUnreadCounts error: %s", e)
+            return tool_service_pb2.GetUnreadCountsResponse(
+                success=False,
+                error=str(e),
+            )
+
+    async def ToggleFeedActive(
+        self,
+        request: tool_service_pb2.ToggleFeedActiveRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ToggleFeedActiveResponse:
+        """Enable or disable polling for an RSS feed."""
+        try:
+            uid = request.user_id or "system"
+            fid = (request.feed_id or "").strip()
+            if not fid:
+                return tool_service_pb2.ToggleFeedActiveResponse(
+                    success=False,
+                    feed_id="",
+                    is_active=request.is_active,
+                    message="",
+                    error="feed_id is required",
+                )
+            from services.auth_service import auth_service
+            from tools_service.services.rss_service import get_rss_service
+
+            rss_service = await get_rss_service()
+            user_info = await auth_service.get_user_by_id(uid)
+            is_admin = bool(user_info and user_info.role == "admin")
+            ok = await rss_service.toggle_feed_active(
+                fid, uid, request.is_active, is_admin=is_admin
+            )
+            if not ok:
+                return tool_service_pb2.ToggleFeedActiveResponse(
+                    success=False,
+                    feed_id=fid,
+                    is_active=request.is_active,
+                    message="",
+                    error="Not allowed or feed not found",
+                )
+            return tool_service_pb2.ToggleFeedActiveResponse(
+                success=True,
+                feed_id=fid,
+                is_active=request.is_active,
+                message="Feed active state updated",
+            )
+        except Exception as e:
+            logger.error("ToggleFeedActive error: %s", e)
+            return tool_service_pb2.ToggleFeedActiveResponse(
+                success=False,
+                feed_id=request.feed_id or "",
+                is_active=request.is_active,
+                message="",
+                error=str(e),
+            )
+
     # ===== Entity Operations =====
     
     async def SearchEntities(
@@ -1708,6 +2079,10 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             if request.HasField("reference_strength"):
                 reference_strength = request.reference_strength
             
+            folder_id = None
+            if request.HasField("folder_id") and request.folder_id:
+                folder_id = request.folder_id
+
             # Call image generation service
             result = await image_service.generate_images(
                 prompt=request.prompt,
@@ -1719,21 +2094,27 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 model=model,
                 reference_image_data=reference_image_data,
                 reference_image_url=reference_image_url,
-                reference_strength=reference_strength
+                reference_strength=reference_strength,
+                user_id=request.user_id if request.user_id else None,
+                folder_id=folder_id,
             )
             
             # Convert result to proto response
             if result.get("success"):
                 images = []
                 for img in result.get("images", []):
-                    images.append(tool_service_pb2.GeneratedImage(
+                    gi = tool_service_pb2.GeneratedImage(
                         filename=img.get("filename", ""),
                         path=img.get("path", ""),
                         url=img.get("url", ""),
                         width=img.get("width", 1024),
                         height=img.get("height", 1024),
                         format=img.get("format", "png")
-                    ))
+                    )
+                    doc_id = img.get("document_id")
+                    if doc_id and hasattr(gi, "document_id"):
+                        gi.document_id = doc_id
+                    images.append(gi)
                 
                 response = tool_service_pb2.ImageGenerationResponse(
                     success=True,
@@ -1952,11 +2333,17 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 org_inbox_set_schedule_and_repeater,
                 org_inbox_apply_tags
             )
+            from services.org_todo_service import _strip_trailing_org_tags_from_title
+
+            # If tags will be applied, strip any trailing org-style tags from text to avoid duplicating
+            text = request.text or ""
+            if request.tags:
+                text = _strip_trailing_org_tags_from_title(text)
             
             # Handle different kinds of entries
             if request.kind == "contact":
                 # Build contact entry with PROPERTIES drawer
-                headline = f"* {request.text}"
+                headline = f"* {text}"
                 org_entry = f"{headline}\n"
                 
                 if request.contact_properties:
@@ -1971,7 +2358,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 
             elif request.kind == "note":
                 # Headline without TODO (plain note)
-                headline = f"* {request.text}"
+                headline = f"* {text}"
                 org_entry = f"{headline}\n"
                 result = await org_inbox_append_text(org_entry, request.user_id)
                 listing = await org_inbox_list_items(request.user_id)
@@ -1981,7 +2368,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             elif request.schedule or request.kind == "event":
                 # Build a proper org-mode entry with schedule
                 org_type = "TODO" if request.kind == "todo" else ""
-                headline = f"* {org_type} {request.text}".strip()
+                headline = f"* {org_type} {text}".strip()
                 org_entry = f"{headline}\n"
                 result = await org_inbox_append_text(org_entry, request.user_id)
                 
@@ -2001,7 +2388,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             else:
                 # Regular todo or checkbox
                 kind = "todo" if request.kind != "checkbox" else "checkbox"
-                result = await org_inbox_add_item(text=request.text, kind=kind, user_id=request.user_id)
+                result = await org_inbox_add_item(text=text, kind=kind, user_id=request.user_id)
                 line_index = result.get("line_index")
             
             # Apply tags if provided
@@ -2020,7 +2407,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             return tool_service_pb2.AddOrgInboxItemResponse(
                 success=True,
                 line_index=line_index if line_index is not None else 0,
-                message=f"Added '{request.text}' to inbox.org"
+                message=f"Added '{text}' to inbox.org"
             )
             
         except Exception as e:
@@ -2029,7 +2416,231 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 success=False,
                 error=str(e)
             )
-    
+
+    async def CaptureJournalEntry(
+        self,
+        request: tool_service_pb2.CaptureJournalEntryRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.CaptureJournalEntryResponse:
+        """Append a journal entry; respects user journal preferences and date hierarchy."""
+        try:
+            from services.org_journal_service import get_org_journal_service
+            from models.org_capture_models import OrgCaptureRequest
+
+            content = request.content or ""
+            if request.HasField("title") and request.title:
+                content = f"{request.title}\n{content}"
+            capture_req = OrgCaptureRequest(
+                content=content,
+                template_type="journal",
+                tags=list(request.tags) if request.tags else None,
+                entry_date=request.entry_date if request.HasField("entry_date") and request.entry_date else None,
+            )
+            svc = await get_org_journal_service()
+            response = await svc.capture_journal_entry(request.user_id, capture_req)
+            return tool_service_pb2.CaptureJournalEntryResponse(
+                success=response.success,
+                message=response.message,
+                entry_preview=response.entry_preview or "",
+                file_path=response.file_path or "",
+                document_id="",
+            )
+        except Exception as e:
+            logger.error("CaptureJournalEntry error: %s", e)
+            return tool_service_pb2.CaptureJournalEntryResponse(
+                success=False,
+                message="",
+                error=str(e),
+            )
+
+    async def GetJournalEntry(
+        self,
+        request: tool_service_pb2.GetJournalEntryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetJournalEntryResponse:
+        """Read one date's journal entry (section-aware)."""
+        try:
+            from services.org_journal_service import get_org_journal_service
+            svc = await get_org_journal_service()
+            date_str = request.date or "today"
+            result = await svc.get_journal_entry(request.user_id, date_str)
+            return tool_service_pb2.GetJournalEntryResponse(
+                success=result.get("success", False),
+                content=result.get("content", ""),
+                date=result.get("date", ""),
+                heading=result.get("heading", ""),
+                document_id=result.get("document_id") or "",
+                file_path=result.get("file_path") or "",
+                has_content=result.get("has_content", False),
+                error=result.get("error") or "",
+            )
+        except Exception as e:
+            logger.error("GetJournalEntry error: %s", e)
+            return tool_service_pb2.GetJournalEntryResponse(
+                success=False,
+                content="",
+                date="",
+                heading="",
+                has_content=False,
+                error=str(e),
+            )
+
+    async def GetJournalEntries(
+        self,
+        request: tool_service_pb2.GetJournalEntriesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetJournalEntriesResponse:
+        """Get full content of journal entries in a date range (review/lookback)."""
+        try:
+            from services.org_journal_service import get_org_journal_service
+            svc = await get_org_journal_service()
+            max_entries = 100
+            if request.HasField("max_entries") and request.max_entries > 0:
+                max_entries = request.max_entries
+            result = await svc.get_journal_entries(
+                request.user_id,
+                start_date=request.start_date if request.HasField("start_date") and request.start_date else None,
+                end_date=request.end_date if request.HasField("end_date") and request.end_date else None,
+                max_entries=max_entries,
+            )
+            if not result.get("success"):
+                return tool_service_pb2.GetJournalEntriesResponse(
+                    success=False,
+                    total=0,
+                    error=result.get("error") or "",
+                )
+            entries = [
+                tool_service_pb2.JournalEntryWithContent(
+                    date=e["date"],
+                    content=e.get("content", ""),
+                    heading=e.get("heading", ""),
+                    has_content=e.get("has_content", False),
+                )
+                for e in result.get("entries", [])
+            ]
+            return tool_service_pb2.GetJournalEntriesResponse(
+                success=True,
+                entries=entries,
+                total=result.get("total", 0),
+            )
+        except Exception as e:
+            logger.error("GetJournalEntries error: %s", e)
+            return tool_service_pb2.GetJournalEntriesResponse(
+                success=False,
+                total=0,
+                error=str(e),
+            )
+
+    async def UpdateJournalEntry(
+        self,
+        request: tool_service_pb2.UpdateJournalEntryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.UpdateJournalEntryResponse:
+        """Replace or append to a single date's journal section only."""
+        try:
+            from services.org_journal_service import get_org_journal_service
+            svc = await get_org_journal_service()
+            result = await svc.update_journal_entry(
+                request.user_id,
+                request.date or "",
+                request.content or "",
+                request.mode or "replace",
+            )
+            return tool_service_pb2.UpdateJournalEntryResponse(
+                success=result.get("success", False),
+                date=result.get("date", ""),
+                error=result.get("error") or "",
+            )
+        except Exception as e:
+            logger.error("UpdateJournalEntry error: %s", e)
+            return tool_service_pb2.UpdateJournalEntryResponse(
+                success=False,
+                date=request.date or "",
+                error=str(e),
+            )
+
+    async def ListJournalEntries(
+        self,
+        request: tool_service_pb2.ListJournalEntriesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListJournalEntriesResponse:
+        """List journal entries in a date range with metadata."""
+        try:
+            from services.org_journal_service import get_org_journal_service
+            svc = await get_org_journal_service()
+            result = await svc.list_journal_entries(
+                request.user_id,
+                start_date=request.start_date if request.HasField("start_date") and request.start_date else None,
+                end_date=request.end_date if request.HasField("end_date") and request.end_date else None,
+            )
+            if not result.get("success"):
+                return tool_service_pb2.ListJournalEntriesResponse(
+                    success=False,
+                    total=0,
+                    error=result.get("error") or "",
+                )
+            entries = [
+                tool_service_pb2.JournalEntryMeta(
+                    date=e["date"],
+                    word_count=e.get("word_count", 0),
+                    has_content=e.get("has_content", False),
+                )
+                for e in result.get("entries", [])
+            ]
+            return tool_service_pb2.ListJournalEntriesResponse(
+                success=True,
+                entries=entries,
+                total=result.get("total", 0),
+            )
+        except Exception as e:
+            logger.error("ListJournalEntries error: %s", e)
+            return tool_service_pb2.ListJournalEntriesResponse(
+                success=False,
+                total=0,
+                error=str(e),
+            )
+
+    async def SearchJournal(
+        self,
+        request: tool_service_pb2.SearchJournalRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.SearchJournalResponse:
+        """Search within journal entry content in a date range."""
+        try:
+            from services.org_journal_service import get_org_journal_service
+            svc = await get_org_journal_service()
+            result = await svc.search_journal_entries(
+                request.user_id,
+                request.query or "",
+                start_date=request.start_date if request.HasField("start_date") and request.start_date else None,
+                end_date=request.end_date if request.HasField("end_date") and request.end_date else None,
+            )
+            if not result.get("success"):
+                return tool_service_pb2.SearchJournalResponse(
+                    success=False,
+                    count=0,
+                    error=result.get("error") or "",
+                )
+            results = [
+                tool_service_pb2.JournalSearchResult(
+                    date=r["date"],
+                    excerpt=r.get("excerpt", ""),
+                )
+                for r in result.get("results", [])
+            ]
+            return tool_service_pb2.SearchJournalResponse(
+                success=True,
+                results=results,
+                count=result.get("count", 0),
+            )
+        except Exception as e:
+            logger.error("SearchJournal error: %s", e)
+            return tool_service_pb2.SearchJournalResponse(
+                success=False,
+                count=0,
+                error=str(e),
+            )
+
     async def ToggleOrgInboxItem(
         self,
         request: tool_service_pb2.ToggleOrgInboxItemRequest,
@@ -2259,9 +2870,295 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 success=False,
                 error=str(e)
             )
-    
+
+    # ===== Universal Todo Operations =====
+
+    async def ListTodos(
+        self,
+        request: tool_service_pb2.ListTodosRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ListTodosResponse:
+        """List todos; scope is all, inbox, or file path."""
+        logger.info("ListTodos: user=%s scope=%s query=%s", request.user_id, request.scope or "all", (request.query or "")[:80])
+        try:
+            from services.org_todo_service import get_org_todo_service
+            service = await get_org_todo_service()
+            result = await service.list_todos(
+                user_id=request.user_id,
+                scope=request.scope or "all",
+                states=list(request.states) if request.states else None,
+                tags=list(request.tags) if request.tags else None,
+                query=request.query or "",
+                limit=request.limit or 100,
+                include_archives=request.include_archives or False,
+                include_body=getattr(request, "include_body", False) or False,
+                closed_since_days=request.closed_since_days if getattr(request, "closed_since_days", 0) > 0 else None,
+            )
+            if not result.get("success"):
+                return tool_service_pb2.ListTodosResponse(success=False, error=result.get("error", ""))
+            response = tool_service_pb2.ListTodosResponse(success=True, count=result.get("count", 0), files_searched=result.get("files_searched", 0))
+            for r in result.get("results", []):
+                response.results.append(tool_service_pb2.TodoResult(
+                    filename=r.get("filename", ""),
+                    file_path=r.get("file_path", ""),
+                    heading=r.get("heading", ""),
+                    level=r.get("level", 0),
+                    line_number=r.get("line_number", 0),
+                    todo_state=r.get("todo_state", ""),
+                    tags=r.get("tags", []),
+                    scheduled=r.get("scheduled", "") or "",
+                    deadline=r.get("deadline", "") or "",
+                    document_id=r.get("document_id", "") or "",
+                    preview=r.get("preview", "") or "",
+                    body=r.get("body", "") or "",
+                    closed=r.get("closed", "") or "",
+                ))
+            return response
+        except Exception as e:
+            logger.exception("ListTodos error")
+            return tool_service_pb2.ListTodosResponse(success=False, error=str(e))
+
+    async def CreateTodo(
+        self,
+        request: tool_service_pb2.CreateTodoRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.CreateTodoResponse:
+        logger.info("CreateTodo: user=%s text=%s", request.user_id, (request.text or "")[:50])
+        try:
+            from services.org_todo_service import get_org_todo_service
+            service = await get_org_todo_service()
+            has_hl = getattr(request, "HasField", lambda _: False)("heading_level")
+            has_ins = getattr(request, "HasField", lambda _: False)("insert_after_line_number")
+            heading_level = getattr(request, "heading_level", None) if has_hl else None
+            insert_after = getattr(request, "insert_after_line_number", None) if has_ins else None
+            result = await service.create_todo(
+                user_id=request.user_id,
+                text=request.text,
+                file_path=request.file_path if request.file_path else None,
+                state=request.state or "TODO",
+                tags=list(request.tags) if request.tags else None,
+                scheduled=request.scheduled if request.scheduled else None,
+                deadline=request.deadline if request.deadline else None,
+                priority=request.priority if request.priority else None,
+                body=(getattr(request, "body", "") or "").strip() or None,
+                heading_level=heading_level,
+                insert_after_line_number=insert_after,
+            )
+            if not result.get("success"):
+                return tool_service_pb2.CreateTodoResponse(success=False, error=result.get("error", ""))
+            return tool_service_pb2.CreateTodoResponse(
+                success=True,
+                file_path=result.get("file_path", ""),
+                line_number=result.get("line_number", 0),
+                heading=result.get("heading", ""),
+            )
+        except Exception as e:
+            logger.exception("CreateTodo error")
+            return tool_service_pb2.CreateTodoResponse(success=False, error=str(e))
+
+    async def UpdateTodo(
+        self,
+        request: tool_service_pb2.UpdateTodoRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.UpdateTodoResponse:
+        logger.info("UpdateTodo: user=%s file_path=%s line_number=%s new_state=%s", request.user_id, request.file_path, request.line_number, request.new_state or "")
+        try:
+            from services.org_todo_service import get_org_todo_service
+            service = await get_org_todo_service()
+            result = await service.update_todo(
+                user_id=request.user_id,
+                file_path=request.file_path,
+                line_number=request.line_number,
+                heading_text=request.heading_text if request.heading_text else None,
+                new_state=request.new_state if request.new_state else None,
+                new_text=request.new_text if request.new_text else None,
+                add_tags=list(request.add_tags) if request.add_tags else None,
+                remove_tags=list(request.remove_tags) if request.remove_tags else None,
+                scheduled=request.scheduled if request.scheduled else None,
+                deadline=request.deadline if request.deadline else None,
+                priority=request.priority if request.priority else None,
+                new_body=(getattr(request, "new_body", "") or "").strip() or None,
+            )
+            if not result.get("success"):
+                return tool_service_pb2.UpdateTodoResponse(success=False, error=result.get("error", ""))
+            return tool_service_pb2.UpdateTodoResponse(
+                success=True,
+                file_path=result.get("file_path", ""),
+                line_number=result.get("line_number", 0),
+                new_line=result.get("new_line", ""),
+            )
+        except Exception as e:
+            logger.exception("UpdateTodo error")
+            return tool_service_pb2.UpdateTodoResponse(success=False, error=str(e))
+
+    async def ToggleTodo(
+        self,
+        request: tool_service_pb2.ToggleTodoRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ToggleTodoResponse:
+        logger.info("ToggleTodo: user=%s file_path=%s line_number=%s", request.user_id, request.file_path, request.line_number)
+        try:
+            from services.org_todo_service import get_org_todo_service
+            service = await get_org_todo_service()
+            result = await service.toggle_todo(
+                user_id=request.user_id,
+                file_path=request.file_path,
+                line_number=request.line_number,
+                heading_text=request.heading_text if request.heading_text else None,
+            )
+            if not result.get("success"):
+                logger.warning("ToggleTodo failed: %s", result.get("error", ""))
+                return tool_service_pb2.ToggleTodoResponse(success=False, error=result.get("error", ""))
+            return tool_service_pb2.ToggleTodoResponse(
+                success=True,
+                file_path=result.get("file_path", ""),
+                line_number=result.get("line_number", 0),
+                new_line=result.get("new_line", ""),
+            )
+        except Exception as e:
+            logger.exception("ToggleTodo error")
+            return tool_service_pb2.ToggleTodoResponse(success=False, error=str(e))
+
+    async def DeleteTodo(
+        self,
+        request: tool_service_pb2.DeleteTodoRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.DeleteTodoResponse:
+        logger.info("DeleteTodo: user=%s file_path=%s line_number=%s", request.user_id, request.file_path, request.line_number)
+        try:
+            from services.org_todo_service import get_org_todo_service
+            service = await get_org_todo_service()
+            result = await service.delete_todo(
+                user_id=request.user_id,
+                file_path=request.file_path,
+                line_number=request.line_number,
+                heading_text=request.heading_text if request.heading_text else None,
+            )
+            if not result.get("success"):
+                return tool_service_pb2.DeleteTodoResponse(success=False, error=result.get("error", ""))
+            return tool_service_pb2.DeleteTodoResponse(
+                success=True,
+                file_path=result.get("file_path", ""),
+                deleted_line_count=result.get("deleted_line_count", 0),
+            )
+        except Exception as e:
+            logger.exception("DeleteTodo error")
+            return tool_service_pb2.DeleteTodoResponse(success=False, error=str(e))
+
+    async def ArchiveDoneTodos(
+        self,
+        request: tool_service_pb2.ArchiveDoneTodosRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ArchiveDoneTodosResponse:
+        logger.info(
+            "ArchiveDoneTodos: user=%s file_path=%s preview_only=%s line_number=%s",
+            request.user_id, request.file_path or "inbox", getattr(request, "preview_only", False),
+            getattr(request, "line_number", None),
+        )
+        try:
+            from services.org_todo_service import get_org_todo_service
+            service = await get_org_todo_service()
+            line_number = None
+            if hasattr(request, "line_number") and request.HasField("line_number"):
+                line_number = request.line_number
+            result = await service.archive_done(
+                user_id=request.user_id,
+                file_path=request.file_path if request.file_path else None,
+                preview_only=getattr(request, "preview_only", False),
+                line_number=line_number,
+            )
+            if result.get("error"):
+                return tool_service_pb2.ArchiveDoneTodosResponse(success=False, error=result.get("error", ""))
+            resp = tool_service_pb2.ArchiveDoneTodosResponse(
+                success=True,
+                path=result.get("path", ""),
+                archived_to=result.get("archived_to", ""),
+                archived_count=result.get("archived_count", 0),
+            )
+            if hasattr(resp, "directive_found"):
+                resp.directive_found = result.get("directive_found", False)
+            if hasattr(resp, "directive_value"):
+                resp.directive_value = result.get("directive_value", "")
+            return resp
+        except Exception as e:
+            logger.exception("ArchiveDoneTodos error")
+            return tool_service_pb2.ArchiveDoneTodosResponse(success=False, error=str(e))
+
+    async def RefileTodo(
+        self,
+        request: tool_service_pb2.RefileTodoRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.RefileTodoResponse:
+        """Move a todo entry (and its subtree) from one org file to another."""
+        logger.info("RefileTodo: user=%s source=%s:%s target=%s", request.user_id, request.source_file, request.source_line, request.target_file)
+        try:
+            from services.org_refile_service import get_org_refile_service
+            service = await get_org_refile_service()
+            target_heading_line = None
+            if request.HasField("target_heading_line"):
+                target_heading_line = request.target_heading_line + 1
+            result = await service.refile_entry(
+                user_id=request.user_id,
+                source_file=request.source_file,
+                source_line=request.source_line + 1,
+                target_file=request.target_file,
+                target_heading_line=target_heading_line,
+            )
+            if not result.get("success"):
+                return tool_service_pb2.RefileTodoResponse(
+                    success=False,
+                    source_file=result.get("source_file", request.source_file),
+                    target_file=result.get("target_file", request.target_file),
+                    lines_moved=0,
+                    error=result.get("error", "Unknown error"),
+                )
+            return tool_service_pb2.RefileTodoResponse(
+                success=True,
+                source_file=result.get("source_file", request.source_file),
+                target_file=result.get("target_file", request.target_file),
+                lines_moved=result.get("lines_moved", 0),
+            )
+        except Exception as e:
+            logger.exception("RefileTodo error")
+            return tool_service_pb2.RefileTodoResponse(
+                success=False,
+                source_file=request.source_file,
+                target_file=request.target_file,
+                lines_moved=0,
+                error=str(e),
+            )
+
+    async def DiscoverRefileTargets(
+        self,
+        request: tool_service_pb2.DiscoverRefileTargetsRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.DiscoverRefileTargetsResponse:
+        """List all org files and headings available as refile destinations."""
+        logger.info("DiscoverRefileTargets: user=%s", request.user_id)
+        try:
+            from services.org_refile_service import get_org_refile_service
+            service = await get_org_refile_service()
+            targets = await service.discover_refile_targets(request.user_id)
+            response = tool_service_pb2.DiscoverRefileTargetsResponse(success=True)
+            for t in targets:
+                heading_line = t.get("heading_line", 0)
+                if heading_line > 0:
+                    heading_line -= 1
+                response.targets.append(tool_service_pb2.RefileTarget(
+                    file=t.get("file", ""),
+                    filename=t.get("filename", ""),
+                    heading_path=t.get("heading_path", []),
+                    heading_line=heading_line,
+                    display_name=t.get("display_name", ""),
+                    level=t.get("level", 0),
+                ))
+            return response
+        except Exception as e:
+            logger.exception("DiscoverRefileTargets error")
+            return tool_service_pb2.DiscoverRefileTargetsResponse(success=False, error=str(e))
+
     # ===== Web Operations =====
-    
+
     async def SearchWeb(
         self,
         request: tool_service_pb2.WebSearchRequest,
@@ -2315,53 +3212,64 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         request: tool_service_pb2.WebCrawlRequest,
         context: grpc.aio.ServicerContext
     ) -> tool_service_pb2.WebCrawlResponse:
-        """Crawl web content from URLs"""
+        """Crawl web content from URLs, with optional pagination."""
         try:
-            urls = list(request.urls) if request.urls else ([request.url] if request.url else [])
-            logger.info(f"CrawlWebContent: {len(urls)} URLs")
-            
             # Import crawl tool
             from services.langgraph_tools.crawl4ai_web_tools import crawl_web_content
-            
-            # Execute crawl
-            result = await crawl_web_content(url=request.url if request.url else None, urls=list(request.urls) if request.urls else None)
-            
+
+            paginate = request.paginate if request.HasField("paginate") else False
+            max_pages = request.max_pages if request.HasField("max_pages") else 10
+            pagination_param = request.pagination_param if request.HasField("pagination_param") else None
+            start_page = request.start_page if request.HasField("start_page") else 0
+            next_page_css_selector = request.next_page_css_selector if request.HasField("next_page_css_selector") else None
+            css_selector = request.css_selector if request.HasField("css_selector") else None
+            max_urls = request.max_urls if request.HasField("max_urls") and request.max_urls > 0 else 5
+
+            kwargs = {
+                "url": request.url if request.url else None,
+                "urls": list(request.urls) if request.urls else None,
+                "user_id": request.user_id or "system",
+                "css_selector": css_selector,
+                "paginate": paginate,
+                "max_pages": max_pages,
+                "pagination_param": pagination_param,
+                "start_page": start_page,
+                "next_page_css_selector": next_page_css_selector,
+                "max_urls": max_urls,
+            }
+            result = await crawl_web_content(**kwargs)
+
             response = tool_service_pb2.WebCrawlResponse()
-            
-            # Parse result
-            if isinstance(result, dict) and 'results' in result:
-                for item in result['results']:
-                    if not item.get('success'):
+
+            if isinstance(result, dict) and "results" in result:
+                for item in result["results"]:
+                    if not item.get("success"):
                         continue
-                    
-                    # Extract title from metadata if available
-                    metadata = item.get('metadata', {})
-                    title = metadata.get('title', '') if isinstance(metadata, dict) else ''
-                    
-                    # Extract content (full_content is the main content field)
-                    content = item.get('full_content', '') or item.get('content', '')
-                    
-                    # Extract HTML from result
-                    html = item.get('html', '')
-                    
-                    # Create crawl result
+
+                    metadata = item.get("metadata", {})
+                    title = metadata.get("title", "") if isinstance(metadata, dict) else ""
+                    content = item.get("full_content", "") or item.get("content", "")
+                    html = item.get("html", "")
+
                     crawl_result = tool_service_pb2.WebCrawlResult(
-                        url=item.get('url', ''),
+                        url=item.get("url", ""),
                         title=title,
                         content=content,
                         html=html
                     )
-                    
-                    # Properly assign metadata map field using update()
                     if isinstance(metadata, dict):
                         for key, value in metadata.items():
                             crawl_result.metadata[str(key)] = str(value)
-                    
+                    for img in item.get("images", [])[:20]:
+                        crawl_result.images.append(img)
+                    for link in item.get("links", [])[:50]:
+                        crawl_result.links.append(link)
+
                     response.results.append(crawl_result)
-            
+
             logger.info(f"CrawlWebContent: Crawled {len(response.results)} URLs")
             return response
-            
+
         except Exception as e:
             logger.error(f"CrawlWebContent error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Web crawl failed: {str(e)}")
@@ -2518,7 +3426,443 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         except Exception as e:
             logger.error(f"CrawlSite error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Domain crawl failed: {str(e)}")
-    
+
+    async def BrowserRun(
+        self,
+        request: tool_service_pb2.BrowserRunToolRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserRunToolResponse:
+        """Run Playwright browser session: steps then final action (download, click, extract, screenshot)."""
+        try:
+            from services.langgraph_tools.playwright_browser_tools import browser_run
+            steps = []
+            for s in request.steps:
+                steps.append({
+                    "action": s.action or "",
+                    "selector": s.selector if s.HasField("selector") else None,
+                    "value": s.value if s.HasField("value") else None,
+                    "wait_for": s.wait_for if s.HasField("wait_for") else None,
+                    "timeout_seconds": s.timeout_seconds if s.HasField("timeout_seconds") else None,
+                    "url": s.url if s.HasField("url") else None,
+                })
+            result = await browser_run(
+                user_id=request.user_id or "system",
+                url=request.url or "",
+                final_action_type=request.final_action_type or "download",
+                final_selector=request.final_selector or "",
+                folder_path=request.folder_path or "",
+                steps=steps if steps else None,
+                connection_id=request.connection_id if request.HasField("connection_id") and request.connection_id else None,
+                tags=list(request.tags) if request.tags else None,
+                title=request.title if request.HasField("title") and request.title else None,
+                goal=request.goal if request.HasField("goal") and request.goal else None,
+            )
+            response = tool_service_pb2.BrowserRunToolResponse()
+            response.success = result.get("success", False)
+            if result.get("error"):
+                response.error = result["error"]
+            if result.get("document_id") is not None:
+                response.document_id = result["document_id"]
+            if result.get("filename") is not None:
+                response.filename = result["filename"]
+            if result.get("file_size_bytes") is not None:
+                response.file_size_bytes = result["file_size_bytes"]
+            if result.get("extracted_text") is not None:
+                response.extracted_text = result["extracted_text"]
+            if result.get("message") is not None:
+                response.message = result["message"]
+            if result.get("images_markdown") is not None:
+                response.images_markdown = result["images_markdown"]
+            return response
+        except Exception as e:
+            logger.error(f"BrowserRun error: {e}")
+            response = tool_service_pb2.BrowserRunToolResponse()
+            response.success = False
+            response.error = str(e)
+            return response
+
+    async def BrowserDownload(
+        self,
+        request: tool_service_pb2.BrowserDownloadToolRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserDownloadToolResponse:
+        """Run Playwright browser session: optional steps, trigger download, save file to user folder. Delegates to BrowserRun with final_action_type=download."""
+        try:
+            from services.langgraph_tools.playwright_browser_tools import browser_run
+            steps = []
+            for s in request.steps:
+                steps.append({
+                    "action": s.action or "",
+                    "selector": s.selector if s.HasField("selector") else None,
+                    "value": s.value if s.HasField("value") else None,
+                    "wait_for": s.wait_for if s.HasField("wait_for") else None,
+                    "timeout_seconds": s.timeout_seconds if s.HasField("timeout_seconds") else None,
+                    "url": s.url if s.HasField("url") else None,
+                })
+            result = await browser_run(
+                user_id=request.user_id or "system",
+                url=request.url or "",
+                final_action_type="download",
+                final_selector=request.download_selector or "",
+                folder_path=request.folder_path or "Downloads",
+                steps=steps if steps else None,
+                connection_id=request.connection_id if request.HasField("connection_id") and request.connection_id else None,
+                tags=list(request.tags) if request.tags else None,
+                title=request.title if request.HasField("title") and request.title else None,
+                goal=request.goal if request.HasField("goal") and request.goal else None,
+            )
+            response = tool_service_pb2.BrowserDownloadToolResponse()
+            response.success = result.get("success", False)
+            response.document_id = result.get("document_id", "")
+            response.filename = result.get("filename", "")
+            response.file_size_bytes = result.get("file_size_bytes", 0)
+            if result.get("error"):
+                response.error = result["error"]
+            return response
+        except Exception as e:
+            logger.error(f"BrowserDownload error: {e}")
+            response = tool_service_pb2.BrowserDownloadToolResponse()
+            response.success = False
+            response.error = str(e)
+            return response
+
+    async def BrowserOpenSession(
+        self,
+        request: tool_service_pb2.BrowserOpenSessionRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserOpenSessionResponse:
+        """Create browser session; restore saved state for user/site if available."""
+        try:
+            from clients.crawl_service_client import get_crawl_service_client
+            from services.browser_session_state_service import get_browser_session_state_service
+            user_id = request.user_id or "system"
+            site_domain = request.site_domain or ""
+            state_svc = get_browser_session_state_service()
+            state_json = await state_svc.load_session_state(user_id, site_domain) if site_domain else None
+            client = await get_crawl_service_client()
+            session_id = await client.browser_create_session(
+                timeout_seconds=request.timeout_seconds or 30,
+                storage_state_json=state_json,
+            )
+            response = tool_service_pb2.BrowserOpenSessionResponse()
+            if session_id:
+                response.success = True
+                response.session_id = session_id
+            else:
+                response.success = False
+                response.error = "Failed to create browser session"
+            return response
+        except Exception as e:
+            logger.error(f"BrowserOpenSession error: {e}")
+            response = tool_service_pb2.BrowserOpenSessionResponse()
+            response.success = False
+            response.error = str(e)
+            return response
+
+    async def BrowserNavigate(
+        self,
+        request: tool_service_pb2.BrowserNavigateRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserNavigateResponse:
+        try:
+            from clients.crawl_service_client import get_crawl_service_client
+            client = await get_crawl_service_client()
+            result = await client.browser_execute_action(
+                request.session_id, "navigate", url=request.url or ""
+            )
+            response = tool_service_pb2.BrowserNavigateResponse()
+            response.success = result.get("success", False)
+            response.current_url = request.url or ""
+            if result.get("error"):
+                response.error = result["error"]
+            return response
+        except Exception as e:
+            logger.error(f"BrowserNavigate error: {e}")
+            response = tool_service_pb2.BrowserNavigateResponse()
+            response.success = False
+            response.error = str(e)
+            return response
+
+    async def BrowserClick(
+        self,
+        request: tool_service_pb2.BrowserClickRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserClickResponse:
+        try:
+            from clients.crawl_service_client import get_crawl_service_client
+            client = await get_crawl_service_client()
+            result = await client.browser_execute_action(
+                request.session_id, "click", selector=request.selector or ""
+            )
+            response = tool_service_pb2.BrowserClickResponse()
+            response.success = result.get("success", False)
+            if result.get("error"):
+                response.error = result["error"]
+            return response
+        except Exception as e:
+            logger.error(f"BrowserClick error: {e}")
+            response = tool_service_pb2.BrowserClickResponse()
+            response.success = False
+            response.error = str(e)
+            return response
+
+    async def BrowserFill(
+        self,
+        request: tool_service_pb2.BrowserFillRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserFillResponse:
+        try:
+            from clients.crawl_service_client import get_crawl_service_client
+            client = await get_crawl_service_client()
+            result = await client.browser_execute_action(
+                request.session_id, "fill",
+                selector=request.selector or "",
+                value=request.value or "",
+            )
+            response = tool_service_pb2.BrowserFillResponse()
+            response.success = result.get("success", False)
+            if result.get("error"):
+                response.error = result["error"]
+            return response
+        except Exception as e:
+            logger.error(f"BrowserFill error: {e}")
+            response = tool_service_pb2.BrowserFillResponse()
+            response.success = False
+            response.error = str(e)
+            return response
+
+    async def BrowserWait(
+        self,
+        request: tool_service_pb2.BrowserWaitRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserWaitResponse:
+        try:
+            from clients.crawl_service_client import get_crawl_service_client
+            client = await get_crawl_service_client()
+            result = await client.browser_execute_action(
+                request.session_id, "wait",
+                wait_selector=request.selector if request.HasField("selector") and request.selector else None,
+                wait_timeout_seconds=request.timeout_seconds if request.HasField("timeout_seconds") else None,
+            )
+            response = tool_service_pb2.BrowserWaitResponse()
+            response.success = result.get("success", False)
+            response.found = result.get("success", False)
+            if result.get("error"):
+                response.error = result["error"]
+            return response
+        except Exception as e:
+            logger.error(f"BrowserWait error: {e}")
+            response = tool_service_pb2.BrowserWaitResponse()
+            response.success = False
+            response.found = False
+            response.error = str(e)
+            return response
+
+    async def BrowserScroll(
+        self,
+        request: tool_service_pb2.BrowserScrollRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserScrollResponse:
+        try:
+            from clients.crawl_service_client import get_crawl_service_client
+            client = await get_crawl_service_client()
+            result = await client.browser_execute_action(
+                request.session_id,
+                "scroll",
+                direction=request.direction if request.direction else "down",
+                amount_pixels=request.amount_pixels if request.amount_pixels > 0 else 800,
+            )
+            response = tool_service_pb2.BrowserScrollResponse()
+            response.success = result.get("success", False)
+            if result.get("error"):
+                response.error = result["error"]
+            return response
+        except Exception as e:
+            logger.error(f"BrowserScroll error: {e}")
+            response = tool_service_pb2.BrowserScrollResponse()
+            response.success = False
+            response.error = str(e)
+            return response
+
+    async def BrowserExtract(
+        self,
+        request: tool_service_pb2.BrowserExtractRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserExtractResponse:
+        try:
+            from clients.crawl_service_client import get_crawl_service_client
+            client = await get_crawl_service_client()
+            result = await client.browser_execute_action(
+                request.session_id, "extract", selector=request.selector or ""
+            )
+            response = tool_service_pb2.BrowserExtractResponse()
+            response.success = result.get("success", False)
+            if result.get("extracted_content") is not None:
+                response.extracted_text = result["extracted_content"]
+            if result.get("error"):
+                response.error = result["error"]
+            return response
+        except Exception as e:
+            logger.error(f"BrowserExtract error: {e}")
+            response = tool_service_pb2.BrowserExtractResponse()
+            response.success = False
+            response.error = str(e)
+            return response
+
+    async def BrowserInspect(
+        self,
+        request: tool_service_pb2.BrowserInspectRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserInspectResponse:
+        try:
+            from clients.crawl_service_client import get_crawl_service_client
+            client = await get_crawl_service_client()
+            result = await client.browser_inspect_page(request.session_id)
+            response = tool_service_pb2.BrowserInspectResponse()
+            response.success = result.get("success", False)
+            if result.get("page_structure"):
+                response.page_structure = result["page_structure"]
+            if result.get("error"):
+                response.error = result["error"]
+            return response
+        except Exception as e:
+            logger.error(f"BrowserInspect error: {e}")
+            response = tool_service_pb2.BrowserInspectResponse()
+            response.success = False
+            response.error = str(e)
+            return response
+
+    async def BrowserScreenshot(
+        self,
+        request: tool_service_pb2.BrowserScreenshotRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserScreenshotResponse:
+        try:
+            import base64
+            from clients.crawl_service_client import get_crawl_service_client
+            from services.langgraph_tools.file_creation_tools import create_user_file
+            client = await get_crawl_service_client()
+            result = await client.browser_execute_action(
+                request.session_id, "screenshot"
+            )
+            response = tool_service_pb2.BrowserScreenshotResponse()
+            if not result.get("success"):
+                response.success = False
+                response.error = result.get("error", "Screenshot failed")
+                return response
+            png_bytes = result.get("screenshot_png") or b""
+            if not png_bytes:
+                response.success = False
+                response.error = "Screenshot produced no image"
+                return response
+            b64 = base64.b64encode(png_bytes).decode("utf-8")
+            response.images_markdown = f"![Screenshot](data:image/png;base64,{b64})"
+            response.success = True
+            if request.folder_path:
+                filename = request.title if request.HasField("title") and request.title else f"screenshot_{int(__import__('time').time())}.png"
+                create_result = await create_user_file(
+                    filename=filename,
+                    content="",
+                    folder_path=request.folder_path,
+                    title=request.title if request.HasField("title") and request.title else filename,
+                    tags=list(request.tags) if request.tags else [],
+                    user_id=request.user_id or "system",
+                    content_bytes=png_bytes,
+                )
+                if create_result.get("success"):
+                    response.document_id = create_result.get("document_id", "")
+                    response.filename = create_result.get("filename", filename)
+                    response.file_size_bytes = len(png_bytes)
+            return response
+        except Exception as e:
+            logger.error(f"BrowserScreenshot error: {e}")
+            response = tool_service_pb2.BrowserScreenshotResponse()
+            response.success = False
+            response.error = str(e)
+            return response
+
+    async def BrowserDownloadFile(
+        self,
+        request: tool_service_pb2.BrowserDownloadFileRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserDownloadFileResponse:
+        try:
+            from clients.crawl_service_client import get_crawl_service_client
+            from services.langgraph_tools.file_creation_tools import create_user_file
+            client = await get_crawl_service_client()
+            download_result = await client.browser_download_file(
+                session_id=request.session_id,
+                trigger_selector=request.selector or "",
+                timeout_seconds=60,
+            )
+            response = tool_service_pb2.BrowserDownloadFileResponse()
+            if not download_result.get("success"):
+                response.success = False
+                response.error = download_result.get("error", "Download failed")
+                return response
+            file_content = download_result.get("file_content") or b""
+            filename = download_result.get("filename") or "download"
+            if not file_content:
+                response.success = False
+                response.error = "Download produced no content"
+                return response
+            create_result = await create_user_file(
+                filename=filename,
+                content="",
+                folder_path=request.folder_path or "Downloads",
+                title=request.title if request.HasField("title") and request.title else filename,
+                tags=list(request.tags) if request.tags else [],
+                user_id=request.user_id or "system",
+                content_bytes=file_content,
+            )
+            response.success = create_result.get("success", False)
+            if create_result.get("document_id"):
+                response.document_id = create_result["document_id"]
+            if create_result.get("filename"):
+                response.filename = create_result["filename"]
+            response.file_size_bytes = len(file_content)
+            if create_result.get("error"):
+                response.error = create_result["error"]
+            return response
+        except Exception as e:
+            logger.error(f"BrowserDownloadFile error: {e}")
+            response = tool_service_pb2.BrowserDownloadFileResponse()
+            response.success = False
+            response.error = str(e)
+            return response
+
+    async def BrowserCloseSession(
+        self,
+        request: tool_service_pb2.BrowserCloseSessionRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.BrowserCloseSessionResponse:
+        try:
+            from clients.crawl_service_client import get_crawl_service_client
+            from services.browser_session_state_service import get_browser_session_state_service
+            client = await get_crawl_service_client()
+            session_saved = False
+            if request.save_state and request.site_domain:
+                state_json = await client.browser_save_session_state(request.session_id)
+                if state_json:
+                    state_svc = get_browser_session_state_service()
+                    session_saved = await state_svc.save_session_state(
+                        request.user_id or "system",
+                        request.site_domain,
+                        state_json,
+                    )
+            await client.browser_destroy_session(request.session_id)
+            response = tool_service_pb2.BrowserCloseSessionResponse()
+            response.success = True
+            response.session_saved = session_saved
+            return response
+        except Exception as e:
+            logger.error(f"BrowserCloseSession error: {e}")
+            response = tool_service_pb2.BrowserCloseSessionResponse()
+            response.success = False
+            response.session_saved = False
+            response.error = str(e)
+            return response
+
     async def _store_crawled_website(
         self,
         crawl_result: Dict[str, Any],
@@ -2817,6 +4161,53 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             logger.error(f"SearchConversationCache error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Cache search failed: {str(e)}")
     
+    async def SearchHelpDocs(
+        self,
+        request: tool_service_pb2.SearchHelpDocsRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.SearchHelpDocsResponse:
+        """Search app help documentation in the help_docs vector collection."""
+        try:
+            query = (request.query or "").strip()
+            limit = request.limit if request.limit > 0 else 5
+            logger.info("SearchHelpDocs: query=%s, limit=%d", query[:80] if query else "", limit)
+            if not query:
+                return tool_service_pb2.SearchHelpDocsResponse(results=[], total_count=0)
+            embedding_manager = await self._get_embedding_manager()
+            if not embedding_manager:
+                return tool_service_pb2.SearchHelpDocsResponse(results=[], total_count=0)
+            embeddings = await embedding_manager.generate_embeddings([query])
+            if not embeddings or len(embeddings) == 0:
+                return tool_service_pb2.SearchHelpDocsResponse(results=[], total_count=0)
+            vector_store = VectorStoreService()
+            await vector_store.initialize()
+            results = await vector_store.search_similar(
+                query_embedding=embeddings[0],
+                collection_name="help_docs",
+                limit=limit,
+                score_threshold=0.6,
+            )
+            out = []
+            for r in results:
+                content = (r.get("content") or "").strip()
+                if not content:
+                    continue
+                topic_id = r.get("document_id") or ""
+                title = (r.get("metadata") or {}).get("title") or topic_id.replace("-", " ").title()
+                score = float(r.get("score") or 0.0)
+                out.append(
+                    tool_service_pb2.HelpSearchResult(
+                        topic_id=topic_id,
+                        title=title,
+                        content=content[:8000],
+                        score=score,
+                    )
+                )
+            return tool_service_pb2.SearchHelpDocsResponse(results=out, total_count=len(out))
+        except Exception as e:
+            logger.error("SearchHelpDocs error: %s", e)
+            await context.abort(grpc.StatusCode.INTERNAL, "Help docs search failed: %s" % str(e))
+    
     # ===== File Creation Operations =====
     
     async def CreateUserFile(
@@ -2840,7 +4231,8 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 title=request.title if request.title else None,
                 tags=list(request.tags) if request.tags else None,
                 category=request.category if request.category else None,
-                user_id=request.user_id
+                user_id=request.user_id,
+                content_bytes=bytes(request.binary_content) if request.binary_content else None,
             )
             
             # Build response
@@ -2946,6 +4338,104 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         except Exception as e:
             logger.error(f"GetFolderTree error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Folder tree failed: {str(e)}")
+
+    async def ListFolderDocuments(
+        self,
+        request: tool_service_pb2.ListFolderDocumentsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListFolderDocumentsResponse:
+        """List documents directly in a folder (same access rules as folder contents API)."""
+        try:
+            from services.service_container import get_service_container
+
+            limit = int(request.limit) if request.limit and request.limit > 0 else 500
+            offset = int(request.offset) if request.offset and request.offset >= 0 else 0
+            container = await get_service_container()
+            folder_service = container.folder_service
+            contents = await folder_service.get_folder_contents(
+                request.folder_id, request.user_id, limit=limit, offset=offset
+            )
+            if not contents:
+                return tool_service_pb2.ListFolderDocumentsResponse(
+                    documents=[],
+                    total_count=0,
+                    error="Folder not found or access denied",
+                )
+            entries = []
+            for d in contents.documents:
+                raw_ct = getattr(d, "collection_type", "") or ""
+                ct_str = str(raw_ct.value) if hasattr(raw_ct, "value") else str(raw_ct)
+                entries.append(
+                    tool_service_pb2.FolderDocumentEntry(
+                        document_id=str(getattr(d, "document_id", "") or ""),
+                        filename=str(getattr(d, "filename", "") or ""),
+                        title=str(getattr(d, "title", "") or ""),
+                        collection_type=ct_str,
+                    )
+                )
+            return tool_service_pb2.ListFolderDocumentsResponse(
+                documents=entries,
+                total_count=int(contents.total_documents or len(entries)),
+                error="",
+            )
+        except Exception as e:
+            logger.error("ListFolderDocuments error: %s", e)
+            return tool_service_pb2.ListFolderDocumentsResponse(
+                documents=[],
+                total_count=0,
+                error=str(e)[:500],
+            )
+
+    async def PickRandomDocumentFromFolder(
+        self,
+        request: tool_service_pb2.PickRandomDocumentFromFolderRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.PickRandomDocumentFromFolderResponse:
+        """Return a randomly chosen document from the given folder. Optional file_extension filter (e.g. png, jpg)."""
+        import random
+        try:
+            from services.service_container import get_service_container
+
+            container = await get_service_container()
+            folder_service = container.folder_service
+            contents = await folder_service.get_folder_contents(
+                request.folder_id, request.user_id, limit=500, offset=0
+            )
+            if not contents or not contents.documents:
+                return tool_service_pb2.PickRandomDocumentFromFolderResponse(
+                    found=False,
+                    document_id="",
+                    filename="",
+                    message="No documents in folder or folder not found.",
+                )
+            docs = list(contents.documents)
+            ext = (request.file_extension or "").strip().lower()
+            if ext and not ext.startswith("."):
+                ext = f".{ext}"
+            if ext:
+                docs = [d for d in docs if (getattr(d, "filename", "") or "").lower().endswith(ext)]
+            if not docs:
+                return tool_service_pb2.PickRandomDocumentFromFolderResponse(
+                    found=False,
+                    document_id="",
+                    filename="",
+                    message=f"No documents in folder with extension {request.file_extension or ext}.",
+                )
+            doc = random.choice(docs)
+            doc_type = getattr(doc, "doc_type", None)
+            doc_type_str = str(doc_type.value) if hasattr(doc_type, "value") else str(doc_type or "")
+            return tool_service_pb2.PickRandomDocumentFromFolderResponse(
+                found=True,
+                document_id=getattr(doc, "document_id", "") or "",
+                filename=getattr(doc, "filename", "") or "",
+                title=getattr(doc, "title", "") or "",
+                folder_id=getattr(doc, "folder_id", "") or "",
+                doc_type=doc_type_str or "",
+                message=f"Random document: {getattr(doc, 'filename', '')}",
+            )
+        except Exception as e:
+            logger.error(f"PickRandomDocumentFromFolder error: {e}")
+            await context.abort(grpc.StatusCode.INTERNAL, f"Pick random document failed: {str(e)}")
 
     async def UpdateDocumentMetadata(
         self,
@@ -3064,7 +4554,8 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                         "right_context": op_proto.right_context if op_proto.HasField("right_context") else None,
                         "occurrence_index": op_proto.occurrence_index if op_proto.HasField("occurrence_index") else None,
                         "note": op_proto.note if op_proto.HasField("note") else None,
-                        "confidence": op_proto.confidence if op_proto.HasField("confidence") else None
+                        "confidence": op_proto.confidence if op_proto.HasField("confidence") else None,
+                        "search_text": op_proto.search_text if op_proto.HasField("search_text") else None,
                     }
                     operations.append(op_dict)
             
@@ -3226,9 +4717,123 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         except Exception as e:
             logger.error(f"ApplyDocumentEditProposal error: {e}")
             await context.abort(grpc.StatusCode.INTERNAL, f"Document edit proposal application failed: {str(e)}")
-    
+
+    async def ListDocumentProposals(
+        self,
+        request: tool_service_pb2.ListDocumentProposalsRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.ListDocumentProposalsResponse:
+        """List pending document edit proposals for a document."""
+        try:
+            from services.langgraph_tools.document_editing_tools import list_pending_proposals_for_document
+            proposals_raw = await list_pending_proposals_for_document(
+                document_id=request.document_id,
+                user_id=request.user_id
+            )
+            summaries = []
+            for p in proposals_raw:
+                ops = p.get("operations") or []
+                count = len(ops) if isinstance(ops, list) else 0
+                if p.get("edit_type") == "content" and p.get("content_edit"):
+                    count = 1
+                summaries.append(tool_service_pb2.ProposalSummary(
+                    proposal_id=p.get("proposal_id", ""),
+                    document_id=p.get("document_id", ""),
+                    edit_type=p.get("edit_type", ""),
+                    agent_name=p.get("agent_name", ""),
+                    summary=p.get("summary", ""),
+                    operations_count=count,
+                    created_at=p.get("created_at") or "",
+                    expires_at=p.get("expires_at") or ""
+                ))
+            return tool_service_pb2.ListDocumentProposalsResponse(
+                success=True,
+                proposals=summaries
+            )
+        except Exception as e:
+            logger.error(f"ListDocumentProposals error: {e}")
+            return tool_service_pb2.ListDocumentProposalsResponse(
+                success=False,
+                error=str(e)
+            )
+
+    async def GetDocumentEditProposal(
+        self,
+        request: tool_service_pb2.GetDocumentEditProposalRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.GetDocumentEditProposalResponse:
+        """Get full details of a document edit proposal."""
+        try:
+            import json
+            from services.langgraph_tools.document_editing_tools import get_document_edit_proposal
+            proposal = await get_document_edit_proposal(
+                proposal_id=request.proposal_id,
+                user_id=request.user_id
+            )
+            if not proposal:
+                return tool_service_pb2.GetDocumentEditProposalResponse(
+                    success=False,
+                    error="Proposal not found"
+                )
+            operations_json = json.dumps(proposal.get("operations") or [])
+            content_edit = proposal.get("content_edit")
+            content_edit_json = json.dumps(content_edit) if content_edit is not None else ""
+            return tool_service_pb2.GetDocumentEditProposalResponse(
+                success=True,
+                proposal_id=proposal.get("proposal_id", ""),
+                document_id=proposal.get("document_id", ""),
+                edit_type=proposal.get("edit_type", ""),
+                operations_json=operations_json,
+                content_edit_json=content_edit_json,
+                agent_name=proposal.get("agent_name", ""),
+                summary=proposal.get("summary", ""),
+                created_at=proposal.get("created_at") or ""
+            )
+        except Exception as e:
+            logger.error(f"GetDocumentEditProposal error: {e}")
+            return tool_service_pb2.GetDocumentEditProposalResponse(
+                success=False,
+                error=str(e)
+            )
+
+    async def RejectDocumentEditProposal(
+        self,
+        request: tool_service_pb2.RejectDocumentEditProposalRequest,
+        context: grpc.aio.ServicerContext
+    ) -> tool_service_pb2.RejectDocumentEditProposalResponse:
+        """Reject (delete) a document edit proposal."""
+        try:
+            from services.database_manager.database_helpers import execute
+            from services.langgraph_tools.document_editing_tools import get_document_edit_proposal
+            proposal = await get_document_edit_proposal(
+                proposal_id=request.proposal_id,
+                user_id=request.user_id
+            )
+            if not proposal:
+                return tool_service_pb2.RejectDocumentEditProposalResponse(
+                    success=False,
+                    error="Proposal not found"
+                )
+            if proposal["user_id"] != request.user_id:
+                return tool_service_pb2.RejectDocumentEditProposalResponse(
+                    success=False,
+                    error="Access denied"
+                )
+            await execute(
+                "DELETE FROM document_edit_proposals WHERE proposal_id = $1::uuid",
+                request.proposal_id,
+                rls_context={"user_id": request.user_id, "user_role": "user"}
+            )
+            return tool_service_pb2.RejectDocumentEditProposalResponse(success=True)
+        except Exception as e:
+            logger.error(f"RejectDocumentEditProposal error: {e}")
+            return tool_service_pb2.RejectDocumentEditProposalResponse(
+                success=False,
+                error=str(e)
+            )
+
     # ===== Conversation Operations =====
-    
+
     async def UpdateConversationTitle(
         self,
         request: tool_service_pb2.UpdateConversationTitleRequest,
@@ -3757,7 +5362,7 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 user_id=request.user_id
             )
             
-            # Convert to proto response
+            # Convert to proto response (include column descriptions and table metadata for agents)
             table_schemas = []
             for table in schema_result.get('tables', []):
                 columns = []
@@ -3765,9 +5370,11 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                     columns.append(tool_service_pb2.ColumnInfo(
                         name=col.get('name', ''),
                         type=col.get('type', 'text'),
-                        is_nullable=col.get('is_nullable', True)
+                        is_nullable=col.get('is_nullable', True),
+                        description=col.get('description', '') or ''
                     ))
-                
+                meta = table.get('metadata_json')
+                metadata_json_str = json.dumps(meta) if isinstance(meta, dict) and meta else ''
                 table_schemas.append(tool_service_pb2.TableSchema(
                     table_id=table.get('table_id', ''),
                     name=table.get('name', ''),
@@ -3775,7 +5382,8 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                     database_id=table.get('database_id', ''),
                     database_name=table.get('database_name', ''),
                     columns=columns,
-                    row_count=table.get('row_count', 0)
+                    row_count=table.get('row_count', 0),
+                    metadata_json=metadata_json_str or ''
                 ))
             
             return tool_service_pb2.GetWorkspaceSchemaResponse(
@@ -3805,33 +5413,62 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             from tools_service.services.data_workspace_service import get_data_workspace_service
             
             service = await get_data_workspace_service()
+            params = None
+            if getattr(request, 'params_json', None) and request.params_json.strip():
+                try:
+                    params = json.loads(request.params_json)
+                    if not isinstance(params, list):
+                        params = [params]
+                except json.JSONDecodeError:
+                    params = None
+            read_only = bool(getattr(request, "read_only", False))
             result = await service.query_workspace(
                 workspace_id=request.workspace_id,
                 query=request.query,
                 query_type=request.query_type,
                 user_id=request.user_id,
-                limit=request.limit if request.limit > 0 else 100
+                limit=request.limit if request.limit > 0 else 100,
+                params=params,
+                read_only=read_only,
             )
             
-            # Convert results to JSON string if not already
-            results_json = result.get('results', [])
-            if isinstance(results_json, str):
-                results_json_str = results_json
+            arrow_bytes = result.get('arrow_results') or b''
+            has_arrow = bool(result.get('has_arrow_data')) and bool(arrow_bytes)
+
+            if has_arrow:
+                results_json_str = "[]"
             else:
-                results_json_str = json.dumps(results_json)
-            
+                results_json = result.get('results', [])
+                if isinstance(results_json, str):
+                    results_json_str = results_json
+                else:
+                    results_json_str = json.dumps(results_json)
+
+            returning = result.get('returning_rows') or result.get('returning_rows_json')
+            if isinstance(returning, str) and returning:
+                try:
+                    returning = json.loads(returning)
+                except json.JSONDecodeError:
+                    returning = []
+            elif not isinstance(returning, list):
+                returning = []
+
             response = tool_service_pb2.QueryDataWorkspaceResponse(
                 success=result.get('success', False),
                 column_names=result.get('column_names', []),
                 results_json=results_json_str,
                 result_count=result.get('result_count', 0),
                 execution_time_ms=result.get('execution_time_ms', 0),
-                generated_sql=result.get('generated_sql', '')
+                generated_sql=result.get('generated_sql', ''),
+                rows_affected=result.get('rows_affected', 0),
+                returning_rows_json=json.dumps(returning),
+                arrow_results=arrow_bytes,
+                has_arrow_data=has_arrow,
             )
-            
+
             if result.get('error_message'):
                 response.error_message = result['error_message']
-            
+
             return response
             
         except Exception as e:
@@ -3843,7 +5480,11 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
                 result_count=0,
                 execution_time_ms=0,
                 generated_sql="",
-                error_message=str(e)
+                error_message=str(e),
+                rows_affected=0,
+                returning_rows_json="[]",
+                arrow_results=b"",
+                has_arrow_data=False,
             )
 
     # ===== Navigation Operations (locations and routes) =====
@@ -4145,11 +5786,13 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         try:
             from services.langgraph_tools.email_tools import read_recent_emails
             user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
             result = await read_recent_emails(
                 user_id=user_id,
                 folder=request.folder or "inbox",
                 count=request.top or 10,
                 unread_only=request.unread_only,
+                connection_id=connection_id if connection_id else None,
             )
             return tool_service_pb2.GetEmailsResponse(success=True, result=result)
         except Exception as e:
@@ -4167,11 +5810,13 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         try:
             from services.langgraph_tools.email_tools import search_emails
             user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
             result = await search_emails(
                 user_id=user_id,
                 query=request.query,
                 top=request.top or 20,
                 from_address=request.from_address or None,
+                connection_id=connection_id if connection_id else None,
             )
             return tool_service_pb2.SearchEmailsResponse(success=True, result=result)
         except Exception as e:
@@ -4189,9 +5834,11 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         try:
             from services.langgraph_tools.email_tools import get_email_thread
             user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
             result = await get_email_thread(
                 user_id=user_id,
                 conversation_id=request.conversation_id,
+                connection_id=connection_id if connection_id else None,
             )
             return tool_service_pb2.GetEmailThreadResponse(success=True, result=result)
         except Exception as e:
@@ -4205,18 +5852,27 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         request: tool_service_pb2.SendEmailRequest,
         context: grpc.aio.ServicerContext,
     ) -> tool_service_pb2.SendEmailResponse:
-        """Send email (HITL should be applied by agent before calling)."""
+        """Send email. from_source: system = Bastion SMTP, user = user's email connection (default)."""
         try:
             from services.langgraph_tools.email_tools import send_email
             user_id = request.user_id or "system"
+            from_source = (request.from_source or "user").strip().lower() or "user"
+            connection_id = getattr(request, "connection_id", 0) or 0
             result = await send_email(
                 user_id=user_id,
                 to=list(request.to),
                 subject=request.subject,
                 body=request.body,
                 cc=list(request.cc) if request.cc else None,
+                from_source=from_source,
+                connection_id=connection_id if connection_id else None,
+                body_is_html=getattr(request, "body_is_html", False) or False,
             )
-            return tool_service_pb2.SendEmailResponse(success=True, result=result)
+            if result.startswith("Email sent successfully"):
+                return tool_service_pb2.SendEmailResponse(success=True, result=result)
+            return tool_service_pb2.SendEmailResponse(
+                success=False, result=result, error=result
+            )
         except Exception as e:
             logger.error("SendEmail failed: %s", e)
             return tool_service_pb2.SendEmailResponse(
@@ -4232,11 +5888,13 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         try:
             from services.langgraph_tools.email_tools import reply_to_email
             user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
             result = await reply_to_email(
                 user_id=user_id,
                 message_id=request.message_id,
                 body=request.body,
                 reply_all=request.reply_all,
+                connection_id=connection_id if connection_id else None,
             )
             return tool_service_pb2.ReplyToEmailResponse(success=True, result=result)
         except Exception as e:
@@ -4254,8 +5912,12 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         try:
             from clients.connections_service_client import get_connections_service_client
             user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
             client = await get_connections_service_client()
-            data = await client.get_folders(user_id=user_id)
+            data = await client.get_folders(
+                user_id=user_id,
+                connection_id=connection_id if connection_id else None,
+            )
             if data.get("error") and not data.get("folders"):
                 return tool_service_pb2.GetEmailFoldersResponse(
                     success=False, result="", error=data.get("error", "No connection")
@@ -4282,7 +5944,11 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
         try:
             from services.langgraph_tools.email_tools import get_email_statistics
             user_id = request.user_id or "system"
-            result = await get_email_statistics(user_id=user_id)
+            connection_id = getattr(request, "connection_id", 0) or 0
+            result = await get_email_statistics(
+                user_id=user_id,
+                connection_id=connection_id if connection_id else None,
+            )
             return tool_service_pb2.GetEmailStatisticsResponse(success=True, result=result)
         except Exception as e:
             logger.error("GetEmailStatistics failed: %s", e)
@@ -4308,6 +5974,5003 @@ class ToolServiceImplementation(tool_service_pb2_grpc.ToolServiceServicer):
             logger.error("MarkEmailRead failed: %s", e)
             return tool_service_pb2.MarkEmailReadResponse(
                 success=False, result="", error=str(e)
+            )
+
+    async def GetEmailById(
+        self,
+        request: tool_service_pb2.GetEmailByIdRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetEmailByIdResponse:
+        """Get a single email by message ID (full content)."""
+        try:
+            from clients.connections_service_client import get_connections_service_client
+            user_id = request.user_id or "system"
+            message_id = request.message_id or ""
+            connection_id = getattr(request, "connection_id", 0) or 0
+            if not message_id:
+                return tool_service_pb2.GetEmailByIdResponse(
+                    success=False, result="", error="message_id is required"
+                )
+            client = await get_connections_service_client()
+            data = await client.get_email_by_id(
+                user_id=user_id,
+                message_id=message_id,
+                connection_id=connection_id if connection_id else None,
+            )
+            if data.get("error") and not data.get("message"):
+                return tool_service_pb2.GetEmailByIdResponse(
+                    success=False, result="", error=data.get("error", "Not found")
+                )
+            msg = data.get("message", {})
+            parts = [
+                f"Subject: {msg.get('subject', '')}",
+                f"From: {msg.get('from_name', '')} <{msg.get('from_address', '')}>",
+                f"To: {', '.join(msg.get('to_addresses') or [])}",
+                f"Date: {msg.get('received_datetime', '')}",
+                f"Read: {msg.get('is_read', False)}",
+                f"Has attachments: {msg.get('has_attachments', False)}",
+            ]
+            body = msg.get("body_content") or msg.get("body_preview") or ""
+            if body:
+                parts.append(f"\nBody:\n{body}")
+            result = "\n".join(parts)
+            return tool_service_pb2.GetEmailByIdResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("GetEmailById failed: %s", e)
+            return tool_service_pb2.GetEmailByIdResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def MoveEmail(
+        self,
+        request: tool_service_pb2.MoveEmailRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.MoveEmailResponse:
+        """Move an email to a different folder."""
+        try:
+            from clients.connections_service_client import get_connections_service_client
+            user_id = request.user_id or "system"
+            message_id = request.message_id or ""
+            destination_folder_id = request.destination_folder_id or ""
+            connection_id = getattr(request, "connection_id", 0) or 0
+            if not message_id or not destination_folder_id:
+                return tool_service_pb2.MoveEmailResponse(
+                    success=False, result="", error="message_id and destination_folder_id are required"
+                )
+            client = await get_connections_service_client()
+            data = await client.move_email(
+                user_id=user_id,
+                message_id=message_id,
+                destination_folder_id=destination_folder_id,
+                connection_id=connection_id if connection_id else None,
+            )
+            if data.get("success"):
+                result = f"Moved email to folder {destination_folder_id}"
+                return tool_service_pb2.MoveEmailResponse(success=True, result=result)
+            return tool_service_pb2.MoveEmailResponse(
+                success=False, result="", error=data.get("error", "Move failed")
+            )
+        except Exception as e:
+            logger.error("MoveEmail failed: %s", e)
+            return tool_service_pb2.MoveEmailResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def UpdateEmail(
+        self,
+        request: tool_service_pb2.UpdateEmailRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.UpdateEmailResponse:
+        """Update an email (mark read/unread, set importance)."""
+        try:
+            from clients.connections_service_client import get_connections_service_client
+            user_id = request.user_id or "system"
+            message_id = request.message_id or ""
+            connection_id = getattr(request, "connection_id", 0) or 0
+            if not message_id:
+                return tool_service_pb2.UpdateEmailResponse(
+                    success=False, result="", error="message_id is required"
+                )
+            is_read = request.is_read if request.HasField("is_read") else None
+            importance = request.importance if request.importance else None
+            if is_read is None and not importance:
+                return tool_service_pb2.UpdateEmailResponse(
+                    success=False, result="", error="At least one of is_read or importance is required"
+                )
+            client = await get_connections_service_client()
+            data = await client.update_email(
+                user_id=user_id,
+                message_id=message_id,
+                is_read=is_read,
+                importance=importance or None,
+                connection_id=connection_id if connection_id else None,
+            )
+            if data.get("success"):
+                result = "Email updated."
+                return tool_service_pb2.UpdateEmailResponse(success=True, result=result)
+            return tool_service_pb2.UpdateEmailResponse(
+                success=False, result="", error=data.get("error", "Update failed")
+            )
+        except Exception as e:
+            logger.error("UpdateEmail failed: %s", e)
+            return tool_service_pb2.UpdateEmailResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def CreateDraft(
+        self,
+        request: tool_service_pb2.CreateDraftRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreateDraftResponse:
+        """Create a draft email (do not send)."""
+        try:
+            from clients.connections_service_client import get_connections_service_client
+            user_id = request.user_id or "system"
+            to_list = list(request.to) if request.to else []
+            subject = request.subject or ""
+            body = request.body or ""
+            cc_list = list(request.cc) if request.cc else []
+            connection_id = getattr(request, "connection_id", 0) or 0
+            if not to_list:
+                return tool_service_pb2.CreateDraftResponse(
+                    success=False, result="", error="At least one recipient (to) is required"
+                )
+            client = await get_connections_service_client()
+            data = await client.create_draft(
+                user_id=user_id,
+                to_recipients=to_list,
+                subject=subject,
+                body=body,
+                cc_recipients=cc_list if cc_list else None,
+                connection_id=connection_id if connection_id else None,
+            )
+            if data.get("success"):
+                msg_id = data.get("message_id", "")
+                result = f"Draft created (ID: {msg_id})" if msg_id else "Draft created."
+                return tool_service_pb2.CreateDraftResponse(success=True, result=result)
+            return tool_service_pb2.CreateDraftResponse(
+                success=False, result="", error=data.get("error", "Create draft failed")
+            )
+        except Exception as e:
+            logger.error("CreateDraft failed: %s", e)
+            return tool_service_pb2.CreateDraftResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def ListCalendars(
+        self,
+        request: tool_service_pb2.ListCalendarsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListCalendarsResponse:
+        """List user's calendars."""
+        try:
+            from services.langgraph_tools.calendar_tools import list_calendars
+            user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
+            result = await list_calendars(
+                user_id=user_id,
+                connection_id=connection_id if connection_id else None,
+            )
+            return tool_service_pb2.ListCalendarsResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("ListCalendars failed: %s", e)
+            return tool_service_pb2.ListCalendarsResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def GetCalendarEvents(
+        self,
+        request: tool_service_pb2.GetCalendarEventsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetCalendarEventsResponse:
+        """Get calendar events in date range."""
+        try:
+            from services.langgraph_tools.calendar_tools import get_calendar_events
+            user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
+            result = await get_calendar_events(
+                user_id=user_id,
+                start_datetime=request.start_datetime or "",
+                end_datetime=request.end_datetime or "",
+                calendar_id=request.calendar_id or "",
+                top=request.top or 50,
+                connection_id=connection_id if connection_id else None,
+            )
+            return tool_service_pb2.GetCalendarEventsResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("GetCalendarEvents failed: %s", e)
+            return tool_service_pb2.GetCalendarEventsResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def GetCalendarEventById(
+        self,
+        request: tool_service_pb2.GetCalendarEventByIdRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetCalendarEventByIdResponse:
+        """Get single calendar event by ID."""
+        try:
+            from services.langgraph_tools.calendar_tools import get_event_by_id
+            user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
+            result = await get_event_by_id(
+                user_id=user_id,
+                event_id=request.event_id or "",
+                connection_id=connection_id if connection_id else None,
+            )
+            return tool_service_pb2.GetCalendarEventByIdResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("GetCalendarEventById failed: %s", e)
+            return tool_service_pb2.GetCalendarEventByIdResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def CreateCalendarEvent(
+        self,
+        request: tool_service_pb2.CreateCalendarEventRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreateCalendarEventResponse:
+        """Create a calendar event."""
+        try:
+            from services.langgraph_tools.calendar_tools import create_event
+            user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
+            result = await create_event(
+                user_id=user_id,
+                subject=request.subject or "",
+                start_datetime=request.start_datetime or "",
+                end_datetime=request.end_datetime or "",
+                connection_id=connection_id if connection_id else None,
+                calendar_id=request.calendar_id or "",
+                location=request.location or "",
+                body=request.body or "",
+                body_is_html=request.body_is_html,
+                attendee_emails=list(request.attendee_emails) if request.attendee_emails else None,
+                is_all_day=request.is_all_day,
+            )
+            if "successfully" in result and "Error" not in result:
+                return tool_service_pb2.CreateCalendarEventResponse(success=True, result=result)
+            return tool_service_pb2.CreateCalendarEventResponse(
+                success=False, result=result, error=result
+            )
+        except Exception as e:
+            logger.error("CreateCalendarEvent failed: %s", e)
+            return tool_service_pb2.CreateCalendarEventResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def UpdateCalendarEvent(
+        self,
+        request: tool_service_pb2.UpdateCalendarEventRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.UpdateCalendarEventResponse:
+        """Update a calendar event."""
+        try:
+            from services.langgraph_tools.calendar_tools import update_event
+            user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
+            result = await update_event(
+                user_id=user_id,
+                event_id=request.event_id or "",
+                connection_id=connection_id if connection_id else None,
+                subject=request.subject if request.subject else None,
+                start_datetime=request.start_datetime if request.start_datetime else None,
+                end_datetime=request.end_datetime if request.end_datetime else None,
+                location=request.location if request.location else None,
+                body=request.body if request.body else None,
+                body_is_html=request.body_is_html,
+                attendee_emails=list(request.attendee_emails) if request.attendee_emails else None,
+                is_all_day=request.is_all_day,
+            )
+            if result == "Event updated successfully.":
+                return tool_service_pb2.UpdateCalendarEventResponse(success=True, result=result)
+            return tool_service_pb2.UpdateCalendarEventResponse(
+                success=False, result=result, error=result
+            )
+        except Exception as e:
+            logger.error("UpdateCalendarEvent failed: %s", e)
+            return tool_service_pb2.UpdateCalendarEventResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def DeleteCalendarEvent(
+        self,
+        request: tool_service_pb2.DeleteCalendarEventRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.DeleteCalendarEventResponse:
+        """Delete a calendar event."""
+        try:
+            from services.langgraph_tools.calendar_tools import delete_event
+            user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
+            result = await delete_event(
+                user_id=user_id,
+                event_id=request.event_id or "",
+                connection_id=connection_id if connection_id else None,
+            )
+            if result == "Event deleted successfully.":
+                return tool_service_pb2.DeleteCalendarEventResponse(success=True, result=result)
+            return tool_service_pb2.DeleteCalendarEventResponse(
+                success=False, result=result, error=result
+            )
+        except Exception as e:
+            logger.error("DeleteCalendarEvent failed: %s", e)
+            return tool_service_pb2.DeleteCalendarEventResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def GetContacts(
+        self,
+        request: tool_service_pb2.GetContactsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetContactsResponse:
+        """Get contacts. sources: all (O365+org), microsoft, org, caldav."""
+        try:
+            from services.langgraph_tools.contact_tools import (
+                get_contacts,
+                get_contacts_unified,
+                _get_org_contacts_for_tool,
+                _format_contacts,
+            )
+            import json
+
+            user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
+            sources = (getattr(request, "sources", None) or "all").strip().lower() or "all"
+            folder_id = request.folder_id or ""
+            top = request.top or 100
+
+            if sources == "microsoft":
+                result = await get_contacts(
+                    user_id=user_id,
+                    connection_id=connection_id if connection_id else None,
+                    folder_id=folder_id,
+                    top=top,
+                )
+            elif sources == "org":
+                org_list = await _get_org_contacts_for_tool(user_id, limit=top)
+                formatted = _format_contacts(org_list, max_items=top, include_source=True)
+                result = json.dumps({"contacts": org_list, "formatted": formatted})
+            else:
+                result = await get_contacts_unified(
+                    user_id=user_id,
+                    connection_id=connection_id if connection_id else None,
+                    folder_id=folder_id,
+                    top=top,
+                )
+            return tool_service_pb2.GetContactsResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("GetContacts failed: %s", e)
+            return tool_service_pb2.GetContactsResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def GetContactById(
+        self,
+        request: tool_service_pb2.GetContactByIdRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetContactByIdResponse:
+        """Get single O365 contact by ID."""
+        try:
+            from services.langgraph_tools.contact_tools import get_contact_by_id
+            user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
+            result = await get_contact_by_id(
+                user_id=user_id,
+                contact_id=request.contact_id or "",
+                connection_id=connection_id if connection_id else None,
+            )
+            return tool_service_pb2.GetContactByIdResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("GetContactById failed: %s", e)
+            return tool_service_pb2.GetContactByIdResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def CreateContact(
+        self,
+        request: tool_service_pb2.CreateContactRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreateContactResponse:
+        """Create an O365 contact."""
+        try:
+            import json
+            from services.langgraph_tools.contact_tools import create_contact
+            user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
+            email_addresses = None
+            if request.email_addresses_json:
+                try:
+                    email_addresses = json.loads(request.email_addresses_json)
+                except json.JSONDecodeError:
+                    pass
+            phone_numbers = None
+            if request.phone_numbers_json:
+                try:
+                    phone_numbers = json.loads(request.phone_numbers_json)
+                except json.JSONDecodeError:
+                    pass
+            result = await create_contact(
+                user_id=user_id,
+                display_name=request.display_name or "",
+                given_name=request.given_name or "",
+                surname=request.surname or "",
+                connection_id=connection_id if connection_id else None,
+                folder_id=request.folder_id or "",
+                email_addresses=email_addresses,
+                phone_numbers=phone_numbers,
+                company_name=request.company_name or "",
+                job_title=request.job_title or "",
+                birthday=request.birthday or "",
+                notes=request.notes or "",
+            )
+            if "successfully" in result and "Error" not in result:
+                return tool_service_pb2.CreateContactResponse(success=True, result=result)
+            return tool_service_pb2.CreateContactResponse(
+                success=False, result=result, error=result
+            )
+        except Exception as e:
+            logger.error("CreateContact failed: %s", e)
+            return tool_service_pb2.CreateContactResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def UpdateContact(
+        self,
+        request: tool_service_pb2.UpdateContactRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.UpdateContactResponse:
+        """Update an O365 contact."""
+        try:
+            import json
+            from services.langgraph_tools.contact_tools import update_contact
+            user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
+            email_addresses = None
+            if request.email_addresses_json:
+                try:
+                    email_addresses = json.loads(request.email_addresses_json)
+                except json.JSONDecodeError:
+                    pass
+            phone_numbers = None
+            if request.phone_numbers_json:
+                try:
+                    phone_numbers = json.loads(request.phone_numbers_json)
+                except json.JSONDecodeError:
+                    pass
+            result = await update_contact(
+                user_id=user_id,
+                contact_id=request.contact_id or "",
+                connection_id=connection_id if connection_id else None,
+                display_name=request.display_name if request.display_name else None,
+                given_name=request.given_name if request.given_name else None,
+                surname=request.surname if request.surname else None,
+                email_addresses=email_addresses,
+                phone_numbers=phone_numbers,
+                company_name=request.company_name if request.company_name else None,
+                job_title=request.job_title if request.job_title else None,
+                birthday=request.birthday if request.birthday else None,
+                notes=request.notes if request.notes else None,
+            )
+            if result == "Contact updated successfully.":
+                return tool_service_pb2.UpdateContactResponse(success=True, result=result)
+            return tool_service_pb2.UpdateContactResponse(
+                success=False, result=result, error=result
+            )
+        except Exception as e:
+            logger.error("UpdateContact failed: %s", e)
+            return tool_service_pb2.UpdateContactResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def DeleteContact(
+        self,
+        request: tool_service_pb2.DeleteContactRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.DeleteContactResponse:
+        """Delete an O365 contact."""
+        try:
+            from services.langgraph_tools.contact_tools import delete_contact
+            user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
+            result = await delete_contact(
+                user_id=user_id,
+                contact_id=request.contact_id or "",
+                connection_id=connection_id if connection_id else None,
+            )
+            if result == "Contact deleted successfully.":
+                return tool_service_pb2.DeleteContactResponse(success=True, result=result)
+            return tool_service_pb2.DeleteContactResponse(
+                success=False, result=result, error=result
+            )
+        except Exception as e:
+            logger.error("DeleteContact failed: %s", e)
+            return tool_service_pb2.DeleteContactResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def SearchContacts(
+        self,
+        request: tool_service_pb2.SearchContactsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.SearchContactsResponse:
+        """Search contacts by query (substring match on name, email, company)."""
+        try:
+            from services.langgraph_tools.contact_tools import search_contacts as search_contacts_impl
+
+            user_id = request.user_id or "system"
+            connection_id = getattr(request, "connection_id", 0) or 0
+            query = (request.query or "").strip()
+            sources = (request.sources or "all").strip().lower() or "all"
+            top = request.top or 20
+            result = await search_contacts_impl(
+                user_id=user_id,
+                query=query,
+                sources=sources,
+                top=top,
+                connection_id=connection_id if connection_id else None,
+            )
+            return tool_service_pb2.SearchContactsResponse(success=True, result=result)
+        except Exception as e:
+            logger.error("SearchContacts failed: %s", e)
+            return tool_service_pb2.SearchContactsResponse(
+                success=False, result="", error=str(e)
+            )
+
+    async def ListUserAccounts(
+        self,
+        request: tool_service_pb2.ListUserAccountsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListUserAccountsResponse:
+        """List email/calendar/contacts accounts for the user, optionally scoped to agent profile bindings."""
+        try:
+            from services.database_manager.database_helpers import fetch_all
+
+            user_id = request.user_id or "system"
+            profile_id = (request.agent_profile_id or "").strip()
+            service_type = (request.service_type or "all").strip().lower() or "all"
+
+            if profile_id:
+                try:
+                    profile_uuid = uuid.UUID(profile_id)
+                except ValueError:
+                    return tool_service_pb2.ListUserAccountsResponse(
+                        success=False, result="[]", error="Invalid agent_profile_id"
+                    )
+                if service_type == "all":
+                    rows = await fetch_all(
+                        """
+                        SELECT ec.id, ec.provider, ec.connection_type, ec.account_identifier,
+                               ec.display_name
+                        FROM agent_service_bindings asb
+                        JOIN external_connections ec ON ec.id = asb.connection_id AND ec.user_id = $2
+                        WHERE asb.agent_profile_id = $1 AND asb.is_enabled = true
+                          AND ec.is_active = true
+                        ORDER BY ec.connection_type, ec.provider
+                        """,
+                        profile_uuid,
+                        user_id,
+                    )
+                else:
+                    rows = await fetch_all(
+                        """
+                        SELECT ec.id, ec.provider, ec.connection_type, ec.account_identifier,
+                               ec.display_name
+                        FROM agent_service_bindings asb
+                        JOIN external_connections ec ON ec.id = asb.connection_id AND ec.user_id = $2
+                        WHERE asb.agent_profile_id = $1 AND asb.is_enabled = true
+                          AND ec.is_active = true AND ec.connection_type = $3
+                        ORDER BY ec.connection_type, ec.provider
+                        """,
+                        profile_uuid,
+                        user_id,
+                        service_type,
+                    )
+            else:
+                if service_type == "all":
+                    rows = await fetch_all(
+                        """
+                        SELECT id, provider, connection_type, account_identifier, display_name
+                        FROM external_connections
+                        WHERE user_id = $1 AND is_active = true
+                        ORDER BY connection_type, provider
+                        """,
+                        user_id,
+                    )
+                else:
+                    rows = await fetch_all(
+                        """
+                        SELECT id, provider, connection_type, account_identifier, display_name
+                        FROM external_connections
+                        WHERE user_id = $1 AND is_active = true AND connection_type = $2
+                        ORDER BY connection_type, provider
+                        """,
+                        user_id,
+                        service_type,
+                    )
+
+            accounts = [
+                {
+                    "connection_id": int(r["id"]),
+                    "provider": r["provider"] or "",
+                    "type": r["connection_type"] or "",
+                    "label": (r.get("display_name") or r.get("account_identifier") or "").strip()
+                    or (r.get("account_identifier") or ""),
+                    "address": r.get("account_identifier") or "",
+                }
+                for r in rows
+            ]
+            return tool_service_pb2.ListUserAccountsResponse(
+                success=True, result=json.dumps(accounts)
+            )
+        except Exception as e:
+            logger.error("ListUserAccounts failed: %s", e)
+            return tool_service_pb2.ListUserAccountsResponse(
+                success=False, result="[]", error=str(e)
+            )
+
+    async def GetAgentProfile(
+        self,
+        request: tool_service_pb2.GetAgentProfileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetAgentProfileResponse:
+        """Return agent profile by ID for custom agent execution."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            user_id = request.user_id or "system"
+            profile_id = request.profile_id
+            if not profile_id:
+                return tool_service_pb2.GetAgentProfileResponse(
+                    success=False, profile_json="", error="profile_id required"
+                )
+            row = await fetch_one(
+                "SELECT * FROM agent_profiles WHERE id = $1 AND user_id = $2",
+                uuid.UUID(profile_id),
+                user_id,
+            )
+            if not row:
+                return tool_service_pb2.GetAgentProfileResponse(
+                    success=False, profile_json="", error="Profile not found"
+                )
+            persona_mode = row.get("persona_mode") or "none"
+            persona_id = str(row["persona_id"]) if row.get("persona_id") else None
+            profile = {
+                "id": str(row["id"]),
+                "user_id": row["user_id"],
+                "name": row["name"],
+                "handle": row["handle"],
+                "description": row.get("description"),
+                "is_active": row.get("is_active", True),
+                "model_preference": row.get("model_preference"),
+                "max_research_rounds": row.get("max_research_rounds", 3),
+                "system_prompt_additions": row.get("system_prompt_additions"),
+                "knowledge_config": row.get("knowledge_config") or {},
+                "default_playbook_id": str(row["default_playbook_id"]) if row.get("default_playbook_id") else None,
+                "default_run_context": row.get("default_run_context") or "interactive",
+                "default_approval_policy": row.get("default_approval_policy") or "require",
+                "journal_config": row.get("journal_config") or {},
+                "team_config": row.get("team_config") or {},
+                "prompt_history_enabled": row.get("chat_history_enabled", False),
+                "chat_history_lookback": row.get("chat_history_lookback", 10),
+                "summary_threshold_tokens": row.get("summary_threshold_tokens", 5000),
+                "summary_keep_messages": row.get("summary_keep_messages", 10),
+                "persona_mode": persona_mode,
+                "persona_id": persona_id,
+                "include_user_context": row.get("include_user_context", False),
+                "include_datetime_context": row.get("include_datetime_context", True),
+                "include_user_facts": row.get("include_user_facts", False),
+                "include_facts_categories": list(row.get("include_facts_categories") or []),
+                "include_agent_memory": row.get("include_agent_memory", False),
+                "auto_routable": row.get("auto_routable", False),
+                "data_workspace_config": row.get("data_workspace_config") or {},
+                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+            }
+            if persona_mode == "specific" and persona_id:
+                from services.settings_service import settings_service
+                persona = await settings_service.get_persona_by_id(persona_id, user_id)
+                if persona:
+                    profile["persona"] = persona
+            return tool_service_pb2.GetAgentProfileResponse(
+                success=True,
+                profile_json=json.dumps(profile, default=_json_default),
+            )
+        except Exception as e:
+            logger.exception("GetAgentProfile failed")
+            return tool_service_pb2.GetAgentProfileResponse(
+                success=False, profile_json="", error=str(e)
+            )
+
+    async def ListAutoRoutableProfiles(
+        self,
+        request: tool_service_pb2.ListAutoRoutableProfilesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListAutoRoutableProfilesResponse:
+        """Return agent profiles for the user where auto_routable=true and is_active=true."""
+        try:
+            from services.database_manager.database_helpers import fetch_all
+            user_id = request.user_id or "system"
+            rows = await fetch_all(
+                "SELECT id, handle, name, description FROM agent_profiles "
+                "WHERE user_id = $1 AND is_active = true AND auto_routable = true ORDER BY name",
+                user_id,
+            )
+            profiles = [
+                {
+                    "id": str(r["id"]),
+                    "handle": r["handle"],
+                    "name": r["name"],
+                    "description": r.get("description") or "",
+                }
+                for r in rows
+            ]
+            return tool_service_pb2.ListAutoRoutableProfilesResponse(
+                success=True,
+                profiles_json=json.dumps(profiles),
+            )
+        except Exception as e:
+            logger.exception("ListAutoRoutableProfiles failed")
+            return tool_service_pb2.ListAutoRoutableProfilesResponse(
+                success=False, profiles_json="[]", error=str(e)
+            )
+
+    async def ResolveAgentHandle(
+        self,
+        request: tool_service_pb2.ResolveAgentHandleRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ResolveAgentHandleResponse:
+        """Resolve agent target string to agent_profile_id: handle, @handle, UUID, or display name (unique)."""
+        try:
+            from services.database_manager.database_helpers import fetch_all, fetch_one
+            user_id = request.user_id or "system"
+            raw = (request.handle or "").strip()
+            if raw.startswith("@"):
+                raw = raw[1:].strip()
+            if not raw:
+                return tool_service_pb2.ResolveAgentHandleResponse(found=False)
+
+            # 1) Exact handle match
+            row = await fetch_one(
+                "SELECT id, name FROM agent_profiles WHERE user_id = $1 AND handle = $2 AND is_active = true",
+                user_id,
+                raw,
+            )
+            if row:
+                return tool_service_pb2.ResolveAgentHandleResponse(
+                    agent_profile_id=str(row["id"]),
+                    agent_name=row.get("name") or raw,
+                    found=True,
+                )
+
+            # 2) Agent profile UUID (workers sometimes paste ids from briefings)
+            try:
+                uid = uuid.UUID(raw)
+                row = await fetch_one(
+                    "SELECT id, name FROM agent_profiles WHERE user_id = $1 AND id = $2 AND is_active = true",
+                    user_id,
+                    uid,
+                )
+                if row:
+                    return tool_service_pb2.ResolveAgentHandleResponse(
+                        agent_profile_id=str(row["id"]),
+                        agent_name=row.get("name") or raw,
+                        found=True,
+                    )
+            except (ValueError, TypeError):
+                pass
+
+            # 3) Unique display name (case-insensitive) — matches "send to your manager (Name)" style prompts
+            rows = await fetch_all(
+                """
+                SELECT id, name FROM agent_profiles
+                WHERE user_id = $1 AND is_active = true
+                  AND LOWER(TRIM(COALESCE(name, ''))) = LOWER(TRIM($2))
+                """,
+                user_id,
+                raw,
+            )
+            if len(rows) == 1:
+                row = rows[0]
+                return tool_service_pb2.ResolveAgentHandleResponse(
+                    agent_profile_id=str(row["id"]),
+                    agent_name=row.get("name") or raw,
+                    found=True,
+                )
+            if len(rows) > 1:
+                logger.warning(
+                    "ResolveAgentHandle: ambiguous display name %r matches %s profiles for user_id=%s",
+                    raw[:80],
+                    len(rows),
+                    user_id,
+                )
+            return tool_service_pb2.ResolveAgentHandleResponse(found=False)
+        except Exception as e:
+            logger.exception("ResolveAgentHandle failed")
+            return tool_service_pb2.ResolveAgentHandleResponse(found=False)
+
+    async def EnqueueAgentInvocation(
+        self,
+        request: tool_service_pb2.EnqueueAgentInvocationRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.EnqueueAgentInvocationResponse:
+        """Enqueue async agent-to-agent invocation via Celery. Used by output_router."""
+        try:
+            from services.celery_tasks.agent_tasks import dispatch_agent_invocation
+            agent_profile_id = request.agent_profile_id or ""
+            input_content = request.input_content or ""
+            user_id = request.user_id or "system"
+            source_agent_name = request.source_agent_name or ""
+            chain_depth = request.chain_depth or 0
+            chain_path_json = request.chain_path_json or "[]"
+            if not agent_profile_id or not input_content:
+                return tool_service_pb2.EnqueueAgentInvocationResponse(
+                    success=False,
+                    error="agent_profile_id and input_content required",
+                )
+            task = dispatch_agent_invocation.apply_async(
+                args=[
+                    agent_profile_id,
+                    input_content,
+                    user_id,
+                    source_agent_name,
+                    chain_depth,
+                    chain_path_json,
+                ],
+            )
+            return tool_service_pb2.EnqueueAgentInvocationResponse(
+                success=True,
+                task_id=task.id or "",
+            )
+        except Exception as e:
+            logger.exception("EnqueueAgentInvocation failed")
+            return tool_service_pb2.EnqueueAgentInvocationResponse(
+                success=False,
+                error=str(e),
+            )
+
+    async def ReadTeamPosts(
+        self,
+        request: tool_service_pb2.ReadTeamPostsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ReadTeamPostsResponse:
+        """Return team posts (optionally since last_read_at for the user). Used by read_team_posts tool."""
+        try:
+            from services.database_manager.database_helpers import fetch_one, fetch_all
+            from services.team_post_service import TeamPostService
+            from services.team_service import TeamService
+            team_id = (request.team_id or "").strip()
+            user_id = request.user_id or "system"
+            since_last_read = request.since_last_read
+            limit = max(1, min(100, request.limit or 20))
+            mark_as_read = request.mark_as_read
+            if not team_id:
+                return tool_service_pb2.ReadTeamPostsResponse(
+                    success=False,
+                    error="team_id required",
+                )
+            team_service = TeamService()
+            await team_service.initialize()
+            team_post_service = TeamPostService()
+            await team_post_service.initialize(team_service=team_service)
+            since_ts = None
+            if since_last_read:
+                row = await fetch_one(
+                    "SELECT last_read_at FROM team_members WHERE team_id = $1 AND user_id = $2",
+                    uuid.UUID(team_id),
+                    user_id,
+                )
+                if row and row.get("last_read_at"):
+                    since_ts = row["last_read_at"]
+            posts_result = await team_post_service.get_team_posts_since(
+                team_id=team_id,
+                user_id=user_id,
+                since_ts=since_ts,
+                limit=limit,
+            )
+            team_row = await fetch_one(
+                "SELECT team_name FROM teams WHERE team_id = $1",
+                uuid.UUID(team_id),
+            )
+            team_name = (team_row.get("team_name") or "") if team_row else ""
+            if mark_as_read and posts_result:
+                await team_service.mark_team_posts_as_read(team_id, user_id)
+            out_posts = []
+            for p in posts_result:
+                out_posts.append(
+                    tool_service_pb2.TeamPost(
+                        post_id=p.get("post_id", ""),
+                        author_id=p.get("author_id", ""),
+                        author_name=p.get("author_name") or p.get("author_display_name") or p.get("author_username") or "",
+                        content=p.get("content", ""),
+                        post_type=p.get("post_type", "text"),
+                        created_at=p.get("created_at").isoformat() if p.get("created_at") else "",
+                    )
+                )
+            return tool_service_pb2.ReadTeamPostsResponse(
+                posts=out_posts,
+                count=len(out_posts),
+                team_name=team_name,
+                success=True,
+            )
+        except PermissionError as e:
+            return tool_service_pb2.ReadTeamPostsResponse(
+                success=False,
+                error=str(e),
+            )
+        except Exception as e:
+            logger.exception("ReadTeamPosts failed")
+            return tool_service_pb2.ReadTeamPostsResponse(
+                success=False,
+                error=str(e),
+            )
+
+    async def CreateTeamPost(
+        self,
+        request: tool_service_pb2.CreateTeamPostRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreateTeamPostResponse:
+        """Create a team post or comment. Used by post_to_team tool and output_router team_post destination."""
+        try:
+            from services.team_post_service import TeamPostService
+            from services.team_service import TeamService
+            team_id = (request.team_id or "").strip()
+            user_id = request.user_id or "system"
+            content = (request.content or "").strip()
+            post_type = (request.post_type or "text").strip() or "text"
+            reply_to_post_id = (request.reply_to_post_id or "").strip()
+            if not team_id or not content:
+                return tool_service_pb2.CreateTeamPostResponse(
+                    success=False,
+                    error="team_id and content required",
+                )
+            team_service = TeamService()
+            await team_service.initialize()
+            team_post_service = TeamPostService()
+            await team_post_service.initialize(team_service=team_service)
+            if reply_to_post_id:
+                comment = await team_post_service.create_comment(
+                    post_id=reply_to_post_id,
+                    author_id=user_id,
+                    content=content,
+                )
+                post_id = comment.get("comment_id", "")
+            else:
+                post = await team_post_service.create_post(
+                    team_id=team_id,
+                    author_id=user_id,
+                    content=content,
+                    post_type=post_type,
+                    attachments=None,
+                )
+                post_id = post.get("post_id", "")
+            return tool_service_pb2.CreateTeamPostResponse(
+                post_id=post_id,
+                success=True,
+            )
+        except PermissionError as e:
+            return tool_service_pb2.CreateTeamPostResponse(
+                success=False,
+                error=str(e),
+            )
+        except Exception as e:
+            logger.exception("CreateTeamPost failed")
+            return tool_service_pb2.CreateTeamPostResponse(
+                success=False,
+                error=str(e),
+            )
+
+    async def GetPlaybook(
+        self,
+        request: tool_service_pb2.GetPlaybookRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetPlaybookResponse:
+        """Return playbook by ID for custom agent execution."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            user_id = request.user_id or "system"
+            playbook_id = (request.playbook_id or "").strip()
+            if not playbook_id:
+                return tool_service_pb2.GetPlaybookResponse(
+                    success=False, playbook_json="", error="playbook_id required"
+                )
+            try:
+                uuid.UUID(playbook_id)
+            except (ValueError, TypeError):
+                slug_normalized = playbook_id.replace("_", "-").lower()
+                resolved = await fetch_one(
+                    """SELECT id FROM custom_playbooks
+                       WHERE user_id = $1 AND (
+                         name = $2
+                         OR LOWER(REGEXP_REPLACE(TRIM(name), '\\s+', '-')) = $3
+                       )
+                       LIMIT 1""",
+                    user_id,
+                    playbook_id,
+                    slug_normalized,
+                )
+                if not resolved:
+                    return tool_service_pb2.GetPlaybookResponse(
+                        success=False, playbook_json="",
+                        error="Playbook not found (use id from list_playbooks, or exact name)",
+                    )
+                playbook_id = str(resolved["id"])
+            row = await fetch_one(
+                "SELECT * FROM custom_playbooks WHERE id = $1 AND (user_id = $2 OR (user_id IS NULL AND is_builtin = true))",
+                uuid.UUID(playbook_id),
+                user_id,
+            )
+            if not row:
+                return tool_service_pb2.GetPlaybookResponse(
+                    success=False, playbook_json="", error="Playbook not found"
+                )
+            raw_def = row.get("definition") or {}
+            if isinstance(raw_def, str):
+                try:
+                    raw_def = json.loads(raw_def) if raw_def else {}
+                except (json.JSONDecodeError, TypeError):
+                    raw_def = {}
+            if not isinstance(raw_def, dict):
+                raw_def = {}
+            raw_triggers = row.get("triggers") or []
+            if isinstance(raw_triggers, str):
+                try:
+                    raw_triggers = json.loads(raw_triggers) if raw_triggers else []
+                except (json.JSONDecodeError, TypeError):
+                    raw_triggers = []
+            if not isinstance(raw_triggers, list):
+                raw_triggers = []
+            playbook = {
+                "id": str(row["id"]),
+                "user_id": row["user_id"],
+                "name": row["name"],
+                "description": row.get("description"),
+                "version": row.get("version", "1.0"),
+                "definition": raw_def,
+                "triggers": raw_triggers,
+                "is_template": row.get("is_template", False),
+                "is_locked": row.get("is_locked", False),
+                "category": row.get("category"),
+                "tags": list(row.get("tags") or []),
+                "required_connectors": list(row.get("required_connectors") or []),
+                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+            }
+            return tool_service_pb2.GetPlaybookResponse(
+                success=True,
+                playbook_json=json.dumps(playbook),
+            )
+        except Exception as e:
+            logger.exception("GetPlaybook failed")
+            return tool_service_pb2.GetPlaybookResponse(
+                success=False, playbook_json="", error=str(e)
+            )
+
+    async def GetSkillsByIds(
+        self,
+        request: tool_service_pb2.GetSkillsByIdsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetSkillsByIdsResponse:
+        """Batch fetch skills by IDs for pipeline skill injection."""
+        try:
+            from services.agent_skills_service import get_skills_by_ids
+            user_id = request.user_id or "system"
+            skill_ids = list(request.skill_ids) if request.skill_ids else []
+            skills = await get_skills_by_ids(skill_ids)
+            return tool_service_pb2.GetSkillsByIdsResponse(
+                success=True,
+                skills_json=json.dumps(skills),
+            )
+        except Exception as e:
+            logger.exception("GetSkillsByIds failed")
+            return tool_service_pb2.GetSkillsByIdsResponse(
+                success=False, skills_json="[]", error=str(e)
+            )
+
+    async def SearchSkills(
+        self,
+        request: tool_service_pb2.SearchSkillsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.SearchSkillsResponse:
+        """Semantic search over skills for auto-discovery at step invocation."""
+        try:
+            from services.skill_vector_service import search_skills
+            user_id = request.user_id or "system"
+            query = (request.query or "").strip()
+            limit = request.limit or 3
+            score_threshold = request.score_threshold if request.score_threshold > 0 else 0.5
+            results = await search_skills(
+                user_id=user_id,
+                query=query,
+                limit=limit,
+                score_threshold=score_threshold,
+            )
+            return tool_service_pb2.SearchSkillsResponse(
+                success=True,
+                skills_json=json.dumps(results),
+            )
+        except Exception as e:
+            logger.exception("SearchSkills failed")
+            return tool_service_pb2.SearchSkillsResponse(
+                success=False, skills_json="[]", error=str(e)
+            )
+
+    async def ListSkills(
+        self,
+        request: tool_service_pb2.ListSkillsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListSkillsResponse:
+        """List user and optionally built-in skills for agent self-awareness."""
+        try:
+            from services.agent_skills_service import list_skills
+            user_id = request.user_id or "system"
+            category = request.category or None
+            include_builtin = getattr(request, "include_builtin", True)
+            skills = await list_skills(user_id, category=category, include_builtin=include_builtin)
+            return tool_service_pb2.ListSkillsResponse(
+                success=True,
+                skills_json=json.dumps(skills),
+            )
+        except Exception as e:
+            logger.exception("ListSkills failed")
+            return tool_service_pb2.ListSkillsResponse(
+                success=False, skills_json="[]", error=str(e)
+            )
+
+    async def CreateSkill(
+        self,
+        request: tool_service_pb2.CreateSkillRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreateSkillResponse:
+        """Create a user-authored skill."""
+        try:
+            from services.agent_skills_service import create_skill
+            user_id = request.user_id or "system"
+            name = (request.name or "").strip() or "Unnamed skill"
+            slug = (request.slug or "").strip().lower().replace(" ", "-")[:100] or "unnamed-skill"
+            procedure = request.procedure or ""
+            required_tools = list(request.required_tools) if request.required_tools else []
+            optional_tools = list(request.optional_tools) if request.optional_tools else []
+            description = (request.description or "").strip() or None
+            category = (request.category or "").strip() or None
+            tags = list(request.tags) if request.tags else []
+            skill = await create_skill(
+                user_id=user_id,
+                name=name,
+                slug=slug,
+                procedure=procedure,
+                required_tools=required_tools,
+                optional_tools=optional_tools,
+                description=description,
+                category=category,
+                tags=tags,
+            )
+            return tool_service_pb2.CreateSkillResponse(
+                success=True,
+                skill_id=str(skill.get("id", "")),
+                skill_json=json.dumps(skill),
+            )
+        except ValueError as e:
+            return tool_service_pb2.CreateSkillResponse(
+                success=False, skill_id="", skill_json="", error=str(e)
+            )
+        except Exception as e:
+            logger.exception("CreateSkill failed")
+            return tool_service_pb2.CreateSkillResponse(
+                success=False, skill_id="", skill_json="", error=str(e)
+            )
+
+    async def UpdateSkill(
+        self,
+        request: tool_service_pb2.UpdateSkillRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.UpdateSkillResponse:
+        """Update a user skill (creates new version). Used for propose_skill_update flow."""
+        try:
+            from services.agent_skills_service import update_skill
+            user_id = request.user_id or "system"
+            skill_id = request.skill_id or ""
+            procedure = (request.procedure or "").strip() or None
+            improvement_rationale = (request.improvement_rationale or "").strip() or None
+            evidence_metadata = None
+            if request.evidence_metadata_json:
+                try:
+                    evidence_metadata = json.loads(request.evidence_metadata_json)
+                except json.JSONDecodeError:
+                    pass
+            name = (request.name or "").strip() or None
+            description = (request.description or "").strip() or None
+            category = (request.category or "").strip() or None
+            required_tools = list(request.required_tools) if request.required_tools else None
+            optional_tools = list(request.optional_tools) if request.optional_tools else None
+            skill = await update_skill(
+                skill_id=skill_id,
+                user_id=user_id,
+                procedure=procedure,
+                improvement_rationale=improvement_rationale,
+                evidence_metadata=evidence_metadata,
+                name=name,
+                description=description,
+                category=category,
+                required_tools=required_tools,
+                optional_tools=optional_tools,
+            )
+            return tool_service_pb2.UpdateSkillResponse(
+                success=True,
+                skill_id=str(skill.get("id", "")),
+                version=skill.get("version", 1),
+                skill_json=json.dumps(skill),
+            )
+        except ValueError as e:
+            return tool_service_pb2.UpdateSkillResponse(
+                success=False, skill_id="", version=0, skill_json="", error=str(e)
+            )
+        except Exception as e:
+            logger.exception("UpdateSkill failed")
+            return tool_service_pb2.UpdateSkillResponse(
+                success=False, skill_id="", version=0, skill_json="", error=str(e)
+            )
+
+    async def LogAgentExecution(
+        self,
+        request: tool_service_pb2.LogAgentExecutionRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.LogAgentExecutionResponse:
+        """Insert a row into agent_execution_log for custom agent run; update agent_budgets spend."""
+        try:
+            from decimal import Decimal
+            from services.database_manager.database_helpers import fetch_value, execute, fetch_one
+            user_id = request.user_id or "system"
+            profile_id = request.profile_id or None
+            playbook_id = request.playbook_id or None
+            if not profile_id:
+                return tool_service_pb2.LogAgentExecutionResponse(
+                    success=False, execution_id="", error="profile_id required"
+                )
+            _now = datetime.now(timezone.utc)
+            started_at = request.started_at or _now.isoformat()
+            completed_at = request.completed_at or _now.isoformat()
+            if isinstance(started_at, str):
+                started_at = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+            if isinstance(completed_at, str):
+                completed_at = datetime.fromisoformat(completed_at.replace("Z", "+00:00"))
+            metadata = {}
+            if request.metadata_json:
+                try:
+                    metadata = json.loads(request.metadata_json)
+                except json.JSONDecodeError:
+                    pass
+            metadata["steps_completed"] = request.steps_completed or 0
+            metadata["steps_total"] = request.steps_total or 0
+
+            steps_data = []
+            if getattr(request, "steps_json", None):
+                try:
+                    steps_data = json.loads(request.steps_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            tokens_input = 0
+            tokens_output = 0
+            for s in (steps_data if isinstance(steps_data, list) else []):
+                if isinstance(s, dict):
+                    tokens_input += int(s.get("input_tokens") or 0)
+                    tokens_output += int(s.get("output_tokens") or 0)
+
+            model_used = (metadata.get("model_used") or "")[:255] if metadata.get("model_used") else None
+            cost_usd = Decimal("0")
+            if model_used and (tokens_input or tokens_output):
+                try:
+                    from services.service_container import get_service_container
+                    container = await get_service_container()
+                    if container.chat_service and hasattr(container.chat_service, "get_available_models"):
+                        models = await container.chat_service.get_available_models()
+                        for m in (models or []):
+                            mid = getattr(m, "id", None) or (m.get("id") if isinstance(m, dict) else None)
+                            if mid == model_used:
+                                inc = (getattr(m, "input_cost", None) or (m.get("input_cost") if isinstance(m, dict) else None)) or 0
+                                outc = (getattr(m, "output_cost", None) or (m.get("output_cost") if isinstance(m, dict) else None)) or 0
+                                cost_usd = Decimal(str(inc)) * tokens_input + Decimal(str(outc)) * tokens_output
+                                break
+                        if cost_usd == Decimal("0"):
+                            logger.warning(
+                                "Cost lookup failed: model_used='%s' not found in %d available models",
+                                model_used, len(models or []),
+                            )
+                except Exception as cost_err:
+                    logger.debug("Resolve execution cost failed: %s", cost_err)
+
+            execution_id = await fetch_value(
+                """
+                INSERT INTO agent_execution_log (
+                    agent_profile_id, user_id, query, playbook_id,
+                    started_at, completed_at, duration_ms, status,
+                    error_details, metadata, tokens_input, tokens_output, cost_usd, model_used
+                ) VALUES ($1, $2, $3, $4, $5::timestamptz, $6::timestamptz, $7, $8, $9, $10, $11, $12, $13::numeric, $14)
+                RETURNING id
+                """,
+                uuid.UUID(profile_id) if profile_id else None,
+                user_id,
+                request.query or "",
+                uuid.UUID(playbook_id) if playbook_id else None,
+                started_at,
+                completed_at,
+                request.duration_ms or 0,
+                request.status or "completed",
+                request.error_details or None,
+                json.dumps(metadata),
+                tokens_input,
+                tokens_output,
+                float(cost_usd),
+                model_used,
+            )
+            exec_uuid = uuid.UUID(str(execution_id)) if execution_id else None
+            if execution_id and isinstance(steps_data, list) and steps_data:
+                from services.database_manager.database_helpers import execute
+                for s in steps_data:
+                    if not isinstance(s, dict):
+                        continue
+                    try:
+                        started_ts = s.get("started_at")
+                        completed_ts = s.get("completed_at")
+                        if isinstance(started_ts, str):
+                            started_ts = datetime.fromisoformat(started_ts.replace("Z", "+00:00"))
+                        if isinstance(completed_ts, str):
+                            completed_ts = datetime.fromisoformat(completed_ts.replace("Z", "+00:00"))
+                        await execute(
+                            """
+                            INSERT INTO agent_execution_steps (
+                                execution_id, step_index, step_name, step_type, action_name,
+                                status, started_at, completed_at, duration_ms,
+                                inputs_json, outputs_json, error_details, tool_call_trace
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz, $9, $10::jsonb, $11::jsonb, $12, $13::jsonb)
+                            """,
+                            exec_uuid,
+                            int(s.get("step_index", 0)),
+                            (s.get("step_name") or "")[:255],
+                            (s.get("step_type") or "tool")[:50],
+                            (s.get("action_name") or "")[:255] if s.get("action_name") else None,
+                            (s.get("status") or "completed")[:50],
+                            started_ts if started_ts else None,
+                            completed_ts if completed_ts else None,
+                            s.get("duration_ms"),
+                            json.dumps(s.get("inputs_snapshot") or {}),
+                            json.dumps(s.get("outputs_snapshot") or {}),
+                            (s.get("error_details") or "")[:65535] if s.get("error_details") else None,
+                            json.dumps(s.get("tool_call_trace") if s.get("tool_call_trace") is not None else []),
+                        )
+                    except Exception as step_err:
+                        logger.warning("Insert agent_execution_step failed: %s", step_err)
+
+            discoveries = metadata.get("discoveries")
+            if execution_id and isinstance(discoveries, list) and discoveries:
+                from services.database_manager.database_helpers import execute
+                for d in discoveries:
+                    if not isinstance(d, dict):
+                        continue
+                    try:
+                        await execute(
+                            """
+                            INSERT INTO agent_discoveries (
+                                execution_id, user_id, discovery_type, entity_name, entity_type,
+                                entity_neo4j_id, relationship_type, related_entity_name,
+                                source_connector, source_endpoint, confidence, details
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb)
+                            """,
+                            exec_uuid,
+                            user_id,
+                            (d.get("discovery_type") or "entity")[:50],
+                            (d.get("entity_name") or "")[:500] if d.get("entity_name") else None,
+                            (d.get("entity_type") or "")[:50] if d.get("entity_type") else None,
+                            (d.get("entity_neo4j_id") or "")[:255] if d.get("entity_neo4j_id") else None,
+                            (d.get("relationship_type") or "")[:100] if d.get("relationship_type") else None,
+                            (d.get("related_entity_name") or "")[:500] if d.get("related_entity_name") else None,
+                            (d.get("source_connector") or "")[:255] if d.get("source_connector") else None,
+                            (d.get("source_endpoint") or "")[:255] if d.get("source_endpoint") else None,
+                            float(d["confidence"]) if d.get("confidence") is not None else None,
+                            json.dumps(d.get("details") or {}),
+                        )
+                    except Exception as ins_err:
+                        logger.warning("Insert agent_discovery failed: %s", ins_err)
+
+            if execution_id and profile_id and float(cost_usd) > 0:
+                try:
+                    from datetime import date
+                    today = date.today()
+                    period_start = today.replace(day=1)
+                    row = await fetch_one(
+                        "SELECT id, current_period_start, current_period_spend_usd FROM agent_budgets WHERE agent_profile_id = $1",
+                        uuid.UUID(profile_id),
+                    )
+                    if row:
+                        existing_start = row.get("current_period_start")
+                        if existing_start and (getattr(existing_start, "year", None) != today.year or getattr(existing_start, "month", None) != today.month):
+                            await execute(
+                                "UPDATE agent_budgets SET current_period_start = $1, current_period_spend_usd = 0, updated_at = NOW() WHERE agent_profile_id = $2",
+                                period_start,
+                                uuid.UUID(profile_id),
+                            )
+                        await execute(
+                            "UPDATE agent_budgets SET current_period_spend_usd = current_period_spend_usd + $1::numeric, updated_at = NOW() WHERE agent_profile_id = $2",
+                            float(cost_usd),
+                            uuid.UUID(profile_id),
+                        )
+                        budget_after = await fetch_one(
+                            "SELECT monthly_limit_usd, current_period_spend_usd, warning_threshold_pct, enforce_hard_limit FROM agent_budgets WHERE agent_profile_id = $1",
+                            uuid.UUID(profile_id),
+                        )
+                        if budget_after and budget_after.get("monthly_limit_usd") is not None:
+                            limit_usd = float(budget_after["monthly_limit_usd"])
+                            spend_usd = float(budget_after.get("current_period_spend_usd") or 0)
+                            pct = int(budget_after.get("warning_threshold_pct") or 80)
+                            enforce = bool(budget_after.get("enforce_hard_limit") is not False)
+                            try:
+                                from utils.websocket_manager import get_websocket_manager
+                                ws = get_websocket_manager()
+                                if ws and user_id:
+                                    if enforce and spend_usd >= limit_usd:
+                                        await ws.send_to_session(
+                                            {
+                                                "type": "agent_notification",
+                                                "subtype": "budget_exceeded",
+                                                "agent_profile_id": profile_id,
+                                                "agent_name": None,
+                                                "spend_usd": spend_usd,
+                                                "limit_usd": limit_usd,
+                                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                            },
+                                            user_id,
+                                        )
+                                    elif spend_usd >= limit_usd * (pct / 100.0):
+                                        await ws.send_to_session(
+                                            {
+                                                "type": "agent_notification",
+                                                "subtype": "budget_warning",
+                                                "agent_profile_id": profile_id,
+                                                "agent_name": None,
+                                                "spend_usd": spend_usd,
+                                                "limit_usd": limit_usd,
+                                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                                            },
+                                            user_id,
+                                        )
+                            except Exception as ws_err:
+                                logger.debug("Budget WebSocket notify failed: %s", ws_err)
+                except Exception as budget_err:
+                    logger.warning("Update agent_budgets spend failed: %s", budget_err)
+
+            if execution_id and user_id:
+                try:
+                    from utils.websocket_manager import get_websocket_manager
+                    profile_row = await fetch_one(
+                        "SELECT name, handle FROM agent_profiles WHERE id = $1",
+                        uuid.UUID(profile_id),
+                    )
+                    agent_name = (profile_row.get("name") or profile_row.get("handle") or "Agent") if profile_row else "Agent"
+                    ws_manager = get_websocket_manager()
+                    if ws_manager:
+                        subtype = "execution_completed" if request.status == "completed" else "execution_failed"
+                        await ws_manager.send_to_session(
+                            {
+                                "type": "agent_notification",
+                                "subtype": subtype,
+                                "execution_id": str(execution_id),
+                                "agent_profile_id": profile_id,
+                                "agent_name": agent_name,
+                                "status": request.status or "completed",
+                                "duration_ms": request.duration_ms,
+                                "cost_usd": float(cost_usd) if cost_usd is not None else None,
+                                "error_details": (request.error_details or "")[:500] if request.error_details else None,
+                                "trigger_type": metadata.get("trigger_type", "manual"),
+                                "query": (request.query or "")[:200] if request.query else None,
+                                "timestamp": datetime.now(timezone.utc).isoformat(),
+                            },
+                            user_id,
+                        )
+                except Exception as ws_err:
+                    logger.debug("LogAgentExecution WebSocket notify failed: %s", ws_err)
+
+            return tool_service_pb2.LogAgentExecutionResponse(
+                success=True,
+                execution_id=str(execution_id) if execution_id else "",
+            )
+        except Exception as e:
+            logger.exception("LogAgentExecution failed")
+            return tool_service_pb2.LogAgentExecutionResponse(
+                success=False, execution_id="", error=str(e)
+            )
+
+    async def ParkApproval(
+        self,
+        request: tool_service_pb2.ParkApprovalRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ParkApprovalResponse:
+        """Insert a row into agent_approval_queue for background/scheduled approval. Called from orchestrator."""
+        try:
+            from services.database_manager.database_helpers import execute, fetch_value
+            user_id = request.user_id or "system"
+            agent_profile_id = request.agent_profile_id or None
+            execution_id = request.execution_id or None
+            step_name = (request.step_name or "approval")[:255]
+            prompt = request.prompt or "Approve to continue?"
+            preview_data_json = request.preview_data_json or "{}"
+            thread_id = (request.thread_id or "")[:500]
+            checkpoint_ns = (request.checkpoint_ns or "")[:255]
+            playbook_config_json = request.playbook_config_json or "{}"
+            governance_type = (request.governance_type or "playbook_step")[:50]
+            if not user_id or not step_name:
+                return tool_service_pb2.ParkApprovalResponse(
+                    success=False, approval_id="", error="user_id and step_name required"
+                )
+            profile_uuid = uuid.UUID(agent_profile_id) if agent_profile_id else None
+            exec_uuid = uuid.UUID(execution_id) if execution_id else None
+            approval_id = await fetch_value(
+                """INSERT INTO agent_approval_queue
+                   (user_id, agent_profile_id, execution_id, step_name, prompt, preview_data, governance_type, thread_id, checkpoint_ns, playbook_config, status)
+                   VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10::jsonb, 'pending')
+                   RETURNING id""",
+                user_id,
+                profile_uuid,
+                exec_uuid,
+                step_name,
+                prompt[:10000],
+                preview_data_json,
+                governance_type,
+                thread_id,
+                checkpoint_ns,
+                playbook_config_json,
+            )
+            if not approval_id:
+                return tool_service_pb2.ParkApprovalResponse(
+                    success=False, approval_id="", error="insert failed"
+                )
+            try:
+                from utils.websocket_manager import get_websocket_manager
+                ws = get_websocket_manager()
+                if ws and user_id:
+                    await ws.send_to_session(
+                        {
+                            "type": "agent_notification",
+                            "subtype": "approval_required",
+                            "approval_id": str(approval_id),
+                            "agent_profile_id": agent_profile_id,
+                            "execution_id": execution_id,
+                            "step_name": step_name,
+                            "prompt": (prompt or "")[:500],
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        },
+                        user_id,
+                    )
+            except Exception as ws_err:
+                logger.debug("ParkApproval WebSocket notify failed: %s", ws_err)
+            return tool_service_pb2.ParkApprovalResponse(
+                success=True,
+                approval_id=str(approval_id),
+            )
+        except Exception as e:
+            logger.exception("ParkApproval failed")
+            return tool_service_pb2.ParkApprovalResponse(
+                success=False, approval_id="", error=str(e)
+            )
+
+    async def GetAgentMemory(
+        self,
+        request: tool_service_pb2.GetAgentMemoryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetAgentMemoryResponse:
+        """Read a single agent memory key. Returns value as JSON string."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            user_id = request.user_id or "system"
+            profile_id = request.agent_profile_id or None
+            memory_key = (request.memory_key or "")[:500]
+            if not profile_id or not memory_key:
+                return tool_service_pb2.GetAgentMemoryResponse(
+                    success=False, memory_value_json="", error="agent_profile_id and memory_key required"
+                )
+            row = await fetch_one(
+                """SELECT memory_value FROM agent_memory
+                   WHERE agent_profile_id = $1 AND user_id = $2 AND memory_key = $3
+                   AND (expires_at IS NULL OR expires_at > NOW())""",
+                uuid.UUID(profile_id),
+                user_id,
+                memory_key,
+            )
+            if not row:
+                return tool_service_pb2.GetAgentMemoryResponse(
+                    success=True, memory_value_json=""
+                )
+            val = row.get("memory_value")
+            return tool_service_pb2.GetAgentMemoryResponse(
+                success=True,
+                memory_value_json=json.dumps(val, default=_json_default) if val is not None else "",
+            )
+        except Exception as e:
+            logger.exception("GetAgentMemory failed")
+            return tool_service_pb2.GetAgentMemoryResponse(
+                success=False, memory_value_json="", error=str(e)
+            )
+
+    async def SetAgentMemory(
+        self,
+        request: tool_service_pb2.SetAgentMemoryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.SetAgentMemoryResponse:
+        """Write or overwrite an agent memory key."""
+        try:
+            from services.database_manager.database_helpers import execute, fetch_one
+            user_id = request.user_id or "system"
+            profile_id = request.agent_profile_id or None
+            memory_key = (request.memory_key or "")[:500]
+            memory_value_json = request.memory_value_json or "{}"
+            memory_type = (request.memory_type or "kv")[:50]
+            expires_at = request.expires_at if request.expires_at else None
+            if not profile_id or not memory_key:
+                return tool_service_pb2.SetAgentMemoryResponse(
+                    success=False, error="agent_profile_id and memory_key required"
+                )
+            try:
+                json.loads(memory_value_json)
+            except (json.JSONDecodeError, TypeError):
+                return tool_service_pb2.SetAgentMemoryResponse(
+                    success=False, error="Invalid memory_value_json"
+                )
+            if expires_at:
+                await execute(
+                    """INSERT INTO agent_memory (agent_profile_id, user_id, memory_key, memory_value, memory_type, updated_at, expires_at)
+                       VALUES ($1, $2, $3, $4::jsonb, $5, NOW(), $6::timestamptz)
+                       ON CONFLICT (agent_profile_id, memory_key)
+                       DO UPDATE SET memory_value = EXCLUDED.memory_value, memory_type = EXCLUDED.memory_type,
+                                     updated_at = NOW(), expires_at = EXCLUDED.expires_at""",
+                    uuid.UUID(profile_id),
+                    user_id,
+                    memory_key,
+                    memory_value_json,
+                    memory_type,
+                    expires_at,
+                )
+            else:
+                await execute(
+                    """INSERT INTO agent_memory (agent_profile_id, user_id, memory_key, memory_value, memory_type, updated_at)
+                       VALUES ($1, $2, $3, $4::jsonb, $5, NOW())
+                       ON CONFLICT (agent_profile_id, memory_key)
+                       DO UPDATE SET memory_value = EXCLUDED.memory_value, memory_type = EXCLUDED.memory_type, updated_at = NOW()""",
+                    uuid.UUID(profile_id),
+                    user_id,
+                    memory_key,
+                    memory_value_json,
+                    memory_type,
+                )
+            return tool_service_pb2.SetAgentMemoryResponse(success=True)
+        except Exception as e:
+            logger.exception("SetAgentMemory failed")
+            return tool_service_pb2.SetAgentMemoryResponse(success=False, error=str(e))
+
+    async def ListAgentMemories(
+        self,
+        request: tool_service_pb2.ListAgentMemoriesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListAgentMemoriesResponse:
+        """List memory keys for an agent, optionally filtered by prefix."""
+        try:
+            from services.database_manager.database_helpers import fetch_all
+            user_id = request.user_id or "system"
+            profile_id = request.agent_profile_id or None
+            key_prefix = (request.key_prefix or "").strip() or None
+            if not profile_id:
+                return tool_service_pb2.ListAgentMemoriesResponse(
+                    success=False, memory_keys=[], error="agent_profile_id required"
+                )
+            if key_prefix:
+                rows = await fetch_all(
+                    """SELECT memory_key FROM agent_memory
+                       WHERE agent_profile_id = $1 AND user_id = $2 AND memory_key LIKE $3
+                       AND (expires_at IS NULL OR expires_at > NOW())
+                       ORDER BY memory_key""",
+                    uuid.UUID(profile_id),
+                    user_id,
+                    key_prefix + "%",
+                )
+            else:
+                rows = await fetch_all(
+                    """SELECT memory_key FROM agent_memory
+                       WHERE agent_profile_id = $1 AND user_id = $2
+                       AND (expires_at IS NULL OR expires_at > NOW())
+                       ORDER BY memory_key""",
+                    uuid.UUID(profile_id),
+                    user_id,
+                )
+            keys = [r["memory_key"] for r in rows]
+            return tool_service_pb2.ListAgentMemoriesResponse(
+                success=True,
+                memory_keys=keys,
+            )
+        except Exception as e:
+            logger.exception("ListAgentMemories failed")
+            return tool_service_pb2.ListAgentMemoriesResponse(
+                success=False, memory_keys=[], error=str(e)
+            )
+
+    async def DeleteAgentMemory(
+        self,
+        request: tool_service_pb2.DeleteAgentMemoryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.DeleteAgentMemoryResponse:
+        """Delete an agent memory key."""
+        try:
+            from services.database_manager.database_helpers import execute
+            user_id = request.user_id or "system"
+            profile_id = request.agent_profile_id or None
+            memory_key = (request.memory_key or "")[:500]
+            if not profile_id or not memory_key:
+                return tool_service_pb2.DeleteAgentMemoryResponse(
+                    success=False, error="agent_profile_id and memory_key required"
+                )
+            await execute(
+                "DELETE FROM agent_memory WHERE agent_profile_id = $1 AND user_id = $2 AND memory_key = $3",
+                uuid.UUID(profile_id),
+                user_id,
+                memory_key,
+            )
+            return tool_service_pb2.DeleteAgentMemoryResponse(success=True)
+        except Exception as e:
+            logger.exception("DeleteAgentMemory failed")
+            return tool_service_pb2.DeleteAgentMemoryResponse(success=False, error=str(e))
+
+    async def AppendAgentMemory(
+        self,
+        request: tool_service_pb2.AppendAgentMemoryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.AppendAgentMemoryResponse:
+        """Append an entry to a log-type memory (JSON array)."""
+        try:
+            from services.database_manager.database_helpers import fetch_one, execute
+            user_id = request.user_id or "system"
+            profile_id = request.agent_profile_id or None
+            memory_key = (request.memory_key or "")[:500]
+            entry_json = request.entry_json or "{}"
+            if not profile_id or not memory_key:
+                return tool_service_pb2.AppendAgentMemoryResponse(
+                    success=False, error="agent_profile_id and memory_key required"
+                )
+            try:
+                entry = json.loads(entry_json)
+            except (json.JSONDecodeError, TypeError):
+                return tool_service_pb2.AppendAgentMemoryResponse(
+                    success=False, error="Invalid entry_json"
+                )
+            row = await fetch_one(
+                "SELECT memory_value, memory_type FROM agent_memory WHERE agent_profile_id = $1 AND user_id = $2 AND memory_key = $3",
+                uuid.UUID(profile_id),
+                user_id,
+                memory_key,
+            )
+            if row:
+                current = row.get("memory_value")
+                if not isinstance(current, list):
+                    current = [current] if current is not None else []
+                current.append(entry)
+                await execute(
+                    "UPDATE agent_memory SET memory_value = $1::jsonb, updated_at = NOW() WHERE agent_profile_id = $2 AND user_id = $3 AND memory_key = $4",
+                    json.dumps(current),
+                    uuid.UUID(profile_id),
+                    user_id,
+                    memory_key,
+                )
+            else:
+                await execute(
+                    """INSERT INTO agent_memory (agent_profile_id, user_id, memory_key, memory_value, memory_type, updated_at)
+                       VALUES ($1, $2, $3, $4::jsonb, 'log', NOW())""",
+                    uuid.UUID(profile_id),
+                    user_id,
+                    memory_key,
+                    json.dumps([entry]),
+                )
+            return tool_service_pb2.AppendAgentMemoryResponse(success=True)
+        except Exception as e:
+            logger.exception("AppendAgentMemory failed")
+            return tool_service_pb2.AppendAgentMemoryResponse(success=False, error=str(e))
+
+    async def GetAgentRunHistory(
+        self,
+        request: tool_service_pb2.GetAgentRunHistoryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetAgentRunHistoryResponse:
+        """Query agent_execution_log for a user's agent run history (access-controlled by user_id)."""
+        try:
+            from services.database_manager.database_helpers import fetch_all
+
+            user_id = request.user_id or "system"
+            profile_id = request.agent_profile_id if request.HasField("agent_profile_id") and request.agent_profile_id else None
+            limit = 10
+            if request.HasField("limit") and request.limit > 0:
+                limit = min(int(request.limit), 50)
+            status_filter = request.status if request.HasField("status") and request.status else None
+            start_date = request.start_date if request.HasField("start_date") and request.start_date else None
+            end_date = request.end_date if request.HasField("end_date") and request.end_date else None
+
+            conditions = ["ael.user_id = $1"]
+            params = [user_id]
+            n = 2
+            if profile_id:
+                conditions.append(f"ael.agent_profile_id = ${n}")
+                params.append(uuid.UUID(profile_id))
+                n += 1
+            if status_filter:
+                conditions.append(f"ael.status = ${n}")
+                params.append(status_filter)
+                n += 1
+            if start_date:
+                conditions.append(f"ael.started_at >= ${n}::date")
+                params.append(start_date)
+                n += 1
+            if end_date:
+                conditions.append(f"ael.started_at < (${n}::date + interval '1 day')")
+                params.append(end_date)
+                n += 1
+            params.append(limit)
+            where_clause = " AND ".join(conditions)
+            q = f"""
+                SELECT ael.id, ael.query, ael.status, ael.started_at, ael.duration_ms,
+                       ael.connectors_called, ael.entities_discovered, ael.error_details, ael.metadata,
+                       ap.name AS agent_name
+                FROM agent_execution_log ael
+                LEFT JOIN agent_profiles ap ON ap.id = ael.agent_profile_id AND ap.user_id = ael.user_id
+                WHERE {where_clause}
+                ORDER BY ael.started_at DESC
+                LIMIT ${n}
+            """
+            rows = await fetch_all(q, *params)
+            runs = []
+            agent_name_out = ""
+            if profile_id and rows:
+                agent_name_out = (rows[0].get("agent_name") or "").strip()
+            for r in rows:
+                meta = r.get("metadata") or {}
+                if isinstance(meta, str):
+                    try:
+                        meta = json.loads(meta)
+                    except json.JSONDecodeError:
+                        meta = {}
+                steps_completed = meta.get("steps_completed", 0) or 0
+                steps_total = meta.get("steps_total", 0) or 0
+                conn_called = r.get("connectors_called")
+                if isinstance(conn_called, list):
+                    connectors_list = [str(x) for x in conn_called]
+                elif isinstance(conn_called, str):
+                    try:
+                        connectors_list = list(json.loads(conn_called)) if conn_called else []
+                    except json.JSONDecodeError:
+                        connectors_list = []
+                else:
+                    connectors_list = []
+                started = r.get("started_at")
+                started_at_str = started.isoformat() if hasattr(started, "isoformat") else str(started or "")
+                runs.append(
+                    tool_service_pb2.AgentRunRecord(
+                        execution_id=str(r["id"]),
+                        agent_name=(r.get("agent_name") or "").strip(),
+                        query=(r.get("query") or "")[:500],
+                        status=(r.get("status") or "").strip(),
+                        started_at=started_at_str,
+                        duration_ms=int(r["duration_ms"]) if r.get("duration_ms") is not None else None,
+                        connectors_called=connectors_list,
+                        entities_discovered=int(r.get("entities_discovered") or 0),
+                        error_details=(r.get("error_details") or "").strip() or None,
+                        steps_completed=int(steps_completed),
+                        steps_total=int(steps_total),
+                    )
+                )
+            return tool_service_pb2.GetAgentRunHistoryResponse(
+                success=True,
+                runs=runs,
+                total=len(runs),
+                agent_name=agent_name_out,
+            )
+        except Exception as e:
+            logger.exception("GetAgentRunHistory failed")
+            return tool_service_pb2.GetAgentRunHistoryResponse(
+                success=False,
+                runs=[],
+                total=0,
+                agent_name="",
+                error=str(e),
+            )
+
+    async def ExecuteConnector(
+        self,
+        request: tool_service_pb2.ExecuteConnectorRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ExecuteConnectorResponse:
+        """Execute a connector endpoint; load definition and credentials from DB."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            from clients.connections_service_client import get_connections_service_client
+
+            user_id = request.user_id or "system"
+            profile_id = request.profile_id or None
+            connector_id = request.connector_id or None
+            endpoint_id = request.endpoint_id or None
+            if not profile_id or not connector_id or not endpoint_id:
+                return tool_service_pb2.ExecuteConnectorResponse(
+                    success=False, result_json="", error="profile_id, connector_id, endpoint_id required"
+                )
+            params = {}
+            if request.params_json:
+                try:
+                    params = json.loads(request.params_json)
+                except json.JSONDecodeError:
+                    return tool_service_pb2.ExecuteConnectorResponse(
+                        success=False, result_json="", error="Invalid params_json"
+                    )
+            connector = await fetch_one(
+                "SELECT id, definition, connector_type FROM data_source_connectors WHERE id = $1",
+                connector_id,
+            )
+            if not connector:
+                return tool_service_pb2.ExecuteConnectorResponse(
+                    success=False, result_json="", error="Connector not found"
+                )
+            source = await fetch_one(
+                "SELECT credentials_encrypted, config_overrides FROM agent_data_sources "
+                "WHERE agent_profile_id = $1 AND connector_id = $2 AND is_enabled = true",
+                profile_id,
+                connector_id,
+            )
+            credentials = {}
+            if source:
+                creds = source.get("credentials_encrypted")
+                if isinstance(creds, dict):
+                    credentials = creds
+                overrides = source.get("config_overrides") or {}
+                if isinstance(overrides, dict) and overrides.get("api_key"):
+                    credentials.setdefault("api_key", overrides["api_key"])
+            definition = connector.get("definition") or {}
+            if isinstance(definition, str):
+                definition = json.loads(definition) if definition else {}
+            client = await get_connections_service_client()
+            result = await client.execute_connector_endpoint(
+                definition=definition,
+                credentials=credentials,
+                endpoint_id=endpoint_id,
+                params=params,
+                connector_type=connector.get("connector_type"),
+            )
+            return tool_service_pb2.ExecuteConnectorResponse(
+                success=True,
+                result_json=json.dumps(result),
+            )
+        except Exception as e:
+            logger.exception("ExecuteConnector failed")
+            return tool_service_pb2.ExecuteConnectorResponse(
+                success=False, result_json="", error=str(e)
+            )
+
+    async def ExecuteMcpTool(
+        self,
+        request: tool_service_pb2.ExecuteMcpToolRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ExecuteMcpToolResponse:
+        """Call tools/call on a user-configured MCP server."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            from services.mcp_client_service import call_tool
+
+            user_id = request.user_id or "system"
+            server_id = int(request.server_id) if request.server_id else 0
+            tool_name = (request.tool_name or "").strip()
+            if not server_id or not tool_name:
+                return tool_service_pb2.ExecuteMcpToolResponse(
+                    success=False, result_json="", formatted="", error="server_id and tool_name required"
+                )
+            raw_args = request.arguments_json or "{}"
+            try:
+                args = json.loads(raw_args) if raw_args else {}
+                if not isinstance(args, dict):
+                    args = {}
+            except json.JSONDecodeError:
+                return tool_service_pb2.ExecuteMcpToolResponse(
+                    success=False, result_json="", formatted="", error="Invalid arguments_json"
+                )
+
+            row = await fetch_one(
+                """
+                SELECT id, user_id, name, description, transport, url, command, args, env, headers, is_active
+                FROM mcp_servers
+                WHERE id = $1 AND user_id = $2 AND is_active = true
+                """,
+                server_id,
+                user_id,
+            )
+            if not row:
+                return tool_service_pb2.ExecuteMcpToolResponse(
+                    success=False, result_json="", formatted="", error="MCP server not found"
+                )
+            cfg = dict(row)
+            for key in ("args", "env", "headers"):
+                v = cfg.get(key)
+                if isinstance(v, str):
+                    try:
+                        cfg[key] = json.loads(v) if v else ([] if key == "args" else {})
+                    except json.JSONDecodeError:
+                        cfg[key] = [] if key == "args" else {}
+
+            ok, result_json, formatted = await call_tool(cfg, tool_name, args)
+            return tool_service_pb2.ExecuteMcpToolResponse(
+                success=bool(ok),
+                result_json=result_json or "",
+                formatted=formatted or "",
+                error="" if ok else (formatted or result_json or "MCP tool error"),
+            )
+        except Exception as e:
+            logger.exception("ExecuteMcpTool failed")
+            return tool_service_pb2.ExecuteMcpToolResponse(
+                success=False, result_json="", formatted="", error=str(e)
+            )
+
+    async def GetMcpServerTools(
+        self,
+        request: tool_service_pb2.GetMcpServerToolsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetMcpServerToolsResponse:
+        """Return tool names from cached discovered_tools for an MCP server."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+
+            user_id = request.user_id or "system"
+            server_id = int(request.server_id) if request.server_id else 0
+            if not server_id:
+                return tool_service_pb2.GetMcpServerToolsResponse(
+                    success=False, tool_names=[], error="server_id required"
+                )
+            row = await fetch_one(
+                """
+                SELECT discovered_tools FROM mcp_servers
+                WHERE id = $1 AND user_id = $2 AND is_active = true
+                """,
+                server_id,
+                user_id,
+            )
+            if not row:
+                return tool_service_pb2.GetMcpServerToolsResponse(
+                    success=False, tool_names=[], error="MCP server not found"
+                )
+            raw = row.get("discovered_tools")
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw) if raw else []
+                except json.JSONDecodeError:
+                    raw = []
+            names: List[str] = []
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict) and item.get("name"):
+                        names.append(str(item["name"]))
+                    elif isinstance(item, str):
+                        names.append(item)
+            return tool_service_pb2.GetMcpServerToolsResponse(
+                success=True,
+                tool_names=names,
+                error="",
+            )
+        except Exception as e:
+            logger.exception("GetMcpServerTools failed")
+            return tool_service_pb2.GetMcpServerToolsResponse(
+                success=False, tool_names=[], error=str(e)
+            )
+
+    async def DiscoverMcpServer(
+        self,
+        request: tool_service_pb2.DiscoverMcpServerRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.DiscoverMcpServerResponse:
+        """Run tools/list for a user MCP server (same runtime as ExecuteMcpTool: stdio uses uvx/npx here)."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            from services.mcp_client_service import discover_tools
+
+            user_id = request.user_id or "system"
+            server_id = int(request.server_id) if request.server_id else 0
+            if not server_id:
+                return tool_service_pb2.DiscoverMcpServerResponse(
+                    success=False, tools_json="[]", error="server_id required"
+                )
+            row = await fetch_one(
+                """
+                SELECT id, user_id, name, description, transport, url, command, args, env, headers, is_active
+                FROM mcp_servers
+                WHERE id = $1 AND user_id = $2
+                """,
+                server_id,
+                user_id,
+            )
+            if not row:
+                return tool_service_pb2.DiscoverMcpServerResponse(
+                    success=False, tools_json="[]", error="MCP server not found"
+                )
+            cfg = dict(row)
+            for key in ("args", "env", "headers"):
+                v = cfg.get(key)
+                if isinstance(v, str):
+                    try:
+                        cfg[key] = json.loads(v) if v else ([] if key == "args" else {})
+                    except json.JSONDecodeError:
+                        cfg[key] = [] if key == "args" else {}
+
+            tools = await discover_tools(cfg)
+            return tool_service_pb2.DiscoverMcpServerResponse(
+                success=True,
+                tools_json=json.dumps(tools, default=str),
+                error="",
+            )
+        except Exception as e:
+            logger.exception("DiscoverMcpServer failed")
+            return tool_service_pb2.DiscoverMcpServerResponse(
+                success=False, tools_json="[]", error=str(e)
+            )
+
+    # ===== Data Connection Builder =====
+
+    async def ProbeApiEndpoint(
+        self,
+        request: tool_service_pb2.ProbeApiEndpointRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ProbeApiEndpointResponse:
+        """Raw HTTP request for API discovery; delegates to connections-service."""
+        try:
+            from clients.connections_service_client import get_connections_service_client
+            user_id = request.user_id or "system"
+            headers = {}
+            if request.headers_json:
+                try:
+                    headers = json.loads(request.headers_json)
+                except json.JSONDecodeError:
+                    return tool_service_pb2.ProbeApiEndpointResponse(
+                        success=False, error="Invalid headers_json"
+                    )
+            body = None
+            if request.body_json:
+                try:
+                    body = json.loads(request.body_json)
+                except json.JSONDecodeError:
+                    return tool_service_pb2.ProbeApiEndpointResponse(
+                        success=False, error="Invalid body_json"
+                    )
+            params = None
+            if request.params_json:
+                try:
+                    params = json.loads(request.params_json)
+                except json.JSONDecodeError:
+                    return tool_service_pb2.ProbeApiEndpointResponse(
+                        success=False, error="Invalid params_json"
+                    )
+            client = await get_connections_service_client()
+            result = await client.probe_api_endpoint(
+                url=request.url or "",
+                method=request.method or "GET",
+                headers=headers,
+                body=body,
+                params=params,
+            )
+            if not result.get("success"):
+                return tool_service_pb2.ProbeApiEndpointResponse(
+                    success=False,
+                    error=result.get("error", "Probe failed"),
+                )
+            return tool_service_pb2.ProbeApiEndpointResponse(
+                success=True,
+                status_code=result.get("status_code", 0),
+                response_headers_json=json.dumps(result.get("response_headers", {})),
+                response_body=result.get("response_body", ""),
+                content_type=result.get("content_type", ""),
+            )
+        except Exception as e:
+            logger.exception("ProbeApiEndpoint failed")
+            return tool_service_pb2.ProbeApiEndpointResponse(success=False, error=str(e))
+
+    async def TestConnectorEndpoint(
+        self,
+        request: tool_service_pb2.TestConnectorEndpointRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.TestConnectorEndpointResponse:
+        """Test a connector definition against the live API (no save required)."""
+        try:
+            from clients.connections_service_client import get_connections_service_client
+            definition = {}
+            if request.definition_json:
+                definition = json.loads(request.definition_json)
+            params = {}
+            if request.params_json:
+                params = json.loads(request.params_json)
+            credentials = {}
+            if request.credentials_json:
+                credentials = json.loads(request.credentials_json)
+            client = await get_connections_service_client()
+            result = await client.execute_connector_endpoint(
+                definition=definition,
+                credentials=credentials,
+                endpoint_id=request.endpoint_id or "",
+                params=params,
+                raw_response=True,
+            )
+            records = result.get("records", [])
+            raw_response = result.get("raw_response")
+            formatted = result.get("formatted", "")
+            if result.get("error"):
+                return tool_service_pb2.TestConnectorEndpointResponse(
+                    success=False,
+                    records_json="[]",
+                    count=0,
+                    raw_response_json="",
+                    formatted=result.get("error", ""),
+                    error=result.get("error"),
+                )
+            return tool_service_pb2.TestConnectorEndpointResponse(
+                success=True,
+                records_json=json.dumps(records),
+                count=len(records),
+                raw_response_json=json.dumps(raw_response) if raw_response is not None else "{}",
+                formatted=formatted,
+            )
+        except json.JSONDecodeError as e:
+            return tool_service_pb2.TestConnectorEndpointResponse(
+                success=False, error=f"Invalid JSON: {e}"
+            )
+        except Exception as e:
+            logger.exception("TestConnectorEndpoint failed")
+            return tool_service_pb2.TestConnectorEndpointResponse(success=False, error=str(e))
+
+    async def CreateDataConnector(
+        self,
+        request: tool_service_pb2.CreateDataConnectorRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreateDataConnectorResponse:
+        """Save a connector definition to the database."""
+        try:
+            from services.database_manager.database_helpers import execute, fetch_one
+            user_id = request.user_id or "system"
+            name = request.name or "Unnamed Connector"
+            definition = {}
+            if request.definition_json:
+                definition = json.loads(request.definition_json)
+            auth_fields = []
+            if request.auth_fields_json:
+                try:
+                    auth_fields = json.loads(request.auth_fields_json)
+                except json.JSONDecodeError:
+                    pass
+            await execute(
+                """
+                INSERT INTO data_source_connectors (
+                    user_id, name, description, connector_type, version, definition,
+                    is_template, requires_auth, auth_fields, icon, category, tags
+                ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, false, $7, $8::jsonb, $9, $10, $11)
+                """,
+                user_id,
+                name,
+                request.description or "",
+                "rest",
+                "1.0",
+                json.dumps(definition),
+                request.requires_auth,
+                json.dumps(auth_fields),
+                None,
+                request.category or None,
+                [],
+            )
+            row = await fetch_one(
+                "SELECT id, name FROM data_source_connectors WHERE user_id = $1 AND name = $2 ORDER BY created_at DESC LIMIT 1",
+                user_id,
+                name,
+            )
+            if not row:
+                return tool_service_pb2.CreateDataConnectorResponse(
+                    success=False, error="Failed to create connector"
+                )
+            connector_id = str(row["id"])
+            formatted = f"Created data connector: {row.get('name', name)} (ID: {connector_id})"
+            return tool_service_pb2.CreateDataConnectorResponse(
+                success=True,
+                connector_id=connector_id,
+                name=row.get("name", name),
+                formatted=formatted,
+            )
+        except Exception as e:
+            logger.exception("CreateDataConnector failed")
+            return tool_service_pb2.CreateDataConnectorResponse(success=False, error=str(e))
+
+    async def BulkScrapeUrls(
+        self,
+        request: tool_service_pb2.BulkScrapeUrlsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.BulkScrapeUrlsResponse:
+        """Scrape URLs for content and optionally images. Inline for <20 URLs, Celery for 20+."""
+        try:
+            urls = []
+            if request.urls_json:
+                urls = json.loads(request.urls_json)
+            if not isinstance(urls, list):
+                urls = []
+            urls = [u for u in urls if isinstance(u, str) and u.strip()]
+            user_id = request.user_id or "system"
+            extract_images = request.extract_images
+            download_images = request.download_images
+            max_concurrent = request.max_concurrent if request.max_concurrent > 0 else 10
+            rate_limit_seconds = request.rate_limit_seconds if request.rate_limit_seconds > 0 else 1.0
+            folder_id = request.folder_id or ""
+
+            if len(urls) >= 20:
+                from services.celery_tasks.scraper_tasks import batch_url_scrape_task
+                task = batch_url_scrape_task.delay(
+                    urls=urls,
+                    user_id=user_id,
+                    config={
+                        "extract_images": extract_images,
+                        "download_images": download_images,
+                        "image_output_folder": request.image_output_folder or "",
+                        "metadata_fields_json": request.metadata_fields_json or "[]",
+                        "max_concurrent": max_concurrent,
+                        "rate_limit_seconds": rate_limit_seconds,
+                        "folder_id": folder_id,
+                    },
+                )
+                return tool_service_pb2.BulkScrapeUrlsResponse(
+                    success=True,
+                    task_id=task.id,
+                    results_json="[]",
+                    count=0,
+                    images_found=0,
+                    images_downloaded=0,
+                    formatted=f"Bulk scrape started for {len(urls)} URLs. Task ID: {task.id}. Use get_bulk_scrape_status to check progress.",
+                )
+            else:
+                from clients.crawl_service_client import get_crawl_service_client
+                client = await get_crawl_service_client()
+                response = await client.crawl_many(
+                    urls=urls[:20],
+                    max_concurrent=max_concurrent,
+                    rate_limit_seconds=rate_limit_seconds,
+                    include_metadata=True,
+                )
+                results = response.get("results", [])
+                images_found = 0
+                images_downloaded = 0
+                for r in results:
+                    images_found += len(r.get("images", []))
+                formatted = f"Crawled {len(results)} URL(s). Images found: {images_found}."
+                return tool_service_pb2.BulkScrapeUrlsResponse(
+                    success=True,
+                    task_id="",
+                    results_json=json.dumps(results),
+                    count=len(results),
+                    images_found=images_found,
+                    images_downloaded=images_downloaded,
+                    formatted=formatted,
+                )
+        except Exception as e:
+            logger.exception("BulkScrapeUrls failed")
+            return tool_service_pb2.BulkScrapeUrlsResponse(
+                success=False, error=str(e)
+            )
+
+    async def GetBulkScrapeStatus(
+        self,
+        request: tool_service_pb2.GetBulkScrapeStatusRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetBulkScrapeStatusResponse:
+        """Get status and optional results of a bulk scrape Celery task."""
+        try:
+            from celery.result import AsyncResult
+            from services.celery_app import celery_app
+            task_id = request.task_id or ""
+            if not task_id:
+                return tool_service_pb2.GetBulkScrapeStatusResponse(
+                    success=False, error="task_id required"
+                )
+            result = AsyncResult(task_id, app=celery_app)
+            state = result.state or "PENDING"
+            progress_current = 0
+            progress_total = 0
+            progress_message = ""
+            results_json = "[]"
+            if state == "SUCCESS" and result.result:
+                res = result.result
+                if isinstance(res, dict):
+                    progress_current = res.get("progress_current", 0)
+                    progress_total = res.get("progress_total", 0)
+                    progress_message = res.get("progress_message", "")
+                    results_json = json.dumps(res.get("results", []))
+            elif state == "PROGRESS" and result.info:
+                info = result.info if isinstance(result.info, dict) else {}
+                progress_current = info.get("current", 0)
+                progress_total = info.get("total", 0)
+                progress_message = info.get("message", "")
+                results_json = json.dumps(info.get("results", []))
+            formatted = f"Task {task_id}: {state}. {progress_message or state}"
+            return tool_service_pb2.GetBulkScrapeStatusResponse(
+                success=True,
+                status=state,
+                progress_current=progress_current,
+                progress_total=progress_total,
+                progress_message=progress_message,
+                results_json=results_json,
+                formatted=formatted,
+            )
+        except Exception as e:
+            logger.exception("GetBulkScrapeStatus failed")
+            return tool_service_pb2.GetBulkScrapeStatusResponse(
+                success=False, error=str(e)
+            )
+
+    async def ListControlPanes(
+        self,
+        request: tool_service_pb2.ListControlPanesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListControlPanesResponse:
+        """List all control panes for the user."""
+        try:
+            from services.database_manager.database_helpers import fetch_all
+            user_id = request.user_id or "system"
+            rows = await fetch_all(
+                """
+                SELECT p.id, p.user_id, p.name, p.icon, p.connector_id, p.credentials_encrypted,
+                       p.connection_id, p.controls, p.is_visible, p.sort_order, p.refresh_interval, p.created_at, p.updated_at,
+                       c.name AS connector_name
+                FROM user_control_panes p
+                LEFT JOIN data_source_connectors c ON c.id = p.connector_id
+                WHERE p.user_id = $1
+                ORDER BY p.sort_order ASC, p.name ASC
+                """,
+                user_id,
+            )
+            result = []
+            for r in rows:
+                row = dict(r)
+                controls = row.get("controls")
+                if controls is not None and isinstance(controls, str):
+                    try:
+                        controls = json.loads(controls)
+                    except json.JSONDecodeError:
+                        controls = []
+                result.append({
+                    "id": str(row["id"]),
+                    "user_id": row.get("user_id"),
+                    "name": row.get("name", ""),
+                    "icon": row.get("icon", "Tune"),
+                    "connector_id": str(row["connector_id"]),
+                    "connector_name": row.get("connector_name"),
+                    "controls": controls or [],
+                    "is_visible": row.get("is_visible", True),
+                    "sort_order": row.get("sort_order", 0),
+                    "refresh_interval": row.get("refresh_interval", 0),
+                })
+            parts = [f"Found {len(result)} control pane(s):"]
+            for p in result:
+                name = p.get("name", "(unnamed)")
+                pid = p.get("id", "")
+                conn = p.get("connector_name") or p.get("connector_id", "")
+                parts.append(f"  - {name} (id: {pid}, connector: {conn})")
+            formatted = "\n".join(parts) if result else parts[0]
+            return tool_service_pb2.ListControlPanesResponse(
+                success=True,
+                panes_json=json.dumps(result),
+                formatted=formatted,
+            )
+        except Exception as e:
+            logger.exception("ListControlPanes failed")
+            return tool_service_pb2.ListControlPanesResponse(success=False, error=str(e))
+
+    async def GetConnectorEndpoints(
+        self,
+        request: tool_service_pb2.GetConnectorEndpointsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetConnectorEndpointsResponse:
+        """Return endpoint ids and metadata from a connector definition for control pane mapping."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            user_id = request.user_id or "system"
+            connector_id = request.connector_id or ""
+            if not connector_id:
+                return tool_service_pb2.GetConnectorEndpointsResponse(
+                    success=False, error="connector_id required"
+                )
+            row = await fetch_one(
+                "SELECT id, definition FROM data_source_connectors WHERE id = $1 AND (user_id = $2 OR is_template = true)",
+                connector_id,
+                user_id,
+            )
+            if not row:
+                return tool_service_pb2.GetConnectorEndpointsResponse(
+                    success=False, error="Connector not found"
+                )
+            definition = row.get("definition") or {}
+            if isinstance(definition, str):
+                try:
+                    definition = json.loads(definition)
+                except json.JSONDecodeError:
+                    definition = {}
+            endpoints_def = definition.get("endpoints") or {}
+            if isinstance(endpoints_def, list):
+                endpoints_def = {ep.get("id") or ep.get("name"): ep for ep in endpoints_def if ep.get("id") or ep.get("name")}
+            endpoints_list = []
+            for eid, ep in (endpoints_def.items() if isinstance(endpoints_def, dict) else []):
+                raw_params = ep.get("params") or []
+                if isinstance(raw_params, dict):
+                    raw_params = [{"name": k, "in": "query", "default": v} for k, v in raw_params.items()]
+                param_list = []
+                for p in raw_params:
+                    name = p.get("name") or p.get("id")
+                    if name:
+                        param_list.append({
+                            "name": name,
+                            "in": p.get("in", "query"),
+                            "description": p.get("description") or "",
+                            "required": p.get("required", False),
+                            "default": p.get("default"),
+                        })
+                endpoints_list.append({
+                    "id": eid,
+                    "path": ep.get("path", "/"),
+                    "method": (ep.get("method") or "GET").upper(),
+                    "description": ep.get("description") or "",
+                    "params": param_list,
+                })
+            parts = []
+            for e in endpoints_list:
+                param_names = [p["name"] for p in e.get("params", [])]
+                parts.append(f"  {e['id']} ({e['method']} {e['path']}) params: {param_names or 'none'}")
+            formatted = f"Connector has {len(endpoints_list)} endpoint(s):\n" + "\n".join(parts)
+            return tool_service_pb2.GetConnectorEndpointsResponse(
+                success=True,
+                endpoints_json=json.dumps(endpoints_list),
+                formatted=formatted,
+            )
+        except Exception as e:
+            logger.exception("GetConnectorEndpoints failed")
+            return tool_service_pb2.GetConnectorEndpointsResponse(success=False, error=str(e))
+
+    async def ListDataConnectors(
+        self,
+        request: tool_service_pb2.ListDataConnectorsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListDataConnectorsResponse:
+        """List user-owned data source connectors (non-templates)."""
+        try:
+            from services.database_manager.database_helpers import fetch_all
+            user_id = request.user_id or "system"
+            rows = await fetch_all(
+                """
+                SELECT id, name, description, connector_type, definition, is_locked, category, tags, created_at, updated_at
+                FROM data_source_connectors
+                WHERE user_id = $1 AND (is_template = false OR is_template IS NULL)
+                ORDER BY updated_at DESC NULLS LAST, created_at DESC
+                """,
+                user_id,
+            )
+            result = []
+            for r in rows:
+                definition = r.get("definition") or {}
+                if isinstance(definition, str):
+                    try:
+                        definition = json.loads(definition)
+                    except json.JSONDecodeError:
+                        definition = {}
+                endpoints = definition.get("endpoints") or {}
+                endpoint_count = len(endpoints) if isinstance(endpoints, dict) else 0
+                result.append({
+                    "id": str(r["id"]),
+                    "name": r.get("name", ""),
+                    "description": r.get("description"),
+                    "connector_type": r.get("connector_type", "rest"),
+                    "endpoint_count": endpoint_count,
+                    "is_locked": r.get("is_locked", False),
+                    "category": r.get("category"),
+                    "tags": list(r.get("tags") or []),
+                    "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+                    "updated_at": r.get("updated_at").isoformat() if r.get("updated_at") else None,
+                })
+            parts = [f"Found {len(result)} connector(s):"]
+            for c in result:
+                name = c.get("name", "(unnamed)")
+                cid = c.get("id", "")
+                ctype = c.get("connector_type", "rest")
+                n_ep = c.get("endpoint_count", 0)
+                parts.append(f"  - {name} (id: {cid}, type: {ctype}, {n_ep} endpoint(s))")
+            formatted = "\n".join(parts) if result else parts[0]
+            return tool_service_pb2.ListDataConnectorsResponse(
+                success=True,
+                connectors_json=json.dumps(result),
+                formatted=formatted,
+            )
+        except Exception as e:
+            logger.exception("ListDataConnectors failed")
+            return tool_service_pb2.ListDataConnectorsResponse(success=False, error=str(e))
+
+    async def GetDataConnector(
+        self,
+        request: tool_service_pb2.GetDataConnectorRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetDataConnectorResponse:
+        """Return full connector by ID (definition, endpoints; auth values redacted)."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            user_id = request.user_id or "system"
+            connector_id = request.connector_id or ""
+            if not connector_id:
+                return tool_service_pb2.GetDataConnectorResponse(
+                    success=False, error="connector_id required"
+                )
+            row = await fetch_one(
+                "SELECT id, name, description, connector_type, definition, requires_auth, auth_fields, "
+                "is_locked, category, tags, created_at, updated_at FROM data_source_connectors "
+                "WHERE id = $1 AND user_id = $2",
+                connector_id,
+                user_id,
+            )
+            if not row:
+                return tool_service_pb2.GetDataConnectorResponse(
+                    success=False, error="Connector not found"
+                )
+            definition = row.get("definition") or {}
+            if isinstance(definition, str):
+                try:
+                    definition = json.loads(definition) if definition else {}
+                except json.JSONDecodeError:
+                    definition = {}
+            if not isinstance(definition, dict):
+                definition = {}
+            auth_fields_raw = row.get("auth_fields") or []
+            if isinstance(auth_fields_raw, str):
+                try:
+                    auth_fields_raw = json.loads(auth_fields_raw) if auth_fields_raw else []
+                except json.JSONDecodeError:
+                    auth_fields_raw = []
+            auth_field_names = []
+            if isinstance(auth_fields_raw, list):
+                for f in auth_fields_raw:
+                    if isinstance(f, dict) and f.get("name"):
+                        auth_field_names.append(f["name"])
+                    elif isinstance(f, str):
+                        auth_field_names.append(f)
+            connector = {
+                "id": str(row["id"]),
+                "name": row.get("name", ""),
+                "description": row.get("description"),
+                "connector_type": row.get("connector_type", "rest"),
+                "definition": definition,
+                "requires_auth": row.get("requires_auth", False),
+                "auth_field_names": auth_field_names,
+                "is_locked": row.get("is_locked", False),
+                "category": row.get("category"),
+                "tags": list(row.get("tags") or []),
+                "endpoint_count": len(definition.get("endpoints") or {}) if isinstance(definition.get("endpoints"), dict) else 0,
+                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                "updated_at": row.get("updated_at").isoformat() if row.get("updated_at") else None,
+            }
+            parts = [
+                f"**{connector['name']}** (ID: {connector['id']})",
+                f"Type: {connector['connector_type']}, Endpoints: {connector['endpoint_count']}",
+            ]
+            if connector.get("requires_auth"):
+                parts.append(f"Auth: required (fields: {', '.join(connector.get('auth_field_names', []))})")
+            return tool_service_pb2.GetDataConnectorResponse(
+                success=True,
+                connector_json=json.dumps(connector),
+                formatted="\n".join(parts),
+            )
+        except Exception as e:
+            logger.exception("GetDataConnector failed")
+            return tool_service_pb2.GetDataConnectorResponse(
+                success=False, error=str(e)
+            )
+
+    async def UpdateDataConnector(
+        self,
+        request: tool_service_pb2.UpdateDataConnectorRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.UpdateDataConnectorResponse:
+        """Update a data connector (partial update)."""
+        try:
+            from services.database_manager.database_helpers import fetch_one, execute
+            user_id = request.user_id or "system"
+            connector_id = request.connector_id or ""
+            if not connector_id:
+                return tool_service_pb2.UpdateDataConnectorResponse(
+                    success=False, error="connector_id required"
+                )
+            row = await fetch_one(
+                "SELECT id, is_locked FROM data_source_connectors WHERE id = $1 AND user_id = $2",
+                connector_id,
+                user_id,
+            )
+            if not row:
+                return tool_service_pb2.UpdateDataConnectorResponse(
+                    success=False, error="Connector not found"
+                )
+            updates = {}
+            if request.HasField("name"):
+                updates["name"] = request.name
+            if request.HasField("description"):
+                updates["description"] = request.description
+            if request.HasField("connector_type"):
+                updates["connector_type"] = request.connector_type
+            if request.HasField("definition_json"):
+                updates["definition"] = request.definition_json
+            if request.HasField("requires_auth"):
+                updates["requires_auth"] = request.requires_auth
+            if request.HasField("auth_fields_json"):
+                updates["auth_fields"] = request.auth_fields_json
+            if request.HasField("is_locked"):
+                updates["is_locked"] = request.is_locked
+            if not updates:
+                formatted = "No updates provided."
+                return tool_service_pb2.UpdateDataConnectorResponse(
+                    success=True,
+                    connector_id=connector_id,
+                    formatted=formatted,
+                )
+            if row.get("is_locked") and set(updates.keys()) != {"is_locked"}:
+                return tool_service_pb2.UpdateDataConnectorResponse(
+                    success=False, error="Connector is locked; only lock toggle is allowed"
+                )
+            set_clauses = []
+            args = []
+            idx = 1
+            jsonb_fields = ("definition", "auth_fields")
+            for k, v in updates.items():
+                if k in jsonb_fields:
+                    set_clauses.append(f"{k} = ${idx}::jsonb")
+                    args.append(v if isinstance(v, str) else json.dumps(v) if v is not None else "{}")
+                else:
+                    set_clauses.append(f"{k} = ${idx}")
+                    args.append(v)
+                idx += 1
+            set_clauses.append("updated_at = NOW()")
+            args.extend([connector_id, user_id])
+            await execute(
+                f"UPDATE data_source_connectors SET {', '.join(set_clauses)} WHERE id = ${idx} AND user_id = ${idx + 1}",
+                *args,
+            )
+            formatted = f"Updated connector {connector_id}."
+            return tool_service_pb2.UpdateDataConnectorResponse(
+                success=True,
+                connector_id=connector_id,
+                formatted=formatted,
+            )
+        except Exception as e:
+            logger.exception("UpdateDataConnector failed")
+            return tool_service_pb2.UpdateDataConnectorResponse(success=False, error=str(e))
+
+    async def ListPlaybooks(
+        self,
+        request: tool_service_pb2.ListPlaybooksRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListPlaybooksResponse:
+        """List playbooks owned by the user or templates."""
+        try:
+            from services import agent_factory_service
+            user_id = request.user_id or "system"
+            playbooks = await agent_factory_service.list_playbooks(user_id)
+            result = []
+            for p in playbooks:
+                definition = p.get("definition") or {}
+                if not isinstance(definition, dict):
+                    definition = {}
+                steps = definition.get("steps") or []
+                triggers = p.get("triggers") or []
+                result.append({
+                    "id": p.get("id"),
+                    "name": p.get("name", ""),
+                    "description": p.get("description"),
+                    "step_count": len(steps) if isinstance(steps, list) else 0,
+                    "is_template": p.get("is_template", False),
+                    "category": p.get("category"),
+                    "tags": list(p.get("tags") or []),
+                    "is_locked": p.get("is_locked", False),
+                    "run_context": definition.get("run_context") or "background",
+                    "has_triggers": len(triggers) > 0,
+                })
+            formatted = f"Found {len(result)} playbook(s)."
+            return tool_service_pb2.ListPlaybooksResponse(
+                success=True,
+                playbooks_json=json.dumps(result),
+                formatted=formatted,
+            )
+        except Exception as e:
+            logger.exception("ListPlaybooks failed")
+            return tool_service_pb2.ListPlaybooksResponse(success=False, error=str(e))
+
+    async def ListAgentProfiles(
+        self,
+        request: tool_service_pb2.ListAgentProfilesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListAgentProfilesResponse:
+        """List agent profiles for the user with derived status."""
+        try:
+            from services import agent_factory_service
+            user_id = request.user_id or "system"
+            profiles = await agent_factory_service.list_profiles(user_id)
+            for p in profiles:
+                is_active = p.get("is_active", True)
+                last_status = p.get("last_execution_status")
+                p["status"] = "draft" if (not is_active and not last_status) else "paused" if not is_active else ("error" if last_status == "failed" else "active")
+            formatted = f"Found {len(profiles)} profile(s)."
+            return tool_service_pb2.ListAgentProfilesResponse(
+                success=True,
+                profiles_json=json.dumps(profiles),
+                formatted=formatted,
+            )
+        except Exception as e:
+            logger.exception("ListAgentProfiles failed")
+            return tool_service_pb2.ListAgentProfilesResponse(success=False, error=str(e))
+
+    async def ListAgentSchedules(
+        self,
+        request: tool_service_pb2.ListAgentSchedulesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListAgentSchedulesResponse:
+        """List schedules for an agent profile (user must own the profile)."""
+        try:
+            from services.database_manager.database_helpers import fetch_all, fetch_one
+            user_id = request.user_id or "system"
+            agent_id = request.agent_id or ""
+            if not agent_id:
+                return tool_service_pb2.ListAgentSchedulesResponse(
+                    success=False, error="agent_id required"
+                )
+            profile = await fetch_one(
+                "SELECT id FROM agent_profiles WHERE id = $1 AND user_id = $2",
+                agent_id,
+                user_id,
+            )
+            if not profile:
+                return tool_service_pb2.ListAgentSchedulesResponse(
+                    success=False, error="Profile not found"
+                )
+            rows = await fetch_all(
+                "SELECT * FROM agent_schedules WHERE agent_profile_id = $1 ORDER BY created_at",
+                agent_id,
+            )
+            result = []
+            for r in rows:
+                result.append({
+                    "id": str(r["id"]),
+                    "agent_profile_id": str(r["agent_profile_id"]),
+                    "schedule_type": r.get("schedule_type"),
+                    "cron_expression": r.get("cron_expression"),
+                    "interval_seconds": r.get("interval_seconds"),
+                    "timezone": r.get("timezone") or "UTC",
+                    "is_active": r.get("is_active", True),
+                    "next_run_at": r["next_run_at"].isoformat() if r.get("next_run_at") else None,
+                    "last_run_at": r["last_run_at"].isoformat() if r.get("last_run_at") else None,
+                    "last_status": r.get("last_status"),
+                    "run_count": r.get("run_count", 0),
+                })
+            parts = [f"Found {len(result)} schedule(s) for agent {agent_id}:"]
+            for s in result:
+                stype = s.get("schedule_type", "?")
+                active = "active" if s.get("is_active") else "paused"
+                parts.append(f"  - {s['id']}: {stype} ({active})")
+            return tool_service_pb2.ListAgentSchedulesResponse(
+                success=True,
+                schedules_json=json.dumps(result),
+                formatted="\n".join(parts),
+            )
+        except Exception as e:
+            logger.exception("ListAgentSchedules failed")
+            return tool_service_pb2.ListAgentSchedulesResponse(success=False, error=str(e))
+
+    async def ListAgentDataSources(
+        self,
+        request: tool_service_pb2.ListAgentDataSourcesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListAgentDataSourcesResponse:
+        """List data source bindings for an agent profile (user must own the profile)."""
+        try:
+            from services.database_manager.database_helpers import fetch_all, fetch_one
+            user_id = request.user_id or "system"
+            agent_id = request.agent_id or ""
+            if not agent_id:
+                return tool_service_pb2.ListAgentDataSourcesResponse(
+                    success=False, error="agent_id required"
+                )
+            profile = await fetch_one(
+                "SELECT id FROM agent_profiles WHERE id = $1 AND user_id = $2",
+                agent_id,
+                user_id,
+            )
+            if not profile:
+                return tool_service_pb2.ListAgentDataSourcesResponse(
+                    success=False, error="Profile not found"
+                )
+            rows = await fetch_all(
+                """
+                SELECT ads.id AS binding_id, ads.connector_id, ads.config_overrides, ads.is_enabled,
+                       dsc.name AS connector_name, dsc.connector_type, dsc.definition
+                FROM agent_data_sources ads
+                LEFT JOIN data_source_connectors dsc ON dsc.id = ads.connector_id
+                WHERE ads.agent_profile_id = $1
+                ORDER BY ads.created_at
+                """,
+                agent_id,
+            )
+            result = []
+            for r in rows:
+                definition = r.get("definition") or {}
+                if isinstance(definition, str):
+                    try:
+                        definition = json.loads(definition)
+                    except json.JSONDecodeError:
+                        definition = {}
+                endpoints = definition.get("endpoints") or {}
+                endpoint_count = len(endpoints) if isinstance(endpoints, dict) else 0
+                result.append({
+                    "binding_id": str(r["binding_id"]),
+                    "connector_id": str(r["connector_id"]),
+                    "connector_name": r.get("connector_name", ""),
+                    "connector_type": r.get("connector_type", "rest"),
+                    "endpoint_count": endpoint_count,
+                    "is_enabled": r.get("is_enabled", True),
+                    "config_overrides": r.get("config_overrides") or {},
+                })
+            parts = [f"Found {len(result)} data source binding(s) for agent {agent_id}:"]
+            for b in result:
+                parts.append(f"  - {b['connector_name']} (connector: {b['connector_id']}, enabled: {b['is_enabled']})")
+            return tool_service_pb2.ListAgentDataSourcesResponse(
+                success=True,
+                bindings_json=json.dumps(result),
+                formatted="\n".join(parts),
+            )
+        except Exception as e:
+            logger.exception("ListAgentDataSources failed")
+            return tool_service_pb2.ListAgentDataSourcesResponse(success=False, error=str(e))
+
+    async def CreateControlPane(
+        self,
+        request: tool_service_pb2.CreateControlPaneRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreateControlPaneResponse:
+        """Create a control pane wired to a data connector."""
+        try:
+            from services.database_manager.database_helpers import fetch_one, fetch_value
+            user_id = request.user_id or "system"
+            name = request.name or "Control Pane"
+            icon = request.icon or "Tune"
+            connector_id = request.connector_id or ""
+            if not connector_id:
+                return tool_service_pb2.CreateControlPaneResponse(
+                    success=False, error="connector_id required"
+                )
+            conn = await fetch_one(
+                "SELECT id FROM data_source_connectors WHERE id = $1 AND (user_id = $2 OR is_template = true)",
+                connector_id,
+                user_id,
+            )
+            if not conn:
+                return tool_service_pb2.CreateControlPaneResponse(
+                    success=False, error="Connector not found"
+                )
+            credentials = {}
+            if request.credentials_encrypted_json:
+                try:
+                    credentials = json.loads(request.credentials_encrypted_json)
+                except json.JSONDecodeError:
+                    pass
+            controls = []
+            if request.controls_json:
+                try:
+                    controls = json.loads(request.controls_json)
+                except json.JSONDecodeError:
+                    pass
+            if not isinstance(controls, list):
+                controls = []
+            refresh_interval = getattr(request, "refresh_interval", 0) or 0
+            new_id = await fetch_value(
+                """
+                INSERT INTO user_control_panes
+                (user_id, name, icon, connector_id, credentials_encrypted, connection_id, controls, is_visible, sort_order, refresh_interval)
+                VALUES ($1, $2, $3, $4::uuid, $5::jsonb, $6, $7::jsonb, $8, $9, $10)
+                RETURNING id
+                """,
+                user_id,
+                name,
+                icon,
+                connector_id,
+                json.dumps(credentials),
+                request.connection_id if request.connection_id else None,
+                json.dumps(controls),
+                request.is_visible,
+                request.sort_order,
+                refresh_interval,
+            )
+            pane_id = str(new_id)
+            formatted = f"Created control pane: {name} (ID: {pane_id})"
+            try:
+                from utils.websocket_manager import get_websocket_manager
+                ws_manager = get_websocket_manager()
+                if ws_manager:
+                    await ws_manager.send_to_session(
+                        {"type": "control_pane_updated", "subtype": "pane_created", "pane_id": pane_id},
+                        user_id,
+                    )
+            except Exception as ws_err:
+                logger.warning("CreateControlPane WebSocket send failed: %s", ws_err)
+            return tool_service_pb2.CreateControlPaneResponse(
+                success=True,
+                pane_id=pane_id,
+                name=name,
+                formatted=formatted,
+            )
+        except Exception as e:
+            logger.exception("CreateControlPane failed")
+            return tool_service_pb2.CreateControlPaneResponse(success=False, error=str(e))
+
+    async def UpdateControlPane(
+        self,
+        request: tool_service_pb2.UpdateControlPaneRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.UpdateControlPaneResponse:
+        """Update a control pane (partial update)."""
+        try:
+            from services.database_manager.database_helpers import fetch_one, execute
+            user_id = request.user_id or "system"
+            pane_id = request.pane_id or ""
+            if not pane_id:
+                return tool_service_pb2.UpdateControlPaneResponse(
+                    success=False, error="pane_id required"
+                )
+            existing = await fetch_one(
+                "SELECT id FROM user_control_panes WHERE id = $1 AND user_id = $2",
+                pane_id,
+                user_id,
+            )
+            if not existing:
+                return tool_service_pb2.UpdateControlPaneResponse(
+                    success=False, error="Control pane not found"
+                )
+            if request.HasField("connector_id") and request.connector_id:
+                conn = await fetch_one(
+                    "SELECT id FROM data_source_connectors WHERE id = $1 AND (user_id = $2 OR is_template = true)",
+                    request.connector_id,
+                    user_id,
+                )
+                if not conn:
+                    return tool_service_pb2.UpdateControlPaneResponse(
+                        success=False, error="Connector not found"
+                    )
+            updates = []
+            args = []
+            idx = 1
+            if request.HasField("name"):
+                updates.append(f"name = ${idx}")
+                args.append(request.name)
+                idx += 1
+            if request.HasField("icon"):
+                updates.append(f"icon = ${idx}")
+                args.append(request.icon)
+                idx += 1
+            if request.HasField("connector_id"):
+                updates.append(f"connector_id = ${idx}::uuid")
+                args.append(request.connector_id)
+                idx += 1
+            if request.HasField("credentials_encrypted_json"):
+                updates.append(f"credentials_encrypted = ${idx}::jsonb")
+                args.append(request.credentials_encrypted_json)
+                idx += 1
+            if request.HasField("connection_id"):
+                updates.append(f"connection_id = ${idx}")
+                args.append(request.connection_id)
+                idx += 1
+            if request.HasField("controls_json"):
+                updates.append(f"controls = ${idx}::jsonb")
+                args.append(request.controls_json)
+                idx += 1
+            if request.HasField("is_visible"):
+                updates.append(f"is_visible = ${idx}")
+                args.append(request.is_visible)
+                idx += 1
+            if request.HasField("sort_order"):
+                updates.append(f"sort_order = ${idx}")
+                args.append(request.sort_order)
+                idx += 1
+            if request.HasField("refresh_interval"):
+                updates.append(f"refresh_interval = ${idx}")
+                args.append(request.refresh_interval)
+                idx += 1
+            if not updates:
+                try:
+                    from utils.websocket_manager import get_websocket_manager
+                    ws_manager = get_websocket_manager()
+                    if ws_manager:
+                        await ws_manager.send_to_session(
+                            {"type": "control_pane_updated", "subtype": "pane_updated", "pane_id": pane_id},
+                            user_id,
+                        )
+                except Exception as ws_err:
+                    logger.warning("UpdateControlPane WebSocket send failed: %s", ws_err)
+                return tool_service_pb2.UpdateControlPaneResponse(
+                    success=True, formatted="No updates applied"
+                )
+            updates.append("updated_at = NOW()")
+            args.extend([pane_id, user_id])
+            await execute(
+                f"UPDATE user_control_panes SET {', '.join(updates)} WHERE id = ${idx}::uuid AND user_id = ${idx + 1}",
+                *args,
+            )
+            try:
+                from utils.websocket_manager import get_websocket_manager
+                ws_manager = get_websocket_manager()
+                if ws_manager:
+                    await ws_manager.send_to_session(
+                        {"type": "control_pane_updated", "subtype": "pane_updated", "pane_id": pane_id},
+                        user_id,
+                    )
+            except Exception as ws_err:
+                logger.warning("UpdateControlPane WebSocket send failed: %s", ws_err)
+            return tool_service_pb2.UpdateControlPaneResponse(
+                success=True,
+                formatted=f"Updated control pane {pane_id}",
+            )
+        except Exception as e:
+            logger.exception("UpdateControlPane failed")
+            return tool_service_pb2.UpdateControlPaneResponse(success=False, error=str(e))
+
+    async def DeleteControlPane(
+        self,
+        request: tool_service_pb2.DeleteControlPaneRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.DeleteControlPaneResponse:
+        """Delete a control pane."""
+        try:
+            from services.database_manager.database_helpers import execute
+            user_id = request.user_id or "system"
+            pane_id = request.pane_id or ""
+            if not pane_id:
+                return tool_service_pb2.DeleteControlPaneResponse(
+                    success=False, error="pane_id required"
+                )
+            await execute(
+                "DELETE FROM user_control_panes WHERE id = $1::uuid AND user_id = $2",
+                pane_id,
+                user_id,
+            )
+            try:
+                from utils.websocket_manager import get_websocket_manager
+                ws_manager = get_websocket_manager()
+                if ws_manager:
+                    await ws_manager.send_to_session(
+                        {"type": "control_pane_updated", "subtype": "pane_deleted", "pane_id": pane_id},
+                        user_id,
+                    )
+            except Exception as ws_err:
+                logger.warning("DeleteControlPane WebSocket send failed: %s", ws_err)
+            return tool_service_pb2.DeleteControlPaneResponse(
+                success=True,
+                formatted=f"Deleted control pane {pane_id}",
+            )
+        except Exception as e:
+            logger.exception("DeleteControlPane failed")
+            return tool_service_pb2.DeleteControlPaneResponse(success=False, error=str(e))
+
+    async def ExecuteControlPaneAction(
+        self,
+        request: tool_service_pb2.ExecuteControlPaneActionRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ExecuteControlPaneActionResponse:
+        """Execute a connector endpoint through a saved control pane (same as REST execute)."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+            from clients.connections_service_client import get_connections_service_client
+
+            user_id = request.user_id or "system"
+            pane_id = request.pane_id or ""
+            endpoint_id = request.endpoint_id or ""
+            if not pane_id or not endpoint_id:
+                return tool_service_pb2.ExecuteControlPaneActionResponse(
+                    success=False,
+                    error="pane_id and endpoint_id required",
+                )
+
+            pane = await fetch_one(
+                "SELECT id, connector_id, credentials_encrypted, connection_id FROM user_control_panes WHERE id = $1 AND user_id = $2",
+                pane_id,
+                user_id,
+            )
+            if not pane:
+                return tool_service_pb2.ExecuteControlPaneActionResponse(
+                    success=False,
+                    error="Control pane not found",
+                )
+
+            connector = await fetch_one(
+                "SELECT id, definition, connector_type FROM data_source_connectors WHERE id = $1",
+                pane["connector_id"],
+            )
+            if not connector:
+                return tool_service_pb2.ExecuteControlPaneActionResponse(
+                    success=False,
+                    error="Connector not found",
+                )
+
+            definition = connector.get("definition") or {}
+            if isinstance(definition, str):
+                try:
+                    definition = json.loads(definition)
+                except json.JSONDecodeError:
+                    return tool_service_pb2.ExecuteControlPaneActionResponse(
+                        success=False,
+                        error="Invalid connector definition",
+                    )
+
+            credentials = pane.get("credentials_encrypted") or {}
+            if isinstance(credentials, str):
+                try:
+                    credentials = json.loads(credentials)
+                except json.JSONDecodeError:
+                    credentials = {}
+            if not isinstance(credentials, dict):
+                credentials = {}
+
+            oauth_token = None
+            connection_id = pane.get("connection_id")
+            if connection_id is not None:
+                from services.external_connections_service import external_connections_service
+                oauth_token = await external_connections_service.get_valid_access_token(
+                    connection_id,
+                    rls_context={"user_id": user_id},
+                )
+                if not oauth_token:
+                    return tool_service_pb2.ExecuteControlPaneActionResponse(
+                        success=False,
+                        error="Could not obtain token for the selected connection",
+                    )
+
+            params = {}
+            if request.params_json:
+                try:
+                    params = json.loads(request.params_json)
+                except json.JSONDecodeError:
+                    return tool_service_pb2.ExecuteControlPaneActionResponse(
+                        success=False,
+                        error="Invalid params_json",
+                    )
+
+            client = await get_connections_service_client()
+            result = await client.execute_connector_endpoint(
+                definition=definition,
+                credentials=credentials,
+                endpoint_id=endpoint_id,
+                params=params,
+                max_pages=1,
+                oauth_token=oauth_token,
+                raw_response=True,
+                connector_type=connector.get("connector_type"),
+            )
+
+            if result.get("error"):
+                return tool_service_pb2.ExecuteControlPaneActionResponse(
+                    success=False,
+                    raw_response_json="{}",
+                    records_json="[]",
+                    count=0,
+                    formatted=result.get("error", ""),
+                    error=result.get("error"),
+                )
+
+            records = result.get("records", [])
+            raw_response = result.get("raw_response")
+            formatted = result.get("formatted", "")
+
+            return tool_service_pb2.ExecuteControlPaneActionResponse(
+                success=True,
+                raw_response_json=json.dumps(raw_response) if raw_response is not None else "{}",
+                records_json=json.dumps(records),
+                count=len(records),
+                formatted=formatted,
+            )
+        except json.JSONDecodeError as e:
+            return tool_service_pb2.ExecuteControlPaneActionResponse(
+                success=False,
+                error=f"Invalid JSON: {e}",
+            )
+        except Exception as e:
+            logger.exception("ExecuteControlPaneAction failed")
+            return tool_service_pb2.ExecuteControlPaneActionResponse(success=False, error=str(e))
+
+    # ===== Agent Factory meta-tools =====
+
+    async def CreateAgentProfile(
+        self,
+        request: tool_service_pb2.CreateAgentProfileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreateAgentProfileResponse:
+        """Create an agent profile via Agent Factory service."""
+        try:
+            from services import agent_factory_service
+            user_id = request.user_id or "system"
+            data = {
+                "name": request.name or "",
+                "handle": request.handle or "",
+                "description": request.description if request.description else None,
+                "model_preference": request.model_preference if request.model_preference else None,
+                "system_prompt_additions": request.system_prompt_additions if request.system_prompt_additions else None,
+                "persona_mode": "default" if (request.persona_enabled if request.HasField("persona_enabled") else False) else "none",
+                "persona_id": None,
+                "include_user_context": False,
+                "include_user_facts": False,
+                "include_facts_categories": [],
+                "auto_routable": request.auto_routable if request.HasField("auto_routable") else False,
+                "prompt_history_enabled": request.chat_history_enabled if request.HasField("chat_history_enabled") else False,
+                "chat_visible": request.chat_visible if request.HasField("chat_visible") else True,
+                "is_active": request.is_active if request.HasField("is_active") else False,
+            }
+            profile = await agent_factory_service.create_profile(user_id, data)
+            h = profile.get("handle") or ""
+            formatted = f"Created agent profile: {profile.get('name', '')} ({'@' + h if h else 'schedule/Run-only'}) — ID: {profile.get('id', '')}"
+            try:
+                from utils.websocket_manager import get_websocket_manager
+                ws_manager = get_websocket_manager()
+                if ws_manager:
+                    await ws_manager.send_to_session(
+                        {
+                            "type": "agent_factory_updated",
+                            "subtype": "profile_created",
+                            "agent_id": profile.get("id", ""),
+                        },
+                        user_id,
+                    )
+            except Exception as ws_err:
+                logger.warning("CreateAgentProfile WebSocket send failed: %s", ws_err)
+            return tool_service_pb2.CreateAgentProfileResponse(
+                success=True,
+                agent_id=profile.get("id", ""),
+                name=profile.get("name", ""),
+                handle=profile.get("handle", ""),
+                formatted=formatted,
+            )
+        except ValueError as e:
+            return tool_service_pb2.CreateAgentProfileResponse(
+                success=False, agent_id="", name="", handle="", formatted="", error=str(e)
+            )
+        except Exception as e:
+            logger.exception("CreateAgentProfile failed")
+            return tool_service_pb2.CreateAgentProfileResponse(
+                success=False, agent_id="", name="", handle="", formatted="", error=str(e)
+            )
+
+    async def SetAgentProfileStatus(
+        self,
+        request: tool_service_pb2.SetAgentProfileStatusRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.SetAgentProfileStatusResponse:
+        """Update an agent profile's is_active (pause or activate). Separate capability from creating agents."""
+        try:
+            from services import agent_factory_service
+            user_id = request.user_id or "system"
+            await agent_factory_service.update_profile(
+                user_id,
+                request.agent_id,
+                {"is_active": request.is_active},
+            )
+            status = "active" if request.is_active else "paused"
+            formatted = f"Agent profile {request.agent_id} set to {status}."
+            return tool_service_pb2.SetAgentProfileStatusResponse(
+                success=True,
+                is_active=request.is_active,
+                formatted=formatted,
+            )
+        except ValueError as e:
+            return tool_service_pb2.SetAgentProfileStatusResponse(
+                success=False, is_active=False, formatted="", error=str(e)
+            )
+        except Exception as e:
+            logger.exception("SetAgentProfileStatus failed")
+            return tool_service_pb2.SetAgentProfileStatusResponse(
+                success=False, is_active=False, formatted="", error=str(e)
+            )
+
+    async def CreatePlaybook(
+        self,
+        request: tool_service_pb2.CreatePlaybookRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreatePlaybookResponse:
+        """Create a custom playbook via Agent Factory service."""
+        try:
+            from services import agent_factory_service
+            user_id = request.user_id or "system"
+            definition = {}
+            if request.definition_json:
+                try:
+                    definition = json.loads(request.definition_json)
+                except json.JSONDecodeError:
+                    return tool_service_pb2.CreatePlaybookResponse(
+                        success=False, playbook_id="", name="", step_count=0,
+                        formatted="", error="Invalid definition_json"
+                    )
+            if request.run_context:
+                definition["run_context"] = request.run_context
+            data = {
+                "name": request.name or "Unnamed",
+                "description": request.description if request.description else None,
+                "definition": definition,
+                "category": request.category if request.category else None,
+                "tags": list(request.tags) if request.tags else [],
+            }
+            warnings = agent_factory_service.validate_playbook_definition(definition)
+            playbook = await agent_factory_service.create_playbook(user_id, data)
+            steps = (playbook.get("definition") or {}).get("steps") or []
+            step_count = len(steps) if isinstance(steps, list) else 0
+            formatted = f"Created playbook: {playbook.get('name', '')} ({step_count} steps) — ID: {playbook.get('id', '')}"
+            if warnings:
+                formatted += "\nValidation warnings: " + "; ".join(warnings[:5])
+            try:
+                from utils.websocket_manager import get_websocket_manager
+                ws_manager = get_websocket_manager()
+                if ws_manager:
+                    await ws_manager.send_to_session(
+                        {"type": "agent_factory_updated", "subtype": "playbook_created", "playbook_id": playbook.get("id", "")},
+                        user_id,
+                    )
+            except Exception as ws_err:
+                logger.warning("CreatePlaybook WebSocket send failed: %s", ws_err)
+            try:
+                from utils.websocket_manager import get_websocket_manager
+                ws = get_websocket_manager()
+                if ws:
+                    await ws.send_to_session(
+                        {"type": "agent_factory_updated", "subtype": "playbook_created", "playbook_id": playbook.get("id", "")},
+                        user_id,
+                    )
+            except Exception as ws_err:
+                logger.warning("CreatePlaybook WebSocket send failed: %s", ws_err)
+            return tool_service_pb2.CreatePlaybookResponse(
+                success=True,
+                playbook_id=playbook.get("id", ""),
+                name=playbook.get("name", ""),
+                step_count=step_count,
+                validation_warnings=warnings,
+                formatted=formatted,
+            )
+        except Exception as e:
+            logger.exception("CreatePlaybook failed")
+            return tool_service_pb2.CreatePlaybookResponse(
+                success=False, playbook_id="", name="", step_count=0,
+                formatted="", error=str(e)
+            )
+
+    async def AssignPlaybookToAgent(
+        self,
+        request: tool_service_pb2.AssignPlaybookToAgentRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.AssignPlaybookToAgentResponse:
+        """Assign a playbook to an agent profile (set default_playbook_id)."""
+        try:
+            from services import agent_factory_service
+            user_id = request.user_id or "system"
+            await agent_factory_service.update_profile(
+                user_id,
+                request.agent_id,
+                {"default_playbook_id": request.playbook_id},
+            )
+            formatted = f"Assigned playbook {request.playbook_id} to agent {request.agent_id}."
+            return tool_service_pb2.AssignPlaybookToAgentResponse(
+                success=True,
+                formatted=formatted,
+            )
+        except ValueError as e:
+            return tool_service_pb2.AssignPlaybookToAgentResponse(
+                success=False, formatted="", error=str(e)
+            )
+        except Exception as e:
+            logger.exception("AssignPlaybookToAgent failed")
+            return tool_service_pb2.AssignPlaybookToAgentResponse(
+                success=False, formatted="", error=str(e)
+            )
+
+    async def CreateAgentSchedule(
+        self,
+        request: tool_service_pb2.CreateAgentScheduleRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreateAgentScheduleResponse:
+        """Create a schedule for an agent profile."""
+        try:
+            from services import agent_factory_service
+            user_id = request.user_id or "system"
+            data = {
+                "schedule_type": request.schedule_type or "cron",
+                "cron_expression": request.cron_expression if request.cron_expression else None,
+                "interval_seconds": request.interval_seconds if request.interval_seconds else None,
+                "timezone": request.timezone if request.timezone else "UTC",
+                "is_active": request.is_active if request.HasField("is_active") else False,
+                "input_context": {},
+            }
+            if request.input_context_json:
+                try:
+                    data["input_context"] = json.loads(request.input_context_json)
+                except json.JSONDecodeError:
+                    pass
+            schedule = await agent_factory_service.create_schedule(
+                user_id,
+                request.agent_id,
+                data,
+            )
+            next_run = schedule.get("next_run_at") or ""
+            is_active = schedule.get("is_active", False)
+            formatted = f"Created schedule for agent {request.agent_id} — next run: {next_run}, active: {is_active}"
+            return tool_service_pb2.CreateAgentScheduleResponse(
+                success=True,
+                schedule_id=schedule.get("id", ""),
+                next_run_at=next_run,
+                is_active=is_active,
+                formatted=formatted,
+            )
+        except ValueError as e:
+            return tool_service_pb2.CreateAgentScheduleResponse(
+                success=False, schedule_id="", next_run_at="", is_active=False,
+                formatted="", error=str(e)
+            )
+        except Exception as e:
+            logger.exception("CreateAgentSchedule failed")
+            return tool_service_pb2.CreateAgentScheduleResponse(
+                success=False, schedule_id="", next_run_at="", is_active=False,
+                formatted="", error=str(e)
+            )
+
+    async def BindDataSourceToAgent(
+        self,
+        request: tool_service_pb2.BindDataSourceToAgentRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.BindDataSourceToAgentResponse:
+        """Bind a data source connector to an agent profile."""
+        try:
+            from services import agent_factory_service
+            user_id = request.user_id or "system"
+            data = {
+                "connector_id": request.connector_id,
+                "config_overrides": {},
+                "permissions": {},
+                "is_enabled": True,
+            }
+            if request.config_overrides_json:
+                try:
+                    data["config_overrides"] = json.loads(request.config_overrides_json)
+                except json.JSONDecodeError:
+                    pass
+            if request.permissions_json:
+                try:
+                    data["permissions"] = json.loads(request.permissions_json)
+                except json.JSONDecodeError:
+                    pass
+            binding = await agent_factory_service.create_data_source_binding(
+                user_id,
+                request.agent_id,
+                data,
+            )
+            formatted = f"Bound connector {request.connector_id} to agent {request.agent_id} — binding ID: {binding.get('id', '')}"
+            return tool_service_pb2.BindDataSourceToAgentResponse(
+                success=True,
+                binding_id=binding.get("id", ""),
+                formatted=formatted,
+            )
+        except ValueError as e:
+            return tool_service_pb2.BindDataSourceToAgentResponse(
+                success=False, binding_id="", formatted="", error=str(e)
+            )
+        except Exception as e:
+            logger.exception("BindDataSourceToAgent failed")
+            return tool_service_pb2.BindDataSourceToAgentResponse(
+                success=False, binding_id="", formatted="", error=str(e)
+            )
+
+    async def ListAvailableLlmModels(
+        self,
+        request: tool_service_pb2.ListAvailableLlmModelsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ListAvailableLlmModelsResponse:
+        """Return the list of LLM models available to the user (for Agent Factory model_preference)."""
+        try:
+            from services.model_source_resolver import get_available_models as resolver_get_available_models
+            user_id = request.user_id or "system"
+            models = await resolver_get_available_models(user_id)
+            proto_models = []
+            for m in models:
+                mid = getattr(m, "id", None) or (m.get("id") if isinstance(m, dict) else None) or ""
+                name = getattr(m, "name", None) or (m.get("name") if isinstance(m, dict) else None) or mid
+                prov = getattr(m, "provider", None) or (m.get("provider") if isinstance(m, dict) else "") or ""
+                proto_models.append(
+                    tool_service_pb2.LlmModelInfo(
+                        model_id=str(mid),
+                        display_name=str(name),
+                        provider=str(prov),
+                    )
+                )
+            lines = [f"Available models ({len(models)}):"] if models else ["No models configured for this user."]
+            for m in models:
+                mid = getattr(m, "id", None) or (m.get("id") if isinstance(m, dict) else None)
+                name = getattr(m, "name", None) or (m.get("name") if isinstance(m, dict) else None)
+                prov = getattr(m, "provider", None) or (m.get("provider") if isinstance(m, dict) else "")
+                lines.append(f"- {mid} ({name or mid}) [{prov}]")
+            formatted = "\n".join(lines)
+            return tool_service_pb2.ListAvailableLlmModelsResponse(
+                success=True,
+                models=proto_models,
+                formatted=formatted,
+            )
+        except Exception as e:
+            logger.exception("ListAvailableLlmModels failed")
+            return tool_service_pb2.ListAvailableLlmModelsResponse(
+                success=False,
+                models=[],
+                formatted="",
+                error=str(e),
+            )
+
+    async def UpdateAgentProfile(
+        self,
+        request: tool_service_pb2.UpdateAgentProfileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.UpdateAgentProfileResponse:
+        """Update an agent profile. Lock enforced in service (only is_active/is_locked when locked)."""
+        try:
+            from services import agent_factory_service
+            from utils.websocket_manager import get_websocket_manager
+
+            user_id = request.user_id or "system"
+            agent_id = (request.agent_id or "").strip()
+            if not agent_id:
+                return tool_service_pb2.UpdateAgentProfileResponse(
+                    success=False, agent_id="", name="", formatted="", error="agent_id required"
+                )
+            updates = {}
+            if request.updates_json:
+                try:
+                    updates = json.loads(request.updates_json)
+                except json.JSONDecodeError:
+                    return tool_service_pb2.UpdateAgentProfileResponse(
+                        success=False, agent_id=agent_id, name="", formatted="", error="Invalid updates_json"
+                    )
+            if not isinstance(updates, dict):
+                return tool_service_pb2.UpdateAgentProfileResponse(
+                    success=False, agent_id=agent_id, name="", formatted="", error="updates_json must be a JSON object"
+                )
+            profile = await agent_factory_service.update_profile(user_id, agent_id, updates)
+            formatted = f"Updated agent profile: {profile.get('name', '')} (ID: {agent_id})"
+            try:
+                ws_manager = get_websocket_manager()
+                if ws_manager:
+                    await ws_manager.send_to_session(
+                        {"type": "agent_factory_updated", "subtype": "profile_updated", "agent_id": agent_id},
+                        user_id,
+                    )
+            except Exception as ws_err:
+                logger.warning("UpdateAgentProfile WebSocket send failed: %s", ws_err)
+            return tool_service_pb2.UpdateAgentProfileResponse(
+                success=True,
+                agent_id=agent_id,
+                name=profile.get("name", ""),
+                formatted=formatted,
+            )
+        except ValueError as e:
+            return tool_service_pb2.UpdateAgentProfileResponse(
+                success=False, agent_id=request.agent_id or "", name="", formatted="", error=str(e)
+            )
+        except Exception as e:
+            logger.exception("UpdateAgentProfile failed")
+            return tool_service_pb2.UpdateAgentProfileResponse(
+                success=False, agent_id=request.agent_id or "", name="", formatted="", error=str(e)
+            )
+
+    async def DeleteAgentProfile(
+        self,
+        request: tool_service_pb2.DeleteAgentProfileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.DeleteAgentProfileResponse:
+        """Delete an agent profile. Blocked when profile is locked."""
+        try:
+            from services.database_manager.database_helpers import fetch_one, execute
+            from utils.websocket_manager import get_websocket_manager
+
+            user_id = request.user_id or "system"
+            agent_id = (request.agent_id or "").strip()
+            if not agent_id:
+                return tool_service_pb2.DeleteAgentProfileResponse(
+                    success=False, formatted="", error="agent_id required"
+                )
+            row = await fetch_one(
+                "SELECT id, is_locked FROM agent_profiles WHERE id = $1 AND user_id = $2",
+                agent_id,
+                user_id,
+            )
+            if not row:
+                return tool_service_pb2.DeleteAgentProfileResponse(
+                    success=False, formatted="", error="Profile not found"
+                )
+            if row.get("is_locked"):
+                return tool_service_pb2.DeleteAgentProfileResponse(
+                    success=False, formatted="", error="Profile is locked; unlock to delete"
+                )
+            await execute("DELETE FROM agent_profiles WHERE id = $1 AND user_id = $2", agent_id, user_id)
+            formatted = f"Deleted agent profile {agent_id}."
+            try:
+                ws_manager = get_websocket_manager()
+                if ws_manager:
+                    await ws_manager.send_to_session(
+                        {"type": "agent_factory_updated", "subtype": "profile_deleted", "agent_id": agent_id},
+                        user_id,
+                    )
+            except Exception as ws_err:
+                logger.warning("DeleteAgentProfile WebSocket send failed: %s", ws_err)
+            return tool_service_pb2.DeleteAgentProfileResponse(success=True, formatted=formatted)
+        except Exception as e:
+            logger.exception("DeleteAgentProfile failed")
+            return tool_service_pb2.DeleteAgentProfileResponse(success=False, formatted="", error=str(e))
+
+    async def UpdatePlaybook(
+        self,
+        request: tool_service_pb2.UpdatePlaybookRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.UpdatePlaybookResponse:
+        """Update a playbook. Lock: only is_locked toggle allowed when locked. Templates are read-only."""
+        try:
+            import uuid
+            from services import agent_factory_service
+            from services.database_manager.database_helpers import fetch_one, execute
+            from utils.websocket_manager import get_websocket_manager
+
+            user_id = request.user_id or "system"
+            playbook_id = (request.playbook_id or "").strip()
+            if not playbook_id:
+                return tool_service_pb2.UpdatePlaybookResponse(
+                    success=False, playbook_id="", name="", step_count=0,
+                    validation_warnings=[], formatted="", error="playbook_id required"
+                )
+            # If identifier is not a UUID, resolve by playbook name or slug (e.g. "morning-intelligence-briefing")
+            try:
+                uuid.UUID(playbook_id)
+            except (ValueError, TypeError):
+                slug_normalized = playbook_id.replace("_", "-").lower()
+                resolved = await fetch_one(
+                    """SELECT id FROM custom_playbooks
+                       WHERE user_id = $1 AND (
+                         name = $2
+                         OR LOWER(REGEXP_REPLACE(TRIM(name), '\\s+', '-')) = $3
+                       )
+                       LIMIT 1""",
+                    user_id,
+                    playbook_id,
+                    slug_normalized,
+                )
+                if not resolved:
+                    return tool_service_pb2.UpdatePlaybookResponse(
+                        success=False, playbook_id=playbook_id, name="", step_count=0,
+                        validation_warnings=[], formatted="", error="Playbook not found"
+                    )
+                playbook_id = str(resolved["id"])
+            row = await fetch_one(
+                "SELECT * FROM custom_playbooks WHERE id = $1 AND user_id = $2",
+                playbook_id,
+                user_id,
+            )
+            if not row:
+                return tool_service_pb2.UpdatePlaybookResponse(
+                    success=False, playbook_id=playbook_id, name="", step_count=0,
+                    validation_warnings=[], formatted="", error="Playbook not found"
+                )
+            if row.get("is_template"):
+                return tool_service_pb2.UpdatePlaybookResponse(
+                    success=False, playbook_id=playbook_id, name="", step_count=0,
+                    validation_warnings=[], formatted="", error="Cannot update template playbook"
+                )
+            updates = {}
+            if request.updates_json:
+                try:
+                    updates = json.loads(request.updates_json)
+                except json.JSONDecodeError:
+                    return tool_service_pb2.UpdatePlaybookResponse(
+                        success=False, playbook_id=playbook_id, name="", step_count=0,
+                        validation_warnings=[], formatted="", error="Invalid updates_json"
+                    )
+            if not isinstance(updates, dict):
+                return tool_service_pb2.UpdatePlaybookResponse(
+                    success=False, playbook_id=playbook_id, name="", step_count=0,
+                    validation_warnings=[], formatted="", error="updates_json must be a JSON object"
+                )
+            allowed_keys = {"name", "description", "version", "definition", "triggers", "is_template", "category", "tags", "required_connectors", "is_locked"}
+            updates = {k: v for k, v in updates.items() if k in allowed_keys}
+            if not updates:
+                pb = agent_factory_service._row_to_playbook(row)
+                step_count = len((pb.get("definition") or {}).get("steps") or [])
+                return tool_service_pb2.UpdatePlaybookResponse(
+                    success=True,
+                    playbook_id=playbook_id,
+                    name=pb.get("name", ""),
+                    step_count=step_count,
+                    formatted=f"Playbook unchanged: {pb.get('name', '')} (ID: {playbook_id})",
+                )
+            if row.get("is_locked") and set(updates.keys()) != {"is_locked"}:
+                return tool_service_pb2.UpdatePlaybookResponse(
+                    success=False, playbook_id=playbook_id, name="", step_count=0,
+                    validation_warnings=[], formatted="", error="Playbook is locked; only lock toggle is allowed"
+                )
+            playbook_remediation_msgs: list = []
+            playbook_remediation_steps: list = []
+            if "definition" in updates:
+                defn = updates["definition"]
+                old_def = row.get("definition")
+                if isinstance(old_def, str):
+                    try:
+                        old_def = json.loads(old_def) if old_def else {}
+                    except (json.JSONDecodeError, TypeError):
+                        old_def = {}
+                if not isinstance(old_def, dict):
+                    old_def = {}
+                if isinstance(defn, dict) and defn.get("steps") and old_def:
+                    agent_factory_service.merge_playbook_definition_steps(old_def, defn)
+                if isinstance(defn, dict):
+                    defn, playbook_remediation_steps, playbook_remediation_msgs = (
+                        await agent_factory_service.validate_and_remediate_playbook_models_for_user(
+                            user_id, defn
+                        )
+                    )
+                    updates["definition"] = defn
+            warnings = []
+            if "definition" in updates:
+                warnings = agent_factory_service.validate_playbook_definition(updates.get("definition") or {})
+            set_clauses = []
+            args = []
+            idx = 1
+            jsonb_fields = ("definition", "triggers")
+            array_fields = ("tags", "required_connectors")
+            for k, v in updates.items():
+                if k in jsonb_fields:
+                    set_clauses.append(f"{k} = ${idx}::jsonb")
+                    args.append(json.dumps(v) if isinstance(v, (dict, list)) else v)
+                elif k in array_fields:
+                    set_clauses.append(f"{k} = ${idx}")
+                    args.append(v)
+                else:
+                    set_clauses.append(f"{k} = ${idx}")
+                    args.append(v)
+                idx += 1
+            set_clauses.append("updated_at = NOW()")
+            args.extend([playbook_id, user_id])
+            await execute(
+                f"UPDATE custom_playbooks SET {', '.join(set_clauses)} WHERE id = ${idx}::uuid AND user_id = ${idx + 1}",
+                *args,
+            )
+            row = await fetch_one("SELECT * FROM custom_playbooks WHERE id = $1", playbook_id)
+            pb = agent_factory_service._row_to_playbook(row)
+            step_count = len((pb.get("definition") or {}).get("steps") or [])
+            formatted = f"Updated playbook: {pb.get('name', '')} ({step_count} steps) — ID: {playbook_id}"
+            if warnings:
+                formatted += "\nValidation warnings: " + "; ".join(warnings[:5])
+            if playbook_remediation_msgs:
+                await agent_factory_service.notify_playbook_model_remediation(
+                    user_id, playbook_id, playbook_remediation_steps, playbook_remediation_msgs
+                )
+            try:
+                ws_manager = get_websocket_manager()
+                if ws_manager:
+                    await ws_manager.send_to_session(
+                        {"type": "agent_factory_updated", "subtype": "playbook_updated", "playbook_id": playbook_id},
+                        user_id,
+                    )
+            except Exception as ws_err:
+                logger.warning("UpdatePlaybook WebSocket send failed: %s", ws_err)
+            return tool_service_pb2.UpdatePlaybookResponse(
+                success=True,
+                playbook_id=playbook_id,
+                name=pb.get("name", ""),
+                step_count=step_count,
+                validation_warnings=warnings[:10],
+                formatted=formatted,
+            )
+        except Exception as e:
+            logger.exception("UpdatePlaybook failed")
+            return tool_service_pb2.UpdatePlaybookResponse(
+                success=False, playbook_id=request.playbook_id or "", name="", step_count=0,
+                validation_warnings=[], formatted="", error=str(e)
+            )
+
+    async def DeletePlaybook(
+        self,
+        request: tool_service_pb2.DeletePlaybookRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.DeletePlaybookResponse:
+        """Delete a playbook. Blocked when locked or when playbook is a template."""
+        try:
+            import uuid
+            from services.database_manager.database_helpers import fetch_one, execute
+            from utils.websocket_manager import get_websocket_manager
+
+            user_id = request.user_id or "system"
+            playbook_id = (request.playbook_id or "").strip()
+            if not playbook_id:
+                return tool_service_pb2.DeletePlaybookResponse(success=False, formatted="", error="playbook_id required")
+            # If identifier is not a UUID, resolve by playbook name or slug
+            try:
+                uuid.UUID(playbook_id)
+            except (ValueError, TypeError):
+                slug_normalized = playbook_id.replace("_", "-").lower()
+                resolved = await fetch_one(
+                    """SELECT id FROM custom_playbooks
+                       WHERE user_id = $1 AND (
+                         name = $2
+                         OR LOWER(REGEXP_REPLACE(TRIM(name), '\\s+', '-')) = $3
+                       )
+                       LIMIT 1""",
+                    user_id,
+                    playbook_id,
+                    slug_normalized,
+                )
+                if not resolved:
+                    return tool_service_pb2.DeletePlaybookResponse(
+                        success=False, formatted="", error="Playbook not found"
+                    )
+                playbook_id = str(resolved["id"])
+            row = await fetch_one(
+                "SELECT id, is_template, is_locked FROM custom_playbooks WHERE id = $1 AND user_id = $2",
+                playbook_id,
+                user_id,
+            )
+            if not row:
+                return tool_service_pb2.DeletePlaybookResponse(
+                    success=False, formatted="", error="Playbook not found"
+                )
+            if row.get("is_template"):
+                return tool_service_pb2.DeletePlaybookResponse(
+                    success=False, formatted="", error="Cannot delete template playbook"
+                )
+            if row.get("is_locked"):
+                return tool_service_pb2.DeletePlaybookResponse(
+                    success=False, formatted="", error="Playbook is locked; unlock to delete"
+                )
+            await execute("DELETE FROM custom_playbooks WHERE id = $1 AND user_id = $2", playbook_id, user_id)
+            formatted = f"Deleted playbook {playbook_id}."
+            try:
+                ws_manager = get_websocket_manager()
+                if ws_manager:
+                    await ws_manager.send_to_session(
+                        {"type": "agent_factory_updated", "subtype": "playbook_deleted", "playbook_id": playbook_id},
+                        user_id,
+                    )
+            except Exception as ws_err:
+                logger.warning("DeletePlaybook WebSocket send failed: %s", ws_err)
+            return tool_service_pb2.DeletePlaybookResponse(success=True, formatted=formatted)
+        except Exception as e:
+            logger.exception("DeletePlaybook failed")
+            return tool_service_pb2.DeletePlaybookResponse(success=False, formatted="", error=str(e))
+
+    # ===== Agent-Initiated Notifications =====
+
+    async def SendOutboundMessage(
+        self,
+        request: tool_service_pb2.SendOutboundMessageRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.SendOutboundMessageResponse:
+        """Send a proactive outbound message via a messaging bot (Telegram, Discord)."""
+        try:
+            from clients.connections_service_client import get_connections_service_client
+            client = await get_connections_service_client()
+            result = await client.send_outbound_message(
+                user_id=request.user_id or "system",
+                provider=request.provider or "",
+                connection_id=request.connection_id or "",
+                message=request.message or "",
+                format=request.format or "markdown",
+                recipient_chat_id=getattr(request, "recipient_chat_id", None) or "",
+            )
+            return tool_service_pb2.SendOutboundMessageResponse(
+                success=result.get("success", False),
+                message_id=result.get("message_id", ""),
+                channel=result.get("channel", ""),
+                error=result.get("error", ""),
+            )
+        except Exception as e:
+            logger.error("SendOutboundMessage failed: %s", e)
+            return tool_service_pb2.SendOutboundMessageResponse(
+                success=False, message_id="", channel="", error=str(e)
+            )
+
+    async def CreateAgentConversation(
+        self,
+        request: tool_service_pb2.CreateAgentConversationRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreateAgentConversationResponse:
+        """Create or append to an agent-initiated conversation via backend API (ensures WebSocket events fire)."""
+        import os
+
+        user_id = request.user_id or "system"
+        msg = (request.message or "").strip()
+        if not msg:
+            return tool_service_pb2.CreateAgentConversationResponse(
+                success=False, conversation_id="", message_id="", error="Message is required"
+            )
+
+        backend_url = os.getenv("BACKEND_URL", "http://backend:8000").rstrip("/")
+        internal_key = os.getenv("INTERNAL_SERVICE_KEY", "")
+        if not internal_key:
+            logger.warning("CreateAgentConversation: INTERNAL_SERVICE_KEY not set; backend may reject request")
+
+        payload = {
+            "user_id": user_id,
+            "message": msg,
+            "agent_name": request.agent_name or "",
+            "agent_profile_id": request.agent_profile_id or "",
+            "title": request.title or "",
+            "conversation_id": request.conversation_id or "",
+        }
+        url = f"{backend_url}/api/internal/agent-conversation"
+        headers = {"Content-Type": "application/json"}
+        if internal_key:
+            headers["X-Internal-Service-Key"] = internal_key
+
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code != 200:
+                err = resp.text or f"HTTP {resp.status_code}"
+                logger.error("CreateAgentConversation backend call failed: %s", err)
+                return tool_service_pb2.CreateAgentConversationResponse(
+                    success=False, conversation_id="", message_id="", error=err[:500]
+                )
+            data = resp.json()
+            return tool_service_pb2.CreateAgentConversationResponse(
+                success=True,
+                conversation_id=data.get("conversation_id", ""),
+                message_id=data.get("message_id", ""),
+                error="",
+            )
+        except Exception as e:
+            logger.error("CreateAgentConversation failed: %s", e)
+            return tool_service_pb2.CreateAgentConversationResponse(
+                success=False, conversation_id="", message_id="", error=str(e)[:500]
+            )
+
+    async def CreateAgentMessage(
+        self,
+        request: tool_service_pb2.CreateAgentMessageRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreateAgentMessageResponse:
+        """Create an inter-agent message (team timeline)."""
+        import json
+
+        try:
+            from services import agent_message_service
+
+            user_id = request.user_id or "system"
+            team_id = (request.team_id or "").strip()
+            if not team_id:
+                return tool_service_pb2.CreateAgentMessageResponse(
+                    success=False, message_id="", message_json="", error="team_id is required"
+                )
+            from_agent_id = (request.from_agent_id or "").strip() or None
+            to_agent_id = (request.to_agent_id or "").strip() or None
+            message_type = (request.message_type or "report").strip()
+            content = request.content or ""
+            metadata = {}
+            if request.metadata_json:
+                try:
+                    metadata = json.loads(request.metadata_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            parent_message_id = (request.parent_message_id or "").strip() or None
+
+            msg = await agent_message_service.create_message(
+                line_id=team_id,
+                from_agent_id=from_agent_id,
+                to_agent_id=to_agent_id,
+                message_type=message_type,
+                content=content,
+                metadata=metadata,
+                parent_message_id=parent_message_id,
+                user_id=user_id,
+            )
+            if metadata.get("trigger_dispatch") and to_agent_id and team_id:
+                try:
+                    from services import agent_line_service as _als
+                    from services.celery_tasks.team_heartbeat_tasks import dispatch_worker_for_message
+
+                    _team = await _als.get_line(team_id, user_id)
+                    if not _team or str(_team.get("status") or "").lower() != "active":
+                        logger.info("Skipping dispatch_worker_for_message: line not active")
+                    else:
+                        dispatch_worker_for_message.apply_async(
+                            args=[team_id, user_id, to_agent_id, msg.get("id", ""), from_agent_id or ""],
+                            countdown=2,
+                        )
+                except Exception as _dispatch_err:
+                    logger.warning("Failed to enqueue dispatch_worker_for_message: %s", _dispatch_err)
+            return tool_service_pb2.CreateAgentMessageResponse(
+                success=True,
+                message_id=msg.get("id", ""),
+                message_json=json.dumps(msg),
+                error="",
+            )
+        except Exception as e:
+            logger.exception("CreateAgentMessage failed")
+            return tool_service_pb2.CreateAgentMessageResponse(
+                success=False, message_id="", message_json="", error=str(e)[:500]
+            )
+
+    async def AppendLineAgentChatMessage(
+        self,
+        request: tool_service_pb2.AppendLineAgentChatMessageRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.AppendLineAgentChatMessageResponse:
+        """Persist a line sub-agent assistant turn into the user chat conversation."""
+        import json
+
+        try:
+            from services.conversation_service import ConversationService
+            from services.database_manager.database_helpers import fetch_one
+            from utils.websocket_manager import get_websocket_manager
+
+            user_id = (request.user_id or "system").strip()
+            conversation_id = (request.conversation_id or "").strip()
+            content = (request.content or "").strip()
+            if not conversation_id or not content:
+                return tool_service_pb2.AppendLineAgentChatMessageResponse(
+                    success=False, message_id="", error="conversation_id and content are required"
+                )
+
+            agent_profile_id = (request.agent_profile_id or "").strip()
+            line_id = (request.line_id or "").strip()
+            line_role = (request.line_role or "").strip()
+            if line_id and agent_profile_id and not line_role:
+                try:
+                    row = await fetch_one(
+                        """
+                        SELECT role FROM agent_line_memberships
+                        WHERE line_id = $1::uuid AND agent_profile_id = $2::uuid
+                        LIMIT 1
+                        """,
+                        line_id,
+                        agent_profile_id,
+                    )
+                    if row and row.get("role"):
+                        line_role = str(row["role"])
+                except Exception as role_err:
+                    logger.debug("Line role lookup skipped: %s", role_err)
+
+            extra: Dict[str, Any] = {}
+            if request.metadata_json:
+                try:
+                    extra = json.loads(request.metadata_json)
+                    if not isinstance(extra, dict):
+                        extra = {}
+                except (json.JSONDecodeError, TypeError):
+                    extra = {}
+
+            msg_meta: Dict[str, Any] = {
+                "orchestrator_system": True,
+                "line_dispatch_sub_agent": True,
+                "delegated_agent": (request.agent_display_name or "line_agent").strip() or "line_agent",
+                "agent_profile_id": agent_profile_id or None,
+                "agent_display_name": (request.agent_display_name or "").strip() or None,
+                "line_id": line_id or None,
+                "line_role": line_role or None,
+                "line_agent_handle": (request.line_agent_handle or "").strip() or None,
+                "delegated_by": (request.delegated_by_agent_id or "").strip() or None,
+            }
+            msg_meta.update(extra)
+            msg_meta = {k: v for k, v in msg_meta.items() if v is not None}
+
+            conversation_service = ConversationService()
+            conversation_service.set_current_user(user_id)
+            saved = await conversation_service.add_message(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                role="assistant",
+                content=content,
+                metadata=msg_meta,
+            )
+            mid = ""
+            if saved and isinstance(saved, dict):
+                mid = str(saved.get("message_id") or saved.get("id") or "")
+            try:
+                ws = get_websocket_manager()
+                await ws.send_line_agent_chat_update(
+                    conversation_id,
+                    user_id,
+                    {
+                        "message_id": mid,
+                        "content": content,
+                        "role": "assistant",
+                        "metadata": msg_meta,
+                    },
+                )
+            except Exception as ws_err:
+                logger.warning("AppendLineAgentChatMessage WebSocket push failed: %s", ws_err)
+
+            return tool_service_pb2.AppendLineAgentChatMessageResponse(
+                success=True, message_id=mid, error=""
+            )
+        except Exception as e:
+            logger.exception("AppendLineAgentChatMessage failed")
+            return tool_service_pb2.AppendLineAgentChatMessageResponse(
+                success=False, message_id="", error=str(e)[:500]
+            )
+
+    async def ReadTeamTimeline(
+        self,
+        request: tool_service_pb2.ReadTeamTimelineRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ReadTeamTimelineResponse:
+        """Return recent team timeline messages for agent context."""
+        import json
+        try:
+            from services import agent_message_service
+            user_id = request.user_id or "system"
+            team_id = (request.team_id or "").strip()
+            if not team_id:
+                return tool_service_pb2.ReadTeamTimelineResponse(
+                    success=False, items_json="[]", total=0, error="team_id is required"
+                )
+            limit = max(1, min(100, request.limit or 20))
+            since_hours = request.since_hours or 0
+            since = None
+            if since_hours > 0:
+                from datetime import datetime, timezone, timedelta
+                since = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
+            result = await agent_message_service.get_line_timeline(
+                line_id=team_id,
+                user_id=user_id,
+                limit=limit,
+                offset=0,
+                since=since,
+            )
+            items = result.get("items") or []
+            total = result.get("total") or 0
+            return tool_service_pb2.ReadTeamTimelineResponse(
+                success=True,
+                items_json=json.dumps(items),
+                total=total,
+                error="",
+            )
+        except Exception as e:
+            logger.exception("ReadTeamTimeline failed")
+            return tool_service_pb2.ReadTeamTimelineResponse(
+                success=False, items_json="[]", total=0, error=str(e)[:500]
+            )
+
+    async def ReadAgentMessages(
+        self,
+        request: tool_service_pb2.ReadAgentMessagesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ReadAgentMessagesResponse:
+        """Return messages to/from a specific agent in a team."""
+        import json
+        try:
+            from services import agent_message_service
+            user_id = request.user_id or "system"
+            team_id = (request.team_id or "").strip()
+            agent_profile_id = (request.agent_profile_id or "").strip()
+            if not team_id or not agent_profile_id:
+                return tool_service_pb2.ReadAgentMessagesResponse(
+                    success=False, items_json="[]", total=0, error="team_id and agent_profile_id are required"
+                )
+            limit = max(1, min(100, request.limit or 50))
+            result = await agent_message_service.get_agent_messages(
+                agent_profile_id=agent_profile_id,
+                line_id=team_id,
+                user_id=user_id,
+                limit=limit,
+                offset=0,
+            )
+            items = result.get("items") or []
+            total = result.get("total") or 0
+            return tool_service_pb2.ReadAgentMessagesResponse(
+                success=True,
+                items_json=json.dumps(items),
+                total=total,
+                error="",
+            )
+        except Exception as e:
+            logger.exception("ReadAgentMessages failed")
+            return tool_service_pb2.ReadAgentMessagesResponse(
+                success=False, items_json="[]", total=0, error=str(e)[:500]
+            )
+
+    async def GetTeamStatusBoard(
+        self,
+        request: tool_service_pb2.GetTeamStatusBoardRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetTeamStatusBoardResponse:
+        """Return composed team overview: members with tasks, goals, last activity."""
+        import json
+        try:
+            from datetime import datetime
+            from services import agent_line_service, agent_task_service, agent_goal_service
+            from services.database_manager.database_helpers import fetch_all
+
+            user_id = request.user_id or "system"
+            team_id = (request.team_id or "").strip()
+            if not team_id:
+                return tool_service_pb2.GetTeamStatusBoardResponse(
+                    success=False, board_json="{}", error="team_id is required"
+                )
+            team = await agent_line_service.get_line(team_id, user_id)
+            if not team:
+                return tool_service_pb2.GetTeamStatusBoardResponse(
+                    success=False, board_json="{}", error="Team not found"
+                )
+            members = team.get("members") or []
+            tasks = await agent_task_service.list_line_tasks(team_id, user_id)
+            pending_tasks = [t for t in tasks if t.get("status") not in ("done", "cancelled")]
+            goals_tree = await agent_goal_service.get_goal_tree(team_id, user_id)
+
+            def flatten_goals(nodes, out):
+                for n in nodes or []:
+                    if n.get("status") in ("done", "cancelled"):
+                        continue
+                    out.append(n)
+                    flatten_goals(n.get("children") or [], out)
+
+            goals_flat = []
+            flatten_goals(goals_tree, goals_flat)
+            tasks_by_agent = {}
+            for t in pending_tasks:
+                aid = t.get("assigned_agent_id")
+                if aid:
+                    tasks_by_agent.setdefault(str(aid), []).append(t)
+            goals_by_agent = {}
+            for g in goals_flat:
+                aid = g.get("assigned_agent_id")
+                if aid:
+                    goals_by_agent.setdefault(str(aid), []).append(g)
+
+            member_ids = [m["agent_profile_id"] for m in members if m.get("agent_profile_id")]
+            last_msg_per_agent = {}
+            last_exec_per_agent = {}
+            if member_ids:
+                # agent_messages: line_id = $1, member ids = $2, $3, ...
+                msg_placeholders = ",".join([f"${i+2}" for i in range(len(member_ids))])
+                rows = await fetch_all(
+                    f"""
+                    SELECT DISTINCT ON (from_agent_id) from_agent_id, created_at FROM agent_messages
+                    WHERE line_id = $1 AND from_agent_id IN ({msg_placeholders})
+                    ORDER BY from_agent_id, created_at DESC
+                    """,
+                    team_id,
+                    *member_ids,
+                )
+                for r in rows:
+                    last_msg_per_agent[str(r["from_agent_id"])] = r.get("created_at")
+                # agent_execution_log: only member ids, so use $1, $2, ...
+                exec_placeholders = ",".join([f"${i+1}" for i in range(len(member_ids))])
+                exec_rows = await fetch_all(
+                    f"""
+                    SELECT DISTINCT ON (agent_profile_id) agent_profile_id, started_at FROM agent_execution_log
+                    WHERE agent_profile_id IN ({exec_placeholders})
+                    ORDER BY agent_profile_id, started_at DESC
+                    """,
+                    *member_ids,
+                )
+                for r in exec_rows:
+                    last_exec_per_agent[str(r["agent_profile_id"])] = r.get("started_at")
+
+            membership_id_to_agent = {
+                str(m["id"]): {
+                    "agent_profile_id": str(m["agent_profile_id"]),
+                    "agent_name": m.get("agent_name") or m.get("agent_handle") or "Unknown",
+                    "agent_handle": m.get("agent_handle") or "",
+                }
+                for m in members
+                if m.get("id") and m.get("agent_profile_id")
+            }
+            board_members = []
+            for m in members:
+                aid = m.get("agent_profile_id")
+                if not aid:
+                    continue
+                sid = str(aid)
+                mid = str(m.get("id", ""))
+                direct_reports = [
+                    membership_id_to_agent[str(m2["id"])]
+                    for m2 in members
+                    if str(m2.get("reports_to") or "") == mid
+                ]
+                manager = membership_id_to_agent.get(str(m.get("reports_to") or "")) if m.get("reports_to") else None
+                peers = [
+                    membership_id_to_agent[str(m2["id"])]
+                    for m2 in members
+                    if str(m2.get("reports_to") or "") == str(m.get("reports_to") or "")
+                    and str(m2.get("agent_profile_id")) != sid
+                ]
+                last_task_at = None
+                for t in tasks_by_agent.get(sid, []):
+                    u = t.get("updated_at")
+                    if u:
+                        try:
+                            ut = datetime.fromisoformat(str(u).replace("Z", "+00:00"))
+                            if last_task_at is None or ut > last_task_at:
+                                last_task_at = ut
+                        except (ValueError, TypeError):
+                            pass
+                last_msg_at = last_msg_per_agent.get(sid)
+                last_exec_at = last_exec_per_agent.get(sid)
+                last_activity = None
+                for ts in (last_msg_at, last_task_at, last_exec_at):
+                    if ts:
+                        try:
+                            t = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+                            if last_activity is None or t > last_activity:
+                                last_activity = t
+                        except (ValueError, TypeError):
+                            pass
+                last_activity_at = None
+                if last_activity:
+                    last_activity_at = last_activity.isoformat() if hasattr(last_activity, "isoformat") else str(last_activity)
+                board_members.append({
+                    "agent_profile_id": sid,
+                    "agent_name": m.get("agent_name") or m.get("agent_handle") or "Unknown",
+                    "agent_handle": m.get("agent_handle") or "",
+                    "role": m.get("role") or "worker",
+                    "tasks": tasks_by_agent.get(sid, []),
+                    "goals": goals_by_agent.get(sid, []),
+                    "last_activity_at": last_activity_at,
+                    "task_count": len(tasks_by_agent.get(sid, [])),
+                    "goal_count": len(goals_by_agent.get(sid, [])),
+                    "direct_reports": direct_reports,
+                    "reports_to_agent_id": manager["agent_profile_id"] if manager else None,
+                    "reports_to_agent_name": manager.get("agent_name") if manager else None,
+                    "peers": peers,
+                })
+            board = {
+                "team_name": team.get("name", "Team"),
+                "line_id": team_id,
+                "members": board_members,
+            }
+            return tool_service_pb2.GetTeamStatusBoardResponse(
+                success=True,
+                board_json=json.dumps(board),
+                error="",
+            )
+        except Exception as e:
+            logger.exception("GetTeamStatusBoard failed")
+            return tool_service_pb2.GetTeamStatusBoardResponse(
+                success=False, board_json="{}", error=str(e)[:500]
+            )
+
+    async def SetWorkspaceEntry(
+        self,
+        request: tool_service_pb2.SetWorkspaceEntryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.SetWorkspaceEntryResponse:
+        """Upsert a team workspace entry (Blackboard pattern)."""
+        try:
+            from services import agent_workspace_service
+            user_id = request.user_id or "system"
+            team_id = (request.team_id or "").strip()
+            key = (request.key or "").strip()
+            value = request.value or ""
+            updated_by_agent_id = (request.updated_by_agent_id or "").strip() or None
+            if not team_id or not key:
+                return tool_service_pb2.SetWorkspaceEntryResponse(
+                    success=False, key=key, error="team_id and key are required"
+                )
+            result = await agent_workspace_service.set_workspace_entry(
+                line_id=team_id,
+                key=key,
+                value=value,
+                user_id=user_id,
+                updated_by_agent_id=updated_by_agent_id,
+            )
+            if not result.get("success"):
+                return tool_service_pb2.SetWorkspaceEntryResponse(
+                    success=False, key=key, error=(result.get("error") or "Failed")[:500]
+                )
+            updated_at = result.get("updated_at") or ""
+            return tool_service_pb2.SetWorkspaceEntryResponse(
+                success=True, key=key, updated_at=updated_at, error=""
+            )
+        except Exception as e:
+            logger.exception("SetWorkspaceEntry failed")
+            return tool_service_pb2.SetWorkspaceEntryResponse(
+                success=False, key=request.key or "", error=str(e)[:500]
+            )
+
+    async def ReadWorkspace(
+        self,
+        request: tool_service_pb2.ReadWorkspaceRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.ReadWorkspaceResponse:
+        """Read one workspace entry by key, or list all keys if key is empty."""
+        import json
+        try:
+            from services import agent_workspace_service
+            user_id = request.user_id or "system"
+            team_id = (request.team_id or "").strip()
+            key = (request.key or "").strip()
+            if not team_id:
+                return tool_service_pb2.ReadWorkspaceResponse(
+                    success=False, entries_json="[]", single=False, error="team_id is required"
+                )
+            if key:
+                result = await agent_workspace_service.get_workspace_entry(
+                    line_id=team_id, key=key, user_id=user_id
+                )
+                if not result.get("success"):
+                    return tool_service_pb2.ReadWorkspaceResponse(
+                        success=False, entries_json="{}", single=True, error=(result.get("error") or "Failed")[:500]
+                    )
+                return tool_service_pb2.ReadWorkspaceResponse(
+                    success=True,
+                    entries_json=json.dumps(result),
+                    single=True,
+                    error="",
+                )
+            result = await agent_workspace_service.list_workspace(line_id=team_id, user_id=user_id)
+            if not result.get("success"):
+                return tool_service_pb2.ReadWorkspaceResponse(
+                    success=False, entries_json="[]", single=False, error=(result.get("error") or "Failed")[:500]
+                )
+            return tool_service_pb2.ReadWorkspaceResponse(
+                success=True,
+                entries_json=json.dumps(result.get("entries") or []),
+                single=False,
+                error="",
+            )
+        except Exception as e:
+            logger.exception("ReadWorkspace failed")
+            return tool_service_pb2.ReadWorkspaceResponse(
+                success=False, entries_json="[]", single=False, error=str(e)[:500]
+            )
+
+    async def GetGoalAncestry(
+        self,
+        request: tool_service_pb2.GetGoalAncestryRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetGoalAncestryResponse:
+        """Get goal ancestry from leaf to root for context injection."""
+        try:
+            from services import agent_goal_service
+            user_id = request.user_id or "system"
+            goal_id = (request.goal_id or "").strip()
+            if not goal_id:
+                return tool_service_pb2.GetGoalAncestryResponse(success=False, goals_json="[]", error="goal_id required")
+            ancestry = await agent_goal_service.get_goal_ancestry(goal_id, user_id)
+            return tool_service_pb2.GetGoalAncestryResponse(
+                success=True,
+                goals_json=json.dumps(ancestry),
+                error="",
+            )
+        except Exception as e:
+            logger.exception("GetGoalAncestry failed")
+            return tool_service_pb2.GetGoalAncestryResponse(success=False, goals_json="[]", error=str(e)[:500])
+
+    async def GetTeamGoalsTree(
+        self,
+        request: tool_service_pb2.GetTeamGoalsTreeRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetTeamGoalsTreeResponse:
+        """Get full goal tree for a team."""
+        try:
+            from services import agent_goal_service
+            user_id = request.user_id or "system"
+            team_id = (request.team_id or "").strip()
+            if not team_id:
+                return tool_service_pb2.GetTeamGoalsTreeResponse(success=False, tree_json="[]", error="team_id required")
+            tree = await agent_goal_service.get_goal_tree(team_id, user_id)
+            return tool_service_pb2.GetTeamGoalsTreeResponse(
+                success=True,
+                tree_json=json.dumps(tree),
+                error="",
+            )
+        except Exception as e:
+            logger.exception("GetTeamGoalsTree failed")
+            return tool_service_pb2.GetTeamGoalsTreeResponse(success=False, tree_json="[]", error=str(e)[:500])
+
+    async def GetGoalsForAgent(
+        self,
+        request: tool_service_pb2.GetGoalsForAgentRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetGoalsForAgentResponse:
+        """Return goals assigned to an agent in a team."""
+        try:
+            from services import agent_goal_service
+            import json
+            user_id = request.user_id or "system"
+            team_id = (request.team_id or "").strip()
+            agent_profile_id = (request.agent_profile_id or "").strip()
+            if not team_id or not agent_profile_id:
+                return tool_service_pb2.GetGoalsForAgentResponse(success=False, goals_json="[]", error="team_id and agent_profile_id required")
+            goals = await agent_goal_service.get_goals_for_agent(agent_profile_id, team_id, user_id)
+            return tool_service_pb2.GetGoalsForAgentResponse(success=True, goals_json=json.dumps(goals), error="")
+        except Exception as e:
+            logger.exception("GetGoalsForAgent failed")
+            return tool_service_pb2.GetGoalsForAgentResponse(success=False, goals_json="[]", error=str(e)[:500])
+
+    async def UpdateGoalProgress(
+        self,
+        request: tool_service_pb2.UpdateGoalProgressRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.UpdateGoalProgressResponse:
+        """Update goal progress percentage."""
+        try:
+            from services import agent_goal_service
+            user_id = request.user_id or "system"
+            goal_id = (request.goal_id or "").strip()
+            progress_pct = max(0, min(100, request.progress_pct))
+            await agent_goal_service.update_progress(goal_id, user_id, progress_pct)
+            return tool_service_pb2.UpdateGoalProgressResponse(success=True, error="")
+        except Exception as e:
+            logger.exception("UpdateGoalProgress failed")
+            return tool_service_pb2.UpdateGoalProgressResponse(success=False, error=str(e)[:500])
+
+    async def CreateAgentTask(
+        self,
+        request: tool_service_pb2.CreateAgentTaskRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.CreateAgentTaskResponse:
+        """Create a team task."""
+        try:
+            from services import agent_task_service
+            import json
+            user_id = request.user_id or "system"
+            line_id = (request.team_id or "").strip()
+            task = await agent_task_service.create_task(
+                line_id=line_id,
+                user_id=user_id,
+                title=(request.title or "").strip() or "Untitled",
+                description=(request.description or "").strip() or None,
+                assigned_agent_id=(request.assigned_agent_id or "").strip() or None,
+                goal_id=(request.goal_id or "").strip() or None,
+                priority=request.priority or 0,
+                created_by_agent_id=(request.created_by_agent_id or "").strip() or None,
+                due_date=(request.due_date or "").strip() or None,
+            )
+            tid = task.get("id", "")
+            logger.info(
+                "CreateAgentTask: user=%s line=%s task=%s assigned=%s goal=%s title=%s",
+                user_id,
+                line_id,
+                tid,
+                (request.assigned_agent_id or "").strip() or None,
+                (request.goal_id or "").strip() or None,
+                ((request.title or "").strip() or "Untitled")[:120],
+            )
+            return tool_service_pb2.CreateAgentTaskResponse(
+                success=True, task_id=tid, task_json=json.dumps(task), error=""
+            )
+        except Exception as e:
+            logger.exception("CreateAgentTask failed")
+            return tool_service_pb2.CreateAgentTaskResponse(success=False, task_id="", task_json="", error=str(e)[:500])
+
+    async def GetAgentWorkQueue(
+        self,
+        request: tool_service_pb2.GetAgentWorkQueueRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetAgentWorkQueueResponse:
+        """Get tasks assigned to an agent in a team."""
+        try:
+            from services import agent_task_service
+            import json
+            user_id = request.user_id or "system"
+            team_id = (request.team_id or "").strip()
+            agent_profile_id = (request.agent_profile_id or "").strip()
+            if not team_id or not agent_profile_id:
+                return tool_service_pb2.GetAgentWorkQueueResponse(success=False, tasks_json="[]", error="team_id and agent_profile_id required")
+            tasks = await agent_task_service.get_agent_work_queue(agent_profile_id, team_id, user_id)
+            return tool_service_pb2.GetAgentWorkQueueResponse(success=True, tasks_json=json.dumps(tasks), error="")
+        except Exception as e:
+            logger.exception("GetAgentWorkQueue failed")
+            return tool_service_pb2.GetAgentWorkQueueResponse(success=False, tasks_json="[]", error=str(e)[:500])
+
+    async def UpdateTaskStatus(
+        self,
+        request: tool_service_pb2.UpdateTaskStatusRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.UpdateTaskStatusResponse:
+        """Transition task to a new status."""
+        try:
+            from services import agent_task_service
+            import json
+            user_id = request.user_id or "system"
+            task_id = (request.task_id or "").strip()
+            new_status = (request.new_status or "").strip()
+            if not task_id or not new_status:
+                return tool_service_pb2.UpdateTaskStatusResponse(success=False, task_json="", error="task_id and new_status required")
+            task = await agent_task_service.transition_task(task_id, user_id, new_status)
+            return tool_service_pb2.UpdateTaskStatusResponse(success=True, task_json=json.dumps(task), error="")
+        except ValueError as e:
+            err = str(e)[:500]
+            logger.warning("UpdateTaskStatus rejected: %s", err)
+            return tool_service_pb2.UpdateTaskStatusResponse(success=False, task_json="", error=err)
+        except Exception as e:
+            logger.exception("UpdateTaskStatus failed")
+            return tool_service_pb2.UpdateTaskStatusResponse(success=False, task_json="", error=str(e)[:500])
+
+    async def AssignTaskToAgent(
+        self,
+        request: tool_service_pb2.AssignTaskToAgentRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.AssignTaskToAgentResponse:
+        """Assign a task to an agent."""
+        try:
+            from services import agent_task_service
+            import json
+            user_id = request.user_id or "system"
+            task_id = (request.task_id or "").strip()
+            agent_profile_id = (request.agent_profile_id or "").strip()
+            if not task_id or not agent_profile_id:
+                return tool_service_pb2.AssignTaskToAgentResponse(success=False, task_json="", error="task_id and agent_profile_id required")
+            task = await agent_task_service.assign_task(task_id, agent_profile_id, user_id)
+            return tool_service_pb2.AssignTaskToAgentResponse(success=True, task_json=json.dumps(task), error="")
+        except Exception as e:
+            logger.exception("AssignTaskToAgent failed")
+            return tool_service_pb2.AssignTaskToAgentResponse(success=False, task_json="", error=str(e)[:500])
+
+    async def GetUserNotificationPreferences(
+        self,
+        request: tool_service_pb2.GetUserNotificationPreferencesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetUserNotificationPreferencesResponse:
+        """Get user notification preferences from users.preferences JSONB."""
+        try:
+            from services.database_manager.database_helpers import fetch_one
+
+            user_id = request.user_id or "system"
+            row = await fetch_one(
+                "SELECT preferences FROM users WHERE user_id = $1",
+                user_id,
+            )
+            prefs = {}
+            if row:
+                all_prefs = row.get("preferences") or {}
+                if isinstance(all_prefs, str):
+                    all_prefs = json.loads(all_prefs)
+                prefs = all_prefs.get("notification_preferences", {})
+
+            return tool_service_pb2.GetUserNotificationPreferencesResponse(
+                success=True,
+                preferences_json=json.dumps(prefs),
+                error="",
+            )
+        except Exception as e:
+            logger.error("GetUserNotificationPreferences failed: %s", e)
+            return tool_service_pb2.GetUserNotificationPreferencesResponse(
+                success=False, preferences_json="{}", error=str(e)
+            )
+
+    async def GetMyProfile(
+        self,
+        request: tool_service_pb2.GetMyProfileRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetMyProfileResponse:
+        """Get the current user's profile (email, display_name, username) and key settings from users + user_settings."""
+        try:
+            from services.database_manager.database_helpers import fetch_one, fetch_all
+
+            user_id = request.user_id or "system"
+            email = ""
+            display_name = ""
+            username = ""
+            preferred_name = ""
+            timezone_val = ""
+            zip_code = ""
+            ai_context = ""
+
+            row = await fetch_one(
+                "SELECT email, display_name, username FROM users WHERE user_id = $1",
+                user_id,
+            )
+            if row:
+                email = row.get("email") or ""
+                display_name = row.get("display_name") or ""
+                username = row.get("username") or ""
+
+            settings_rows = await fetch_all(
+                "SELECT key, value FROM user_settings WHERE user_id = $1 AND key IN ('preferred_name', 'timezone', 'zip_code', 'ai_context')",
+                user_id,
+            )
+            for s in settings_rows or []:
+                k, v = s.get("key"), (s.get("value") or "")
+                if k == "preferred_name":
+                    preferred_name = v
+                elif k == "timezone":
+                    timezone_val = v
+                elif k == "zip_code":
+                    zip_code = v
+                elif k == "ai_context":
+                    ai_context = v
+
+            return tool_service_pb2.GetMyProfileResponse(
+                email=email,
+                display_name=display_name,
+                username=username,
+                preferred_name=preferred_name,
+                timezone=timezone_val,
+                zip_code=zip_code,
+                ai_context=ai_context,
+                success=True,
+                error="",
+            )
+        except Exception as e:
+            logger.error("GetMyProfile failed: %s", e)
+            return tool_service_pb2.GetMyProfileResponse(
+                email="",
+                display_name="",
+                username="",
+                preferred_name="",
+                timezone="",
+                zip_code="",
+                ai_context="",
+                success=False,
+                error=str(e),
+            )
+
+    async def UpsertUserFact(
+        self,
+        request: tool_service_pb2.UpsertUserFactRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.UpsertUserFactResponse:
+        """Insert or update a single user fact."""
+        try:
+            from services.settings_service import settings_service
+
+            user_id = request.user_id or "system"
+            fact_key = request.fact_key or ""
+            value = request.value or ""
+            category = request.category or "general"
+            if not fact_key.strip():
+                return tool_service_pb2.UpsertUserFactResponse(success=False, error="fact_key is required")
+            write_enabled = await settings_service.get_facts_write_enabled(user_id)
+            if not write_enabled:
+                return tool_service_pb2.UpsertUserFactResponse(success=False, error="Fact writing disabled by user")
+            source = getattr(request, "source", None) or "user_manual"
+            result = await settings_service.upsert_user_fact(
+                user_id, fact_key.strip(), value, category, source=source
+            )
+            if result.get("success"):
+                return tool_service_pb2.UpsertUserFactResponse(success=True, error="")
+            if result.get("status") == "pending_review":
+                msg = (
+                    "Fact '%s' is currently set to '%s' by the user. "
+                    "Your proposed update has been queued for user review."
+                ) % (result.get("fact_key", fact_key), result.get("current_value", ""))
+                return tool_service_pb2.UpsertUserFactResponse(success=False, error=msg)
+            return tool_service_pb2.UpsertUserFactResponse(
+                success=False, error=result.get("error", "Upsert failed")
+            )
+        except Exception as e:
+            logger.error("UpsertUserFact failed: %s", e)
+            return tool_service_pb2.UpsertUserFactResponse(success=False, error=str(e))
+
+    async def GetUserFacts(
+        self,
+        request: tool_service_pb2.GetUserFactsRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetUserFactsResponse:
+        """Return all facts for a user (for Agent Factory include_user_facts context)."""
+        try:
+            from services.settings_service import settings_service
+
+            user_id = request.user_id or "system"
+            facts = await settings_service.get_user_facts(user_id)
+            facts_json = json.dumps(facts, default=_json_default)
+            return tool_service_pb2.GetUserFactsResponse(success=True, facts_json=facts_json, error="")
+        except Exception as e:
+            logger.error("GetUserFacts failed: %s", e)
+            return tool_service_pb2.GetUserFactsResponse(
+                success=False, facts_json="[]", error=str(e)
+            )
+
+    async def InvokeDeviceTool(
+        self,
+        request: tool_service_pb2.InvokeDeviceToolRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.InvokeDeviceToolResponse:
+        """Invoke a tool on a connected local proxy device via backend (device WebSockets live there)."""
+        try:
+            import os
+
+            user_id = request.user_id or "system"
+            device_id = request.device_id or ""
+            tool = request.tool or ""
+            args_json = request.args_json or "{}"
+            timeout_seconds = request.timeout_seconds or 30
+            logger.info(
+                "InvokeDeviceTool: user_id=%s, device_id=%s, tool=%s",
+                user_id,
+                device_id or "(any)",
+                tool,
+            )
+            try:
+                args = json.loads(args_json)
+            except json.JSONDecodeError:
+                args = {}
+
+            backend_url = os.getenv("BACKEND_URL", "http://backend:8000").rstrip("/")
+            internal_key = os.getenv("INTERNAL_SERVICE_KEY", "")
+            if not internal_key:
+                logger.warning("InvokeDeviceTool: INTERNAL_SERVICE_KEY not set; backend may reject request")
+
+            payload = {
+                "user_id": user_id,
+                "tool": tool,
+                "args": args,
+                "timeout_seconds": timeout_seconds,
+            }
+            if device_id:
+                payload["device_id"] = device_id
+
+            url = f"{backend_url}/api/internal/invoke-device-tool"
+            headers = {"Content-Type": "application/json"}
+            if internal_key:
+                headers["X-Internal-Service-Key"] = internal_key
+
+            http_timeout = max(35.0, float(timeout_seconds) + 5.0)
+
+            import httpx
+            async with httpx.AsyncClient(timeout=http_timeout) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+            if resp.status_code != 200:
+                err = resp.text or f"HTTP {resp.status_code}"
+                logger.error("InvokeDeviceTool backend call failed: %s", err)
+                return tool_service_pb2.InvokeDeviceToolResponse(
+                    success=False,
+                    result_json="{}",
+                    error=err[:500],
+                    formatted=err[:500],
+                )
+            data = resp.json()
+            return tool_service_pb2.InvokeDeviceToolResponse(
+                success=data.get("success", False),
+                result_json=data.get("result_json", "{}"),
+                error=data.get("error", ""),
+                formatted=data.get("formatted", ""),
+            )
+        except Exception as e:
+            logger.error("InvokeDeviceTool failed: %s", e)
+            return tool_service_pb2.InvokeDeviceToolResponse(
+                success=False,
+                result_json="{}",
+                error=str(e),
+                formatted=str(e),
+            )
+
+    async def GetDeviceCapabilities(
+        self,
+        request: tool_service_pb2.GetDeviceCapabilitiesRequest,
+        context: grpc.aio.ServicerContext,
+    ) -> tool_service_pb2.GetDeviceCapabilitiesResponse:
+        """Return union of capabilities from all connected devices for the user."""
+        try:
+            import os
+
+            user_id = request.user_id or "system"
+            backend_url = os.getenv("BACKEND_URL", "http://backend:8000").rstrip("/")
+            internal_key = os.getenv("INTERNAL_SERVICE_KEY", "")
+            headers = {}
+            if internal_key:
+                headers["X-Internal-Service-Key"] = internal_key
+
+            url = f"{backend_url}/api/internal/device-list"
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url, params={"user_id": user_id}, headers=headers)
+            if resp.status_code != 200:
+                logger.warning("GetDeviceCapabilities backend call failed: %s", resp.text)
+                return tool_service_pb2.GetDeviceCapabilitiesResponse(
+                    capabilities=[],
+                    has_device=False,
+                )
+            data = resp.json()
+            devices = data.get("devices") or []
+            all_caps = set()
+            for dev in devices:
+                for cap in dev.get("capabilities") or []:
+                    all_caps.add(cap)
+            return tool_service_pb2.GetDeviceCapabilitiesResponse(
+                capabilities=sorted(all_caps),
+                has_device=len(devices) > 0,
+            )
+        except Exception as e:
+            logger.error("GetDeviceCapabilities failed: %s", e)
+            return tool_service_pb2.GetDeviceCapabilitiesResponse(
+                capabilities=[],
+                has_device=False,
             )
 
 
@@ -4350,7 +11013,41 @@ async def serve_tool_service(port: int = 50052):
         # Start server
         await server.start()
         logger.info(f"✅ gRPC Tool Service listening on port {port}")
-        
+
+        # Single sync authority: populate skills vector collection with retry until vector-service is ready.
+        async def _sync_skills_with_retry():
+            max_attempts = 5
+            for attempt in range(max_attempts):
+                delay = 2 ** (attempt + 1)  # 2, 4, 8, 16, 32 seconds
+                if attempt > 0:
+                    logger.info("Skills sync attempt %d/%d in %ds...", attempt + 1, max_attempts, delay)
+                    await asyncio.sleep(delay)
+                try:
+                    from clients.vector_service_client import get_vector_service_client
+                    client = await get_vector_service_client(required=False)
+                    if not getattr(client, "_initialized", False):
+                        await client.initialize(required=False)
+                    if not getattr(client, "_initialized", False):
+                        continue
+                    await client.health_check()
+                except Exception as e:
+                    logger.debug("Vector service not ready: %s", e)
+                    continue
+                try:
+                    from services.skill_vector_service import sync_all_skills
+                    count = await sync_all_skills(user_id=None)
+                    if count > 0:
+                        logger.info("Skills vector collection populated with %d built-in skills", count)
+                        return
+                    else:
+                        logger.info("Skills sync returned 0 skills (DB may not be seeded yet), retrying...")
+                        continue
+                except Exception as e:
+                    logger.warning("Startup skills sync failed (attempt %d/%d): %s", attempt + 1, max_attempts, e)
+            logger.error("Skills sync failed after %d attempts; vector-service may be unreachable", max_attempts)
+
+        asyncio.create_task(_sync_skills_with_retry())
+
         # Wait for termination
         await server.wait_for_termination()
         

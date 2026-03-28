@@ -71,11 +71,35 @@ class ColumnDefinition(BaseModel):
     nullable: bool = True
 
 
+class TableMetadataRelationship(BaseModel):
+    """Describes a column that references another table."""
+    column: str
+    references_table: str
+    references_column: str = "id"
+
+
+class TableMetadata(BaseModel):
+    """Business context for a table (semantic layer for agents)."""
+    business_context: Optional[str] = None
+    source: Optional[str] = None
+    update_frequency: Optional[str] = None
+    glossary: Optional[Dict[str, str]] = None  # column_or_term -> description
+    relationships: Optional[List[TableMetadataRelationship]] = None
+
+
 class CreateTableRequest(BaseModel):
     database_id: str
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
     table_schema: Dict[str, Any]
+    metadata: Optional[Dict[str, Any]] = None  # TableMetadata as dict; optional
+
+
+class UpdateTableRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    table_schema: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None  # TableMetadata as dict; optional
 
 
 class TableResponse(BaseModel):
@@ -164,6 +188,7 @@ class ImportJobResponse(BaseModel):
 class SQLQueryRequest(BaseModel):
     query: str
     limit: int = 1000
+    params: Optional[List[Any]] = None  # Bound as $1, $2, ... for parameterized SQL
 
 
 class NaturalLanguageQueryRequest(BaseModel):
@@ -180,6 +205,8 @@ class QueryResultResponse(BaseModel):
     execution_time_ms: int
     generated_sql: Optional[str] = None
     error_message: Optional[str] = None
+    rows_affected: int = 0  # For INSERT/UPDATE/DELETE
+    returning_rows: Optional[List[Dict[str, Any]]] = None  # For write with RETURNING
 
 
 # Transformation Models

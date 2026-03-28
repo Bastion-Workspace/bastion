@@ -24,10 +24,10 @@ class EmbeddingCache:
         """Initialize cache"""
         logger.info(f"Embedding cache initialized with {self.ttl_seconds}s TTL")
     
-    def hash_text(self, text: str) -> str:
-        """Generate stable hash for text content"""
-        # Use SHA256 for consistent hashing
-        return hashlib.sha256(text.encode('utf-8')).hexdigest()
+    def hash_text(self, text: str, model: str = "") -> str:
+        """Generate stable hash for text content and model (avoids cross-provider cache hits)."""
+        key = f"{model}:{text}" if model else text
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()
     
     async def get(self, content_hash: str) -> Optional[List[float]]:
         """Get embedding from cache if not expired"""

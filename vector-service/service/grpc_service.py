@@ -12,7 +12,7 @@ from typing import Dict, Any, List, Optional
 from concurrent import futures
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import VectorParams, Distance, PointStruct, Filter, FieldCondition, MatchValue, MatchAny
 from qdrant_client.http.exceptions import UnexpectedResponse
 
 # Import generated proto files (will be generated during Docker build)
@@ -57,9 +57,11 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
                 logger.info(f"Connected to Qdrant at {settings.QDRANT_URL} (timeout={settings.QDRANT_TIMEOUT}s)")
                 # Ensure tools collection exists
                 self._ensure_collection_exists(settings.TOOL_COLLECTION_NAME)
+                # Warn if existing collections have different dimensions than configured
+                self._validate_embedding_dimensions()
             else:
                 logger.warning("QDRANT_URL not set, vector store features will be unavailable")
-            
+
             self._initialized = True
             logger.info("Vector Service initialized successfully")
             logger.info("Service mode: Knowledge Hub (Embeddings + Qdrant Ops)")
@@ -75,11 +77,7 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
             
             if collection_name not in collection_names:
                 logger.info(f"Creating collection '{collection_name}' in Qdrant")
-                # text-embedding-3-large is 3072 dimensions
-                # text-embedding-3-small is 1536 dimensions
-                # We default to large in settings
-                dimensions = 3072 if "large" in settings.OPENAI_EMBEDDING_MODEL else 1536
-                
+                dimensions = settings.EMBEDDING_DIMENSIONS
                 self.qdrant_client.create_collection(
                     collection_name=collection_name,
                     vectors_config=VectorParams(
@@ -93,6 +91,44 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
         except Exception as e:
             logger.error(f"Failed to ensure collection '{collection_name}' exists: {e}")
             # Don't raise here, allow other features to work if possible
+
+    def _validate_embedding_dimensions(self) -> None:
+        """Check document/text collections have vector_size matching EMBEDDING_DIMENSIONS.
+        Skips face_encodings (128) and object_features (512) which use fixed dimensions."""
+        if not self.qdrant_client:
+            return
+        # Collections that use the configurable text embedding model; others use fixed dimensions
+        document_collection_suffixes = ("_documents",)
+        document_collection_names = ("documents", "skills", "tools")
+        try:
+            collections = self.qdrant_client.get_collections()
+            configured = settings.EMBEDDING_DIMENSIONS
+            for col in collections.collections:
+                name = col.name
+                if "face_encodings" in name or "object_features" in name:
+                    continue
+                if not (name.endswith(document_collection_suffixes) or name in document_collection_names):
+                    continue
+                try:
+                    col_info = self.qdrant_client.get_collection(name)
+                    try:
+                        size = col_info.config.params.vectors.size
+                    except AttributeError:
+                        size = 0
+                    if size and size != configured:
+                        logger.error(
+                            "Embedding dimension mismatch: collection %r has vector_size=%s "
+                            "but EMBEDDING_DIMENSIONS=%s. Re-index documents with the current "
+                            "embedding model or set EMBEDDING_DIMENSIONS=%s to match existing data.",
+                            name,
+                            size,
+                            configured,
+                            size,
+                        )
+                except Exception as e:
+                    logger.debug("Could not check collection %s dimensions: %s", name, e)
+        except Exception as e:
+            logger.warning("Could not validate embedding dimensions against Qdrant: %s", e)
 
     async def UpsertTools(self, request, context):
         """Vectorize and store tools in Qdrant (Knowledge Hub Maneuver!)"""
@@ -262,16 +298,42 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
                     except Exception as batch_err:
                         last_error = batch_err
                         err_str = str(batch_err).lower()
-                        is_retryable = (
+                        status_code = getattr(batch_err, "status_code", None)
+                        is_timeout_or_connection = (
                             "timeout" in err_str or "timed out" in err_str or
                             "connection" in err_str or "read" in err_str
                         )
+                        is_collection_not_ready = (
+                            isinstance(batch_err, UnexpectedResponse)
+                            and status_code == 404
+                        ) or (
+                            "not found" in err_str and "collection" in err_str
+                        ) or "doesn't exist" in err_str
+                        # 500/503: Qdrant cluster "1 out of N shards failed" / replica not ready
+                        is_server_error = (
+                            isinstance(batch_err, UnexpectedResponse)
+                            and status_code in (500, 503)
+                        ) or "500" in err_str or "503" in err_str or "internal" in err_str
+                        is_retryable = is_timeout_or_connection or is_collection_not_ready or is_server_error
                         if is_retryable and attempt < max_retries - 1:
                             wait_time = 2 ** attempt
-                            logger.warning(
-                                f"Qdrant upsert batch failed (attempt {attempt + 1}/{max_retries}): {batch_err}; "
-                                f"will retry in {wait_time}s"
-                            )
+                            if is_collection_not_ready:
+                                logger.warning(
+                                    "Qdrant collection not ready on all shards (attempt %s/%s); "
+                                    "retrying in %ss (cluster propagation)",
+                                    attempt + 1, max_retries, wait_time
+                                )
+                            elif is_server_error:
+                                logger.warning(
+                                    "Qdrant server error (attempt %s/%s); "
+                                    "retrying in %ss (shard/replica may be catching up)",
+                                    attempt + 1, max_retries, wait_time
+                                )
+                            else:
+                                logger.warning(
+                                    f"Qdrant upsert batch failed (attempt {attempt + 1}/{max_retries}): {batch_err}; "
+                                    f"will retry in {wait_time}s"
+                                )
                             time.sleep(wait_time)
                         else:
                             raise
@@ -304,28 +366,50 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
             # Build Qdrant filter from VectorFilter messages
             query_filter = None
             if request.filters:
-                filter_conditions = []
+                must_conditions = []
+                must_not_conditions = []
                 for vf in request.filters:
                     if vf.operator == "equals":
-                        filter_conditions.append(
+                        must_conditions.append(
                             FieldCondition(
                                 key=vf.field,
                                 match=MatchValue(value=vf.value)
+                            )
+                        )
+                    elif vf.operator == "not_equals":
+                        must_not_conditions.append(
+                            FieldCondition(
+                                key=vf.field,
+                                match=MatchValue(value=vf.value)
+                            )
+                        )
+                    elif vf.operator == "any_of" and vf.values:
+                        vals = list(vf.values)
+                        logger.debug(
+                            "SearchVectors: any_of filter field=%r values=%s",
+                            vf.field,
+                            vals[:10] if len(vals) > 10 else vals,
+                        )
+                        must_conditions.append(
+                            FieldCondition(
+                                key=vf.field,
+                                match=MatchAny(any=vals)
                             )
                         )
                     elif vf.operator == "in":
                         # For array fields - check if value is in array
                         # Qdrant doesn't have native "in" for arrays, use "contains" for now
-                        filter_conditions.append(
+                        must_conditions.append(
                             FieldCondition(
                                 key=vf.field,
                                 match=MatchValue(value=vf.value)
                             )
                         )
-                    # Add more operators as needed
-                
-                if filter_conditions:
-                    query_filter = Filter(must=filter_conditions)
+                if must_conditions or must_not_conditions:
+                    query_filter = Filter(
+                        must=must_conditions if must_conditions else None,
+                        must_not=must_not_conditions if must_not_conditions else None,
+                    )
             
             # Check if collection exists first
             collections = self.qdrant_client.get_collections()
@@ -381,6 +465,17 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
                 )
             
             logger.info(f"SearchVectors: Found {len(results)} results in '{request.collection_name}'")
+            if len(results) == 0 and request.filters:
+                try:
+                    col_info = self.qdrant_client.get_collection(request.collection_name)
+                    pts = getattr(col_info, "points_count", None)
+                    logger.info(
+                        "SearchVectors: 0 results for collection %s (points_count=%s); filter was applied",
+                        request.collection_name,
+                        pts,
+                    )
+                except Exception as ex:
+                    logger.debug("SearchVectors: could not get collection info: %s", ex)
             return vector_service_pb2.SearchVectorsResponse(
                 success=True,
                 results=results
@@ -734,34 +829,35 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
                 return vector_service_pb2.EmbeddingResponse()
             
             from_cache = False
-            
+            active_model = request.model or (self.embedding_engine.model or "")
+
             # Check cache first
             if settings.EMBEDDING_CACHE_ENABLED:
-                content_hash = self.embedding_cache.hash_text(request.text)
+                content_hash = self.embedding_cache.hash_text(request.text, active_model)
                 cached_embedding = await self.embedding_cache.get(content_hash)
-                
+
                 if cached_embedding:
                     logger.debug(f"Cache hit for embedding")
                     from_cache = True
                     return vector_service_pb2.EmbeddingResponse(
                         embedding=cached_embedding,
                         token_count=len(request.text.split()),
-                        model=request.model or settings.OPENAI_EMBEDDING_MODEL,
+                        model=active_model,
                         from_cache=True
                     )
-            
+
             # Cache miss - generate embedding
             embedding = await self.embedding_engine.generate_embedding(request.text)
-            
+
             # Store in cache
             if settings.EMBEDDING_CACHE_ENABLED:
-                content_hash = self.embedding_cache.hash_text(request.text)
+                content_hash = self.embedding_cache.hash_text(request.text, active_model)
                 await self.embedding_cache.set(content_hash, embedding)
-            
+
             return vector_service_pb2.EmbeddingResponse(
                 embedding=embedding,
                 token_count=len(request.text.split()),
-                model=request.model or settings.OPENAI_EMBEDDING_MODEL,
+                model=active_model,
                 from_cache=False
             )
             
@@ -786,12 +882,13 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
             text_indices = []
             cache_hits = 0
             cache_misses = 0
-            
+            active_model = request.model or (self.embedding_engine.model or "")
+
             if settings.EMBEDDING_CACHE_ENABLED:
                 for idx, text in enumerate(texts):
-                    content_hash = self.embedding_cache.hash_text(text)
+                    content_hash = self.embedding_cache.hash_text(text, active_model)
                     cached_embedding = await self.embedding_cache.get(content_hash)
-                    
+
                     if cached_embedding:
                         embeddings.append((idx, cached_embedding, True))  # from_cache=True
                         cache_hits += 1
@@ -803,27 +900,27 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
                 texts_to_generate = texts
                 text_indices = list(range(len(texts)))
                 cache_misses = len(texts)
-            
+
             # Generate embeddings for cache misses
             if texts_to_generate:
                 new_embeddings = await self.embedding_engine.generate_batch_embeddings(
                     texts=texts_to_generate,
                     batch_size=request.batch_size or settings.BATCH_SIZE
                 )
-                
+
                 # Cache new embeddings and add to results
                 if settings.EMBEDDING_CACHE_ENABLED:
                     for text, embedding, idx in zip(texts_to_generate, new_embeddings, text_indices):
-                        content_hash = self.embedding_cache.hash_text(text)
+                        content_hash = self.embedding_cache.hash_text(text, active_model)
                         await self.embedding_cache.set(content_hash, embedding)
                         embeddings.append((idx, embedding, False))  # from_cache=False
                 else:
                     for embedding, idx in zip(new_embeddings, text_indices):
                         embeddings.append((idx, embedding, False))
-            
+
             # Sort by original index
             embeddings.sort(key=lambda x: x[0])
-            
+
             # Convert to proto format
             embedding_vectors = []
             for idx, (original_idx, embedding, from_cache) in enumerate(embeddings):
@@ -835,13 +932,13 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
                         from_cache=from_cache
                     )
                 )
-            
+
             logger.info(f"Batch embeddings: {cache_hits} hits, {cache_misses} misses")
-            
+
             return vector_service_pb2.BatchEmbeddingResponse(
                 embeddings=embedding_vectors,
                 total_tokens=sum(len(t.split()) for t in texts),
-                model=request.model or settings.OPENAI_EMBEDDING_MODEL,
+                model=active_model,
                 cache_hits=cache_hits,
                 cache_misses=cache_misses
             )
@@ -906,7 +1003,10 @@ class VectorServiceImplementation(vector_service_pb2_grpc.VectorServiceServicer)
                 'cache_hit_rate': f"{cache_stats['hit_rate']:.2%}",
                 'mode': 'embedding_generation_only'
             }
-            
+            if self._initialized and self.embedding_engine.provider:
+                details['embedding_provider'] = self.embedding_engine.provider.provider_name
+                details['model'] = self.embedding_engine.model or ""
+
             return vector_service_pb2.HealthCheckResponse(
                 status=status,
                 openai_available=openai_ok,

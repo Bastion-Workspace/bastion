@@ -119,6 +119,55 @@ class QueryService:
         
         return list(set(table_names))
     
+    @staticmethod
+    def _workspace_schema_name(workspace_id: str) -> str:
+        """Return schema name for workspace (must match TableService)."""
+        return 'ws_' + re.sub(r'[^a-zA-Z0-9_]', '_', workspace_id)[:50]
+    
+    @staticmethod
+    def _get_statement_type(sql: str) -> str:
+        """Return SELECT, INSERT, UPDATE, DELETE, or DDL (CREATE/ALTER/DROP) from first token."""
+        stripped = sql.strip().upper()
+        for token in ('SELECT', 'INSERT', 'UPDATE', 'DELETE'):
+            if stripped.startswith(token):
+                return token
+        for token in ('CREATE', 'ALTER', 'DROP'):
+            if stripped.startswith(token):
+                return token
+        return 'SELECT'
+
+    @staticmethod
+    def _looks_like_sql(text: str) -> bool:
+        """Heuristic: treat as SQL if the trimmed text starts with a common SQL keyword."""
+        if not text or not text.strip():
+            return False
+        u = text.strip().upper()
+        return any(
+            u.startswith(p)
+            for p in (
+                "SELECT",
+                "WITH",
+                "INSERT",
+                "UPDATE",
+                "DELETE",
+                "EXPLAIN",
+                "SHOW",
+                "CREATE",
+                "ALTER",
+                "DROP",
+            )
+        )
+    
+    @staticmethod
+    def _parse_rows_affected(execute_result: str) -> int:
+        """Parse asyncpg execute result string (e.g. 'UPDATE 3', 'INSERT 0 1') to get rows affected."""
+        if not execute_result:
+            return 0
+        parts = execute_result.split()
+        if len(parts) >= 2 and parts[-1].isdigit():
+            return int(parts[-1])
+        return 0
+    
     async def _validate_table_access(
         self,
         workspace_id: str,
@@ -175,79 +224,158 @@ class QueryService:
         sql_query: str,
         user_id: str,
         limit: int = 1000,
-        user_team_ids: Optional[List[str]] = None
+        user_team_ids: Optional[List[str]] = None,
+        params: Optional[List[Any]] = None,
+        read_only: bool = False,
+        prefer_arrow: bool = False,
     ) -> Dict[str, Any]:
         """
-        Execute SQL query against workspace databases with security validation
-        
-        Args:
-            workspace_id: Workspace containing the databases
-            sql_query: SQL query to execute
-            user_id: User executing the query
-            limit: Maximum rows to return
-            user_team_ids: User's team IDs for RLS context
-            
-        Returns:
-            Query result with columns, rows, and metadata
+        Execute SQL query against workspace databases with security validation.
+        Supports SELECT (read) and INSERT/UPDATE/DELETE (write) with parameter binding ($1, $2, ...).
+        For native tables, sets search_path to workspace schema so table names resolve.
+        When read_only is True, reject DDL and DML (non-SELECT) statements.
         """
         query_id = str(uuid.uuid4())
         start_time = time.time()
+        param_list = list(params) if params is not None else []
         
         try:
-            # Extract table names from query
             table_names = self._extract_table_names(sql_query)
             logger.info(f"Extracted table names from query: {table_names}")
             
-            # Validate table access
-            await self._validate_table_access(
-                workspace_id,
-                table_names,
-                user_id=user_id,
-                user_team_ids=user_team_ids
-            )
+            statement_type = self._get_statement_type(sql_query)
+            is_ddl = statement_type in ('CREATE', 'ALTER', 'DROP')
+            is_write = statement_type in ('INSERT', 'UPDATE', 'DELETE') or is_ddl
+
+            if read_only and (is_write or is_ddl):
+                execution_time_ms = int((time.time() - start_time) * 1000)
+                err = (
+                    "This workspace is bound as read-only. Only SELECT queries are allowed."
+                )
+                await self._log_query(
+                    query_id=query_id,
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    natural_language_query="",
+                    generated_sql=sql_query,
+                    result_count=0,
+                    execution_time_ms=execution_time_ms,
+                    error_message=err,
+                    user_team_ids=user_team_ids,
+                )
+                return {
+                    "query_id": query_id,
+                    "column_names": [],
+                    "results_json": json.dumps([]),
+                    "result_count": 0,
+                    "execution_time_ms": execution_time_ms,
+                    "generated_sql": sql_query,
+                    "error_message": err,
+                    "rows_affected": 0,
+                    "returning_rows_json": None,
+                    "has_arrow_data": False,
+                    "arrow_results": b"",
+                }
             
-            # Add LIMIT if not present (for SELECT queries)
-            sql_upper = sql_query.upper().strip()
-            if sql_upper.startswith('SELECT') and 'LIMIT' not in sql_upper:
-                # Add LIMIT clause
-                if ';' in sql_query:
-                    sql_query = sql_query.rstrip(';') + f' LIMIT {limit};'
+            if not is_ddl:
+                await self._validate_table_access(
+                    workspace_id,
+                    table_names,
+                    user_id=user_id,
+                    user_team_ids=user_team_ids
+                )
+            
+            if table_names or is_ddl:
+                await self.table_service._ensure_workspace_schema_exists(
+                    workspace_id, user_id=user_id, user_team_ids=user_team_ids
+                )
+            
+            statement_type = self._get_statement_type(sql_query)
+            has_returning = 'RETURNING' in sql_query.upper()
+            
+            if not is_write:
+                sql_upper = sql_query.upper().strip()
+                if sql_upper.startswith('SELECT') and 'LIMIT' not in sql_upper:
+                    if ';' in sql_query:
+                        sql_query = sql_query.rstrip(';') + f' LIMIT {limit};'
+                    else:
+                        sql_query = sql_query + f' LIMIT {limit}'
+            
+            schema_name = self._workspace_schema_name(workspace_id)
+            arrow_batch = None
+            async with self.db.acquire(user_id=user_id, user_team_ids=user_team_ids) as conn:
+                await conn.execute(f'SET search_path TO "{schema_name}", public')
+                if is_ddl:
+                    await conn.execute(sql_query, *param_list) if param_list else await conn.execute(sql_query)
+                    execution_time_ms = int((time.time() - start_time) * 1000)
+                    column_names = []
+                    results = []
+                    rows_affected = 0
+                elif is_write and has_returning:
+                    rows = await conn.fetch(sql_query, *param_list) if param_list else await conn.fetch(sql_query)
+                    execution_time_ms = int((time.time() - start_time) * 1000)
+                    column_names = list(rows[0].keys()) if rows else []
+                    results = [dict(row) for row in rows]
+                    for result in results:
+                        for key, value in result.items():
+                            if isinstance(value, datetime):
+                                result[key] = value.isoformat()
+                            elif hasattr(value, '__dict__') and not isinstance(value, (dict, list, str, int, float, bool, type(None))):
+                                result[key] = str(value)
+                    rows_affected = len(results)
+                elif is_write:
+                    result_str = await conn.execute(sql_query, *param_list) if param_list else await conn.execute(sql_query)
+                    execution_time_ms = int((time.time() - start_time) * 1000)
+                    rows_affected = self._parse_rows_affected(result_str)
+                    column_names = []
+                    results = []
                 else:
-                    sql_query = sql_query + f' LIMIT {limit}'
+                    rows = await conn.fetch(sql_query, *param_list) if param_list else await conn.fetch(sql_query)
+                    execution_time_ms = int((time.time() - start_time) * 1000)
+                    if rows:
+                        column_names = list(rows[0].keys())
+                    else:
+                        column_names = []
+                    if prefer_arrow:
+                        from utils.arrow_utils import asyncpg_rows_to_record_batch
+
+                        arrow_batch = asyncpg_rows_to_record_batch(rows, column_names)
+                        results = []
+                    else:
+                        if rows:
+                            results = [dict(row) for row in rows]
+                            for result in results:
+                                for key, value in result.items():
+                                    if isinstance(value, datetime):
+                                        result[key] = value.isoformat()
+                                    elif hasattr(value, '__dict__') and not isinstance(
+                                        value, (dict, list, str, int, float, bool, type(None))
+                                    ):
+                                        result[key] = str(value)
+                        else:
+                            results = []
+                    rows_affected = 0
             
-            # Execute query with RLS context
-            rows = await self.db.fetch(
-                sql_query,
-                user_id=user_id,
-                user_team_ids=user_team_ids
-            )
-            
-            execution_time_ms = int((time.time() - start_time) * 1000)
-            
-            # Convert rows to JSON-serializable format
-            if rows:
-                column_names = list(rows[0].keys())
-                results = [dict(row) for row in rows]
-                
-                # Convert datetime and other non-serializable types
-                for result in results:
-                    for key, value in result.items():
-                        if isinstance(value, datetime):
-                            result[key] = value.isoformat()
-                        elif hasattr(value, '__dict__'):
-                            result[key] = str(value)
+            if arrow_batch is not None:
+                from utils.arrow_utils import record_batch_to_ipc_bytes
+
+                result_count = arrow_batch.num_rows
+                results_json = ""
+                arrow_bytes = record_batch_to_ipc_bytes(arrow_batch)
+                has_arrow = True
             else:
-                column_names = []
-                results = []
-            
-            # Log query to data_queries table
+                result_count = len(results)
+                results_json = json.dumps(results)
+                arrow_bytes = b""
+                has_arrow = False
+
             await self._log_query(
                 query_id=query_id,
                 workspace_id=workspace_id,
                 user_id=user_id,
                 natural_language_query="",
                 generated_sql=sql_query,
-                result_count=len(results),
+                result_count=result_count,
                 execution_time_ms=execution_time_ms,
                 error_message=None,
                 user_team_ids=user_team_ids
@@ -256,11 +384,15 @@ class QueryService:
             return {
                 'query_id': query_id,
                 'column_names': column_names,
-                'results_json': json.dumps(results),
-                'result_count': len(results),
+                'results_json': results_json,
+                'result_count': result_count,
                 'execution_time_ms': execution_time_ms,
                 'generated_sql': sql_query,
-                'error_message': None
+                'error_message': None,
+                'rows_affected': rows_affected if is_write else 0,
+                'returning_rows_json': json.dumps(results) if (is_write and has_returning and results) else None,
+                'has_arrow_data': has_arrow,
+                'arrow_results': arrow_bytes,
             }
             
         except ValueError as e:
@@ -287,7 +419,11 @@ class QueryService:
                 'result_count': 0,
                 'execution_time_ms': execution_time_ms,
                 'generated_sql': sql_query,
-                'error_message': error_message
+                'error_message': error_message,
+                'rows_affected': 0,
+                'returning_rows_json': None,
+                'has_arrow_data': False,
+                'arrow_results': b"",
             }
             
         except Exception as e:
@@ -315,8 +451,60 @@ class QueryService:
                 'result_count': 0,
                 'execution_time_ms': execution_time_ms,
                 'generated_sql': sql_query,
-                'error_message': error_message
+                'error_message': error_message,
+                'rows_affected': 0,
+                'returning_rows_json': None,
+                'has_arrow_data': False,
+                'arrow_results': b"",
             }
+
+    async def execute_nl_query(
+        self,
+        workspace_id: str,
+        natural_query: str,
+        user_id: str,
+        limit: int = 1000,
+        user_team_ids: Optional[List[str]] = None,
+        include_documents: bool = False,
+        read_only: bool = False,
+        prefer_arrow: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Execute a natural-language query. When the text is SQL-shaped, run via execute_sql_query.
+        Full LLM-based NL-to-SQL can be added later; read_only is enforced on the SQL path.
+        """
+        del include_documents  # Reserved for document-augmented NL
+        if self._looks_like_sql(natural_query):
+            return await self.execute_sql_query(
+                workspace_id,
+                natural_query.strip(),
+                user_id,
+                limit=limit,
+                user_team_ids=user_team_ids,
+                params=None,
+                read_only=read_only,
+                prefer_arrow=prefer_arrow,
+            )
+        query_id = str(uuid.uuid4())
+        start_time = time.time()
+        execution_time_ms = int((time.time() - start_time) * 1000)
+        err = (
+            "Natural language queries must be expressed as SQL for this service, "
+            "or use query_type \"sql\" with a SELECT statement."
+        )
+        return {
+            "query_id": query_id,
+            "column_names": [],
+            "results_json": json.dumps([]),
+            "result_count": 0,
+            "execution_time_ms": execution_time_ms,
+            "generated_sql": "",
+            "error_message": err,
+            "rows_affected": 0,
+            "returning_rows_json": None,
+            "has_arrow_data": False,
+            "arrow_results": b"",
+        }
     
     async def _log_query(
         self,

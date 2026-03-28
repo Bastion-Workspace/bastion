@@ -70,7 +70,7 @@ class EncryptionService:
         
         self._fernet = Fernet(self._master_key)
         self._initialized = True
-        logger.info("🔐 BULLY! Encryption service initialized and ready!")
+        logger.info("Encryption service initialized")
     
     @staticmethod
     def generate_fernet_key() -> str:
@@ -258,7 +258,7 @@ def generate_master_key() -> str:
 if __name__ == "__main__":
     # Helper for generating a new master key
     print("=" * 60)
-    print("ROOSEVELT'S ENCRYPTION KEY GENERATOR")
+    print("Encryption key generator (MESSAGE_ENCRYPTION_MASTER_KEY)")
     print("=" * 60)
     print("\nGenerated Fernet key for MESSAGE_ENCRYPTION_MASTER_KEY:\n")
     print(generate_master_key())

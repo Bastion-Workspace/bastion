@@ -3,6 +3,7 @@ import { useQueryClient } from 'react-query';
 import { useAuth } from './AuthContext';
 import teamService from '../services/teams/TeamService';
 import { useMessaging } from './MessagingContext';
+import { useNotifications } from './NotificationContext';
 
 const TeamContext = createContext();
 
@@ -17,6 +18,7 @@ export const useTeam = () => {
 export const TeamProvider = ({ children }) => {
   const { user, isAuthenticated } = useAuth();
   const { loadRooms } = useMessaging();
+  const { addNotification } = useNotifications();
   const queryClient = useQueryClient();
   
   // State
@@ -446,6 +448,14 @@ export const TeamProvider = ({ children }) => {
           const data = JSON.parse(event.data);
           console.log('📨 WebSocket message received:', data.type, data);
           
+          if (data.type === 'agent_notification') {
+            addNotification(data);
+          } else if (data.type === 'agent_factory_updated') {
+            queryClient.invalidateQueries('agentFactoryProfiles');
+            queryClient.invalidateQueries('agentFactoryPlaybooks');
+          } else if (data.type === 'control_pane_updated') {
+            queryClient.invalidateQueries('controlPanes');
+          }
           // Handle team-related events
           if (data.type === 'team.post.created') {
             const { team_id, post } = data;
@@ -651,7 +661,7 @@ export const TeamProvider = ({ children }) => {
 
       ws.onerror = (error) => {
         // Only log errors in development to reduce console noise
-        if (process.env.NODE_ENV === 'development') {
+        if (import.meta.env.DEV) {
           console.error('Team WebSocket error:', error);
         }
         
@@ -679,7 +689,7 @@ export const TeamProvider = ({ children }) => {
         reconnectAttempts++;
         
         // Only log reconnection attempts in development
-        if (process.env.NODE_ENV === 'development') {
+        if (import.meta.env.DEV) {
           console.log(`Team WebSocket disconnected, reconnecting in ${delay}ms (attempt ${reconnectAttempts})...`);
         }
         

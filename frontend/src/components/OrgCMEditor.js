@@ -6,16 +6,23 @@ import { history, defaultKeymap, historyKeymap } from '@codemirror/commands';
 import { searchKeymap, getSearchQuery, setSearchQuery, openSearchPanel, closeSearchPanel } from '@codemirror/search';
 import { useTheme } from '../contexts/ThemeContext';
 import { useEditor } from '../contexts/EditorContext';
-import { Box, IconButton, Tooltip } from '@mui/material';
-import { HelpOutline } from '@mui/icons-material';
+import { Box, Button } from '@mui/material';
+import { ArrowUpward, ArrowDownward } from '@mui/icons-material';
 import OrgFileLinkDialog from './OrgFileLinkDialog';
+import DictationButton from './editor/DictationButton';
+import { createLiveEditDiffExtension, getLiveEditDiffPlugin } from './editor/extensions/liveEditDiffExtension';
+import { documentDiffStore } from '../services/documentDiffStore';
 import { orgDecorationsPlugin, orgFoldService, createOrgTabKeymap, createBaseTheme, codeFolding, createContentIndentationPlugin, createFoldStatePersistencePlugin } from './OrgEditorPlugins';
 import apiService from '../services/apiService';
+import yaml from 'js-yaml';
 
 // Memoize OrgCMEditor to prevent re-renders from parent context updates. darkMode prop ensures re-render when theme toggles (memo compares props only).
 const OrgCMEditor = React.memo(React.forwardRef(({ value, onChange, scrollToLine = null, scrollToHeading = null, initialScrollPosition = 0, onScrollChange, canonicalPath, filename, documentId, folderId, onCurrentSectionChange, darkMode: darkModeProp }, ref) => {
-  const { darkMode: darkModeContext } = useTheme();
+  const { darkMode: darkModeContext, accentId } = useTheme();
   const darkMode = darkModeProp !== undefined ? darkModeProp : darkModeContext;
+  const themeSignature = `${darkMode ? 'dark' : 'light'}-${accentId}`;
+  const [themeRemountNonce, setThemeRemountNonce] = useState(0);
+  const hasMountedRef = useRef(false);
   const { setEditorState } = useEditor() || { setEditorState: () => {} };
   const editorRef = useRef(null);
   const [currentHeadingLine, setCurrentHeadingLine] = useState(null);
@@ -23,6 +30,18 @@ const OrgCMEditor = React.memo(React.forwardRef(({ value, onChange, scrollToLine
   const hasRestoredInitialScrollRef = useRef(false);
   const [fileLinkDialogOpen, setFileLinkDialogOpen] = useState(false);
   const [indentContentToHeading, setIndentContentToHeading] = useState(false);
+  const [diffCount, setDiffCount] = useState(0);
+  const savedScrollPosRef = useRef(null);
+  const shouldRestoreScrollRef = useRef(false);
+
+  useEffect(() => {
+    if (!hasMountedRef.current) {
+      hasMountedRef.current = true;
+      return;
+    }
+    // Force CodeMirror remount so mode/accent updates are applied immediately.
+    setThemeRemountNonce((prev) => prev + 1);
+  }, [themeSignature]);
   
   // Method to insert text at cursor position
   const insertTextAtCursor = (text) => {
@@ -60,6 +79,18 @@ const OrgCMEditor = React.memo(React.forwardRef(({ value, onChange, scrollToLine
     loadSettings();
   }, []);
 
+  // Track diff count for UI visibility
+  useEffect(() => {
+    if (!documentId) {
+      setDiffCount(0);
+      return;
+    }
+    const updateCount = () => setDiffCount(documentDiffStore.getDiffCount(documentId));
+    updateCount();
+    documentDiffStore.subscribe(updateCount);
+    return () => documentDiffStore.unsubscribe(updateCount);
+  }, [documentId]);
+
   // Expose editor methods to parent via ref
   React.useImperativeHandle(ref, () => ({
     getCurrentLine: () => {
@@ -85,6 +116,18 @@ const OrgCMEditor = React.memo(React.forwardRef(({ value, onChange, scrollToLine
         }
       }
       return 'Current entry';
+    },
+    getScrollPosition: () => {
+      if (!editorRef.current?.view) return 0;
+      const scrollDOM = editorRef.current.view.scrollDOM;
+      return scrollDOM ? scrollDOM.scrollTop : 0;
+    },
+    getSelectedText: () => {
+      if (!editorRef.current?.view) return null;
+      const view = editorRef.current.view;
+      const selection = view.state.selection.main;
+      if (selection.from === selection.to) return null;
+      return view.state.sliceDoc(selection.from, selection.to);
     },
     scrollToLine: (lineNum) => {
       if (!editorRef.current?.view || !lineNum || lineNum < 1) return;
@@ -248,10 +291,14 @@ const OrgCMEditor = React.memo(React.forwardRef(({ value, onChange, scrollToLine
     ];
   }, []);
 
-  const baseTheme = useMemo(() => createBaseTheme(darkMode), [darkMode]);
+  const baseTheme = useMemo(() => createBaseTheme(darkMode, accentId), [darkMode, accentId]);
   const contentIndentationPlugin = useMemo(() => createContentIndentationPlugin(indentContentToHeading), [indentContentToHeading]);
   const foldStatePersistencePlugin = useMemo(() => createFoldStatePersistencePlugin(documentId), [documentId]);
-  
+  const liveEditDiffExt = useMemo(() => {
+    if (!documentId) return [];
+    return createLiveEditDiffExtension(documentId);
+  }, [documentId]);
+
   // Extension to track current section
   const currentSectionTracker = useMemo(() => {
     if (!onCurrentSectionChange) return [];
@@ -288,9 +335,23 @@ const OrgCMEditor = React.memo(React.forwardRef(({ value, onChange, scrollToLine
     baseTheme,
     contentIndentationPlugin,
     foldStatePersistencePlugin,
+    ...liveEditDiffExt,
     ...persistentSearchExt,
     ...(currentSectionTracker ? [currentSectionTracker] : [])
-  ], [baseTheme, contentIndentationPlugin, foldStatePersistencePlugin, persistentSearchExt, currentSectionTracker, fileLinkKeymap]);
+  ], [baseTheme, contentIndentationPlugin, foldStatePersistencePlugin, persistentSearchExt, currentSectionTracker, fileLinkKeymap, liveEditDiffExt]);
+
+  // Restore scroll position after value changes (from diff accept/reject)
+  useEffect(() => {
+    if (shouldRestoreScrollRef.current && savedScrollPosRef.current !== null && editorRef.current?.view) {
+      requestAnimationFrame(() => {
+        if (editorRef.current?.view && savedScrollPosRef.current !== null) {
+          editorRef.current.view.scrollDOM.scrollTop = savedScrollPosRef.current;
+          shouldRestoreScrollRef.current = false;
+          savedScrollPosRef.current = null;
+        }
+      });
+    }
+  }, [value]);
 
   // Scroll to line or heading when editor is ready
   useEffect(() => {
@@ -480,8 +541,6 @@ const OrgCMEditor = React.memo(React.forwardRef(({ value, onChange, scrollToLine
     const match = text.match(fmRegex);
     if (match) {
       try {
-        // Use dynamic import to avoid bundling yaml parser if not needed
-        const yaml = require('js-yaml');
         const data = yaml.load(match[1]) || {};
         return { data, content: match[2] };
       } catch (e) {
@@ -591,6 +650,147 @@ const OrgCMEditor = React.memo(React.forwardRef(({ value, onChange, scrollToLine
     };
   }, [refreshEditorCacheWithContent]);
 
+  // Editor operations apply: listen for codexApplyEditorOps, liveEditAccepted, liveEditRejected, codexRequestEditorContent
+  useEffect(() => {
+    function sliceHash(s) {
+      let h = 0;
+      for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+      return h.toString(16);
+    }
+
+    function applyOperations(e) {
+      try {
+        const detail = e.detail || {};
+        const operations = Array.isArray(detail.operations) ? detail.operations : [];
+        if (!operations.length) return;
+
+        const view = editorRef.current?.view;
+        if (!view) return;
+
+        const doc = view.state.doc;
+        const docText = doc.toString();
+
+        const ops = operations.slice().sort((a, b) => {
+          const startDiff = (b.start || 0) - (a.start || 0);
+          if (startDiff !== 0) return startDiff;
+          const aIsChunk = a.is_text_chunk && a.chunk_index !== undefined;
+          const bIsChunk = b.is_text_chunk && b.chunk_index !== undefined;
+          if (aIsChunk && bIsChunk) return (a.chunk_index || 0) - (b.chunk_index || 0);
+          return 0;
+        });
+
+        const changes = [];
+        let hasValidChanges = false;
+
+        for (const op of ops) {
+          const start = Math.max(0, Math.min(doc.length, Number(op.start || 0)));
+          const end = Math.max(start, Math.min(doc.length, Number(op.end || start)));
+
+          if (op.pre_hash && op.pre_hash.length > 0 && start !== end) {
+            const currentSlice = docText.slice(start, end);
+            const ph = sliceHash(currentSlice);
+            if (ph !== op.pre_hash) continue;
+          }
+
+          let newText = '';
+          if (op.op_type === 'delete_range') {
+            newText = '';
+          } else if (op.op_type === 'insert_after_heading' || op.op_type === 'insert_after') {
+            newText = typeof op.text === 'string' ? op.text : '';
+          } else {
+            newText = typeof op.text === 'string' ? op.text : '';
+          }
+
+          const currentSlice = docText.slice(start, end);
+          if (currentSlice !== newText) {
+            changes.push({ from: start, to: end, insert: newText });
+            hasValidChanges = true;
+          }
+        }
+
+        if (hasValidChanges && changes.length > 0) {
+          if (view.scrollDOM) {
+            savedScrollPosRef.current = view.scrollDOM.scrollTop;
+            shouldRestoreScrollRef.current = true;
+          }
+          view.dispatch({
+            changes,
+            userEvent: 'agent-edit'
+          });
+          const nextText = view.state.doc.toString();
+          if (onChange) {
+            onChange(nextText);
+            try {
+              refreshEditorCacheWithContent();
+            } catch (err) {
+              console.error('Failed to update cache after operation apply:', err);
+            }
+          }
+        }
+      } catch (err) {
+        console.error('Failed to apply editor operations:', err);
+      }
+    }
+
+    function handleLiveEditAccepted(e) {
+      try {
+        const { operationId, operation } = e.detail || {};
+        if (!operation) return;
+        const normalizedOp = {
+          op_type: operation.op_type || 'replace_range',
+          start: Number(operation.start || 0),
+          end: Number(operation.end !== undefined ? operation.end : operation.start || 0),
+          text: operation.text || ''
+        };
+        applyOperations({ detail: { operations: [normalizedOp] } });
+        window.dispatchEvent(new CustomEvent('removeLiveDiff', { detail: { operationId } }));
+      } catch (err) {
+        console.error('Failed to handle live edit acceptance:', err);
+      }
+    }
+
+    function handleLiveEditRejected(e) {
+      try {
+        const { operationId } = e.detail || {};
+        if (!operationId) return;
+        let savedScrollPos = null;
+        if (editorRef.current?.view?.scrollDOM) {
+          savedScrollPos = editorRef.current.view.scrollDOM.scrollTop;
+        }
+        window.dispatchEvent(new CustomEvent('removeLiveDiff', { detail: { operationId } }));
+        if (savedScrollPos !== null && editorRef.current?.view) {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              if (editorRef.current?.view?.scrollDOM) {
+                editorRef.current.view.scrollDOM.scrollTop = savedScrollPos;
+              }
+            });
+          });
+        }
+      } catch (err) {
+        console.error('Failed to handle live edit rejection:', err);
+      }
+    }
+
+    function provideEditorContent() {
+      try {
+        const current = (value || '').replace(/\r\n/g, '\n');
+        window.dispatchEvent(new CustomEvent('codexProvideEditorContent', { detail: { content: current } }));
+      } catch {}
+    }
+
+    window.addEventListener('codexApplyEditorOps', applyOperations);
+    window.addEventListener('liveEditAccepted', handleLiveEditAccepted);
+    window.addEventListener('liveEditRejected', handleLiveEditRejected);
+    window.addEventListener('codexRequestEditorContent', provideEditorContent);
+    return () => {
+      window.removeEventListener('codexApplyEditorOps', applyOperations);
+      window.removeEventListener('liveEditAccepted', handleLiveEditAccepted);
+      window.removeEventListener('liveEditRejected', handleLiveEditRejected);
+      window.removeEventListener('codexRequestEditorContent', provideEditorContent);
+    };
+  }, [value, onChange, refreshEditorCacheWithContent]);
+
   // Update editor context ONLY on mount and tab switch (NOT during typing)
   // The cache will be refreshed on-demand when ChatSidebar requests it via refreshEditorCache event
   useEffect(() => {
@@ -648,22 +848,17 @@ const OrgCMEditor = React.memo(React.forwardRef(({ value, onChange, scrollToLine
 
   return (
     <>
-      <Box sx={{ bgcolor: darkMode ? '#1e1e1e' : '#ffffff', p: 2, borderRadius: 1 }}>
-        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 1 }}>
-          <Tooltip title="Org-Mode Help: Headings (*, **, ***), TODO states (TODO/NEXT/WAITING/HOLD; DONE/CANCELLED), Checkboxes (- [ ] item, - [x] done), Progress indicators ([n/m] or [n%] in headings), Properties (:PROPERTIES: ... :END:). Keyboard Shortcuts: Ctrl+Shift+H to fold/unfold headers, Ctrl+Alt+L to insert file link, Ctrl+Shift+T to toggle checkbox, Ctrl+Alt+H to fold all, Ctrl+Alt+Shift+H to unfold all.">
-            <IconButton 
-              size="small"
-              onClick={() => alert('Org-Mode Help\n\nHeadings: *, **, ***\nTODO states: TODO/NEXT/WAITING/HOLD; DONE/CANCELLED\nCheckboxes: - [ ] item, - [x] done, - [-] partially done\nProgress indicators: Add [n/m] or [n%] to headings\nProperties: :PROPERTIES: ... :END:\n\nKeyboard Shortcuts:\nCtrl+Shift+H: Fold/unfold current header\nCtrl+Alt+L: Insert file link\nCtrl+Shift+T: Toggle checkbox at cursor\nCtrl+Alt+H: Fold all headings\nCtrl+Alt+Shift+H: Unfold all headings\n\nFeatures:\n- Parent checkboxes auto-update when children change\n- Progress indicators auto-update when checkboxes toggle\n- Enable "Indent Content to Heading Level" in Settings for visual indentation\n\nFolding (Emacs compatible):\n- #+STARTUP: overview/content/showall/show2levels/etc.\n- :VISIBILITY: folded in PROPERTIES drawer\n- Fold state persists between tab switches and sessions')}
-            >
-              <HelpOutline fontSize="small" />
-            </IconButton>
-          </Tooltip>
+      <Box sx={{ bgcolor: 'background.paper', p: 1, borderRadius: 1, display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+        <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <Box sx={{ display: 'flex', justifyContent: 'flex-end', mb: 0.5 }}>
+          <DictationButton insertText={insertTextAtCursor} />
         </Box>
         <CodeMirror
-          key={darkMode ? 'dark' : 'light'}
+          key={`${documentId || 'no-doc'}-${themeSignature}-${themeRemountNonce}`}
           ref={editorRef}
           value={value}
-          height="50vh"
+          height="100%"
+          style={{ height: '100%', minHeight: 0 }}
           basicSetup={false}
           extensions={extensions}
           onChange={(val) => {
@@ -673,23 +868,7 @@ const OrgCMEditor = React.memo(React.forwardRef(({ value, onChange, scrollToLine
               const state = editorRef.current.view.state;
               const selection = state.selection.main;
               const fullText = (val || '').replace(/\r\n/g, '\n');
-              
-              // Parse frontmatter if present
-              const parseFrontmatter = (text) => {
-                const fmRegex = /^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/;
-                const match = text.match(fmRegex);
-                if (match) {
-                  try {
-                    const yaml = require('js-yaml');
-                    const data = yaml.load(match[1]) || {};
-                    return { data, content: match[2] };
-                  } catch (e) {
-                    return { data: {}, content: text };
-                  }
-                }
-                return { data: {}, content: text };
-              };
-              
+
               const parsed = parseFrontmatter(fullText);
               const mergedFrontmatter = { ...(parsed.data || {}) };
               
@@ -719,7 +898,86 @@ const OrgCMEditor = React.memo(React.forwardRef(({ value, onChange, scrollToLine
             }
           }}
         />
+        </Box>
       </Box>
+      {diffCount > 0 && (
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 1, mt: 1 }}>
+          <Box sx={{ display: 'flex', gap: 1 }}>
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<ArrowUpward />}
+              onClick={() => {
+                try {
+                  const plugin = documentId ? getLiveEditDiffPlugin(documentId) : null;
+                  const view = editorRef.current?.view;
+                  if (plugin && view) {
+                    const cursorPos = view.state.selection.main.head;
+                    const prevDiff = plugin.findPreviousDiff(cursorPos);
+                    if (prevDiff) plugin.jumpToPosition(prevDiff.position);
+                  }
+                } catch (err) {
+                  console.error('Failed to jump to previous diff:', err);
+                }
+              }}
+            >
+              Previous Edit
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<ArrowDownward />}
+              onClick={() => {
+                try {
+                  const plugin = documentId ? getLiveEditDiffPlugin(documentId) : null;
+                  const view = editorRef.current?.view;
+                  if (plugin && view) {
+                    const cursorPos = view.state.selection.main.head;
+                    const nextDiff = plugin.findNextDiff(cursorPos);
+                    if (nextDiff) plugin.jumpToPosition(nextDiff.position);
+                  }
+                } catch (err) {
+                  console.error('Failed to jump to next diff:', err);
+                }
+              }}
+            >
+              Next Edit
+            </Button>
+          </Box>
+          <Box sx={{ display: 'flex', gap: 1 }}>
+            <Button
+              size="small"
+              variant="outlined"
+              color="success"
+              onClick={() => {
+                try {
+                  const plugin = documentId ? getLiveEditDiffPlugin(documentId) : null;
+                  if (plugin?.acceptAllOperations) plugin.acceptAllOperations();
+                } catch (err) {
+                  console.error('Failed to accept all operations:', err);
+                }
+              }}
+            >
+              Accept All
+            </Button>
+            <Button
+              size="small"
+              variant="outlined"
+              color="error"
+              onClick={() => {
+                try {
+                  const plugin = documentId ? getLiveEditDiffPlugin(documentId) : null;
+                  if (plugin?.rejectAllOperations) plugin.rejectAllOperations();
+                } catch (err) {
+                  console.error('Failed to reject all operations:', err);
+                }
+              }}
+            >
+              Reject All
+            </Button>
+          </Box>
+        </Box>
+      )}
       <OrgFileLinkDialog
         open={fileLinkDialogOpen}
         onClose={() => setFileLinkDialogOpen(false)}

@@ -49,7 +49,7 @@ STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact sc
 }}"""
 
         llm = agent._get_llm(temperature=0.3, state=state)
-        datetime_context = agent._get_datetime_context()
+        datetime_context = agent._get_datetime_context(state)
 
         detection_messages = [
             SystemMessage(content="You are a query type classifier. Always respond with valid JSON matching the exact schema provided."),
@@ -323,7 +323,7 @@ Provide a well-organized, thorough response that directly answers the query, syn
 Your comprehensive response:"""
 
         synthesis_llm = agent._get_llm(temperature=0.3, state=state)
-        datetime_context = agent._get_datetime_context()
+        datetime_context = agent._get_datetime_context(state)
 
         shared_memory = state.get("shared_memory", {})
         handoff_context = shared_memory.get("handoff_context", {})
@@ -346,6 +346,16 @@ Your comprehensive response:"""
 
 When synthesizing your answer, integrate information from the user's reference document with your research findings."""
                 logger.info(f"Handoff context available for synthesis from {source_agent}")
+
+        evaluation_feedback = state.get("evaluation_feedback")
+        if evaluation_feedback:
+            handoff_note += f"""
+
+**QUALITY FEEDBACK (previous attempt was insufficient or off-topic)**:
+{evaluation_feedback}
+
+Improve the synthesis so it directly and adequately answers the user's query."""
+            logger.info("Re-synthesizing with quality feedback")
 
         synthesis_messages = [
             SystemMessage(content="You are an expert research synthesizer."),
@@ -414,7 +424,7 @@ When synthesizing your answer, integrate information from the user's reference d
         shared_memory["primary_agent_selected"] = "research_agent"
         shared_memory["last_agent"] = "research_agent"
 
-        return {
+        out = {
             "final_response": final_response,
             "research_complete": True,
             "sources_used": sources_used,
@@ -426,6 +436,9 @@ When synthesizing your answer, integrate information from the user's reference d
             "shared_memory": shared_memory,
             "skill_config": skill_config,
         }
+        if state.get("evaluation_feedback"):
+            out["synthesis_attempt"] = 1
+        return out
 
     except Exception as e:
         logger.error(f"Synthesis error: {e}")
@@ -438,6 +451,98 @@ When synthesizing your answer, integrate information from the user's reference d
             "error": str(e),
             "shared_memory": shared_memory,
             "skill_config": state.get("skill_config", {}),
+        }
+
+
+def _preserve_research_state_for_evaluation(state: ResearchState) -> Dict[str, Any]:
+    """Return a dict of all state keys that must be preserved across the evaluation node."""
+    return {
+        "query": state.get("query", ""),
+        "metadata": state.get("metadata", {}),
+        "user_id": state.get("user_id", "system"),
+        "shared_memory": state.get("shared_memory", {}),
+        "messages": state.get("messages", []),
+        "final_response": state.get("final_response", ""),
+        "formatting_recommendations": state.get("formatting_recommendations"),
+        "routing_recommendation": state.get("routing_recommendation"),
+        "sources_used": state.get("sources_used", []),
+        "structured_images": state.get("structured_images"),
+        "image_search_results": state.get("image_search_results"),
+        "round1_results": state.get("round1_results"),
+        "round2_results": state.get("round2_results"),
+        "web_round1_results": state.get("web_round1_results"),
+        "web_round2_results": state.get("web_round2_results"),
+        "cached_context": state.get("cached_context", ""),
+        "full_doc_insights": state.get("full_doc_insights", {}),
+        "query_type": state.get("query_type"),
+        "query_type_detection": state.get("query_type_detection", {}),
+        "should_present_options": state.get("should_present_options", False),
+        "num_options": state.get("num_options"),
+        "round1_assessment": state.get("round1_assessment", {}),
+        "attachment_analysis": state.get("attachment_analysis"),
+        "skill_config": state.get("skill_config", {}),
+        "research_complete": state.get("research_complete", True),
+    }
+
+
+async def evaluate_response_node(agent: "FullResearchAgent", state: ResearchState) -> Dict[str, Any]:
+    """Evaluate whether the synthesized response directly answers the user query. Enables one re-synthesis on failure."""
+    from orchestrator.models.research_models import ResponseQualityEvaluation
+
+    preserved = _preserve_research_state_for_evaluation(state)
+    query = state.get("query", "")
+    final_response = state.get("final_response", "")
+    synthesis_attempt = state.get("synthesis_attempt", 0)
+
+    if synthesis_attempt >= 1:
+        logger.info("Already re-synthesized once; proceeding without re-evaluation")
+        return {
+            **preserved,
+            "evaluation_result": "sufficient",
+            "evaluation_feedback": None,
+        }
+    if not (query and final_response):
+        return {
+            **preserved,
+            "evaluation_result": "sufficient",
+            "evaluation_feedback": None,
+        }
+
+    try:
+        fast_model = agent._get_fast_model(state)
+        llm = agent._get_llm(temperature=0.0, model=fast_model, state=state)
+        structured_llm = llm.with_structured_output(ResponseQualityEvaluation)
+        prompt = f"""Given the user's query and the research response below, does the response directly answer the question?
+
+USER QUERY: {query}
+
+RESEARCH RESPONSE:
+{final_response[:8000]}
+
+Rate the response as:
+- sufficient: the response directly and adequately answers the query
+- insufficient: the response is partial, vague, or does not fully address the query
+- off_topic: the response does not address the query or is irrelevant
+
+Respond with the rating and brief reasoning."""
+        evaluation = await structured_llm.ainvoke([HumanMessage(content=prompt)])
+        rating = evaluation.rating if hasattr(evaluation, "rating") else getattr(evaluation, "rating", "sufficient")
+        reasoning = evaluation.reasoning if hasattr(evaluation, "reasoning") else getattr(evaluation, "reasoning", "")
+        logger.info(f"Response quality evaluation: {rating}, reasoning={reasoning[:80] if reasoning else ''}")
+        feedback = None
+        if rating in ("insufficient", "off_topic"):
+            feedback = f"Previous synthesis was rated '{rating}'. {reasoning}".strip()
+        return {
+            **preserved,
+            "evaluation_result": rating,
+            "evaluation_feedback": feedback,
+        }
+    except Exception as e:
+        logger.warning(f"Evaluation failed, proceeding as sufficient: {e}")
+        return {
+            **preserved,
+            "evaluation_result": "sufficient",
+            "evaluation_feedback": None,
         }
 
 

@@ -18,6 +18,10 @@ class Settings:
     MICROSOFT_GRAPH_BASE: str = os.getenv("MICROSOFT_GRAPH_BASE", "https://graph.microsoft.com/v1.0")
     GRAPH_REQUEST_TIMEOUT: int = int(os.getenv("GRAPH_REQUEST_TIMEOUT", "30"))
 
+    # Voice service (STT/TTS)
+    VOICE_SERVICE_HOST: str = os.getenv("VOICE_SERVICE_HOST", "voice-service")
+    VOICE_SERVICE_PORT: int = int(os.getenv("VOICE_SERVICE_PORT", "50059"))
+
     # Backend internal API (for external-chat)
     BACKEND_URL: str = os.getenv("BACKEND_URL", "http://backend:8000")
     INTERNAL_SERVICE_KEY: str = os.getenv("INTERNAL_SERVICE_KEY", "")

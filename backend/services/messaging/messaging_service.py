@@ -40,7 +40,7 @@ class MessagingService:
             self.db_pool = shared_db_pool
         else:
             self.db_pool = await get_shared_db_pool()
-        logger.info("🏇 BULLY! Messaging service initialized!")
+        logger.info("Messaging service initialized")
     
     async def _ensure_initialized(self):
         """Ensure service is initialized"""

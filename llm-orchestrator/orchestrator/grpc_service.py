@@ -4,6 +4,7 @@ Handles incoming gRPC requests for LLM orchestration
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime
 from typing import AsyncIterator, Optional, Dict, Any, List
@@ -36,6 +37,34 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
     def __init__(self):
         self.is_initialized = False
         logger.info("Initializing OrchestratorGRPCService...")
+
+    @staticmethod
+    def _strip_duplicate_trailing_user_message(
+        messages: List[Any],
+        request_query: str,
+    ) -> List[Any]:
+        """
+        Remove trailing user message when it duplicates the current request (UI vs external-connector).
+
+        External connectors persist the user turn before the orchestrator call; history then includes
+        that message. UI path typically does not. Uses content match and/or sequence_number vs max
+        assistant sequence to avoid stripping the wrong turn when text repeats.
+        """
+        if not messages or not isinstance(messages[-1], HumanMessage):
+            return messages
+        last = messages[-1]
+        last_seq = (getattr(last, "additional_kwargs", None) or {}).get("sequence_number") or 0
+        max_ai_seq = 0
+        for m in messages:
+            if isinstance(m, AIMessage):
+                s = (getattr(m, "additional_kwargs", None) or {}).get("sequence_number") or 0
+                if s > max_ai_seq:
+                    max_ai_seq = s
+        if last.content == request_query:
+            return messages[:-1]
+        if last_seq and last_seq > max_ai_seq:
+            return messages[:-1]
+        return messages
 
     def _extract_shared_memory(self, request: orchestrator_pb2.ChatRequest, existing_shared_memory: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -193,7 +222,33 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         if "editor_preference" not in shared_memory:
             shared_memory["editor_preference"] = "prefer"
             logger.debug(f"📝 EDITOR PREFERENCE: Defaulting to 'prefer' (not provided in request)")
-        
+
+        # Extract active data workspace context
+        if request.HasField("active_data_workspace"):
+            dw = request.active_data_workspace
+            schema = [
+                {"name": c.name, "type": c.type, "description": c.description}
+                for c in dw.columns
+            ]
+            visible_rows = []
+            if dw.visible_rows_json:
+                try:
+                    visible_rows = json.loads(dw.visible_rows_json)
+                except (TypeError, ValueError):
+                    pass
+            shared_memory["active_data_workspace"] = {
+                "workspace_id": dw.workspace_id,
+                "workspace_name": dw.workspace_name,
+                "database_id": dw.database_id,
+                "database_name": dw.database_name,
+                "table_id": dw.table_id,
+                "table_name": dw.table_name,
+                "row_count": dw.row_count,
+                "schema": schema,
+                "visible_rows": visible_rows,
+                "visible_row_count": dw.visible_row_count,
+            }
+
         # Extract pipeline context
         if request.HasField("pipeline_context"):
             shared_memory["active_pipeline_id"] = request.pipeline_context.active_pipeline_id
@@ -256,6 +311,11 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             if "image_base64" in request.metadata:
                 shared_memory["image_base64"] = request.metadata["image_base64"]
                 logger.debug("📎 SHARED MEMORY: Added image_base64 for image description routing")
+        
+        # Fallback: use persona timezone so custom agents get correct date/time when metadata lacks user_timezone
+        if "user_timezone" not in shared_memory and request.HasField("persona"):
+            shared_memory["user_timezone"] = request.persona.timezone or "UTC"
+            logger.debug("EXTRACTED user_timezone from persona (fallback)")
         
         return shared_memory
     
@@ -336,6 +396,48 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         # Count user messages in history (current message is not in history yet)
         user_message_count = sum(1 for msg in conversation_history if msg.role == "user")
         return user_message_count == 0
+
+    async def _generate_and_yield_title(
+        self,
+        request: orchestrator_pb2.ChatRequest,
+        user_message: str,
+        response_text: str,
+    ):
+        """
+        Generate a conversation title via TitleGenerationService and schedule DB update.
+        Returns a ChatChunk with type="title" for the caller to yield.
+        Only used for first turn (caller checks not request.conversation_history).
+        """
+        try:
+            from orchestrator.services.title_generation_service import get_title_generation_service
+            title_service = get_title_generation_service()
+            generated_title = await title_service.generate_title(
+                user_message=user_message or "",
+                agent_response=response_text or None,
+            )
+            if not generated_title:
+                return None
+            try:
+                from orchestrator.backend_tool_client import get_backend_tool_client
+                backend_client = await get_backend_tool_client()
+                asyncio.create_task(
+                    backend_client.update_conversation_title(
+                        conversation_id=request.conversation_id,
+                        title=generated_title,
+                        user_id=request.user_id,
+                    )
+                )
+            except Exception as e:
+                logger.warning("Failed to queue title update: %s", e)
+            return orchestrator_pb2.ChatChunk(
+                type="title",
+                message=generated_title,
+                timestamp=datetime.now().isoformat(),
+                agent_name="system",
+            )
+        except Exception as e:
+            logger.warning("Title generation failed: %s", e)
+            return None
     
     def _extract_response_text(self, result: Any) -> str:
         """
@@ -394,93 +496,6 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         required_fields = ["response", "task_status", "agent_type", "timestamp"]
         return all(field in result for field in required_fields)
     
-    def _extract_editor_operations_unified(self, result: Any) -> Optional[List[Dict[str, Any]]]:
-        """
-        Extract editor_operations from agent result (unified fallback chain)
-        
-        Checks all known locations where agents might place editor_operations.
-        Supports both legacy and standard formats.
-        
-        Args:
-            result: Agent result dictionary
-            
-        Returns:
-            List of editor operations or None if not found
-        """
-        if not isinstance(result, dict):
-            logger.warning(f"🔍 EXTRACT EDITOR OPS: result is not a dict (type: {type(result)})")
-            return None
-        
-        # DEBUG: Log what we're checking
-        logger.info(f"🔍 EXTRACT EDITOR OPS: result keys: {list(result.keys())}")
-        logger.info(f"🔍 EXTRACT EDITOR OPS: result.get('editor_operations') = {result.get('editor_operations')}")
-        logger.info(f"🔍 EXTRACT EDITOR OPS: type = {type(result.get('editor_operations'))}")
-        if result.get("editor_operations"):
-            logger.info(f"🔍 EXTRACT EDITOR OPS: length = {len(result.get('editor_operations'))}")
-        
-        # Check all known locations in priority order
-        # CRITICAL: Use 'is not None' instead of 'or' to handle empty lists correctly
-        ops = result.get("editor_operations")
-        if ops is not None:
-            logger.info(f"✅ EXTRACT EDITOR OPS: Found at result level ({len(ops)} ops)")
-            return ops
-        
-        ops = result.get("agent_results", {}).get("editor_operations")
-        if ops is not None:
-            logger.info(f"✅ EXTRACT EDITOR OPS: Found at agent_results level ({len(ops)} ops)")
-            return ops
-        
-        if isinstance(result.get("response"), dict):
-            ops = result.get("response", {}).get("editor_operations")
-            if ops is not None:
-                logger.info(f"✅ EXTRACT EDITOR OPS: Found at response level ({len(ops)} ops)")
-                return ops
-        
-        logger.warning(f"⚠️ EXTRACT EDITOR OPS: Not found in any location")
-        return None
-    
-    def _extract_manuscript_edit_unified(self, result: Any) -> Optional[Dict[str, Any]]:
-        """
-        Extract manuscript_edit from agent result (unified fallback chain)
-        
-        Checks all known locations where agents might place manuscript_edit.
-        Supports both legacy and standard formats.
-        
-        Args:
-            result: Agent result dictionary
-            
-        Returns:
-            Manuscript edit metadata dict or None if not found
-        """
-        if not isinstance(result, dict):
-            logger.warning(f"🔍 EXTRACT MANUSCRIPT EDIT: result is not a dict (type: {type(result)})")
-            return None
-        
-        # DEBUG: Log what we're checking
-        logger.info(f"🔍 EXTRACT MANUSCRIPT EDIT: result keys: {list(result.keys())}")
-        logger.info(f"🔍 EXTRACT MANUSCRIPT EDIT: result.get('manuscript_edit') = {result.get('manuscript_edit')}")
-        
-        # Check all known locations in priority order
-        # CRITICAL: Use 'is not None' instead of 'or' to handle empty dicts correctly
-        edit = result.get("manuscript_edit")
-        if edit is not None:
-            logger.info(f"✅ EXTRACT MANUSCRIPT EDIT: Found at result level")
-            return edit
-        
-        edit = result.get("agent_results", {}).get("manuscript_edit")
-        if edit is not None:
-            logger.info(f"✅ EXTRACT MANUSCRIPT EDIT: Found at agent_results level")
-            return edit
-        
-        if isinstance(result.get("response"), dict):
-            edit = result.get("response", {}).get("manuscript_edit")
-            if edit is not None:
-                logger.info(f"✅ EXTRACT MANUSCRIPT EDIT: Found at response level")
-                return edit
-        
-        logger.warning(f"⚠️ EXTRACT MANUSCRIPT EDIT: Not found in any location")
-        return None
-    
     def _extract_response_unified(self, result: Any, agent_type: str = "unknown") -> Dict[str, Any]:
         """
         Unified response extraction supporting both old and new formats
@@ -531,88 +546,15 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             datetime.now().isoformat()
         )
         
-        # Extract optional fields
-        editor_operations = self._extract_editor_operations_unified(result) if isinstance(result, dict) else None
-        manuscript_edit = self._extract_manuscript_edit_unified(result) if isinstance(result, dict) else None
-        
+        # Extract optional fields (editor_operations/manuscript_edit removed - DB proposal path only)
         return {
             "response": response_text,
             "task_status": task_status,
             "agent_type": extracted_agent_type,
             "timestamp": timestamp,
-            "editor_operations": editor_operations,
-            "manuscript_edit": manuscript_edit,
             # Preserve any other fields from original result
             **(result if isinstance(result, dict) else {})
         }
-    
-    async def _process_agent_with_cancellation(
-        self,
-        agent,
-        query: str,
-        metadata: Dict[str, Any],
-        messages: List[Any],
-        cancellation_token: asyncio.Event
-    ) -> Dict[str, Any]:
-        """
-        Process agent request with cancellation support
-        
-        Wraps agent.process() with cancellation token handling.
-        If agent supports process_with_cancellation(), uses that; otherwise falls back to standard process().
-        
-        Args:
-            agent: Agent instance to process request
-            query: User query
-            metadata: Metadata dictionary
-            messages: Conversation messages
-            cancellation_token: Cancellation event token
-            
-        Returns:
-            Agent result dictionary
-        """
-        # Check if agent supports cancellation-aware processing
-        if hasattr(agent, 'process_with_cancellation'):
-            result = await agent.process_with_cancellation(
-                query=query,
-                metadata=metadata,
-                messages=messages,
-                cancellation_token=cancellation_token
-            )
-        else:
-            # Fallback to standard process with cancellation monitoring
-            process_task = asyncio.create_task(
-                agent.process(query=query, metadata=metadata, messages=messages)
-            )
-            
-            # Wait for either completion or cancellation
-            done, pending = await asyncio.wait(
-                [process_task, asyncio.create_task(cancellation_token.wait())],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            
-            # Cancel pending tasks
-            for task in pending:
-                task.cancel()
-            
-            # Check if cancellation was requested
-            if cancellation_token.is_set():
-                process_task.cancel()
-                try:
-                    await process_task
-                except asyncio.CancelledError:
-                    pass
-                raise asyncio.CancelledError("Operation cancelled")
-            
-            # Return result
-            result = await process_task
-        
-        # Save agent identity to cache for conversation continuity
-        # Cache serves as optimization layer; backend will also save when storing response
-        conversation_id = metadata.get("conversation_id")
-        if conversation_id:
-            self._save_agent_identity_to_cache(result, conversation_id)
-        
-        return result
     
     async def _load_checkpoint_shared_memory(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -641,6 +583,49 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             logger.debug(f"⚠️ Failed to load checkpoint shared_memory in gRPC service: {e}")
             return {}
     
+    async def _llm_reselect_skill(
+        self,
+        query: str,
+        rejected_skills: set,
+        registry,
+        metadata: Dict[str, Any],
+        conversation_context: Dict[str, Any],
+        editor_context=None,
+    ) -> Optional[str]:
+        """Run LLM skill selection excluding already-rejected skills."""
+        try:
+            from orchestrator.routes.route_selector import llm_select_route_ranked
+            shared = conversation_context.get("shared_memory") or {}
+            has_image = bool(shared.get("attached_images") or shared.get("image_base64"))
+            eligible, _ = registry.filter_eligible(
+                query=query,
+                editor_context=editor_context,
+                conversation_context=conversation_context,
+                editor_preference=shared.get("editor_preference", "prefer"),
+                has_image_context=has_image,
+            )
+            eligible = [s for s in eligible if s.name not in rejected_skills]
+            if not eligible:
+                return None
+            routing_result = await llm_select_route_ranked(
+                eligible,
+                query,
+                editor_context=editor_context,
+                conversation_context=conversation_context,
+                metadata=metadata,
+            )
+            selected = routing_result.primary
+            if selected and selected not in rejected_skills:
+                logger.info("LLM re-selection picked: %s (after rejections: %s)", selected, rejected_skills)
+                fallback = [s for s in routing_result.fallback_stack if s not in rejected_skills]
+                sm = metadata.get("shared_memory") or {}
+                sm["routing_fallback_stack"] = fallback
+                return selected
+            return None
+        except Exception as e:
+            logger.warning("LLM re-selection failed: %s", e)
+            return None
+
     def _save_agent_identity_to_cache(self, agent_result: Dict[str, Any], conversation_id: str) -> None:
         """
         Save the agent's identity (primary_agent_selected) to the in-memory cache.
@@ -659,24 +644,28 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 logger.debug(f"Skipping agent identity cache: agent_result is not a dict (type={type(agent_result).__name__})")
                 return
 
-            # Extract primary_agent_selected from agent's result
+            # Extract primary_agent_selected and optional agent_profile_id from agent's result
             result_shared_memory = agent_result.get("shared_memory", {})
             primary_agent = result_shared_memory.get("primary_agent_selected")
             last_agent = result_shared_memory.get("last_agent")
-            
-            if not primary_agent:
-                # Agent didn't set primary_agent_selected, skip
+            agent_profile_id = result_shared_memory.get("agent_profile_id")
+
+            if not primary_agent and not agent_profile_id:
+                # Agent didn't set primary_agent_selected or agent_profile_id, skip
                 return
-            
+
             # Store in cache
             import time
-            _conversation_metadata_cache[conversation_id] = {
-                "primary_agent_selected": primary_agent,
-                "last_agent": last_agent or primary_agent,
-                "timestamp": time.time()
+            cached = {
+                "primary_agent_selected": primary_agent or "custom_agent",
+                "last_agent": (last_agent or primary_agent or "custom_agent"),
+                "timestamp": time.time(),
             }
-            
-            logger.info(f"✅ CACHED AGENT IDENTITY: primary_agent_selected = '{primary_agent}', last_agent = '{last_agent}' (conversation: {conversation_id})")
+            if agent_profile_id:
+                cached["agent_profile_id"] = agent_profile_id
+            _conversation_metadata_cache[conversation_id] = cached
+
+            logger.info(f"✅ CACHED AGENT IDENTITY: primary_agent_selected = '{cached['primary_agent_selected']}', last_agent = '{cached['last_agent']}' (conversation: {conversation_id})")
             
         except Exception as e:
             logger.warning(f"⚠️ Failed to save agent identity to cache: {e}")
@@ -716,7 +705,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         """
         Stream chat responses back to client
         
-        Supports multiple agent types: research, chat, help, weather, image_generation, rss, org, etc.
+        Supports multiple agent types: research, chat, weather, image_generation, rss, org, etc.
         Includes cancellation support - detects client disconnect and cancels operations
         """
         # Create cancellation token for this request
@@ -767,6 +756,8 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     "political_bias": request.persona.political_bias if request.persona.political_bias else "neutral",
                     "timezone": request.persona.timezone if request.persona.timezone else "UTC"
                 }
+                if request.persona.custom_preferences:
+                    persona_dict["custom_preferences"] = dict(request.persona.custom_preferences)
                 metadata["persona"] = persona_dict
                 logger.debug(f"✅ PERSONA: Extracted persona for agents (ai_name={persona_dict['ai_name']}, style={persona_dict['persona_style']})")
             else:
@@ -791,6 +782,8 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     checkpoint_shared_memory = {}
                 checkpoint_shared_memory["primary_agent_selected"] = cached_agent_identity.get("primary_agent_selected")
                 checkpoint_shared_memory["last_agent"] = cached_agent_identity.get("last_agent")
+                if cached_agent_identity.get("agent_profile_id"):
+                    checkpoint_shared_memory["agent_profile_id"] = cached_agent_identity["agent_profile_id"]
                 logger.debug(f"📚 Merged cache into checkpoint: primary_agent={cached_agent_identity.get('primary_agent_selected')}")
             
             # Build conversation context from proto fields for intent classification
@@ -846,88 +839,42 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             # Determine which agent to use via skill discovery (or intent classification fallback when disabled)
             primary_agent_name = None
             agent_type = None  # Initialize to None - will be set by routing logic or skill discovery
-            discovered_skill = None  # Set by short-circuit routes or skill discovery
-            from orchestrator.engines.unified_dispatch import _ensure_skills_loaded
-            from orchestrator.skills import get_skill_registry
-            _ensure_skills_loaded()
-            registry = get_skill_registry()
+            discovered_route = None  # Set by short-circuit routes or route discovery
+            custom_agent_profile_id = metadata.get("agent_profile_id")  # Agent Factory: route to custom agent when set
+            if not custom_agent_profile_id:
+                conv_shared = conversation_context.get("shared_memory", {})
+                if conv_shared.get("primary_agent_selected") == "custom_agent" and conv_shared.get("agent_profile_id"):
+                    custom_agent_profile_id = conv_shared["agent_profile_id"]
+                    metadata["agent_profile_id"] = custom_agent_profile_id
+                    logger.info("Restored agent_profile_id from conversation context (sticky routing): %s", custom_agent_profile_id)
+            from orchestrator.engines.unified_dispatch import _ensure_routes_loaded
+            from orchestrator.routes import get_route_registry
+            _ensure_routes_loaded()
+            registry = get_route_registry()
 
-            # SHORT-CIRCUIT ROUTING: Check for "/help" prefix for instant help routing
+            # SHORT-CIRCUIT ROUTING: Strip "/help" prefix and continue with normal discovery
             query_lower = request.query.lower().strip()
             if query_lower.startswith("/help"):
-                agent_type = "help"
-                discovered_skill = registry.get("help")
-                primary_agent_name = "help_agent"
-                # Strip "/help" prefix from query (with optional space after)
-                # Handle both "/help" and "/help " (with space)
-                cleaned_query = request.query[5:].strip()  # Remove "/help" (5 chars)
-                # If no query after "/help", use empty string (help agent will show general help)
-                if not cleaned_query:
-                    cleaned_query = ""
-                # Update request.query for agent processing
-                request.query = cleaned_query
-                logger.debug(f"❓ SHORT-CIRCUIT ROUTING: Help agent (query starts with '/help', cleaned: '{cleaned_query[:50]}...' if cleaned_query else 'empty')")
-                
-                # Ensure shared_memory is in metadata and conversation_context
-                if "shared_memory" not in metadata:
-                    metadata["shared_memory"] = {}
-                
-                # Merge the extracted request shared_memory (including active_editor!)
-                metadata["shared_memory"].update(request_shared_memory)
-                metadata["shared_memory"]["primary_agent_selected"] = agent_type
-                metadata["shared_memory"]["routing_fallback_stack"] = ["research", "chat"]
-                if "shared_memory" not in conversation_context:
-                    conversation_context["shared_memory"] = {}
-                conversation_context["shared_memory"].update(request_shared_memory)
-                conversation_context["shared_memory"]["primary_agent_selected"] = agent_type
-                conversation_context["shared_memory"]["routing_fallback_stack"] = ["research", "chat"]
-                if checkpoint_shared_memory:
-                    checkpoint_shared_memory["primary_agent_selected"] = agent_type
-                logger.info(f"📋 SET primary_agent_selected: {agent_type} (and merged {len(request_shared_memory)} shared_memory keys)")
-            # SHORT-CIRCUIT ROUTING: Check for "/define" prefix for instant dictionary routing
-            elif query_lower.startswith("/define"):
-                agent_type = "dictionary"
-                discovered_skill = registry.get("dictionary")
-                primary_agent_name = "dictionary_agent"
-                # Strip "/define" prefix from query (with optional space after)
-                # Handle both "/define" and "/define " (with space)
-                cleaned_query = request.query[7:].strip()  # Remove "/define" (7 chars)
-                # If no query after "/define", use empty string (dictionary agent will handle it)
-                if not cleaned_query:
-                    cleaned_query = ""
-                # Update request.query for agent processing
-                request.query = cleaned_query
-                logger.info(f"📖 SHORT-CIRCUIT ROUTING: Dictionary agent (query starts with '/define', cleaned: '{cleaned_query[:50]}...' if cleaned_query else 'empty')")
-                
-                # Ensure shared_memory is in metadata and conversation_context
-                if "shared_memory" not in metadata:
-                    metadata["shared_memory"] = {}
-                
-                # Merge the extracted request shared_memory (including active_editor!)
-                metadata["shared_memory"].update(request_shared_memory)
-                metadata["shared_memory"]["primary_agent_selected"] = agent_type
-                metadata["shared_memory"]["routing_fallback_stack"] = ["chat"]
-                if "shared_memory" not in conversation_context:
-                    conversation_context["shared_memory"] = {}
-                conversation_context["shared_memory"].update(request_shared_memory)
-                conversation_context["shared_memory"]["primary_agent_selected"] = agent_type
-                conversation_context["shared_memory"]["routing_fallback_stack"] = ["chat"]
-                if checkpoint_shared_memory:
-                    checkpoint_shared_memory["primary_agent_selected"] = agent_type
-                logger.info(f"📋 SET primary_agent_selected: {agent_type} (and merged {len(request_shared_memory)} shared_memory keys)")
-            elif request.agent_type and request.agent_type != "auto":
+                cleaned_query = request.query[5:].strip()
+                request.query = cleaned_query if cleaned_query else "What can you help me with?"
+                logger.debug("Stripped /help prefix; proceeding with normal skill discovery")
+            if request.agent_type and request.agent_type != "auto":
                 # Explicit agent routing provided by backend
                 agent_type = request.agent_type
                 primary_agent_name = agent_type
-                discovered_skill = registry.get(agent_type)  # registry.get() accepts "help_agent" -> help skill
+                discovered_route = registry.get(agent_type)
                 logger.info(f"EXPLICIT ROUTING: {agent_type} (reason: {request.routing_reason or 'not specified'})")
             
-            # If agent_type is still None, run skill discovery (compound-aware)
-            compound_plan = None
+            # If agent_type is still None, run skill discovery
+            editor_context = None
             if agent_type is None:
-                from orchestrator.skills.skill_llm_selector import llm_select_skill, llm_select_skill_or_plan, llm_select_skill_ranked
+                if not custom_agent_profile_id:
+                    try:
+                        from orchestrator.routes.definitions import load_auto_routable_agents
+                        await load_auto_routable_agents(request.user_id)
+                    except Exception as e:
+                        logger.warning("load_auto_routable_agents failed: %s", e)
                 active_editor = (request_shared_memory or {}).get("active_editor") or conversation_context.get("shared_memory", {}).get("active_editor")
-                editor_context = None
                 if active_editor:
                     fm = (active_editor.get("frontmatter") or {})
                     editor_context = {
@@ -950,12 +897,12 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 # single editor skill dedicated to that document type so we skip compound plans
                 # (e.g. outline open -> outline_editing only).
                 if instant_route is None and eligible and editor_context and shared.get("editor_preference") == "prefer":
-                    from orchestrator.skills.skill_schema import EngineType
+                    from orchestrator.routes.route_schema import EngineType
                     editor_type = (editor_context.get("type") or "").strip().lower()
                     if editor_type:
                         dedicated = [
                             s for s in eligible
-                            if s.engine == EngineType.EDITOR and (s.editor_types or []) == [editor_type]
+                            if s.engine == EngineType.CUSTOM_AGENT and (s.editor_types or []) == [editor_type]
                         ]
                         if len(dedicated) == 1:
                             instant_route = dedicated[0].name
@@ -966,128 +913,72 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                             )
                 if instant_route:
                     agent_type = instant_route
-                    discovered_skill = registry.get(agent_type)
+                    discovered_route = registry.get(agent_type)
                     primary_agent_name = f"{agent_type}_agent" if not agent_type.endswith("_agent") else agent_type
                     logger.info("Skill discovery: %s (instant)", agent_type)
-                elif eligible:
-                    plan = await llm_select_skill_or_plan(
-                        eligible,
-                        request.query,
-                        editor_context=editor_context,
-                        conversation_context=conversation_context,
-                        metadata=metadata,
-                    )
-                    if plan is None:
-                        routing_result = await llm_select_skill_ranked(
-                            eligible,
-                            request.query,
-                            editor_context=editor_context,
-                            conversation_context=conversation_context,
-                            metadata=metadata,
-                        )
-                        agent_type = routing_result.primary or "chat"
-                        discovered_skill = registry.get(agent_type)
-                        primary_agent_name = f"{agent_type}_agent" if not agent_type.endswith("_agent") else agent_type
-                        if "shared_memory" not in metadata:
-                            metadata["shared_memory"] = {}
-                        metadata["shared_memory"]["routing_fallback_stack"] = list(routing_result.fallback_stack)
-                        conversation_context["shared_memory"]["routing_fallback_stack"] = list(routing_result.fallback_stack)
-                        logger.info("Skill discovery: %s (fallback), fallbacks=%s", agent_type, routing_result.fallback_stack)
-                    elif plan.is_compound and len(plan.steps) > 1:
-                        # Safeguard: when user prefers editor context (e.g. outline open), do not run
-                        # compound plans. We may not have received active_editor in this request, so
-                        # editor-type pin did not run; rejecting compound avoids story_analysis +
-                        # image_generation when an outline (or other editor) is open.
-                        editor_pref = (conversation_context.get("shared_memory") or {}).get("editor_preference", "")
-                        if (editor_pref or "").strip().lower() == "prefer":
-                            logger.info(
-                                "Skill discovery: rejecting compound plan (editor_preference=prefer); falling back to single skill"
-                            )
-                            routing_result = await llm_select_skill_ranked(
-                                eligible,
-                                request.query,
-                                editor_context=editor_context,
-                                conversation_context=conversation_context,
-                                metadata=metadata,
-                            )
-                            agent_type = routing_result.primary or "chat"
-                            discovered_skill = registry.get(agent_type)
-                            primary_agent_name = f"{agent_type}_agent" if not agent_type.endswith("_agent") else agent_type
-                            if "shared_memory" not in metadata:
-                                metadata["shared_memory"] = {}
-                            metadata["shared_memory"]["routing_fallback_stack"] = list(routing_result.fallback_stack)
-                            conversation_context["shared_memory"]["routing_fallback_stack"] = list(routing_result.fallback_stack)
-                            logger.info("Skill discovery: %s (single-skill fallback after compound reject), fallbacks=%s", agent_type, routing_result.fallback_stack)
-                        else:
-                            compound_plan = plan
-                            agent_type = "compound"
-                            primary_agent_name = "compound_agent"
-                            discovered_skill = None
-                            step_skills = [s.skill_name for s in plan.steps]
-                            logger.info(
-                                "Skill discovery: compound plan (%d steps): %s",
-                                len(plan.steps),
-                                ", ".join(step_skills),
-                            )
-                            if plan.reasoning:
-                                logger.info("Compound plan reasoning: %s", plan.reasoning.strip())
-                            for s in plan.steps:
-                                logger.info(
-                                    "  step %s: skill=%s | sub_query=%s",
-                                    s.step_id,
-                                    s.skill_name,
-                                    (s.sub_query or "").strip() or "(none)",
-                                )
+                elif not custom_agent_profile_id:
+                    default_profile_id = metadata.get("default_agent_profile_id")
+                    if default_profile_id:
+                        custom_agent_profile_id = default_profile_id
+                        metadata["agent_profile_id"] = default_profile_id
+                        primary_agent_name = "custom_agent"
+                        logger.info("Default agent profile: %s", default_profile_id)
                     else:
-                        agent_type = (plan.skill or "chat")
-                        discovered_skill = registry.get(agent_type)
-                        primary_agent_name = f"{agent_type}_agent" if not agent_type.endswith("_agent") else agent_type
-                        logger.info("Skill discovery: %s", agent_type)
+                        agent_type = "chat"
+                        discovered_route = registry.get("chat")
+                        primary_agent_name = "chat_agent"
+                        logger.info("No default agent, fallback to chat")
                 else:
                     agent_type = "chat"
-                    discovered_skill = registry.get("chat")
+                    discovered_route = registry.get("chat")
                     primary_agent_name = "chat_agent"
-                    logger.info("Skill discovery: no eligible skills, fallback to chat")
+                    logger.info("Route discovery: no eligible routes, fallback to chat")
                 if "shared_memory" not in metadata:
                     metadata["shared_memory"] = {}
                 metadata["shared_memory"]["primary_agent_selected"] = primary_agent_name or agent_type
                 conversation_context["shared_memory"]["primary_agent_selected"] = primary_agent_name or agent_type
 
-            if not discovered_skill:
-                discovered_skill = registry.get("chat")
+            if not discovered_route:
+                discovered_route = registry.get("chat")
                 primary_agent_name = "chat_agent"
 
-            # Parse conversation history for agent
+            if custom_agent_profile_id:
+                discovered_route = None
+
+            # Parse conversation history for agent (sequence_number / created_at for robust merge)
             messages = []
             for msg in request.conversation_history:
+                kwargs: Dict[str, Any] = {}
+                meta = dict(msg.metadata) if msg.metadata else {}
+                seq_raw = (meta.get("sequence_number") or "").strip()
+                if seq_raw:
+                    try:
+                        kwargs["sequence_number"] = int(seq_raw)
+                    except ValueError:
+                        pass
+                ts = (getattr(msg, "timestamp", None) or "").strip()
+                if ts:
+                    kwargs["created_at"] = ts
                 if msg.role == "user":
-                    messages.append(HumanMessage(content=msg.content))
+                    messages.append(HumanMessage(content=msg.content, additional_kwargs=kwargs))
                 elif msg.role == "assistant":
-                    messages.append(AIMessage(content=msg.content))
+                    tcs = (meta.get("tool_call_summary") or "").strip()
+                    if tcs:
+                        kwargs["tool_call_summary"] = tcs
+                    messages.append(AIMessage(content=msg.content, additional_kwargs=kwargs))
 
-            # Skill dispatch: compound plan or unified dispatcher
-            if compound_plan:
-                if not request.conversation_history:
-                    title = (request.query or "New conversation").strip()[:50]
-                    if title:
-                        yield orchestrator_pb2.ChatChunk(
-                            type="title",
-                            message=title,
-                            timestamp=datetime.now().isoformat(),
-                            agent_name="system",
-                        )
-                        try:
-                            from orchestrator.backend_tool_client import get_backend_tool_client
-                            backend_client = await get_backend_tool_client()
-                            asyncio.create_task(
-                                backend_client.update_conversation_title(
-                                    conversation_id=request.conversation_id,
-                                    title=title,
-                                    user_id=request.user_id
-                                )
-                            )
-                        except Exception as e:
-                            logger.warning("Failed to queue title update: %s", e)
+            # External connectors persist the user message before calling the orchestrator, so history
+            # can include the current turn. Strip trailing duplicate user (content match or seq-only).
+            messages = self._strip_duplicate_trailing_user_message(messages, request.query or "")
+
+            # Skill dispatch: unified dispatcher
+            line_dispatch_on = (
+                metadata.get("line_dispatch_mode") == "true" and metadata.get("ceo_profile_id")
+            )
+            if line_dispatch_on:
+                from orchestrator.engines.unified_dispatch import get_unified_dispatcher
+
+                dispatcher = get_unified_dispatcher()
                 shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
                 dispatch_metadata = {
                     "user_id": request.user_id,
@@ -1095,43 +986,49 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                     "shared_memory": shared_memory,
                     **{k: v for k, v in metadata.items() if k != "shared_memory"},
                 }
-                from orchestrator.engines.plan_engine import PlanEngine
-                plan_engine = PlanEngine()
+                if not request.conversation_history:
+                    placeholder_title = (request.query or "New conversation").strip()[:50]
+                    if placeholder_title:
+                        yield orchestrator_pb2.ChatChunk(
+                            type="title",
+                            message=placeholder_title,
+                            timestamp=datetime.now().isoformat(),
+                            agent_name="system",
+                        )
+                        try:
+                            from orchestrator.backend_tool_client import get_backend_tool_client
 
-                # Collect the skills/fragments used so the frontend can display them.
-                compound_skills_used: List[str] = []
-                _seen_compound: set[str] = set()
-                for step in compound_plan.steps:
-                    name = (step.fragment_name or step.skill_name or "").strip()
-                    if not name or name in _seen_compound:
-                        continue
-                    compound_skills_used.append(name)
-                    _seen_compound.add(name)
-
+                            backend_client = await get_backend_tool_client()
+                            asyncio.create_task(
+                                backend_client.update_conversation_title(
+                                    conversation_id=request.conversation_id,
+                                    title=placeholder_title,
+                                    user_id=request.user_id,
+                                )
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to queue placeholder title update (line dispatch): %s", e)
                 start_time = datetime.now()
-                pending_complete_chunk: Optional[orchestrator_pb2.ChatChunk] = None
-                async for chunk in plan_engine.execute_plan(
-                    compound_plan, request.query, dispatch_metadata, messages, cancellation_token
+                pending_complete_chunk = None
+                accumulated_content = ""
+                async for chunk in dispatcher.dispatch_line(
+                    request.query,
+                    dispatch_metadata,
+                    messages,
+                    cancellation_token,
                 ):
-                    # Preserve step-level complete chunks, but enrich only the final complete chunk
-                    # with duration + skills/fragments metadata (shown in the chat footer).
                     if chunk.type == "complete":
-                        if pending_complete_chunk is not None:
-                            yield pending_complete_chunk
                         pending_complete_chunk = chunk
                         continue
+                    if chunk.type == "content" and chunk.message:
+                        accumulated_content += chunk.message
                     yield chunk
-
                 if pending_complete_chunk is not None:
-                    import json
-
                     duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
-                    merged_metadata: Dict[str, str] = (
+                    merged_metadata = (
                         dict(pending_complete_chunk.metadata) if pending_complete_chunk.metadata else {}
                     )
                     merged_metadata["duration_ms"] = str(duration_ms)
-                    merged_metadata["skills_used"] = json.dumps(compound_skills_used)
-
                     yield orchestrator_pb2.ChatChunk(
                         type=pending_complete_chunk.type,
                         message=pending_complete_chunk.message,
@@ -1141,11 +1038,97 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                         tools_used=list(pending_complete_chunk.tools_used),
                     )
                 self._save_agent_identity_to_cache(
-                    {"shared_memory": {"primary_agent_selected": "compound_agent", "last_agent": "compound_agent"}},
+                    {
+                        "shared_memory": {
+                            "primary_agent_selected": "line_dispatch",
+                            "last_agent": "line_dispatch",
+                        }
+                    },
                     request.conversation_id,
                 )
                 return
-            if discovered_skill:
+
+            if custom_agent_profile_id:
+                from orchestrator.engines.unified_dispatch import get_unified_dispatcher
+                dispatcher = get_unified_dispatcher()
+                shared_memory = self._extract_shared_memory(request, metadata.get("shared_memory", {}))
+                dispatch_metadata = {
+                    "user_id": request.user_id,
+                    "conversation_id": request.conversation_id,
+                    "shared_memory": shared_memory,
+                    **{k: v for k, v in metadata.items() if k != "shared_memory"},
+                }
+                if not request.conversation_history:
+                    placeholder_title = (request.query or "New conversation").strip()[:50]
+                    if placeholder_title:
+                        yield orchestrator_pb2.ChatChunk(
+                            type="title",
+                            message=placeholder_title,
+                            timestamp=datetime.now().isoformat(),
+                            agent_name="system",
+                        )
+                        try:
+                            from orchestrator.backend_tool_client import get_backend_tool_client
+                            backend_client = await get_backend_tool_client()
+                            asyncio.create_task(
+                                backend_client.update_conversation_title(
+                                    conversation_id=request.conversation_id,
+                                    title=placeholder_title,
+                                    user_id=request.user_id,
+                                )
+                            )
+                        except Exception as e:
+                            logger.warning("Failed to queue placeholder title update: %s", e)
+                start_time = datetime.now()
+                pending_complete_chunk = None
+                accumulated_content = ""
+                async for chunk in dispatcher.dispatch_custom_agent(
+                    custom_agent_profile_id,
+                    request.query,
+                    dispatch_metadata,
+                    messages,
+                    cancellation_token,
+                ):
+                    if chunk.type == "complete":
+                        pending_complete_chunk = chunk
+                        continue
+                    if chunk.type == "content" and chunk.message:
+                        accumulated_content += chunk.message
+                    yield chunk
+                if pending_complete_chunk is not None:
+                    duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
+                    merged_metadata = (
+                        dict(pending_complete_chunk.metadata) if pending_complete_chunk.metadata else {}
+                    )
+                    merged_metadata["duration_ms"] = str(duration_ms)
+                    yield orchestrator_pb2.ChatChunk(
+                        type=pending_complete_chunk.type,
+                        message=pending_complete_chunk.message,
+                        timestamp=pending_complete_chunk.timestamp,
+                        agent_name=pending_complete_chunk.agent_name,
+                        metadata=merged_metadata,
+                        tools_used=list(pending_complete_chunk.tools_used),
+                    )
+                    if not request.conversation_history:
+                        # Skip LLM title generation for Agent Line runs (detected via line_id/team_id in metadata)
+                        if not (metadata.get("line_id") or metadata.get("team_id")):
+                            title_chunk = await self._generate_and_yield_title(
+                                request, request.query or "", accumulated_content
+                            )
+                            if title_chunk:
+                                yield title_chunk
+                self._save_agent_identity_to_cache(
+                    {
+                        "shared_memory": {
+                            "primary_agent_selected": "custom_agent",
+                            "last_agent": "custom_agent",
+                            "agent_profile_id": custom_agent_profile_id,
+                        }
+                    },
+                    request.conversation_id,
+                )
+                return
+            if discovered_route:
                 if not request.conversation_history:
                     title = (request.query or "New conversation").strip()[:50]
                     if title:
@@ -1178,34 +1161,48 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 from orchestrator.engines.unified_dispatch import get_unified_dispatcher
                 dispatcher = get_unified_dispatcher()
                 start_time = datetime.now()
-                max_retries = 1
-                current_discovered_skill = discovered_skill
-                current_skill_name = discovered_skill.name
+                max_retries = 2
+                current_discovered_route = discovered_route
+                current_skill_name = discovered_route.name
+                rejected_skills = set()
 
                 for attempt in range(max_retries + 1):
                     if attempt > 0:
                         fallback_stack = dispatch_metadata.get("shared_memory", {}).get("routing_fallback_stack", [])
-                        next_skill = fallback_stack.pop(0) if fallback_stack else "chat"
-                        current_discovered_skill = registry.get(next_skill)
-                        if not current_discovered_skill:
-                            current_discovered_skill = registry.get("chat")
-                            next_skill = "chat"
-                        current_skill_name = next_skill
-                        logger.info("Skill rejected, retrying with fallback: %s", current_skill_name)
+                        next_skill = None
+                        while fallback_stack and next_skill is None:
+                            candidate = fallback_stack.pop(0)
+                            if candidate not in rejected_skills:
+                                next_skill = candidate
+                        if next_skill is None:
+                            next_skill = await self._llm_reselect_skill(
+                                request.query, rejected_skills, registry, metadata,
+                                conversation_context, editor_context,
+                            )
+                        if next_skill is None:
+                            logger.info("All fallbacks exhausted; ending dispatch")
+                            break
+                        current_discovered_route = registry.get(next_skill) or registry.get("chat")
+                        current_skill_name = current_discovered_route.name if current_discovered_route else "chat"
+                        logger.info("Skill rejected, retrying with: %s (attempt %d)", current_skill_name, attempt)
 
                     rejected = False
                     pending_complete_chunk = None
+                    accumulated_content = ""
                     async for chunk in dispatcher.dispatch(
                         current_skill_name, request.query, dispatch_metadata, messages, cancellation_token
                     ):
                         if chunk.type == "rejected":
                             rejected = True
+                            rejected_skills.add(current_skill_name)
                             break
                         if chunk.type == "complete":
                             if pending_complete_chunk is not None:
                                 yield pending_complete_chunk
                             pending_complete_chunk = chunk
                             continue
+                        if chunk.type == "content" and chunk.message:
+                            accumulated_content += chunk.message
                         yield chunk
 
                     if not rejected:
@@ -1216,7 +1213,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                                 dict(pending_complete_chunk.metadata) if pending_complete_chunk.metadata else {}
                             )
                             merged_metadata["duration_ms"] = str(duration_ms)
-                            merged_metadata["skills_used"] = json.dumps([current_discovered_skill.name])
+                            merged_metadata["skills_used"] = json.dumps([current_discovered_route.name])
                             yield orchestrator_pb2.ChatChunk(
                                 type=pending_complete_chunk.type,
                                 message=pending_complete_chunk.message,
@@ -1225,14 +1222,22 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                                 metadata=merged_metadata,
                                 tools_used=list(pending_complete_chunk.tools_used),
                             )
-                        agent_name = primary_agent_name or current_discovered_skill.name
+                            if not request.conversation_history:
+                                # Skip LLM title generation for Agent Line runs (detected via line_id/team_id in metadata)
+                                if not (metadata.get("line_id") or metadata.get("team_id")):
+                                    title_chunk = await self._generate_and_yield_title(
+                                        request, request.query or "", accumulated_content
+                                    )
+                                    if title_chunk:
+                                        yield title_chunk
+                        agent_name = primary_agent_name or current_discovered_route.name
                         self._save_agent_identity_to_cache(
                             {"shared_memory": {"primary_agent_selected": agent_name, "last_agent": agent_name}},
                             request.conversation_id,
                         )
                         return
 
-                agent_name = primary_agent_name or current_discovered_skill.name
+                agent_name = primary_agent_name or current_discovered_route.name
                 self._save_agent_identity_to_cache(
                     {"shared_memory": {"primary_agent_selected": agent_name, "last_agent": agent_name}},
                     request.conversation_id,
@@ -1266,65 +1271,6 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             except asyncio.CancelledError:
                 pass
     
-    async def StartTask(
-        self,
-        request: orchestrator_pb2.TaskRequest,
-        context: grpc.aio.ServicerContext
-    ) -> orchestrator_pb2.TaskResponse:
-        """
-        Start async task processing
-        
-        Phase 1: Stub implementation
-        """
-        logger.info(f"StartTask request from user {request.user_id}")
-        
-        return orchestrator_pb2.TaskResponse(
-            task_id=f"task_{datetime.now().timestamp()}",
-            status="queued",
-            message="Phase 1: Task queued (full implementation in Phase 2)"
-        )
-    
-    async def GetTaskStatus(
-        self,
-        request: orchestrator_pb2.TaskStatusRequest,
-        context: grpc.aio.ServicerContext
-    ) -> orchestrator_pb2.TaskStatusResponse:
-        """Get status of async task"""
-        logger.info(f"GetTaskStatus request for task {request.task_id}")
-        
-        return orchestrator_pb2.TaskStatusResponse(
-            task_id=request.task_id,
-            status="completed",
-            result="Phase 1: Stub response",
-            error_message=""
-        )
-    
-    async def ApprovePermission(
-        self,
-        request: orchestrator_pb2.PermissionApproval,
-        context: grpc.aio.ServicerContext
-    ) -> orchestrator_pb2.ApprovalResponse:
-        """Handle permission approval (HITL)"""
-        logger.info(f"ApprovePermission from user {request.user_id}: {request.approval_decision}")
-        
-        return orchestrator_pb2.ApprovalResponse(
-            success=True,
-            message="Phase 1: Permission recorded",
-            next_action="continue"
-        )
-    
-    async def GetPendingPermissions(
-        self,
-        request: orchestrator_pb2.PermissionRequest,
-        context: grpc.aio.ServicerContext
-    ) -> orchestrator_pb2.PermissionList:
-        """Get list of pending permissions"""
-        logger.info(f"GetPendingPermissions for user {request.user_id}")
-        
-        return orchestrator_pb2.PermissionList(
-            permissions=[]  # Phase 1: No pending permissions
-        )
-    
     async def HealthCheck(
         self,
         request: orchestrator_pb2.HealthCheckRequest,
@@ -1337,83 +1283,105 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 "phase": "6",
                 "service": "llm-orchestrator",
                 "status": "multi_agent_active",
-                "agents": "research,chat,help,weather,image_generation,rss,org,substack,podcast_script",
+                "agents": "research,chat,weather,image_generation,rss,org,substack,podcast_script",
                 "features": "multi_round_research,query_expansion,gap_analysis,web_search,caching,conversation,formatting,weather_forecasts,image_generation,rss_management,org_management,article_generation,podcast_script_generation,org_project_capture,cross_document_synthesis"
             }
         )
 
-    async def StartTask(
+    async def GetActions(
         self,
-        request: orchestrator_pb2.TaskRequest,
+        request: orchestrator_pb2.GetActionsRequest,
         context: grpc.aio.ServicerContext
-    ) -> orchestrator_pb2.TaskResponse:
-        """
-        Start async task processing
-        
-        Phase 1: Stub implementation
-        """
-        logger.info(f"StartTask request from user {request.user_id}")
-        
-        return orchestrator_pb2.TaskResponse(
-            task_id=f"task_{datetime.now().timestamp()}",
-            status="queued",
-            message="Phase 1: Task queued (full implementation in Phase 2)"
-        )
-    
-    async def GetTaskStatus(
+    ) -> orchestrator_pb2.GetActionsResponse:
+        """Return all registered action I/O contracts for Agent Factory Workflow Composer."""
+        try:
+            import orchestrator.tools  # Ensures all register_action() calls have run
+            from orchestrator.utils.action_io_registry import get_all_actions
+            actions = get_all_actions()
+            payload = []
+            typed_actions = []
+            for name, contract in actions.items():
+                payload.append({
+                    "name": name,
+                    "category": contract.category,
+                    "description": contract.description,
+                    "short_description": getattr(contract, "short_description", None),
+                    "input_schema": contract.get_input_schema(),
+                    "params_schema": contract.get_params_schema(),
+                    "output_schema": contract.get_output_schema(),
+                    "input_fields": contract.get_input_fields(),
+                    "output_fields": contract.get_output_fields(),
+                })
+                inputs = [
+                    orchestrator_pb2.ActionField(
+                        name=f.get("name", ""),
+                        type=f.get("type", "text"),
+                        description=f.get("description", ""),
+                        required=f.get("required", False),
+                        default_value=str(f["default"]) if f.get("default") is not None else "",
+                    )
+                    for f in contract.get_input_fields()
+                ]
+                outputs = [
+                    orchestrator_pb2.ActionField(
+                        name=f.get("name", ""),
+                        type=f.get("type", "text"),
+                        description=f.get("description", ""),
+                        required=False,
+                        default_value="",
+                    )
+                    for f in contract.get_output_fields()
+                ]
+                params = []
+                if contract.params_model:
+                    params_schema = contract.get_params_schema()
+                    for prop, meta in (params_schema.get("properties") or {}).items():
+                        params.append(orchestrator_pb2.ActionField(
+                            name=prop,
+                            type=meta.get("type", "text"),
+                            description=meta.get("description", ""),
+                            required=prop in (params_schema.get("required") or []),
+                            default_value="",
+                        ))
+                typed_actions.append(orchestrator_pb2.ActionContract(
+                    name=name,
+                    category=contract.category,
+                    description=contract.description,
+                    inputs=inputs,
+                    outputs=outputs,
+                    params=params,
+                ))
+            return orchestrator_pb2.GetActionsResponse(actions_json=json.dumps(payload), actions=typed_actions)
+        except Exception as e:
+            logger.exception("GetActions failed")
+            return orchestrator_pb2.GetActionsResponse(actions_json=json.dumps({"error": str(e), "actions": []}))
+
+    async def GetPlugins(
         self,
-        request: orchestrator_pb2.TaskStatusRequest,
+        request: orchestrator_pb2.GetPluginsRequest,
         context: grpc.aio.ServicerContext
-    ) -> orchestrator_pb2.TaskStatusResponse:
-        """Get status of async task"""
-        logger.info(f"GetTaskStatus request for task {request.task_id}")
-        
-        return orchestrator_pb2.TaskStatusResponse(
-            task_id=request.task_id,
-            status="completed",
-            result="Phase 1: Stub response",
-            error_message=""
-        )
-    
-    async def ApprovePermission(
-        self,
-        request: orchestrator_pb2.PermissionApproval,
-        context: grpc.aio.ServicerContext
-    ) -> orchestrator_pb2.ApprovalResponse:
-        """Handle permission approval (HITL)"""
-        logger.info(f"ApprovePermission from user {request.user_id}: {request.approval_decision}")
-        
-        return orchestrator_pb2.ApprovalResponse(
-            success=True,
-            message="Phase 1: Permission recorded",
-            next_action="continue"
-        )
-    
-    async def GetPendingPermissions(
-        self,
-        request: orchestrator_pb2.PermissionRequest,
-        context: grpc.aio.ServicerContext
-    ) -> orchestrator_pb2.PermissionList:
-        """Get list of pending permissions"""
-        logger.info(f"GetPendingPermissions for user {request.user_id}")
-        
-        return orchestrator_pb2.PermissionList(
-            permissions=[]  # Phase 1: No pending permissions
-        )
-    
-    async def HealthCheck(
-        self,
-        request: orchestrator_pb2.HealthCheckRequest,
-        context: grpc.aio.ServicerContext
-    ) -> orchestrator_pb2.HealthCheckResponse:
-        """Health check endpoint"""
-        return orchestrator_pb2.HealthCheckResponse(
-            status="healthy",
-            details={
-                "phase": "6",
-                "service": "llm-orchestrator",
-                "status": "multi_agent_active",
-                "agents": "research,chat,help,weather,image_generation,rss,org,substack,podcast_script",
-                "features": "multi_round_research,query_expansion,gap_analysis,web_search,caching,conversation,formatting,weather_forecasts,image_generation,rss_management,org_management,article_generation,podcast_script_generation,org_project_capture,cross_document_synthesis"
-            }
-        )
+    ) -> orchestrator_pb2.GetPluginsResponse:
+        """Return available Agent Factory plugins and their connection requirements."""
+        try:
+            from orchestrator.plugins.plugin_loader import get_plugin_loader
+            loader = get_plugin_loader()
+            names = loader.discover_plugins()
+            plugins = []
+            for name in names:
+                plugin = loader.get_plugin(name)
+                if not plugin:
+                    continue
+                req = plugin.get_connection_requirements()
+                connection_requirements = [
+                    orchestrator_pb2.PluginConnectionField(key=k, label=v)
+                    for k, v in req.items()
+                ]
+                plugins.append(orchestrator_pb2.PluginInfo(
+                    name=plugin.plugin_name,
+                    version=plugin.plugin_version,
+                    connection_requirements=connection_requirements,
+                ))
+            return orchestrator_pb2.GetPluginsResponse(plugins=plugins)
+        except Exception as e:
+            logger.exception("GetPlugins failed")
+            return orchestrator_pb2.GetPluginsResponse(plugins=[])

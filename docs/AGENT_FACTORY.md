@@ -1,8 +1,8 @@
 # Agent Factory: User-Defined Research & Intelligence Agents
 
 **Document Version:** 1.0
-**Last Updated:** February 14, 2026
-**Status:** Planning Phase
+**Last Updated:** February 16, 2026
+**Status:** Core implemented — profiles, playbooks, connectors, schedules, pipeline executor, tool I/O contracts, plugin credentials, execution viewer, approval UI, and hardening in place. See [Current implementation status](#current-implementation-status) below.
 **Supersedes:** DATA_WORKSPACE_ANALYTICS_ENHANCEMENTS.md
 **Companion docs:** [Technical Guide](./AGENT_FACTORY_TECHNICAL_GUIDE.md), [Tool Catalog](./AGENT_FACTORY_TOOLS.md), [Examples](./AGENT_FACTORY_EXAMPLES.md)
 
@@ -455,9 +455,9 @@ steps:
     action: extract_entities
     inputs:
       data: "{nonprofit_data.results}"  # Wired to upstream step output field
-      entity_types: [PERSON]
+    entity_types: [PERSON]
     params:
-      relationship_type: OFFICER_OF
+    relationship_type: OFFICER_OF
     output_key: officers
     # outputs: entities[], count
 
@@ -469,7 +469,7 @@ steps:
       dataset_a: "{officers.entities}"          # Wired: entities from extraction
       dataset_b: "{fec_contributions.results}"  # Wired: records from FEC
     params:
-      match_strategy: fuzzy_name
+    match_strategy: fuzzy_name
     output_key: officer_connections
     # outputs: matches[], unmatched[], count
 
@@ -492,7 +492,7 @@ steps:
       officers: "{officers}"
       officer_connections: "{officer_connections}"
     params:
-      template: nonprofit_investigation_report
+    template: nonprofit_investigation_report
     output_schema:                    # LLM steps declare their output shape
       type: object
       fields:
@@ -1260,6 +1260,69 @@ Agents get two new tools automatically:
 
 The `write_journal_entry` tool is called automatically by the workflow engine after each execution completes. It receives the execution context (steps run, entities found, outputs produced, errors encountered) and generates a human-readable summary. For LLM-augmented workflows, the LLM generates the summary; for deterministic pipelines, the engine generates a structured summary from step results.
 
+#### Failure Capture & Debugging Through the Journal
+
+The journal is not just a success log — it is the primary debugging interface for custom agents. When a workflow fails or produces unexpected results, the journal captures everything needed to diagnose the issue without requiring the user to read raw system logs.
+
+**Every journal entry includes a `diagnostic_context` field** that captures:
+
+- **Step-level execution trace**: Which steps ran, which were skipped, which failed, in what order
+- **Failure details per step**: The error type, error message, input values that caused the failure, and the connector/tool that failed
+- **Partial results**: What data was successfully collected before the failure
+- **State snapshot**: The `playbook_state` at the point of failure (what output_keys were populated, what was missing)
+- **Connector diagnostics**: HTTP status codes, rate limit state, response snippets (truncated), circuit breaker status
+- **LLM step diagnostics**: Which model was used, token count, whether the structured output parsed successfully, validation errors if not
+
+**Failure journal entries look different from success entries:**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  📋 WORK JOURNAL — @nonprofit-investigator                   │
+│                                                              │
+│  Today, Feb 15 2026                                          │
+│  ─────────────────                                           │
+│  09:15  ❌ Daily FEC monitoring FAILED (scheduled)            │
+│         • Step 1/3 completed: pull_fec_data ✓                │
+│         • Step 2/3 FAILED: filter_recent                     │
+│           Error: KeyError 'contribution_receipt_date'         │
+│           Cause: FEC API changed response field name          │
+│           Input: 23 records from step 1                      │
+│         • Step 3/3 skipped: notify_if_found (dependency)     │
+│         • Partial data saved to execution log                │
+│         ▸ Tap for full diagnostic trace                      │
+│                                                              │
+│  08:00  ⚠️ Nonprofit 990 check PARTIAL (scheduled)           │
+│         • ProPublica API returned 429 (rate limited)         │
+│         • Circuit breaker tripped after 5 failures           │
+│         • Used cached data from Feb 14 (1 day stale)         │
+│         • Report generated with stale data warning           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Users can ask about failures naturally:**
+
+```
+User: @fec-tracker Why did your morning run fail?
+
+Agent: My 9:15 AM scheduled run failed at step 2 (filter_recent).
+The FEC API appears to have renamed the date field from
+"contribution_receipt_date" to "contribution_date". Step 1
+successfully pulled 23 records, but the filter couldn't find
+the expected field name. I recommend updating the connector's
+response_mapping to use the new field name.
+
+User: @nonprofit-investigator Have you had any errors this week?
+
+Agent: Yes, 2 issues this week:
+1. **Feb 15, 8:00 AM** — ProPublica API rate-limited. Circuit
+   breaker tripped. Used cached data (1 day stale).
+2. **Feb 13, 3:22 PM** — Entity resolution timed out during
+   Koch Industries investigation. 4 entities queued for
+   background resolution, completed 20 minutes later.
+```
+
+This means the journal serves double duty: it is both the user-facing activity log AND the diagnostic tool. Users never need to look at system logs or execution traces directly — they ask the agent, and the agent explains what went wrong in plain language, drawing from the structured diagnostic context stored in each journal entry.
+
 ### 10. Team Integration
 
 Custom agents can be **shared with teams** the user belongs to. When shared, team members can invoke the agent via @mention, view its journal, and benefit from its knowledge graph contributions. The agent owner controls what level of access the agent has to team resources.
@@ -1320,6 +1383,375 @@ When an agent is shared with a team:
 - **Credential isolation** — Connector credentials (API keys) are NEVER shared. The agent uses the owner's credentials regardless of who invokes it. If the team needs different credentials, the team should create their own agent.
 - **RLS enforcement** — All team file/post access goes through existing Row-Level Security policies on the teams infrastructure
 - **Audit trail** — All team resource access is logged in the agent's journal and the team's activity log
+
+### 11. Schema Versioning for Connectors & Playbooks
+
+Connectors and playbooks evolve. An API vendor renames a field, a user refines their output_schema, or a playbook step gets a new output field. Without schema versioning, downstream playbooks wired to the old field names break silently.
+
+#### Versioned Output Schemas
+
+Every connector endpoint's `output_schema` and every playbook step's `output_schema` is immutably versioned. When a schema changes, the system creates a **new version** rather than mutating the existing one.
+
+```
+Connector: fec-contributions
+  Endpoint: search_contributions
+    output_schema v1 (created Feb 10):
+      fields: [donor_name, contribution_receipt_date, amount, ...]
+    output_schema v2 (created Feb 15):
+      fields: [donor_name, contribution_date, amount, ...]
+                          ^^^ renamed field
+```
+
+#### Lifecycle Rules
+
+| Condition | Behavior |
+|---|---|
+| New schema version created | Old version retained. All playbooks referencing the old version continue to work. |
+| Playbooks exist that reference old version | Old version **cannot be deleted**. UI shows "N playbooks depend on this version." |
+| No playbooks reference old version | Old version eligible for cleanup. UI offers "Remove unused version" option. |
+| Connector definition updated | System detects field differences and prompts user: "These fields changed. Create a new schema version?" |
+| Breaking change detected | Playbooks wired to removed/renamed fields are flagged with warnings in the Workflow Composer UI. User can re-wire or pin to old version. |
+
+#### Version Resolution at Runtime
+
+When a playbook runs, the pipeline executor resolves each step's schema version:
+
+1. **Explicit version pin**: Step specifies `schema_version: 1` → uses that version regardless
+2. **Latest version (default)**: Step has no version pin → uses the latest schema version for that connector endpoint
+3. **Compatibility check**: At save time, the Workflow Composer validates that all wired field references exist in the resolved schema version. At runtime, missing fields produce a clear error in the journal diagnostic.
+
+#### Auto-Migration Assistance
+
+When a new schema version introduces breaking changes, the Assembly Agent can help:
+
+```
+Assembly Agent: "The FEC connector updated search_contributions from v1 to v2.
+The field 'contribution_receipt_date' was renamed to 'contribution_date'.
+
+2 playbooks are affected:
+  • Nonprofit Investigation Playbook (step: pull_fec_data)
+  • Daily FEC Monitor (step: daily_fec_check)
+
+Shall I update both playbooks to use the new field name? Or pin them to v1?"
+```
+
+### 12. Per-Step Model Selection & Cost Visibility
+
+LLM task steps are the only steps that consume model tokens. Users need control over which model runs each LLM step, and visibility into what those steps will cost.
+
+#### Model Selection Hierarchy
+
+Every `llm_task` step can specify which model to use, with a clear fallback chain:
+
+```
+Step-level model_preference (if set)
+    ↓ fallback
+Agent Profile model_preference (if set)
+    ↓ fallback
+User's default chat model (from user settings)
+    ↓ fallback
+System default model (admin-configured)
+```
+
+In the Workflow Composer UI, each `llm_task` step shows a model selector dropdown that includes:
+
+1. **Globally available models** — Models enabled by the system administrator
+2. **User-provided models (future)** — Models the user has configured with their own API keys (e.g., personal OpenAI key, Anthropic key, or a local model endpoint)
+
+```yaml
+steps:
+  - name: classify_documents
+    step_type: llm_task
+    action: llm_analyze
+    model_preference: "google/gemini-2.5-flash"    # Fast, cheap — classification
+    inputs:
+      files: "{new_files.files}"
+    output_schema:
+      type: record_set
+      fields:
+        - name: classification
+          type: string
+
+  - name: deep_analysis
+    step_type: llm_task
+    action: llm_analyze
+    model_preference: "anthropic/claude-sonnet-4-20250514"  # Capable — synthesis
+    inputs:
+      classified: "{classify_documents}"
+    output_schema:
+      type: object
+      fields:
+        - name: report
+          type: string
+        - name: risk_score
+          type: number
+```
+
+#### Cost Visibility
+
+The Workflow Composer UI shows estimated costs alongside each LLM step, using the same pricing information displayed in the AI Chat sidebar:
+
+```
+┌────────────────────────────────────────────────────────────┐
+│  Step 4: classify_documents (llm_task)                      │
+│  Model: google/gemini-2.5-flash                             │
+│  Est. cost: ~$0.001/run (based on avg input size)           │
+│                                                             │
+│  Step 6: deep_analysis (llm_task)                           │
+│  Model: anthropic/claude-sonnet-4-20250514                         │
+│  Est. cost: ~$0.03/run (based on avg input size)            │
+│                                                             │
+│  Steps 1-3, 5: deterministic (tool)                         │
+│  Cost: $0.00 (no LLM tokens)                               │
+│                                                             │
+│  Total estimated cost per run: ~$0.031                      │
+│  For scheduled runs (daily): ~$0.93/month                   │
+└────────────────────────────────────────────────────────────┘
+```
+
+Cost estimates are necessarily approximate — they depend on the actual data volume flowing through each step. The system calculates estimates from:
+
+1. **Average input/output token counts** from previous executions of this playbook (if any)
+2. **Model pricing data** from the same source as the AI Chat sidebar pricing display
+3. **Step count** — number of LLM steps × estimated tokens × price per token
+
+For playbooks that have never been run, the system uses conservative estimates based on the step's `inputs` map (estimated data volume from upstream steps) and the model's pricing tier.
+
+### 13. Connector Sharing & Cross-Agent Rate Limiting
+
+#### Connector Reuse Within a User
+
+A single user building multiple agents will naturally reuse the same connectors. The system supports this through the existing **binding model**: the connector definition lives in `data_source_connectors` (one row), and multiple agents bind to it via `agent_data_sources` (many rows).
+
+The Workflow Composer shows "Your Connectors" as a persistent library — when building a new agent, the user picks from their existing connectors rather than recreating them.
+
+#### Connector Similarity Across Users
+
+When multiple users independently create connectors for the same API (e.g., two users both create an FEC API connector), the system does NOT automatically merge or deduplicate them. User-created connectors contain user-specific configuration (rate limit overrides, credential references, allowed endpoints) and are private by design.
+
+However, the system supports **discovery and reuse** through connector templates:
+
+| Source | Visibility | Editability | Use Case |
+|---|---|---|---|
+| **System templates** | All users | Read-only (clone to customize) | Pre-built connectors (FEC, ProPublica, SEC, etc.) |
+| **User connectors** | Owner only | Full edit | Personal connectors |
+| **Team-shared connectors** (future) | Team members | Clone to customize | Team standardizes on a connector config |
+
+When a user creates a custom connector, the Assembly Agent can suggest: "This looks similar to the FEC API template. Would you like to start from the template instead?" This prevents redundant connector creation without forcing deduplication.
+
+#### Cross-Agent Rate Limiting
+
+When multiple agents (owned by the same user or shared across a team) bind to the **same connector instance**, they share a rate limit budget. This is critical — two agents polling the FEC API simultaneously should not each independently consume the rate limit.
+
+**Rate limiting is enforced at the connector instance level, not the agent level:**
+
+```
+Connector: fec-contributions (user_id: alice)
+  Rate limit: 10 requests/second, 1000/day
+  │
+  ├── Bound by: @nonprofit-investigator
+  ├── Bound by: @fec-tracker
+  └── Bound by: @daily-monitor (scheduled)
+  
+  All three agents share the 10 req/s and 1000/day budget.
+  Rate limiter tracks: connector_id + user_id (not agent_id)
+```
+
+The rate limiter uses a shared counter (Redis or PostgreSQL advisory locks) keyed by `(connector_id, user_id)`. When any agent makes a request through this connector, it consumes from the shared budget. If the budget is exhausted, all agents using this connector are throttled.
+
+For **team-shared agents** that use the owner's credentials, the rate limit is charged against the owner's connector instance — regardless of which team member invoked the agent.
+
+### 14. Agent-to-Agent Communication
+
+Custom agents can communicate with each other, enabling multi-agent collaboration patterns where one agent's output becomes another agent's input.
+
+#### The Agent Message Bus
+
+Agents communicate through a message bus — a structured channel for passing queries, results, and instructions between agents. This is NOT direct function calls between agents. Each message is a proper agent invocation that goes through the full workflow runtime, with journaling, checkpointing, and output routing.
+
+```
+┌──────────────────┐                    ┌──────────────────┐
+│  @email-watcher   │   send_to_agent   │  @response-checker│
+│  (monitor mode)   │ ───────────────── │  (on-demand)      │
+│                   │   "Check this     │                   │
+│  Detects important│    draft reply"   │  Reviews draft,   │
+│  inbound email    │                   │  returns feedback  │
+│                   │ ◄──────────────── │                   │
+│  Receives approval│   agent_response  │                   │
+│  sends the reply  │   "Looks good,    │                   │
+│                   │    send it"       │                   │
+└──────────────────┘                    └──────────────────┘
+```
+
+#### Communication Patterns
+
+**Pattern A: Handoff (one-way pass)**
+
+One agent completes part of a task, then hands off to another agent for the next phase. The receiving agent runs independently.
+
+```yaml
+steps:
+  - name: research_entity
+    step_type: tool
+    action: call_connector
+    connector: fec-contributions
+    endpoint: search_contributions
+    inputs:
+      contributor_name: "{entity_name}"
+    output_key: fec_data
+
+  - name: hand_to_analyst
+    step_type: tool
+    action: send_to_agent
+    inputs:
+      target_agent: "@political-analyst"
+      message: "Analyze these FEC contributions for {entity_name}"
+      data: "{fec_data}"
+    params:
+      wait_for_response: false       # Fire-and-forget
+    output_key: handoff_result
+```
+
+**Pattern B: Request-Response (synchronous collaboration)**
+
+One agent sends a query to another and waits for the response before continuing. This enables review workflows, second opinions, and specialist delegation.
+
+```yaml
+steps:
+  - name: draft_response
+    step_type: llm_task
+    action: llm_analyze
+    inputs:
+      email: "{incoming_email}"
+    output_schema:
+      type: object
+      fields:
+        - name: draft_reply
+          type: string
+        - name: confidence
+          type: number
+    output_key: draft
+
+  - name: get_review
+    step_type: tool
+    action: send_to_agent
+    inputs:
+      target_agent: "@response-reviewer"
+      message: "Review this draft reply for tone and accuracy"
+      data: "{draft}"
+    params:
+      wait_for_response: true        # Block until reviewer responds
+      timeout_minutes: 30
+    output_key: review
+
+  - name: send_if_approved
+    step_type: tool
+    action: send_email
+    condition: "{review.approval} == true"
+    inputs:
+      body: "{draft.draft_reply}"
+      to: "{incoming_email.sender}"
+    output_key: send_result
+```
+
+**Pattern C: Conversational Loop (multi-turn agent dialogue)**
+
+Two or more agents engage in a multi-turn conversation, each building on the other's response. The conversation runs autonomously but can be observed in real-time.
+
+```yaml
+execution_mode: hybrid
+agent_conversation:
+  participants:
+    - agent: "@research-agent"
+      role: "researcher"
+    - agent: "@skeptic-agent"
+      role: "critic"
+  max_turns: 6                       # Safety limit on conversation length
+  seed_message: "Investigate funding connections for {entity_name}"
+  termination_condition: "Both agents agree on conclusions"
+  
+  output_destinations:
+    - type: chat                     # Stream conversation to user's chat sidebar
+    - type: channel_message          # Also send to user's Telegram
+      channel: "default"
+```
+
+In a conversational loop, each agent sees the full conversation history (both sides). The workflow engine manages turn-taking and enforces the max_turns limit. Each turn is a full agent invocation with journaling.
+
+#### Real-Time Observation
+
+When agents converse, users can watch the conversation in real-time through multiple channels:
+
+| Observation Method | How It Works |
+|---|---|
+| **Chat sidebar** | Agent conversation streams into a dedicated conversation thread. User sees both sides in real-time. |
+| **External messaging** | Conversation messages are relayed to the user's configured channel (Telegram, Discord, etc.) via connections-service. |
+| **Journal** | Each agent's turns are logged in their respective journals. |
+
+Users can **intervene** in an agent conversation by sending a message to the conversation thread. This inserts a human message into the conversation context that both agents see on their next turn.
+
+#### Team Agents Monitoring & Commenting on Posts
+
+Agents with `team_post_access` can participate in team conversations — not just read them, but actively contribute. Combined with monitor mode, this enables autonomous team awareness:
+
+```yaml
+# Agent: @team-summarizer
+run_context: monitor
+monitor_config:
+  interval: 15m
+  suppress_if_empty: true
+
+steps:
+  - name: check_new_posts
+    step_type: tool
+    action: detect_new_team_posts
+    inputs:
+      team_id: "{team_id}"
+    output_key: new_posts
+
+  - name: analyze_posts
+    step_type: llm_task
+    action: llm_analyze
+    condition: "{new_posts.count} > 0"
+    inputs:
+      posts: "{new_posts.posts}"
+    output_schema:
+      type: object
+      fields:
+        - name: action_items
+          type: string[]
+        - name: summary
+          type: string
+        - name: needs_response
+          type: boolean
+    output_key: analysis
+
+  - name: post_summary
+    step_type: tool
+    action: write_team_post
+    condition: "{analysis.needs_response} == true"
+    inputs:
+      team_id: "{team_id}"
+      message: "{analysis.summary}"
+    output_key: post_result
+```
+
+Multiple agents can monitor the same team channel. Agent A might summarize discussions, Agent B might flag action items, and Agent C might cross-reference mentioned entities against the knowledge graph — all working autonomously on a monitor schedule.
+
+#### Security & Guardrails
+
+| Guardrail | Purpose |
+|---|---|
+| **Max turns limit** | Conversational loops have a hard maximum (default: 10) to prevent runaway agent dialogues |
+| **Max daily agent-to-agent messages** | Per-user limit on total inter-agent messages per day (prevents infinite loops across agents) |
+| **Same-owner requirement** | Agents can only communicate with other agents owned by the same user (or shared to the same team) |
+| **Rate limiting** | Inter-agent messages consume from the same rate limit budget as user-initiated invocations |
+| **Journal transparency** | Every inter-agent message is logged in both agents' journals |
+| **User can halt** | Users can stop an agent conversation at any time via the chat UI or sidebar |
+
+### 15. Dry-Run / Preview Mode (Future)
+
+The architecture does not restrict the future addition of a dry-run mode for playbooks. A dry-run would simulate deterministic pipeline execution without executing side effects (no API calls, no graph writes, no file creation), using mock data or cached responses from previous runs. This capability is deferred but the pipeline executor's step-by-step execution model is designed to accommodate it by allowing individual step handlers to be swapped for mock implementations.
 
 ---
 
@@ -1526,6 +1958,35 @@ Auto-generates table schema:
 
 ---
 
+## Autonomous Agent Lines
+
+Agent Factory supports **autonomous agent lines**: a line is a container (like a company) with an org chart of agents, goals, tasks, and inter-agent messaging. Use the **Agent Lines** nav item (`/agent-factory/lines`) to create and manage lines.
+
+- **Teams:** Create a team with name, description, mission statement, and governance policy. Add agent profiles as members and set reporting lines (reports_to) to form an org chart. The root member (no reports_to) is the "CEO" used for heartbeat runs.
+- **Timeline:** All inter-agent messages (task assignments, status updates, delegation, etc.) appear on the team timeline. View it at `/agent-factory/teams/:teamId/timeline` with optional filters. Real-time updates are delivered via WebSocket.
+- **Goals:** Define a goal hierarchy per team (mission → project goals → assigned goals). Agents see their goal context in the system prompt and can use tools to report progress or list goals.
+- **Tasks:** Create tasks and assign them to agents. Use the task board at `/agent-factory/teams/:teamId/tasks` to move tasks through backlog → assigned → in progress → review → done. Task assignments create timeline messages.
+- **Heartbeat:** Enable a team heartbeat (in team settings) to run the CEO agent on an interval or cron. The CEO receives a summary of pending tasks, goal progress, and recent activity and can delegate or create tasks via tools.
+- **Governance:** Structural changes (e.g. proposing a new hire or a strategy change) can require user approval. Agents use `propose_hire` and `propose_strategy_change` tools to create approval queue entries; the user approves or rejects in the Operations (agent-dashboard) pending approvals UI.
+
+See `docs/dev-notes/AGENT_TEAMS_ARCHITECTURE.md`, `AGENT_COMMUNICATION_ARCHITECTURE.md`, `GOAL_HIERARCHY_DESIGN.md`, `AGENT_TASK_SYSTEM.md`, `TEAM_HEARTBEAT_DESIGN.md`, and `TEAM_GOVERNANCE_MODEL.md` for technical details.
+
+---
+
+## Current implementation status
+
+As of February 2026, the following are implemented and aligned with the planning doc "Agent Factory & Tool Typing: Status and Next Steps":
+
+- **Backend:** Full CRUD APIs for profiles, playbooks, data sources, schedules, executions; connector runtime (auth, pagination, parameter substitution); scheduled execution (Celery beat, circuit breaker, concurrency control); custom agent LangGraph workflow with HITL approval gate; pipeline executor with typed `{step_name.field}` resolution and type coercion; output router (document, data_workspace, notification, knowledge_graph, chat).
+- **Frontend:** Agent list sidebar, editor with auto-save, identity section; step list with reorder/delete and StepConfigDrawer with type-aware input wiring; data sources (templates, test connection), output destinations (multi-channel); schedule management (cron/interval, pause/resume, failure tracking); execution history card with **detailed execution viewer** (click a run to open drawer with query, status, duration, error, metadata); **approval step UI** in StepConfigDrawer (prompt text, timeout, on-reject); type wiring utilities mirroring backend coercion; **playbook wiring validation** with inline warnings.
+- **Tool I/O:** Action I/O Registry with `register_action()`, coercion, schema generation; shared type models (DocumentRef, WebResult, FileRef, TodoItem, EmailRef, etc.); automation engine reads `result["formatted"]` for dict returns; pipeline executor resolves `{step_name.field}` with type coercion. **~74 tools** have enriched output models (Pydantic) and are registered (7 complete [x], 58 registered [r] with field-level wiring; 16 internal/skipped). Data workspace, RSS refresh, and list_available_formulas output models enriched; navigation and image tools confirmed migrated. See `dev-notes/TOOL_IO_CONTRACT_MIGRATION.md`.
+- **Plugins:** Base plugin class, plugin loader, integrations (e.g. Trello, Notion, CalDAV, GitHub); plugins auto-register with Action I/O Registry. **Plugin credential management** per profile: DB table `agent_plugin_configs`, API for plugin configs, pipeline executor injects credentials when running plugin tools, frontend DataSourcesSection "Plugins" card with credential UI, gRPC `GetPlugins` for discovery.
+- **Hardening:** **Schedule-paused notification** — when a schedule is auto-paused (circuit breaker), backend calls internal `POST /api/agent-factory/internal/notify-schedule-paused`; Celery task triggers it; WebSocket message `agent_factory.schedule_paused` sent to user. **agent_discoveries** — when `LogAgentExecution` receives `metadata.discoveries` (list of discovery dicts), rows are persisted to `agent_discoveries`. **Import/export** — `GET /profiles/{id}/export`, `POST /profiles/import`, `GET /playbooks/{id}/export`, `POST /playbooks/import` for JSON backup/restore.
+
+Future work (per original Implementation Phases) includes full connector YAML framework, entity resolution service, knowledge accumulation loop, and Assembly Agent UI.
+
+---
+
 ## Implementation Phases
 
 ### Phase 0: Foundation — Agent Profile Schema & CRUD
@@ -1728,8 +2189,28 @@ Skill Resolution Order:
 - Network simplification and visualization
 - Money flow path queries
 - Cross-agent discovery sharing
-- Agent-to-agent handoff ("the nonprofit investigator found this person, hand to political tracker")
+- Agent-to-agent communication: handoff, request-response, conversational loops
+- Agent message bus with journaling, rate limiting, and max-turn guardrails
+- Real-time conversation observation (chat sidebar + external messaging relay)
+- Team-aware agents: monitor team posts, comment, summarize, cross-reference
 - Automated pattern alerting ("new cluster detected in funding network")
+
+---
+
+### Phase 8: Schema Versioning & Cost Visibility
+
+**Estimated Complexity:** Medium
+**Prerequisites:** Phase 1 (connectors), Phase 2 (dynamic registry)
+**Expected Impact:** High — production reliability and user trust
+
+**Deliverables:**
+- Immutable schema versioning for connector output_schemas and playbook step output_schemas
+- Version lifecycle management (retain while referenced, cleanup when unused)
+- Breaking change detection (field renames, removals) with user warnings
+- Assembly Agent auto-migration assistance for breaking schema changes
+- Per-step model selection in Workflow Composer UI (global models + user-provided models)
+- Cost estimation display per LLM step (same pricing data as AI Chat sidebar)
+- Per-playbook cost summary (estimated per-run and monthly for scheduled workflows)
 
 ---
 
@@ -1776,7 +2257,7 @@ Skill Resolution Order:
 
 - Connector credentials (API keys) stored encrypted in PostgreSQL
 - Per-agent credential isolation (agent A cannot use agent B's API keys)
-- Rate limiting enforced at connector level
+- Rate limiting enforced at **connector instance level** — multiple agents sharing a connector share the rate limit budget (see §13 Cross-Agent Rate Limiting)
 - User must explicitly grant each connector access to their agent
 
 ### Output Destination Permissions
@@ -1799,6 +2280,15 @@ Skill Resolution Order:
 - Cannot access other users' agent profiles
 - Cannot modify built-in skills or connectors
 - All generated configurations validated before storage
+
+### Agent-to-Agent Communication Safety
+
+- Conversational loops enforced with max_turns limit (default: 10, admin-configurable ceiling)
+- Per-user daily limit on total inter-agent messages (prevents runaway cascades)
+- Agents can only message other agents owned by the same user or shared to the same team
+- Every inter-agent message is journaled on both sides for full auditability
+- Users can halt any agent conversation in real-time
+- Agent-to-agent invocations consume from the same rate limit and token budget as user invocations
 
 ---
 

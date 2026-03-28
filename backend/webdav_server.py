@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from webdav.auth_provider import PlatoAuthController
 from webdav.orgmode_provider import OrgModeDAVProvider
 from webdav.config import create_webdav_config, get_logging_config
-from config import settings
+from webdav.webdav_settings import settings
 
 # **ROOSEVELT'S LOGGING COUP D'ÉTAT!**
 # Forcefully configure logging at startup to ensure WsgiDAV's verbose XML
@@ -52,20 +52,7 @@ async def initialize_database_pool():
     return pool
 
 
-async def initialize_auth_service(db_pool):
-    """Initialize authentication service for WebDAV"""
-    from services.auth_service import AuthenticationService
-    
-    logger.info("🔐 Initializing authentication service...")
-    
-    auth_service = AuthenticationService()
-    await auth_service.initialize(shared_db_pool=db_pool)
-    
-    logger.info("✅ Authentication service initialized")
-    return auth_service
-
-
-def create_wsgi_app(auth_service, db_pool):
+def create_wsgi_app():
     """Create the WsgiDAV application"""
     from wsgidav.wsgidav_app import WsgiDAVApp
     from webdav.simple_filesystem_provider import UserFilteredFilesystemProvider
@@ -179,12 +166,11 @@ def main():
     asyncio.set_event_loop(loop)
     
     try:
-        # Initialize database and auth service
+        # Initialize database pool
         db_pool = loop.run_until_complete(initialize_database_pool())
-        auth_service = loop.run_until_complete(initialize_auth_service(db_pool))
         
         # Create WSGI app
-        app = create_wsgi_app(auth_service, db_pool)
+        app = create_wsgi_app()
         
         # Get host and port from settings
         host = settings.WEBDAV_HOST if hasattr(settings, 'WEBDAV_HOST') else "0.0.0.0"

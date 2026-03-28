@@ -212,6 +212,55 @@ class TeamPostService:
             logger.error(f"Failed to get team posts: {e}")
             raise
     
+    async def get_team_posts_since(
+        self,
+        team_id: str,
+        user_id: str,
+        since_ts: Optional[datetime] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get team posts created after since_ts (for unread / since-last-read).
+        Returns list of post dicts with author info, newest first.
+        """
+        await self._ensure_initialized()
+        if self.team_service:
+            role = await self.team_service.check_team_access(team_id, user_id)
+            if not role:
+                raise PermissionError("Not a team member")
+        try:
+            async with self.db_pool.acquire() as conn:
+                await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
+                query = """
+                    SELECT
+                        tp.*,
+                        u.username as author_username,
+                        u.display_name as author_display_name,
+                        u.avatar_url as author_avatar
+                    FROM team_posts tp
+                    INNER JOIN users u ON u.user_id = tp.author_id
+                    WHERE tp.team_id = $1 AND tp.deleted_at IS NULL
+                """
+                params: List[Any] = [team_id]
+                param_num = 2
+                if since_ts is not None:
+                    query += f" AND tp.created_at > ${param_num}"
+                    params.append(since_ts)
+                    param_num += 1
+                query += f" ORDER BY tp.created_at DESC LIMIT ${param_num}"
+                params.append(limit)
+                rows = await conn.fetch(query, *params)
+                post_dicts = []
+                for row in rows:
+                    post_dict = await self._row_to_post_dict(conn, row, user_id)
+                    post_dicts.append(post_dict)
+                return post_dicts
+        except PermissionError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get team posts since: {e}")
+            raise
+
     async def delete_post(self, post_id: str, user_id: str) -> bool:
         """
         Delete post (author or admin only)

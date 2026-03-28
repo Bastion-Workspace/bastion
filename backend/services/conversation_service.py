@@ -266,10 +266,11 @@ class ConversationLifecycleManager:
             conv_metadata["lifecycle"] = lifecycle
             conv_metadata["execution_stats"] = execution_stats
             
-            # Update conversation
+            # Update conversation; any new message marks the thread for session-level memory analysis
             await conn.execute("""
-                UPDATE conversations 
-                SET metadata_json = $1, updated_at = $2, message_sequence = message_sequence + 1
+                UPDATE conversations
+                SET metadata_json = $1, updated_at = $2, message_sequence = message_sequence + 1,
+                    needs_session_summary = TRUE
                 WHERE conversation_id = $3
             """, json.dumps(conv_metadata), current_time, conversation_id)
             
@@ -578,9 +579,21 @@ class ConversationService:
             logger.error(f"❌ Failed to get conversation: {e}")
             raise
     
-    async def get_conversation_messages(self, conversation_id: str, user_id: str, 
-                                      skip: int = 0, limit: int = 100) -> Dict[str, Any]:
-        """Get conversation messages with lifecycle verification"""
+    async def get_conversation_messages(
+        self,
+        conversation_id: str,
+        user_id: str,
+        skip: int = 0,
+        limit: int = 100,
+        most_recent: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Get conversation messages with lifecycle verification.
+
+        When most_recent is True, returns the newest ``limit`` messages in chronological order
+        (skip is ignored). When False, uses ascending order with skip/limit for pagination
+        (oldest-first window).
+        """
         try:
             # First verify conversation ownership and get lifecycle info
             lifecycle_info = await self.lifecycle_manager.get_conversation_lifecycle(conversation_id, user_id)
@@ -597,55 +610,105 @@ class ConversationService:
                 # Set user context for RLS policies
                 await conn.execute("SELECT set_config('app.current_user_id', $1, false)", user_id)
                 logger.info(f"🔍 Set user context for conversation messages: {user_id}")
-                
+
                 # Verify RLS context was set
                 rls_context = await conn.fetchval("SELECT current_setting('app.current_user_id', true)")
                 logger.info(f"🔍 Verified RLS context: {rls_context}")
-                
-                # First check if conversation exists
-                conversation_exists = await conn.fetchval(
-                    "SELECT COUNT(*) FROM conversations WHERE conversation_id = $1",
-                    conversation_id
-                )
-                logger.info(f"🔍 Conversation {conversation_id} exists check: {conversation_exists} rows")
-                
-                # Check message count before query (without JOIN to avoid RLS on conversations table)
-                message_count_before = await conn.fetchval(
-                    "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = $1",
-                    conversation_id
-                )
-                logger.info(f"🔍 Message count for conversation {conversation_id}: {message_count_before} messages")
-                
-                # Try query without JOIN first to see if RLS is blocking
-                messages_direct = await conn.fetch(
-                    """
-                    SELECT * FROM conversation_messages
-                    WHERE conversation_id = $1
-                    ORDER BY sequence_number ASC
-                    LIMIT $2 OFFSET $3
-                    """, conversation_id, limit, skip
-                )
-                logger.info(f"🔍 Direct query (no JOIN) returned {len(messages_direct)} messages")
-                
-                # Now try with JOIN
-                messages = await conn.fetch(
-                    """
-                    SELECT cm.*, c.metadata_json as conversation_metadata
-                    FROM conversation_messages cm
-                    JOIN conversations c ON cm.conversation_id = c.conversation_id
-                    WHERE cm.conversation_id = $1
-                    ORDER BY cm.sequence_number ASC
-                    LIMIT $2 OFFSET $3
-                    """, conversation_id, limit, skip
-                )
-                
-                logger.info(f"🔍 JOIN query returned {len(messages)} messages from database for conversation {conversation_id}")
-                if len(messages) == 0 and message_count_before > 0:
-                    logger.warning(f"⚠️ Query returned 0 messages but message_count shows {message_count_before} - possible RLS issue")
-                if len(messages_direct) > 0 and len(messages) == 0:
-                    logger.warning(f"⚠️ Direct query found {len(messages_direct)} messages but JOIN query found 0 - RLS blocking on conversations table")
-                    # Use direct query results if JOIN fails
-                    messages = messages_direct
+
+                if most_recent:
+                    messages = await conn.fetch(
+                        """
+                        SELECT * FROM (
+                            SELECT cm.*, c.metadata_json as conversation_metadata
+                            FROM conversation_messages cm
+                            JOIN conversations c ON cm.conversation_id = c.conversation_id
+                            WHERE cm.conversation_id = $1
+                            ORDER BY cm.sequence_number DESC
+                            LIMIT $2
+                        ) sub
+                        ORDER BY sub.sequence_number ASC
+                        """,
+                        conversation_id,
+                        limit,
+                    )
+                    if not messages:
+                        messages = await conn.fetch(
+                            """
+                            SELECT * FROM (
+                                SELECT * FROM conversation_messages
+                                WHERE conversation_id = $1
+                                ORDER BY sequence_number DESC
+                                LIMIT $2
+                            ) sub
+                            ORDER BY sequence_number ASC
+                            """,
+                            conversation_id,
+                            limit,
+                        )
+                    logger.info(
+                        "Loaded %s messages for conversation %s (most_recent=True)",
+                        len(messages),
+                        conversation_id,
+                    )
+                else:
+                    # First check if conversation exists
+                    conversation_exists = await conn.fetchval(
+                        "SELECT COUNT(*) FROM conversations WHERE conversation_id = $1",
+                        conversation_id,
+                    )
+                    logger.info(f"🔍 Conversation {conversation_id} exists check: {conversation_exists} rows")
+
+                    # Check message count before query (without JOIN to avoid RLS on conversations table)
+                    message_count_before = await conn.fetchval(
+                        "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = $1",
+                        conversation_id,
+                    )
+                    logger.info(f"🔍 Message count for conversation {conversation_id}: {message_count_before} messages")
+
+                    # Try query without JOIN first to see if RLS is blocking
+                    messages_direct = await conn.fetch(
+                        """
+                        SELECT * FROM conversation_messages
+                        WHERE conversation_id = $1
+                        ORDER BY sequence_number ASC
+                        LIMIT $2 OFFSET $3
+                        """,
+                        conversation_id,
+                        limit,
+                        skip,
+                    )
+                    messages = await conn.fetch(
+                        """
+                        SELECT cm.*, c.metadata_json as conversation_metadata
+                        FROM conversation_messages cm
+                        JOIN conversations c ON cm.conversation_id = c.conversation_id
+                        WHERE cm.conversation_id = $1
+                        ORDER BY cm.sequence_number ASC
+                        LIMIT $2 OFFSET $3
+                        """,
+                        conversation_id,
+                        limit,
+                        skip,
+                    )
+
+                    logger.info(f"🔍 Direct query (no JOIN) returned {len(messages_direct)} messages")
+
+                    logger.info(
+                        "🔍 JOIN query returned %s messages from database for conversation %s (most_recent=%s)",
+                        len(messages),
+                        conversation_id,
+                        most_recent,
+                    )
+                    if len(messages) == 0 and message_count_before > 0:
+                        logger.warning(
+                            f"⚠️ Query returned 0 messages but message_count shows {message_count_before} - possible RLS issue"
+                        )
+                    if len(messages_direct) > 0 and len(messages) == 0:
+                        logger.warning(
+                            "⚠️ Direct query found %s messages but JOIN query found 0 - RLS blocking on conversations table",
+                            len(messages_direct),
+                        )
+                        messages = messages_direct
                 
                 message_list = []
                 for row in messages:
@@ -677,8 +740,11 @@ class ConversationService:
                     conversation_id
                 )
                 
-                has_more = (skip + limit) < total_count
-                
+                if most_recent:
+                    has_more = total_count > limit
+                else:
+                    has_more = (skip + limit) < total_count
+
                 return {
                     "messages": message_list,
                     "has_more": has_more,
@@ -830,24 +896,34 @@ class ConversationService:
             return False
     
     async def update_agent_metadata(
-        self, 
-        conversation_id: str, 
-        user_id: str, 
+        self,
+        conversation_id: str,
+        user_id: str,
         primary_agent_selected: str,
-        last_agent: Optional[str] = None
+        last_agent: Optional[str] = None,
+        agent_profile_id: Optional[str] = None,
+        clear_agent_profile_id: bool = False,
+        active_line_id: Optional[str] = None,
+        active_line_name: Optional[str] = None,
+        clear_active_line: bool = False,
     ) -> bool:
         """
         Update agent routing metadata in conversation
-        
+
         This stores which agent is currently handling the conversation,
         enabling proper agent continuity across requests.
-        
+
         Args:
             conversation_id: The conversation to update
             user_id: The user ID (for RLS)
             primary_agent_selected: The agent handling this conversation
             last_agent: The most recent agent that processed a request
-            
+            agent_profile_id: Optional Agent Factory profile UUID for sticky routing and lookback
+            clear_agent_profile_id: When True, remove agent_profile_id from conversation metadata
+            active_line_id: When set, persist agent line UUID for sticky line chat dispatch
+            active_line_name: Display name for the active line (UI)
+            clear_active_line: When True, remove active_line_id and active_line_name
+
         Returns:
             bool: True if update succeeded, False otherwise
         """
@@ -874,6 +950,18 @@ class ConversationService:
                 metadata["primary_agent_selected"] = primary_agent_selected
                 if last_agent:
                     metadata["last_agent"] = last_agent
+                if clear_agent_profile_id:
+                    metadata.pop("agent_profile_id", None)
+                elif agent_profile_id:
+                    metadata["agent_profile_id"] = agent_profile_id
+                if clear_active_line:
+                    metadata.pop("active_line_id", None)
+                    metadata.pop("active_line_name", None)
+                else:
+                    if active_line_id:
+                        metadata["active_line_id"] = active_line_id
+                    if active_line_name is not None:
+                        metadata["active_line_name"] = active_line_name
                 metadata["agent_updated_at"] = datetime.now(timezone.utc).isoformat()
                 
                 # Save back to database
@@ -883,7 +971,14 @@ class ConversationService:
                     conversation_id
                 )
                 
-                logger.info(f"✅ Updated agent metadata for conversation {conversation_id}: primary_agent={primary_agent_selected}, last_agent={last_agent}")
+                logger.info(
+                    "✅ Updated agent metadata for conversation %s: primary_agent=%s, last_agent=%s, agent_profile_id=%s, active_line=%s",
+                    conversation_id,
+                    primary_agent_selected,
+                    last_agent,
+                    "(cleared)" if clear_agent_profile_id else (agent_profile_id or "(unchanged)"),
+                    "(cleared)" if clear_active_line else (active_line_id or "(unchanged)"),
+                )
                 return True
                 
         except Exception as e:
@@ -901,7 +996,7 @@ class ConversationService:
             user_id: The user ID (for RLS)
             
         Returns:
-            Dict with primary_agent_selected and last_agent, or empty dict
+            Dict with primary_agent_selected, last_agent, and optional agent_profile_id, or empty dict
         """
         try:
             pool = await self.lifecycle_manager._get_db_pool()
@@ -926,6 +1021,12 @@ class ConversationService:
                     agent_metadata["primary_agent_selected"] = metadata["primary_agent_selected"]
                 if "last_agent" in metadata:
                     agent_metadata["last_agent"] = metadata["last_agent"]
+                if "agent_profile_id" in metadata:
+                    agent_metadata["agent_profile_id"] = metadata["agent_profile_id"]
+                if "active_line_id" in metadata:
+                    agent_metadata["active_line_id"] = metadata["active_line_id"]
+                if "active_line_name" in metadata:
+                    agent_metadata["active_line_name"] = metadata["active_line_name"]
                 
                 if agent_metadata:
                     logger.debug(f"📚 Loaded agent metadata for conversation {conversation_id}: {agent_metadata}")

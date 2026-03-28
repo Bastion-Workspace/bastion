@@ -1,0 +1,11 @@
+# Bastion Local Proxy - Example configuration
+# Copy to ~/.config/bastion-proxy/config.yml (Linux) or %APPDATA%\bastion-proxy\config.yml (Windows)
+
+device_id: "my-workstation"
+bastion_url: "https://bastion.example.com"
+token: "your-device-token-here"
+auto_connect: true
+
+capabilities:
+  screenshot:
+    enabled: true

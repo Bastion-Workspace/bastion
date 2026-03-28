@@ -6,7 +6,37 @@ Supports length, area, volume, temperature, power, and electrical units
 import logging
 from typing import Dict, Any, Optional, Callable
 
+from pydantic import BaseModel, Field
+
+from orchestrator.utils.action_io_registry import register_action
+
 logger = logging.getLogger(__name__)
+
+
+# ── I/O models for convert_units_tool ────────────────────────────────────────
+
+class ConvertUnitsInputs(BaseModel):
+    """Required inputs for convert_units_tool."""
+    value: float = Field(description="Numeric value to convert")
+    from_unit: str = Field(description="Source unit e.g. sq_ft, fahrenheit, watts")
+    to_unit: str = Field(description="Target unit e.g. sq_m, celsius, kilowatts")
+
+
+class ConvertUnitsParams(BaseModel):
+    """Optional parameters."""
+    quantity_type: Optional[str] = Field(default=None, description="Hint: length, area, volume, temperature, power, electrical")
+
+
+class ConvertUnitsOutputs(BaseModel):
+    """Typed outputs for convert_units_tool."""
+    result: Optional[float] = Field(default=None, description="Converted value")
+    from_unit: str = Field(description="Source unit")
+    to_unit: str = Field(description="Target unit")
+    conversion_factor: Optional[float] = Field(default=None, description="Factor used (linear conversions)")
+    conversion_type: Optional[str] = Field(default=None, description="linear or non_linear")
+    success: bool = Field(description="Whether conversion succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
 
 
 # Unit conversion tables
@@ -203,13 +233,15 @@ async def convert_units_tool(
             quantity_type = _detect_quantity_type(from_unit, to_unit)
         
         if not quantity_type:
+            err = f"Could not determine quantity type for units '{from_unit}' and '{to_unit}'"
             return {
                 "result": None,
                 "from_unit": from_unit,
                 "to_unit": to_unit,
                 "conversion_factor": None,
                 "success": False,
-                "error": f"Could not determine quantity type for units '{from_unit}' and '{to_unit}'"
+                "error": err,
+                "formatted": err
             }
         
         # Handle temperature conversions (non-linear)
@@ -218,80 +250,51 @@ async def convert_units_tool(
             to_unit_lower = to_unit.lower()
             
             if from_unit_lower not in TEMPERATURE_CONVERSIONS:
-                return {
-                    "result": None,
-                    "from_unit": from_unit,
-                    "to_unit": to_unit,
-                    "conversion_factor": None,
-                    "success": False,
-                    "error": f"Unknown temperature unit: {from_unit}"
-                }
+                err = f"Unknown temperature unit: {from_unit}"
+                return {"result": None, "from_unit": from_unit, "to_unit": to_unit, "conversion_factor": None, "success": False, "error": err, "formatted": err}
             
             if to_unit_lower not in TEMPERATURE_CONVERSIONS[from_unit_lower]:
-                return {
-                    "result": None,
-                    "from_unit": from_unit,
-                    "to_unit": to_unit,
-                    "conversion_factor": None,
-                    "success": False,
-                    "error": f"Cannot convert from {from_unit} to {to_unit}"
-                }
+                err = f"Cannot convert from {from_unit} to {to_unit}"
+                return {"result": None, "from_unit": from_unit, "to_unit": to_unit, "conversion_factor": None, "success": False, "error": err, "formatted": err}
             
             conversion_func = TEMPERATURE_CONVERSIONS[from_unit_lower][to_unit_lower]
             result = conversion_func(value)
-            
+            formatted = f"{value} {from_unit} = {result} {to_unit}"
             return {
                 "result": result,
                 "from_unit": from_unit,
                 "to_unit": to_unit,
-                "conversion_factor": None,  # Non-linear, no single factor
+                "conversion_factor": None,
                 "conversion_type": "non_linear",
                 "success": True,
-                "error": None
+                "error": None,
+                "formatted": formatted
             }
         
         # Handle linear conversions
         if quantity_type not in UNIT_CONVERSIONS:
-            return {
-                "result": None,
-                "from_unit": from_unit,
-                "to_unit": to_unit,
-                "conversion_factor": None,
-                "success": False,
-                "error": f"Unknown quantity type: {quantity_type}"
-            }
+            err = f"Unknown quantity type: {quantity_type}"
+            return {"result": None, "from_unit": from_unit, "to_unit": to_unit, "conversion_factor": None, "success": False, "error": err, "formatted": err}
         
         category_units = UNIT_CONVERSIONS[quantity_type]
         from_unit_lower = from_unit.lower()
         to_unit_lower = to_unit.lower()
         
         if from_unit_lower not in category_units:
-            return {
-                "result": None,
-                "from_unit": from_unit,
-                "to_unit": to_unit,
-                "conversion_factor": None,
-                "success": False,
-                "error": f"Unknown {quantity_type} unit: {from_unit}"
-            }
+            err = f"Unknown {quantity_type} unit: {from_unit}"
+            return {"result": None, "from_unit": from_unit, "to_unit": to_unit, "conversion_factor": None, "success": False, "error": err, "formatted": err}
         
         from_unit_conversions = category_units[from_unit_lower]
         
         if to_unit_lower not in from_unit_conversions:
-            return {
-                "result": None,
-                "from_unit": from_unit,
-                "to_unit": to_unit,
-                "conversion_factor": None,
-                "success": False,
-                "error": f"Cannot convert from {from_unit} to {to_unit} in {quantity_type} category"
-            }
+            err = f"Cannot convert from {from_unit} to {to_unit} in {quantity_type} category"
+            return {"result": None, "from_unit": from_unit, "to_unit": to_unit, "conversion_factor": None, "success": False, "error": err, "formatted": err}
         
         conversion_factor = from_unit_conversions[to_unit_lower]
         result = value * conversion_factor
         
         logger.info(f"Conversion result: {result} {to_unit}")
-        
+        formatted = f"{value} {from_unit} = {result} {to_unit}"
         return {
             "result": result,
             "from_unit": from_unit,
@@ -299,17 +302,31 @@ async def convert_units_tool(
             "conversion_factor": conversion_factor,
             "conversion_type": "linear",
             "success": True,
-            "error": None
+            "error": None,
+            "formatted": formatted
         }
         
     except Exception as e:
         logger.error(f"Unit conversion failed: {e}")
+        err = str(e)
         return {
             "result": None,
             "from_unit": from_unit,
             "to_unit": to_unit,
             "conversion_factor": None,
             "success": False,
-            "error": str(e)
+            "error": err,
+            "formatted": f"Unit conversion failed: {err}"
         }
+
+
+register_action(
+    name="convert_units",
+    category="math",
+    description="Convert between units (length, area, volume, temperature, power, electrical)",
+    inputs_model=ConvertUnitsInputs,
+    params_model=ConvertUnitsParams,
+    outputs_model=ConvertUnitsOutputs,
+    tool_function=convert_units_tool,
+)
 

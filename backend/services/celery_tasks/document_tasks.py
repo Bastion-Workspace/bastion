@@ -3,12 +3,13 @@ Document Celery Tasks
 Background reprocessing after document content save so the save response returns immediately.
 """
 
-import logging
 import asyncio
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 
 from services.celery_app import celery_app
+from services.celery_tasks.async_runner import run_async
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -76,12 +77,7 @@ def reprocess_document_after_save_task(self, doc_id: str, user_id: str) -> Dict[
     """
     try:
         logger.info(f"Document reprocess task started: {doc_id}")
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(_async_reprocess_document_after_save(doc_id, user_id))
-        finally:
-            loop.close()
+        result = run_async(_async_reprocess_document_after_save(doc_id, user_id))
         logger.info(f"Document reprocess task completed: {doc_id}")
         return result
     except Exception as e:
@@ -92,3 +88,26 @@ def reprocess_document_after_save_task(self, doc_id: str, user_id: str) -> Dict[
             "document_id": doc_id,
             "message": "Background re-indexing failed",
         }
+
+
+async def _async_backfill_document_chunks(limit: int = 5000, batch_size: int = 50, delay: float = 0.3) -> Dict[str, Any]:
+    """Backfill document_chunks table by reprocessing completed documents."""
+    from services.document_chunk_backfill import run_backfill
+
+    return await run_backfill(limit=limit, batch_size=batch_size, delay=delay)
+
+
+@celery_app.task(bind=True, name="services.celery_tasks.document_tasks.backfill_document_chunks")
+def backfill_document_chunks_task(self, limit: int = 5000, batch_size: int = 50, delay: float = 0.3) -> Dict[str, Any]:
+    """
+    Celery task: backfill document_chunks for full-text search by reprocessing completed documents.
+    Safe to run multiple times.
+    """
+    try:
+        logger.info("Backfill document_chunks task started (limit=%s)", limit)
+        result = run_async(_async_backfill_document_chunks(limit=limit, batch_size=batch_size, delay=delay))
+        logger.info("Backfill document_chunks task completed: %s", result)
+        return result
+    except Exception as e:
+        logger.error("Backfill document_chunks task failed: %s", e)
+        return {"success": False, "error": str(e)}

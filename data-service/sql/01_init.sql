@@ -53,6 +53,7 @@ CREATE TABLE custom_tables (
     indexes_json JSONB,
     constraints_json JSONB,
     metadata_json JSONB,
+    storage_type VARCHAR(20) NOT NULL DEFAULT 'jsonb',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     created_by VARCHAR(255),
@@ -62,6 +63,7 @@ CREATE TABLE custom_tables (
 CREATE INDEX idx_tables_database ON custom_tables(database_id);
 CREATE INDEX idx_tables_created_by ON custom_tables(created_by);
 CREATE INDEX idx_tables_updated_by ON custom_tables(updated_by);
+CREATE INDEX idx_tables_storage_type ON custom_tables(storage_type);
 
 -- Data rows (flexible JSONB storage with formula support)
 CREATE TABLE custom_data_rows (

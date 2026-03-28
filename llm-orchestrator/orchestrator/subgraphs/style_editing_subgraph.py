@@ -22,12 +22,12 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
 
 from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
 from orchestrator.models.agent_response_contract import AgentResponse, ManuscriptEditMetadata
+from orchestrator.middleware.message_preprocessor import MessagePreprocessor
 from orchestrator.utils.writing_subgraph_utilities import (
     preserve_critical_state,
     create_writing_error_response,
     extract_user_request,
     paragraph_bounds,
-    sanitize_ai_response_for_history,
     strip_frontmatter_block,
     slice_hash,
     build_response_text_for_question,
@@ -148,94 +148,6 @@ def _detect_analysis_mode(user_request: str, body_only: str) -> Tuple[bool, str]
         return True, user_request
     
     return False, ""
-
-
-def _extract_conversation_history(messages: List[Any], limit: int = 10) -> List[Dict[str, str]]:
-    """Extract conversation history from LangChain messages, filtering out large data URIs"""
-    try:
-        history = []
-        for msg in messages[-limit:]:
-            if hasattr(msg, 'content'):
-                role = "assistant" if hasattr(msg, 'type') and msg.type == "ai" else "user"
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                if role == "assistant":
-                    content = sanitize_ai_response_for_history(content)
-                history.append({
-                    "role": role,
-                    "content": content
-                })
-        return history
-    except Exception as e:
-        logger.error(f"Failed to extract conversation history: {e}")
-        return []
-
-
-def _build_editing_agent_messages(
-    system_prompt: str,
-    context_parts: List[str],
-    current_request: str,
-    messages_list: List[Any],
-    get_datetime_context: Callable,
-    look_back_limit: int = 6
-) -> List[Any]:
-    """
-    Build message list for editing agents with conversation history and separate context
-    
-    STANDALONE VERSION for subgraph use (doesn't require BaseAgent)
-    
-    Message Structure:
-    1. SystemMessage: system_prompt
-    2. SystemMessage: datetime_context
-    3. Conversation history as alternating HumanMessage/AIMessage objects
-    4. HumanMessage: file context (from context_parts - file content, references)
-    5. HumanMessage: current_request (user query + mode-specific instructions)
-    
-    Args:
-        system_prompt: System-level instructions for the agent
-        context_parts: List of context strings (file content, references, etc.)
-        current_request: User's request with mode-specific instructions
-        messages_list: Conversation history from state.get("messages", [])
-        get_datetime_context: Function that returns datetime context string
-        look_back_limit: Number of previous messages to include (default: 6)
-        
-    Returns:
-        List of LangChain message objects ready for LLM
-    """
-    # Start with system messages
-    messages = [
-        SystemMessage(content=system_prompt),
-        SystemMessage(content=get_datetime_context())
-    ]
-    
-    # Add conversation history as proper message objects
-    if messages_list:
-        conversation_history = _extract_conversation_history(
-            messages_list, 
-            limit=look_back_limit
-        )
-        
-        # Remove last message if it duplicates current_request
-        if conversation_history and len(conversation_history) > 0:
-            last_msg = conversation_history[-1]
-            if last_msg.get("content") == current_request:
-                conversation_history = conversation_history[:-1]
-        
-        # Add as proper message objects
-        for msg in conversation_history:
-            if msg["role"] == "user":
-                messages.append(HumanMessage(content=msg["content"]))
-            elif msg["role"] == "assistant":
-                messages.append(AIMessage(content=msg["content"]))
-    
-    # Add file context as separate message
-    if context_parts:
-        messages.append(HumanMessage(content="".join(context_parts)))
-    
-    # Add current request with instructions as separate message
-    if current_request:
-        messages.append(HumanMessage(content=current_request))
-    
-    return messages
 
 
 # ============================================
@@ -1148,13 +1060,14 @@ async def generate_edit_plan_node(
         
         # Use standardized helper for message construction with conversation history
         messages_list = state.get("messages", [])
-        messages = _build_editing_agent_messages(
+        messages = MessagePreprocessor.build_editing_messages(
             system_prompt=system_prompt,
             context_parts=context_parts,
             current_request=request_with_instructions,
             messages_list=messages_list,
-            get_datetime_context=get_datetime_context,
-            look_back_limit=6
+            look_back_limit=6,
+            datetime_context=get_datetime_context(),
+            sanitize_ai_responses=True,
         )
         
         # Call LLM

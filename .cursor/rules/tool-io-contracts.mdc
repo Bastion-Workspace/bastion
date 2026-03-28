@@ -1,0 +1,717 @@
+---
+alwaysApply: true
+description: All tools must have typed I/O contracts with a flexible type system, automatic coercion, and unified structured+formatted returns registered in the Action I/O Registry.
+---
+
+# Tool I/O Contracts: Typed Inputs & Outputs for Every Tool
+
+Every tool in the system MUST have a typed I/O contract that declares what it accepts and what it produces. This contract is registered in the Action I/O Registry so that skills, composed workflows, the Agent Factory Workflow Composer, and other tools can discover and validate tool wiring programmatically.
+
+## Why This Matters
+
+Without typed contracts:
+- The Workflow Composer can't show what a tool produces for downstream wiring
+- Skills can't validate that their tool sequences are type-compatible
+- Composed workflows break silently when a tool's output shape changes
+- Agent Factory playbooks can't link step inputs to upstream outputs
+- There is no machine-readable documentation of what a tool does
+
+---
+
+## The Type System
+
+### Core Types
+
+A small, pragmatic type system. These are the ONLY types used in I/O contracts:
+
+| Type | Python | Examples | Notes |
+|------|--------|----------|-------|
+| `text` | `str` | Free text, IDs, names, content, markdown | **The universal connector** — everything coerces to text |
+| `number` | `int \| float` | Counts, scores, amounts, indices | |
+| `boolean` | `bool` | Success flags, feature toggles | |
+| `date` | `str` (ISO 8601) | `"2026-02-14"`, `"2026-02-14T17:00:00Z"` | Stored as text, semantically a date |
+| `record` | `Dict[str, Any]` | Structured objects with named fields | Fields are individually addressable |
+| `list[T]` | `List[T]` | Arrays of items where T is any core type | |
+| `file_ref` | `Dict` | `{document_id, title, file_type, folder_path, scope}` | Standardized document reference |
+| `any` | `Any` | Accepts anything | Escape hatch — use sparingly |
+
+### `text` Is the Universal Type
+
+**`text` is the lingua franca.** Most tool inputs accept `text`. Most tool outputs include `text` fields. Free text is always a valid type.
+
+This is by design:
+- LLM task steps produce `text` as their primary output
+- Users type `text` into the chat
+- Document content is `text`
+- Entity names, queries, file paths — all `text`
+
+When in doubt about an input type, use `text`. It is always valid.
+
+### Automatic Coercion Rules
+
+The type system is **permissive by default**. When an output of type A is wired to an input of type B, coercion happens automatically:
+
+#### Always Allowed (lossless, silent):
+
+```
+number   → text       "42"
+boolean  → text       "true" / "false"
+date     → text       "2026-02-14T17:00:00Z"
+file_ref → text       document_id string
+record   → text       JSON serialization
+list[T]  → text       JSON serialization
+any      → text       str() conversion
+file_ref → record     Full metadata dict
+number   → any        Always allowed
+text     → any        Always allowed
+(anything) → any      Always allowed
+```
+
+#### Allowed with Parsing (auto-attempted, warn on failure):
+
+```
+text     → number     Parse "42" → 42, "3.14" → 3.14
+text     → boolean    "true"/"yes"/"1" → True, "false"/"no"/"0" → False
+text     → date       ISO 8601 parse
+text     → record     JSON parse
+text     → list[T]    JSON parse (if array), or wrap as single-element list
+text     → file_ref   Treat as document_id, resolve metadata
+number   → boolean    0 → False, nonzero → True
+```
+
+#### Structural Coercion (collections):
+
+```
+list[record] → list[text]         Coerce each element
+record.field → type_of_field      Field access (e.g., result.count → number)
+list[record].field → list[T]      Array projection (e.g., results.title → list[text])
+list[T][0] → T                    Index access
+list[T].length → number           Length
+```
+
+#### Blocked (Workflow Composer shows error):
+
+```
+list     → number     Not meaningful
+record   → number     Not meaningful
+record   → boolean    Not meaningful
+list     → boolean    Not meaningful (use list.length > 0 instead)
+```
+
+### Design Principles
+
+1. **Never block a valid chain.** If a human would think "of course that should work," the type system should allow it.
+2. **Coerce silently when lossless.** `number` → `text` just works, no warnings.
+3. **Coerce with warning when lossy.** `text` → `number` attempts parsing, warns if it fails at runtime.
+4. **Block only when truly nonsensical.** `list` → `boolean` is almost certainly a mistake.
+5. **`text` connects everything.** Any output can become `text`. Any `text` input can receive anything.
+
+---
+
+## The Unified Return Format
+
+### The Problem with Dual Returns
+
+The old approach proposed `_tool` functions (returning `str`) alongside `_structured` variants (returning `dict`). This:
+- Doubles the surface area
+- Never converges — both variants live forever
+- Skills/agents must know which variant to call
+- No single source of truth for what the tool produces
+
+### The Solution: One Return, Both Formats
+
+**Every tool returns ONE dict** that includes both structured data AND a human-readable summary:
+
+```python
+class SearchDocumentsOutputs(BaseModel):
+    """Every output model MUST include a 'formatted' field."""
+    documents: List[DocumentRef] = Field(description="Matching documents")
+    count: int = Field(description="Number of results")
+    query_used: str = Field(description="The search query that was executed")
+    formatted: text = Field(description="Human-readable summary for LLM/chat display")
+```
+
+**The `formatted` field is MANDATORY on every output model.** It contains the human-readable representation that:
+- The LLM sees when the tool is called via `bind_tools()`
+- The chat UI displays to the user
+- Backward-compatible callers consume
+
+**The typed fields** are what:
+- The Workflow Composer wires to downstream step inputs
+- Agent Factory playbooks reference via `{step_name.field}`
+- Programmatic callers (research agents, direct calls) consume
+
+### How Each Consumer Reads the Return
+
+```python
+result = await search_documents_tool(query="meeting minutes", user_id=user_id)
+# result = {
+#     "documents": [{"document_id": "abc", "title": "Jan Meeting", ...}, ...],
+#     "count": 3,
+#     "query_used": "meeting minutes",
+#     "formatted": "Found 3 documents:\n1. **Jan Meeting** (ID: abc)..."
+# }
+
+# LLM / Automation Engine (bind_tools path):
+#   Reads result["formatted"] for ToolMessage content
+#   LLM sees the human-readable string
+
+# Workflow Engine (Agent Factory playbooks):
+#   Reads result["documents"] for downstream wiring
+#   Reads result["count"] for conditional logic
+
+# Direct callers (research agents):
+#   Reads result["documents"] for programmatic processing
+#   Ignores "formatted" entirely
+
+# Backward-compatible callers expecting str:
+#   Reads result["formatted"] — same content they got before
+```
+
+### Automation Engine Update
+
+The automation engine currently does `str(result)`. After migration:
+
+```python
+# BEFORE (current):
+result_str = str(result) if result is not None else ""
+tool_messages.append(ToolMessage(content=result_str, tool_call_id=tool_id))
+
+# AFTER (migrated):
+if isinstance(result, dict) and "formatted" in result:
+    # Migrated tool — use the formatted field for LLM consumption
+    result_str = result["formatted"]
+else:
+    # Legacy tool — fall back to str() conversion
+    result_str = str(result) if result is not None else ""
+tool_messages.append(ToolMessage(content=result_str, tool_call_id=tool_id))
+```
+
+This is backward compatible. Legacy tools returning `str` still work. Migrated tools returning dicts use the `formatted` field. No breaking change.
+
+---
+
+## The Contract
+
+Every tool has three typed components:
+
+### 1. Inputs (required parameters)
+Data the tool MUST receive to execute. Wireable in the Workflow Composer.
+
+### 2. Params (optional configuration)
+Static config with defaults. Set at design time, not wired from data flow.
+
+### 3. Outputs (typed return fields)
+Named, typed fields the tool produces. MUST include `formatted: text`. Downstream steps reference by name.
+
+---
+
+## Implementation Pattern
+
+### Complete Example
+
+```python
+from pydantic import BaseModel, Field
+from typing import List, Optional
+from orchestrator.utils.action_io_registry import register_action
+
+
+# ── I/O Models ───────────────────────────────────────────
+
+class SearchDocumentsInputs(BaseModel):
+    """Required inputs — wireable from upstream steps."""
+    query: text = Field(description="Search query (natural language or keywords)")
+
+class SearchDocumentsParams(BaseModel):
+    """Optional configuration — set at design time."""
+    limit: int = Field(default=5, description="Max results to return")
+    scope: text = Field(default="all", description="my_docs, team_docs, global_docs, or all")
+    file_types: Optional[List[text]] = Field(default=None, description="Filter by extension")
+
+class DocumentRef(BaseModel):
+    """A reference to a found document. Reusable across tools."""
+    document_id: text
+    title: text
+    filename: text
+    file_type: text
+    folder_path: text
+    relevance_score: number
+    content_preview: text
+
+class SearchDocumentsOutputs(BaseModel):
+    """Typed outputs — every field is individually addressable."""
+    documents: List[DocumentRef] = Field(description="Matching documents")
+    count: number = Field(description="Number of results found")
+    query_used: text = Field(description="The query that was executed")
+    formatted: text = Field(description="Human-readable summary for LLM/chat")
+
+
+# ── Tool Function (unified return) ──────────────────────
+
+async def search_documents_tool(
+    query: str,
+    limit: int = 5,
+    scope: str = "all",
+    file_types: list = None,
+    user_id: str = "system"
+) -> dict:
+    """
+    Search documents in the knowledge base.
+    Returns structured dict matching SearchDocumentsOutputs.
+    """
+    client = await get_backend_tool_client()
+    result = await client.search_documents(query=query, user_id=user_id, limit=limit)
+
+    documents = [
+        {
+            "document_id": doc["document_id"],
+            "title": doc["title"],
+            "filename": doc["filename"],
+            "file_type": doc.get("file_type", "md"),
+            "folder_path": doc.get("folder_path", ""),
+            "relevance_score": doc.get("relevance_score", 0),
+            "content_preview": doc.get("content_preview", "")[:200]
+        }
+        for doc in result.get("results", [])
+    ]
+
+    # Build formatted string (what the LLM and chat see)
+    formatted_parts = [f"Found {len(documents)} document(s):"]
+    for i, doc in enumerate(documents, 1):
+        formatted_parts.append(f"\n{i}. **{doc['title']}** (ID: {doc['document_id']})")
+        if doc["content_preview"]:
+            formatted_parts.append(f"   Preview: {doc['content_preview']}...")
+
+    return {
+        "documents": documents,
+        "count": len(documents),
+        "query_used": query,
+        "formatted": "\n".join(formatted_parts)
+    }
+
+
+# ── Registry Entry ───────────────────────────────────────
+
+register_action(
+    name="search_documents",
+    category="search",
+    description="Search documents in the knowledge base by query",
+    inputs_model=SearchDocumentsInputs,
+    params_model=SearchDocumentsParams,
+    outputs_model=SearchDocumentsOutputs,
+    tool_function=search_documents_tool
+)
+```
+
+### Shared Type Models
+
+Common types should be defined ONCE and reused across tools:
+
+```python
+# orchestrator/utils/tool_type_models.py
+
+from pydantic import BaseModel, Field
+from typing import Optional
+
+class DocumentRef(BaseModel):
+    """Standard document reference — reused by all file/document tools."""
+    document_id: str
+    title: str
+    filename: str
+    file_type: str
+    folder_path: str
+    scope: str = "my_docs"
+    modified_at: Optional[str] = None
+
+class TodoItem(BaseModel):
+    """Standard todo/task reference — reused by all task tools."""
+    todo_id: str
+    title: str
+    state: str
+    priority: Optional[str] = None
+    deadline: Optional[str] = None
+    tags: list = []
+    file_path: str
+
+class NotificationResult(BaseModel):
+    """Standard notification result."""
+    success: bool
+    message_id: Optional[str] = None
+    channel: Optional[str] = None
+```
+
+---
+
+## Action I/O Registry
+
+The registry is the single source of truth. It stores contracts AND provides schema generation for the Workflow Composer UI:
+
+```python
+# orchestrator/utils/action_io_registry.py
+
+import json
+from pydantic import BaseModel
+from typing import Dict, Type, Callable, Optional, List, Any
+
+
+class ActionContract(BaseModel):
+    """Complete I/O contract for a registered action."""
+    name: str
+    category: str
+    description: str
+    inputs_model: Type[BaseModel]
+    params_model: Optional[Type[BaseModel]] = None
+    outputs_model: Type[BaseModel]
+    tool_function: Callable
+
+    class Config:
+        arbitrary_types_allowed = True
+
+    def get_input_schema(self) -> dict:
+        """JSON Schema for inputs (Workflow Composer wiring UI)."""
+        return self.inputs_model.model_json_schema()
+
+    def get_params_schema(self) -> dict:
+        """JSON Schema for params (Workflow Composer config panel)."""
+        if self.params_model:
+            return self.params_model.model_json_schema()
+        return {}
+
+    def get_output_schema(self) -> dict:
+        """JSON Schema for outputs (downstream wiring)."""
+        return self.outputs_model.model_json_schema()
+
+    def get_output_fields(self) -> List[Dict[str, Any]]:
+        """
+        Output fields as list of {name, type, description} for Workflow Composer
+        dropdown when wiring downstream step inputs.
+        """
+        fields = []
+        for name, field_info in self.outputs_model.model_fields.items():
+            if name == "formatted":
+                continue  # Don't show formatted in wiring dropdown
+            field_type = _python_type_to_tool_type(field_info.annotation)
+            fields.append({
+                "name": name,
+                "type": field_type,
+                "description": field_info.description or ""
+            })
+        return fields
+
+    def get_input_fields(self) -> List[Dict[str, Any]]:
+        """Input fields for the Workflow Composer wiring UI."""
+        fields = []
+        for name, field_info in self.inputs_model.model_fields.items():
+            field_type = _python_type_to_tool_type(field_info.annotation)
+            required = field_info.is_required()
+            fields.append({
+                "name": name,
+                "type": field_type,
+                "description": field_info.description or "",
+                "required": required,
+                "default": field_info.default if not required else None
+            })
+        return fields
+
+
+def _python_type_to_tool_type(python_type) -> str:
+    """Map Python type annotations to the tool type system."""
+    import typing
+    origin = getattr(python_type, "__origin__", None)
+
+    if python_type is str:
+        return "text"
+    elif python_type in (int, float):
+        return "number"
+    elif python_type is bool:
+        return "boolean"
+    elif origin is list:
+        args = getattr(python_type, "__args__", (Any,))
+        inner = _python_type_to_tool_type(args[0]) if args else "any"
+        return f"list[{inner}]"
+    elif origin is dict:
+        return "record"
+    elif python_type is type(None):
+        return "any"
+    else:
+        # Check if it's a BaseModel subclass (record type)
+        try:
+            if issubclass(python_type, BaseModel):
+                return "record"
+        except TypeError:
+            pass
+        return "any"
+
+
+# ── Global Registry ──────────────────────────────────────
+
+_REGISTRY: Dict[str, ActionContract] = {}
+
+
+def register_action(
+    name: str,
+    category: str,
+    description: str,
+    inputs_model: Type[BaseModel],
+    outputs_model: Type[BaseModel],
+    tool_function: Callable,
+    params_model: Type[BaseModel] = None
+):
+    """Register a tool with its typed I/O contract."""
+    _REGISTRY[name] = ActionContract(
+        name=name,
+        category=category,
+        description=description,
+        inputs_model=inputs_model,
+        params_model=params_model,
+        outputs_model=outputs_model,
+        tool_function=tool_function
+    )
+
+
+def get_action(name: str) -> Optional[ActionContract]:
+    """Look up a registered action by name."""
+    return _REGISTRY.get(name)
+
+
+def get_all_actions() -> Dict[str, ActionContract]:
+    """Return the full registry."""
+    return _REGISTRY.copy()
+
+
+def get_actions_by_category(category: str) -> Dict[str, ActionContract]:
+    """Return all actions in a category."""
+    return {k: v for k, v in _REGISTRY.items() if v.category == category}
+
+
+def get_compatible_upstream_fields(
+    target_input_type: str,
+    upstream_outputs: Dict[str, str]
+) -> List[str]:
+    """
+    Given a target input type and a dict of {field_name: field_type} from
+    upstream steps, return which fields are compatible (with coercion).
+    """
+    compatible = []
+    for field_name, field_type in upstream_outputs.items():
+        if is_type_compatible(source_type=field_type, target_type=target_input_type):
+            compatible.append(field_name)
+    return compatible
+
+
+def is_type_compatible(source_type: str, target_type: str) -> bool:
+    """
+    Check if source_type can be wired to target_type (with coercion).
+    Returns True if the connection is valid.
+    """
+    # Exact match
+    if source_type == target_type:
+        return True
+
+    # 'any' accepts everything, everything coerces to 'any'
+    if target_type == "any" or source_type == "any":
+        return True
+
+    # Everything coerces to text
+    if target_type == "text":
+        return True
+
+    # Text can be parsed into most types
+    if source_type == "text":
+        return target_type in ("number", "boolean", "date", "record", "any")
+        # Also list[T] via JSON parse, handled below
+
+    # Number coercions
+    if source_type == "number" and target_type == "boolean":
+        return True  # 0=False, nonzero=True
+
+    # file_ref coercions
+    if source_type == "file_ref":
+        return target_type in ("text", "record", "any")
+
+    # List coercions
+    if source_type.startswith("list[") and target_type == "text":
+        return True  # JSON serialization
+    if source_type.startswith("list[") and target_type.startswith("list["):
+        # list[record] → list[text] etc.
+        inner_source = source_type[5:-1]
+        inner_target = target_type[5:-1]
+        return is_type_compatible(inner_source, inner_target)
+
+    # Record coercions
+    if source_type == "record" and target_type == "text":
+        return True
+
+    # text → list[T] (JSON parse or single-element wrap)
+    if source_type == "text" and target_type.startswith("list["):
+        return True
+
+    return False
+```
+
+---
+
+## Migration Strategy: In-Place, Not Variants
+
+### Do NOT create `_structured` variants
+
+The old approach of keeping `_tool` (str) + adding `_structured` (dict) is deprecated. Instead:
+
+**Modify the existing tool function in place** to return the unified dict format. Update all callers.
+
+### Migration Steps for Each Tool
+
+1. **Add Pydantic I/O models** (inputs, params, outputs with `formatted: str`)
+2. **Modify the tool function** to return a dict matching the output model
+3. **Build the `formatted` field** inside the tool (move the string formatting logic there)
+4. **Register in I/O registry** with `register_action()` at module level
+5. **Update direct callers** that expected `str` to read `result["formatted"]` or the typed fields
+6. **The pipeline executor and custom agent runner handle it automatically** (read `result["formatted"]` for ToolMessage)
+
+### Caller Migration
+
+#### Direct Callers in Agents
+
+Agents that call tools directly and expect `str`:
+
+```python
+# BEFORE:
+content = await get_document_content_tool(doc_id, user_id=user_id)
+# content is a string, used directly
+
+# AFTER:
+result = await get_document_content_tool(doc_id, user_id=user_id)
+content = result["content"]        # Typed field for programmatic use
+# or: content = result["formatted"]  # If you just want the display string
+```
+
+#### Skills Referencing Tools by Name
+
+Skills that reference tool function names continue to work — the function name doesn't change, only its return type. The pipeline executor and custom agent runner read `result["formatted"]` for ToolMessage.
+
+---
+
+## Checklist for Every Tool Migration
+
+- [ ] **Input model defined** — Pydantic `BaseModel` with typed fields and descriptions
+- [ ] **Params model defined** — Optional config with defaults (can be `None` if no params)
+- [ ] **Output model defined** — Pydantic `BaseModel` with individually addressable fields + `formatted: str`
+- [ ] **`formatted` field included** — Human-readable summary in every output model
+- [ ] **Tool returns unified dict** — Single dict with typed fields + formatted
+- [ ] **Registered in I/O registry** — `register_action()` called at module level
+- [ ] **Direct callers updated** — Any agent code reading the old `str` return
+- [ ] **Category assigned** — Matches a known category
+- [ ] **Shared types used** — Uses `DocumentRef`, `TodoItem`, etc. from `tool_type_models.py`
+
+---
+
+## Anti-patterns
+
+```python
+# ❌ WRONG: Returns only a string (no typed fields for wiring)
+async def my_tool(query: str) -> str:
+    return f"Found {count} items"
+
+# ❌ WRONG: Returns dict but no 'formatted' field (breaks LLM consumption)
+async def my_tool(query: str) -> dict:
+    return {"results": [...], "count": 5}
+    # LLM gets: "{'results': [...], 'count': 5}" — ugly, unreadable
+
+# ❌ WRONG: Creating a _structured variant alongside _tool
+async def my_tool(query: str) -> str: ...           # Old
+async def my_structured(query: str) -> dict: ...    # Variant
+# Now there are two functions to maintain forever
+
+# ❌ WRONG: Output fields not individually addressable
+class MyOutputs(BaseModel):
+    data: dict      # Opaque blob
+    formatted: str
+
+# ❌ WRONG: Overly strict types that prevent valid chains
+class MyInputs(BaseModel):
+    document_id: DocumentRef   # Forces upstream to produce exact model
+    # Should be: document_id: str (text) — accepts any text, including a doc ID
+
+# ✅ CORRECT: Unified return, typed fields, formatted included
+class MyOutputs(BaseModel):
+    results: List[ResultItem]
+    count: int
+    has_more: bool
+    query_used: str
+    formatted: str = Field(description="Human-readable summary")
+
+async def my_tool(query: str) -> dict:
+    results = do_search(query)
+    return {
+        "results": results,
+        "count": len(results),
+        "has_more": len(results) >= limit,
+        "query_used": query,
+        "formatted": f"Found {len(results)} items:\n" + format_results(results)
+    }
+
+register_action(
+    name="my_tool", category="search", description="...",
+    inputs_model=MyInputs, outputs_model=MyOutputs, tool_function=my_tool
+)
+```
+
+---
+
+## Input Design Guidelines
+
+### Prefer `text` for IDs and References
+
+```python
+# ❌ WRONG: Requires exact model — blocks valid upstream connections
+class MyInputs(BaseModel):
+    document: DocumentRef          # Upstream MUST produce a full DocumentRef
+
+# ✅ CORRECT: Accepts any text — a document_id string from any source
+class MyInputs(BaseModel):
+    document_id: str = Field(description="Document ID")  # text type
+```
+
+### Use `text` for Free-Form Content
+
+```python
+# Many tools accept free text — this is fine and expected
+class SummarizeInputs(BaseModel):
+    content: str = Field(description="Text to summarize")  # text type
+    # Could come from: read_file.content, crawl_url.content, llm_task output, etc.
+```
+
+### Use Specific Types Only When Semantically Meaningful
+
+```python
+class FilterInputs(BaseModel):
+    items: List[dict] = Field(description="Items to filter")  # list[record]
+    min_score: float = Field(description="Minimum score threshold")  # number
+    # min_score SHOULD be number — "high" is not a valid threshold
+```
+
+### Accept `text` Even for Typed Fields (via Coercion)
+
+If a tool input is `number`, the Workflow Composer allows wiring a `text` output to it — the runtime will parse. Don't add redundant `str` alternatives:
+
+```python
+# ❌ WRONG: Dual inputs for the same concept
+class MyInputs(BaseModel):
+    limit: int               # Number
+    limit_str: str            # "Just in case it's a string"
+
+# ✅ CORRECT: Single typed input — coercion handles text→number
+class MyInputs(BaseModel):
+    limit: int = Field(default=10, description="Max results")
+    # If upstream sends "20" as text, runtime coerces to 20
+```
+
+---
+
+## References
+
+- Tool catalog with I/O contracts: [AGENT_FACTORY_TOOLS.md](mdc:docs/AGENT_FACTORY_TOOLS.md)
+- Tool placement zones: [langgraph-tool-placement.mdc](mdc:.cursor/rules/langgraph-tool-placement.mdc)
+- Agent Factory tech guide (registry spec): [AGENT_FACTORY_TECHNICAL_GUIDE.md § 12](mdc:docs/AGENT_FACTORY_TECHNICAL_GUIDE.md)
+- Structured LLM outputs rule: [structured-llm-outputs.mdc](mdc:.cursor/rules/structured-llm-outputs.mdc)
+- Migration tracker: [dev-notes/TOOL_IO_CONTRACT_MIGRATION.md](mdc:dev-notes/TOOL_IO_CONTRACT_MIGRATION.md)

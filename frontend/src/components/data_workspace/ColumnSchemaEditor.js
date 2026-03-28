@@ -143,6 +143,7 @@ const ColumnSchemaEditor = ({ initialColumns = [], onChange, readOnly = false })
               <TableCell width="40px">Order</TableCell>
               <TableCell>Column Name</TableCell>
               <TableCell>Type</TableCell>
+              <TableCell>Description</TableCell>
               <TableCell align="center">Nullable</TableCell>
               <TableCell align="center">Primary Key</TableCell>
               <TableCell>Default Value</TableCell>
@@ -183,6 +184,21 @@ const ColumnSchemaEditor = ({ initialColumns = [], onChange, readOnly = false })
                       size="small"
                       fullWidth
                       placeholder="column_name"
+                    />
+                  )}
+                </TableCell>
+                <TableCell>
+                  {readOnly ? (
+                    <Typography variant="body2" sx={{ maxWidth: 200 }} noWrap title={column.description || ''}>
+                      {column.description || '-'}
+                    </Typography>
+                  ) : (
+                    <TextField
+                      value={column.description || ''}
+                      onChange={(e) => handleUpdateColumn(index, 'description', e.target.value)}
+                      size="small"
+                      fullWidth
+                      placeholder="e.g. Net revenue after refunds"
                     />
                   )}
                 </TableCell>

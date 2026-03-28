@@ -31,8 +31,12 @@ class AsyncOrchestratorRequest(BaseModel):
     priority: str = "normal"  # normal, high, low
     active_editor: Optional[dict] = None  # {is_editable, filename, language, content, content_length, frontmatter}
     editor_preference: Optional[str] = None  # 'prefer' | 'ignore'
+    active_data_workspace: Optional[dict] = None  # {workspace_id, table_id, schema, visible_rows, ...}
+    data_workspace_preference: Optional[str] = None  # 'auto' | 'ignore'
     base_checkpoint_id: Optional[str] = None  # Optional: start from this checkpoint to branch
     locked_agent: Optional[str] = None  # Optional: lock conversation routing to a specific agent
+    agent_profile_id: Optional[str] = None  # Agent Factory: route to custom agent when set
+    user_chat_model: Optional[str] = None  # Chat sidebar selected model
 
 
 # Deprecated response models removed - no longer needed
@@ -67,10 +71,14 @@ async def stream_orchestrator_response(
         request_context = {
             "active_editor": request.active_editor,
             "editor_preference": request.editor_preference,
+            "active_data_workspace": request.active_data_workspace,
+            "data_workspace_preference": request.data_workspace_preference,
             "pipeline_preference": None,  # Not in AsyncOrchestratorRequest
             "active_pipeline_id": None,  # Not in AsyncOrchestratorRequest
             "locked_agent": request.locked_agent,
-            "base_checkpoint_id": request.base_checkpoint_id
+            "base_checkpoint_id": request.base_checkpoint_id,
+            "agent_profile_id": request.agent_profile_id,
+            "user_chat_model": request.user_chat_model,
         }
         
         # Remove None values

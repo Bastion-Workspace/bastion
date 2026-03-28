@@ -17,22 +17,26 @@ class ExportService {
   /**
    * Export message content as PDF with enhanced HTML-based rendering
    */
-  exportAsPDF = async (message) => {
+  exportAsPDF = async (message, options = {}) => {
     try {
-      // Try enhanced HTML-based rendering first
-      console.log('🖨️ PDF Export: Starting enhanced export...');
-      try {
-        const result = await this._exportAsPDFEnhanced(message);
-        console.log('✅ PDF Export: Enhanced export successful');
-        return result;
-      } catch (enhancedError) {
-        console.warn('❌ PDF Export: Enhanced export failed, falling back to basic method:', enhancedError);
-        console.warn('Detailed error:', enhancedError.stack);
-        return await this._exportAsPDFBasic(message);
-      }
+      // Use backend API for PDF export
+      const timestamp = message.timestamp ? new Date(message.timestamp).toISOString() : new Date().toISOString();
+      const role = message.role || 'Message';
+      
+      const payload = {
+        kind: 'chat_message',
+        message_content: message.content || '',
+        message_timestamp: timestamp,
+        message_role: role,
+        page_size: options.pageSize || 'letter',
+        page_orientation: options.pageOrientation || 'portrait',
+        title: `Chat Message - ${new Date(message.timestamp || Date.now()).toLocaleString()}`,
+      };
+      
+      return await this._exportPdfViaBackend(payload);
     } catch (error) {
-      console.error('💥 PDF Export: Complete failure:', error);
-      throw new Error('Failed to export PDF. Please try again.');
+      console.error('PDF Export: Failed to export message:', error);
+      throw new Error(`Failed to export PDF: ${error.message}`);
     }
   };
 
@@ -235,7 +239,10 @@ class ExportService {
    */
   _parseMarkdownForTextPDF = (markdown) => {
     const elements = [];
-    const lines = markdown.split('\n');
+    const normalized = (markdown || '')
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n');
+    const lines = normalized.split('\n');
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -251,8 +258,8 @@ class ExportService {
         continue;
       }
 
-      // Headers
-      const headerMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+      // ATX headings: optional space after hashes (##Title or ## Title)
+      const headerMatch = trimmed.match(/^(#{1,6})\s*(.+)$/);
       if (headerMatch) {
         elements.push({
           type: 'heading',
@@ -311,8 +318,9 @@ class ExportService {
         continue;
       }
 
-      // Horizontal rules
-      if (trimmed.match(/^[-*_]{3,}$/)) {
+      // Horizontal rules: Markdown --- / *** / ___ or decorative Unicode (box-drawing, dashes).
+      // jsPDF standard fonts cannot render box-drawing glyphs (e.g. ═); treat as vector line instead of text.
+      if (this._isHorizontalRuleLine(trimmed)) {
         elements.push({
           type: 'hr',
           text: ''
@@ -338,6 +346,16 @@ class ExportService {
     }
 
     return elements;
+  };
+
+  /**
+   * True for Markdown HR lines or lines made only of horizontal rule characters
+   * (Unicode box drawing U+2500–U+257F, hyphen/dash punctuation, etc.).
+   */
+  _isHorizontalRuleLine = (trimmed) => {
+    if (trimmed.length < 3) return false;
+    if (/^[-*_]{3,}$/.test(trimmed)) return true;
+    return /^[\u2500-\u257F\u2010-\u2015\uFE31\uFE58\uFF0D]{3,}$/.test(trimmed);
   };
 
   /**
@@ -1395,10 +1413,27 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
   /**
    * Export conversation as a complete document
    */
-  exportConversation = async (conversation, format = 'pdf') => {
+  exportConversation = async (conversation, format = 'pdf', options = {}) => {
     try {
       if (format === 'pdf') {
-        return await this._exportConversationAsPDF(conversation);
+        // Use backend API for PDF export
+        const messages = (conversation.messages || []).map(msg => ({
+          role: msg.role || 'unknown',
+          timestamp: msg.timestamp || msg.created_at || new Date().toISOString(),
+          content: msg.content || '',
+        }));
+        
+        const payload = {
+          kind: 'conversation',
+          conversation_title: conversation.title || 'Untitled Conversation',
+          conversation_created_at: conversation.created_at || new Date().toISOString(),
+          messages: messages,
+          page_size: options.pageSize || 'letter',
+          page_orientation: options.pageOrientation || 'portrait',
+          title: conversation.title || 'Untitled Conversation',
+        };
+        
+        return await this._exportPdfViaBackend(payload);
       } else if (format === 'docx') {
         return await this._exportConversationAsDOCX(conversation);
       } else {
@@ -1430,7 +1465,7 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
 
     // Direct fetch to receive blob
     const token = localStorage.getItem('auth_token');
-    const resp = await fetch((process.env.REACT_APP_API_URL || '') + '/api/export/epub', {
+    const resp = await fetch((import.meta.env.VITE_API_URL || '') + '/api/export/epub', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -2155,10 +2190,145 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
   };
 
   /**
-   * Export markdown document as PDF with proper formatting
-   * Uses native jsPDF text rendering for high quality, selectable text and no canvas size limits
+   * Heading outline for PDF book section UI (stable ids match export).
+   */
+  fetchPdfHeadingOutline = async (markdownContent, options = {}) => {
+    const sourceFormat = options.sourceFormat === 'org' ? 'org' : 'markdown';
+    const token = localStorage.getItem('auth_token');
+    const resp = await fetch((import.meta.env.VITE_API_URL || '') + '/api/export/pdf/heading-outline', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({
+        content: markdownContent || '',
+        source_format: sourceFormat,
+      }),
+    });
+    if (!resp.ok) {
+      const errorText = await resp.text();
+      throw new Error(`Heading outline failed: ${errorText || resp.statusText}`);
+    }
+    return resp.json();
+  };
+
+  /**
+   * Helper: Export PDF via backend API
+   */
+  _exportPdfViaBackend = async (payload) => {
+    const token = localStorage.getItem('auth_token');
+    const resp = await fetch((import.meta.env.VITE_API_URL || '') + '/api/export/pdf', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const errorText = await resp.text();
+      throw new Error(`PDF export failed: ${errorText || resp.statusText}`);
+    }
+    const blob = await resp.blob();
+    const contentDisposition = resp.headers.get('Content-Disposition');
+    let filename = 'export.pdf';
+    if (contentDisposition) {
+      const match = contentDisposition.match(/filename="?([^"]+)"?/);
+      if (match) {
+        filename = match[1];
+      }
+    }
+    const url = window.URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.URL.revokeObjectURL(url);
+    return { success: true, filename };
+  };
+
+  /**
+   * Export markdown document as PDF via backend
    */
   exportMarkdownAsPDF = async (markdownContent, options = {}) => {
+    try {
+      // Parse frontmatter to extract metadata
+      const parsed = parseFrontmatter(markdownContent || '');
+      const frontmatter = { ...(parsed.data || {}), ...(parsed.lists || {}) };
+      
+      // Extract title from frontmatter or use filename
+      const title = frontmatter.title || frontmatter.Title || options.filename || 'Document';
+      const documentTitle = title.replace(/\.[^.]+$/, '');
+      
+      const wm = options.watermarkText != null && String(options.watermarkText).trim() !== ''
+        ? String(options.watermarkText).trim()
+        : null;
+
+      const layout = options.pdfLayout === 'book' ? 'book' : 'article';
+      const bookSectionOverrides = Array.isArray(options.bookSectionOverrides)
+        ? options.bookSectionOverrides
+        : [];
+      const bookOptions =
+        layout === 'book'
+          ? {
+              margin_top_mm: Number.isFinite(options.bookMarginTopMm) ? options.bookMarginTopMm : 20,
+              margin_right_mm: Number.isFinite(options.bookMarginRightMm) ? options.bookMarginRightMm : 20,
+              margin_bottom_mm: Number.isFinite(options.bookMarginBottomMm) ? options.bookMarginBottomMm : 28,
+              margin_left_mm: Number.isFinite(options.bookMarginLeftMm) ? options.bookMarginLeftMm : 20,
+              indent_body_paragraphs: options.bookIndentBodyParagraphs !== false,
+              no_indent_after_section_heading: options.bookNoIndentAfterSectionHeading !== false,
+              page_number_format: options.bookPageNumberFormat || 'n_of_total',
+              page_number_vertical: options.bookPageNumberVertical || 'bottom',
+              page_number_horizontal: options.bookPageNumberHorizontal || 'center',
+              suppress_page_number_on_first_page: !!options.bookSuppressPageNumberOnFirstPage,
+            }
+          : undefined;
+
+      const payload = {
+        kind: 'markdown_document',
+        content: markdownContent || '',
+        page_size: options.pageSize || 'letter',
+        page_orientation: options.pageOrientation || 'portrait',
+        title: documentTitle,
+        document_id: options.documentId,
+        folder_id: options.folderId,
+        metadata: {
+          ...frontmatter,
+          ...(options.metadata || {}),
+        },
+        pdf_layout: layout,
+        ...(bookOptions ? { book_options: bookOptions } : {}),
+        ...(layout === 'book' ? { book_section_overrides: bookSectionOverrides } : {}),
+        include_toc: !!options.includeToc,
+        toc_depth: Number.isFinite(options.tocDepth) ? Math.min(6, Math.max(1, options.tocDepth)) : 3,
+        page_numbers: options.pageNumbers !== false,
+        watermark_text: wm,
+        watermark_on_all_pages: options.watermarkOnAllPages !== false,
+        page_break_before_headings: Array.isArray(options.pageBreakBeforeHeadings)
+          ? options.pageBreakBeforeHeadings.filter((n) => n >= 1 && n <= 6)
+          : [],
+        pdf_source_format: options.pdfSourceFormat === 'org' ? 'org' : 'markdown',
+        pdf_font_preset: options.pdfFontPreset || 'liberation',
+        pdf_typeface_style: ['serif', 'sans', 'mixed'].includes(options.pdfTypefaceStyle)
+          ? options.pdfTypefaceStyle
+          : 'mixed',
+      };
+      
+      return await this._exportPdfViaBackend(payload);
+    } catch (error) {
+      console.error('PDF Export: Failed to export markdown document:', error);
+      throw new Error(`Failed to export PDF: ${error.message}`);
+    }
+  };
+
+  /**
+   * Legacy exportMarkdownAsPDF implementation (replaced by backend)
+   * Kept for reference - will be removed after verification
+   */
+  _exportMarkdownAsPDF_Legacy = async (markdownContent, options = {}) => {
     try {
       console.log('PDF Export: Starting text-based markdown document export...');
       
@@ -2166,9 +2336,12 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
       await new Promise(resolve => setTimeout(resolve, 10));
       
       // Parse frontmatter to extract metadata
-      const parsed = parseFrontmatter(markdownContent);
+      const normalizedMarkdown = (markdownContent || '')
+        .replace(/\r\n/g, '\n')
+        .replace(/\r/g, '\n');
+      const parsed = parseFrontmatter(normalizedMarkdown);
       const frontmatter = { ...(parsed.data || {}), ...(parsed.lists || {}) };
-      const bodyContent = parsed.body || markdownContent;
+      const bodyContent = parsed.body || normalizedMarkdown;
       
       // Extract title from frontmatter or use filename
       const title = frontmatter.title || frontmatter.Title || options.filename || 'Document';
@@ -2184,27 +2357,14 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
       // Set up layout constants
       const margin = 20; 
       const pageWidth = ExportService.PAGE_WIDTH_MM - (2 * margin);
-      const pageHeight = ExportService.PAGE_HEIGHT_MM - (2 * margin);
+      const pageBottomY = ExportService.PAGE_HEIGHT_MM - margin;
       let yPosition = margin;
 
-      // 1. Add title header
-      pdf.setFont('helvetica', 'bold');
-      pdf.setFontSize(22);
-      const titleLines = pdf.splitTextToSize(documentTitle, pageWidth);
-      pdf.text(titleLines, margin, yPosition);
-      yPosition += titleLines.length * 9 + 5;
-
-      // Add separator line
-      pdf.setDrawColor(50, 50, 50);
-      pdf.setLineWidth(0.5);
-      pdf.line(margin, yPosition, margin + pageWidth, yPosition);
-      yPosition += 10;
-
-      // 2. Parse markdown into elements
+      // Parse markdown into elements (no filename/title banner — content starts at top margin)
       console.log('PDF Export: Parsing markdown content...');
       const elements = this._parseMarkdownForTextPDF(bodyContent);
       
-      // 3. Render elements
+      // Render elements
       console.log(`PDF Export: Rendering ${elements.length} elements...`);
       pdf.setFont('helvetica', 'normal');
       pdf.setFontSize(12);
@@ -2234,7 +2394,7 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
             yPosition = margin;
           }
           
-          yPosition = this._renderTextWithFormattingImproved(pdf, element.text, margin, yPosition, pageWidth, margin, pageHeight, fontSize);
+          yPosition = this._renderTextWithFormattingImproved(pdf, element.text, margin, yPosition, pageWidth, margin, pageBottomY, fontSize);
           yPosition += 2; // Minimal space after header; user can add blank line in markdown
           pdf.setFontSize(12);
           pdf.setFont('helvetica', 'normal');
@@ -2268,7 +2428,16 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
 
         else if (element.type === 'list') {
           const indent = (element.indent || 0) * 8;
-          const bullet = element.isOrdered ? `${element.marker}. ` : '• ';
+          // Marker from regex is already "1." for ordered lists — do not add another period
+          const bullet = element.isOrdered ? `${element.marker} ` : '• ';
+          const bulletX = margin + indent;
+          pdf.setFont('helvetica', 'bold');
+          const bulletWidth = pdf.getTextWidth(bullet);
+          const textStartX = bulletX + bulletWidth + 2;
+          const listTextWidth = Math.max(
+            8,
+            ExportService.PAGE_WIDTH_MM - margin - textStartX
+          );
           
           // Check if we need a new page
           if (yPosition > ExportService.PAGE_HEIGHT_MM - margin - 10) {
@@ -2276,11 +2445,18 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
             yPosition = margin;
           }
           
-          pdf.setFont('helvetica', 'bold');
-          pdf.text(bullet, margin + indent, yPosition);
+          pdf.text(bullet, bulletX, yPosition);
           pdf.setFont('helvetica', 'normal');
           
-          yPosition = this._renderTextWithFormattingImproved(pdf, element.text, margin + indent + 6, yPosition, pageWidth - indent - 6, margin, pageHeight);
+          yPosition = this._renderTextWithFormattingImproved(
+            pdf,
+            element.text,
+            textStartX,
+            yPosition,
+            listTextWidth,
+            margin,
+            pageBottomY
+          );
           yPosition += 2;
         }
 
@@ -2295,7 +2471,7 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
           const textWidth = pageWidth - 8;
           
           const startY = yPosition - 4;
-          yPosition = this._renderTextWithFormattingImproved(pdf, element.text, textX, yPosition, textWidth, margin, pageHeight);
+          yPosition = this._renderTextWithFormattingImproved(pdf, element.text, textX, yPosition, textWidth, margin, pageBottomY);
           
           // Draw left border (simplified for multi-page blockquotes)
           pdf.setDrawColor(200, 200, 200);
@@ -2350,7 +2526,7 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
             pdf.addPage();
             yPosition = margin;
           }
-          yPosition = this._renderTextWithFormattingImproved(pdf, element.text, margin, yPosition, pageWidth, margin, pageHeight);
+          yPosition = this._renderTextWithFormattingImproved(pdf, element.text, margin, yPosition, pageWidth, margin, pageBottomY);
           yPosition += 4;
         }
       }
@@ -2386,7 +2562,7 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
    * Improved version of _renderTextWithFormatting that handles page breaks
    * FIXED: Keeps inline code and formatted text together, moves to next line if needed
    */
-  _renderTextWithFormattingImproved = (pdf, segments, x, y, maxWidth, margin, pageHeight, fontSize = 12) => {
+  _renderTextWithFormattingImproved = (pdf, segments, x, y, maxWidth, margin, pageBottomY, fontSize = 12) => {
     let currentX = x;
     let currentY = y;
     const lineHeight = (fontSize / 2) + 1;
@@ -2429,19 +2605,30 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
         currentX = x;
         currentY += lineHeight;
         
-        if (currentY > pageHeight) {
+        if (currentY > pageBottomY) {
           pdf.addPage();
           currentY = margin;
         }
       }
 
-      // Now split text to fit (use full maxWidth if we just moved to new line)
-      const widthToUse = (currentX === x) ? maxWidth : (maxWidth - (currentX - x));
+      // Split text to fit; maxWidth is the line budget for x. If little or no room remains (e.g. bad width math), wrap.
+      let widthToUse = (currentX === x) ? maxWidth : (maxWidth - (currentX - x));
+      if (widthToUse < 12) {
+        currentX = x;
+        currentY += lineHeight;
+        if (currentY > pageBottomY) {
+          pdf.addPage();
+          currentY = margin;
+        }
+        widthToUse = maxWidth;
+      }
+      widthToUse = Math.max(12, widthToUse);
+
       const lines = pdf.splitTextToSize(text, widthToUse);
       
       // Render each line
       for (let l = 0; l < lines.length; l++) {
-        if (currentY > pageHeight) {
+        if (currentY > pageBottomY) {
           pdf.addPage();
           currentY = margin;
         }
@@ -2479,4 +2666,4 @@ ${metadata ? `---\n*${metadata}*` : ''}`;
   };
 }
 
-export default new ExportService(); 
+export default new ExportService();

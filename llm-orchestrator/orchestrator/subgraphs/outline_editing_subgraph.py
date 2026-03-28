@@ -9,7 +9,7 @@ Supports outline development with:
 - Chapter detection: Finds chapter ranges, counts beats per chapter
 - Structure analysis: Assesses outline completeness, chapter count, identifies missing sections
 - Reference quality assessment: Evaluates loaded references (style, rules, characters) and generates warnings
-- 100 Beat Limit Enforcement: System prompt instructs LLM to prune beats when approaching 100-beat chapter limit
+- 150 Beat Limit Enforcement: System prompt instructs LLM to prune beats when approaching 150-beat chapter limit
 - Chapter Heading Format: Strict enforcement of "## Chapter N" format (no titles in headings)
 - Clarification Request Handling: Supports multi-turn clarification for empty outlines
 - Series Timeline Support: Loads series timeline for cross-book continuity
@@ -23,6 +23,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Callable
 
 from langgraph.graph import StateGraph, END
@@ -32,12 +33,12 @@ from pydantic import ValidationError
 from orchestrator.models.editor_models import ManuscriptEdit
 from orchestrator.models.agent_response_contract import AgentResponse, ManuscriptEditMetadata
 from orchestrator.utils.editor_operation_resolver import resolve_editor_operation
+from orchestrator.middleware.message_preprocessor import MessagePreprocessor
 from orchestrator.utils.writing_subgraph_utilities import (
     preserve_critical_state,
     create_writing_error_response,
     extract_user_request,
     paragraph_bounds,
-    sanitize_ai_response_for_history,
     strip_frontmatter_block,
     slice_hash,
     build_response_text_for_question,
@@ -256,94 +257,6 @@ def _assess_reference_quality(content: str, ref_type: str) -> Tuple[float, List[
     return min(1.0, quality_score), warnings
 
 
-def _extract_conversation_history(messages: List[Any], limit: int = 10) -> List[Dict[str, str]]:
-    """Extract conversation history from LangChain messages, filtering out large data URIs"""
-    try:
-        history = []
-        for msg in messages[-limit:]:
-            if hasattr(msg, 'content'):
-                role = "assistant" if hasattr(msg, 'type') and msg.type == "ai" else "user"
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                if role == "assistant":
-                    content = sanitize_ai_response_for_history(content)
-                history.append({
-                    "role": role,
-                    "content": content
-                })
-        return history
-    except Exception as e:
-        logger.error(f"Failed to extract conversation history: {e}")
-        return []
-
-
-def _build_editing_agent_messages(
-    system_prompt: str,
-    context_parts: List[str],
-    current_request: str,
-    messages_list: List[Any],
-    get_datetime_context: Callable,
-    look_back_limit: int = 6
-) -> List[Any]:
-    """
-    Build message list for editing agents with conversation history and separate context
-    
-    STANDALONE VERSION for subgraph use (doesn't require BaseAgent)
-    
-    Message Structure:
-    1. SystemMessage: system_prompt
-    2. SystemMessage: datetime_context
-    3. Conversation history as alternating HumanMessage/AIMessage objects
-    4. HumanMessage: file context (from context_parts - file content, references)
-    5. HumanMessage: current_request (user query + mode-specific instructions)
-    
-    Args:
-        system_prompt: System-level instructions for the agent
-        context_parts: List of context strings (file content, references, etc.)
-        current_request: User's request with mode-specific instructions
-        messages_list: Conversation history from state.get("messages", [])
-        get_datetime_context: Function that returns datetime context string
-        look_back_limit: Number of previous messages to include (default: 6)
-        
-    Returns:
-        List of LangChain message objects ready for LLM
-    """
-    # Start with system messages
-    messages = [
-        SystemMessage(content=system_prompt),
-        SystemMessage(content=get_datetime_context())
-    ]
-    
-    # Add conversation history as proper message objects
-    if messages_list:
-        conversation_history = _extract_conversation_history(
-            messages_list, 
-            limit=look_back_limit
-        )
-        
-        # Remove last message if it duplicates current_request
-        if conversation_history and len(conversation_history) > 0:
-            last_msg = conversation_history[-1]
-            if last_msg.get("content") == current_request:
-                conversation_history = conversation_history[:-1]
-        
-        # Add as proper message objects
-        for msg in conversation_history:
-            if msg["role"] == "user":
-                messages.append(HumanMessage(content=msg["content"]))
-            elif msg["role"] == "assistant":
-                messages.append(AIMessage(content=msg["content"]))
-    
-    # Add file context as separate message
-    if context_parts:
-        messages.append(HumanMessage(content="".join(context_parts)))
-    
-    # Add current request with instructions as separate message
-    if current_request:
-        messages.append(HumanMessage(content=current_request))
-    
-    return messages
-
-
 # ============================================
 # System Prompt Builder
 # ============================================
@@ -352,6 +265,11 @@ def _build_system_prompt() -> str:
     """Build system prompt for outline editing"""
     return (
         "You are an outline editor. Generate operations to edit story outlines.\n\n"
+        "**SCOPE: OUTLINE FILE ONLY**\n"
+        "- You ONLY edit the CURRENT OUTLINE file (the document under \"=== CURRENT OUTLINE ===\").\n"
+        "- Universe rules, style guide, and character profiles are REFERENCE ONLY: you read them to inform outline content, but you NEVER generate operations to change them. They are separate files; you cannot and must not edit them.\n"
+        "- If the user asks to update rules, style, or character profiles: put your answer or suggestion in the summary and return 0 operations (or only outline-related operations). Tell the user to open the rules/style/character file and ask there for edits.\n"
+        "- Your job: craft outlines for chapters, answer questions about the outline, and edit the outline proactively. Nothing else.\n\n"
         "**CRITICAL: WORK WITH AVAILABLE INFORMATION FIRST**\n"
         "Always start by working with what you know from the request, existing outline content, and references:\n"
         "- Make edits based on available information - don't wait for clarification\n"
@@ -399,7 +317,8 @@ def _build_system_prompt() -> str:
         "### Status (optional, for chapters after Chapter 1)\n"
         "### Pacing (optional, recommended for Chapter 2+)\n"
         "### Summary (brief 3-5 sentence overview)\n"
-        "### Beats (detailed bullet point events, max 100)\n\n"
+        "### Beats (detailed bullet point events, max 150)\n"
+        "### Scenes (optional - groups of beats for fiction generation)\n\n"
         "**CRITICAL - CHAPTER HEADING FORMAT**:\n"
         "- Chapter headings MUST be EXACTLY \"## Chapter N\" where N is the chapter number\n"
         "- **NEVER add titles, names, or descriptions to chapter headings**\n"
@@ -455,8 +374,9 @@ def _build_system_prompt() -> str:
         "  ### Status (optional - can appear in any chapter, including Chapter 1)\n"
         "  ### Pacing (optional - recommended for Chapter 2+)\n"
         "  ### Summary\n"
-        "  ### Beats\n\n"
-        "- Example format for Chapter 2+ (with Status and Pacing):\n"
+        "  ### Beats\n"
+        "  ### Scenes (optional - recommended when 4+ beats)\n\n"
+        "- Example format for Chapter 2+ (with Status, Pacing, and optional Scenes):\n"
         "  ## Chapter 2\n"
         "  ### Status\n"
         "  - Alex: Went home in chapter 1\n"
@@ -470,7 +390,10 @@ def _build_system_prompt() -> str:
         "  ### Beats\n"
         "  - Sam interviews witness at warehouse\n"
         "  - Alex discovers hidden letter in library\n"
-        "  - [additional beats...]\n\n"
+        "  - [additional beats...]\n"
+        "  ### Scenes\n"
+        "  Scene: Discovery — Beats 1-2 (combine; single investigative paragraph)\n"
+        "  Scene: Revelation — Beats 3-5 (expand; each beat significant)\n\n"
         "- Example format for Chapter 1 (with optional status, no pacing needed):\n"
         "  ## Chapter 1\n"
         "  ### Status\n"
@@ -493,25 +416,41 @@ def _build_system_prompt() -> str:
         "- Each chapter MUST have a '### Beats' header followed by bullet point beats\n"
         "- Every beat MUST start with '- ' (dash space)\n"
         "- **NEVER number beats** - Do NOT use numbered lists (1., 2., 3., etc.) or any numbering format\n"
-        "- Beats are specific plot events/actions (THIS is where details belong)\n"
+        "- Beats capture WHAT happens (plot events/actions) and may OPTIONALLY include guidance for the final narrative (visuals, atmosphere, staging, internal thread)\n"
+        "- Event-first: each beat should state the plot event; you may add brief visual/atmosphere hints to inform prose later (e.g. \"- Sam arrives at the warehouse — fog, single lamp, distant sirens\")\n"
+        "- Optional prose guidance: lighting, weather, sensory tone, or how a moment should look/feel; keep it brief so beats stay scannable\n"
+        "- **Internal thoughts and perception shifts**: When the STYLE GUIDE emphasizes internal monologue, character interiority, or shifts in perception, include beats that specify key internal realizations or perception shifts (e.g. \"- She realizes for the first time he lied — shift from trust to doubt\", \"- His view of the city shifts from familiar to hostile\"). Describe the internal shift or realization without quoting actual inner dialogue; the prose will render it. This gives the fiction writer clear targets for narrative depth.\n"
         "- Format: '### Beats' on its own line, followed by bullet points (dash space only, NO numbers)\n"
-        "- **CRITICAL - 100 BEAT LIMIT**: Each chapter MUST have a MAXIMUM of 100 beats\n"
+        "- **CRITICAL - 150 BEAT LIMIT**: Each chapter MUST have a MAXIMUM of 150 beats\n"
         "- When adding new beats to a chapter that already has beats:\n"
         "  * Count the existing beats first\n"
-        "  * If adding new beats would exceed 100, you MUST prune less important beats to make room\n"
+        "  * If adding new beats would exceed 150, you MUST prune less important beats to make room\n"
         "  * Prioritize plot-critical beats over minor details\n"
-        "  * Remove redundant or less essential beats to stay within the 100-beat limit\n"
+        "  * Remove redundant or less essential beats to stay within the 150-beat limit\n"
         "  * Example: If chapter has 48 beats and user wants to add 5 new beats, remove 3 least important existing beats\n"
-        "- Each chapter needs: (1) BRIEF 3-5 sentence summary paragraph AND (2) detailed beats (max 100)\n"
+        "- Each chapter needs: (1) BRIEF 3-5 sentence summary paragraph AND (2) detailed beats (max 150)\n"
         "- **CRITICAL**: The summary is BRIEF and HIGH-LEVEL; the beats are DETAILED\n\n"
+        "CHAPTER SCENES (OPTIONAL - RECOMMENDED WHEN 4+ BEATS):\n"
+        "- You MAY add a '### Scenes' block after '### Beats' to suggest how beats should be grouped into prose.\n"
+        "- This helps the fiction generator combine related beats into single paragraphs/scenes instead of one paragraph per beat.\n"
+        "- **When to add Scenes**: When a chapter has 4 or more beats, or when the user asks for scene structure or beat grouping.\n"
+        "- **Format**: One line per scene. Each line: 'Scene: [Name] — Beats [range or list] (optional prose hint)'\n"
+        "- Beat numbers are 1-based (first beat = 1). Use ranges (e.g. Beats 1-3) or lists (e.g. Beats 1, 2, 5).\n"
+        "- **Examples**:\n"
+        "  * Scene: Arrival — Beats 1-3 (combine; single atmospheric paragraph)\n"
+        "  * Scene: Confrontation — Beats 4-6 (expand; each beat significant)\n"
+        "  * Scene: Intro — Beats 1, 2\n"
+        "- **Placement**: ### Scenes must appear AFTER ### Beats in the same chapter, before the next ## Chapter.\n"
+        "- **Optional**: If you add or significantly change beats, consider adding or updating ### Scenes for that chapter so fiction generation stays guided.\n"
+        "- Do NOT add Scenes for chapters with very few beats (e.g. 1-3) unless the user asks.\n\n"
         "**ABSOLUTE PROHIBITION ON DIALOGUE**:\n"
         "- **NEVER include actual dialogue** (quoted speech) in outline beats\n"
         "- Dialogue belongs in the fiction manuscript, NOT in the outline\n"
         "- You CAN mention talking/conversation as an event: \"- Character discusses plan with ally\"\n"
         "- You CAN describe what is discussed: \"- Character reveals secret to ally during conversation\"\n"
         "- You CANNOT include: \"- Character says 'I have a secret'\" or any quoted dialogue\n"
-        "- Think of beats as plot events, not prose - describe what happens, not how characters speak\n"
-        "- Example CORRECT: \"- Character confronts antagonist about betrayal\"\n"
+        "- Describe what happens (and optionally how it looks/feels); do not write how characters speak in quotes\n"
+        "- Example CORRECT: \"- Character confronts antagonist about betrayal\" or \"- Character confronts antagonist — tense, close quarters, rain at the windows\"\n"
         "- Example WRONG: \"- Character says 'You betrayed me!' to antagonist\"\n\n"
         "OPERATIONS:\n\n"
         "**1. replace_range - REPLACING OR MODIFYING EXISTING TEXT ONLY**:\n"
@@ -1617,18 +1556,12 @@ async def generate_edit_plan_node(
                         section_label = f"=== CHAPTER {chapter_num} ==="
                     
                     context_parts.append(f"{section_label}\n")
-                    context_parts.append(f"**Beat count: {beat_count}/100**\n")
-                    if beat_count >= 100:
-                        context_parts.append(f"⚠️ **WARNING**: Chapter {chapter_num} is at the 100-beat limit! Any new beats require removing existing ones.\n")
-                    elif beat_count >= 95:
-                        context_parts.append(f"⚠️ **NOTE**: Chapter {chapter_num} is approaching the 100-beat limit ({beat_count} beats). Consider pruning less important beats if adding more.\n")
+                    context_parts.append(f"**Beat count: {beat_count}/150**\n")
+                    if beat_count >= 150:
+                        context_parts.append(f"⚠️ **WARNING**: Chapter {chapter_num} is at the 150-beat limit! Any new beats require removing existing ones.\n")
+                    elif beat_count >= 145:
+                        context_parts.append(f"⚠️ **NOTE**: Chapter {chapter_num} is approaching the 150-beat limit ({beat_count} beats). Consider pruning less important beats if adding more.\n")
                     context_parts.append(f"{chapter_text}\n\n")
-                    
-                    # Add transition guidance after each chapter (except the last)
-                    if i < len(chapter_ranges) - 1:
-                        next_chapter_num = chapter_ranges[i + 1].chapter_number
-                        if next_chapter_num:
-                            context_parts.append(f"--- END OF CHAPTER {chapter_num} → BEGINNING OF CHAPTER {next_chapter_num} ---\n\n")
                 
                 # Add critical transition reminder
                 if prev_chapter_text and prev_chapter_number is not None:
@@ -1641,17 +1574,17 @@ async def generate_edit_plan_node(
                 # No chapters found, show full outline
                 context_parts.append("\n" + body_only + "\n\n")
         
-        # References (if present)
+        # References (if present) - REFERENCE ONLY, not editable by this agent
         if rules_body:
-            context_parts.append("=== UNIVERSE RULES ===\n")
+            context_parts.append("=== UNIVERSE RULES (REFERENCE ONLY - do not generate edits to this; it is a separate file) ===\n")
             context_parts.append(f"{rules_body}\n\n")
         
         if style_body:
-            context_parts.append("=== STYLE GUIDE ===\n")
+            context_parts.append("=== STYLE GUIDE (REFERENCE ONLY - do not generate edits to this; it is a separate file) ===\n")
             context_parts.append(f"{style_body}\n\n")
         
         if characters_bodies:
-            context_parts.append("=== CHARACTER PROFILES ===\n")
+            context_parts.append("=== CHARACTER PROFILES (REFERENCE ONLY - do not generate edits to these; they are separate files) ===\n")
             context_parts.append("**NOTE**: Character details (descriptions, backstories, traits) belong in character profile files.\n")
             context_parts.append("The outline should only reference characters briefly (name + role), not include full character information.\n\n")
             context_parts.append("".join([f"{b}\n---\n" for b in characters_bodies]))
@@ -1677,7 +1610,7 @@ async def generate_edit_plan_node(
             "   - Don't create the entire outline structure at once\n"
             "   - Ask about story basics: genre, main characters, key plot points, chapter count\n"
             "   - Build incrementally - create one section at a time based on user responses\n"
-            "4. **FOR FILES WITH CONTENT**: Make edits based on the request and available context (outline file, rules, style, characters)\n"
+            "4. **FOR FILES WITH CONTENT**: Make edits to the OUTLINE ONLY, using rules/style/characters as reference. Never generate operations that target the rules, style, or character files.\n"
             "5. **USE INFERENCE**: Make reasonable inferences from the request - but ask if starting from scratch\n"
             "6. **ASK ALONG THE WAY**: If you need specific details, include questions in the summary AFTER describing the work you've done\n"
             "7. **CHARACTER INFORMATION**: Keep character details in character profiles, not in the outline!\n"
@@ -1754,9 +1687,9 @@ Use replace_range for changing existing content, insert_after_heading for adding
    - **WRONG**: "## Chapter 1: The Beginning", "## Chapter 5 - Confrontation", "## Chapter 12: Final Battle"
    - If chapter titles are desired, the user will add them - you should NEVER add them automatically
 
-2. **100-BEAT LIMIT**: Each chapter MUST have a MAXIMUM of 100 beats
+2. **150-BEAT LIMIT**: Each chapter MUST have a MAXIMUM of 150 beats
    - Before adding beats, count existing beats in the target chapter
-   - If adding beats would exceed 100, you MUST remove less important beats first
+   - If adding beats would exceed 150, you MUST remove less important beats first
    - Prioritize plot-critical beats over minor details
    - Example: If chapter has 48 beats and user wants 5 new beats, remove 3 least important existing beats
 
@@ -1771,7 +1704,9 @@ Use replace_range for changing existing content, insert_after_heading for adding
    - Dialogue belongs in fiction manuscripts, NOT outlines
    - You CAN mention talking as an event: "- Character discusses plan with ally"
    - You CAN describe what is discussed: "- Character reveals secret during conversation"
-   - Think of beats as plot events, not prose - describe what happens, not how characters speak
+   - Beats = what happens (events) + optional guidance for the narrative (visual/atmosphere e.g. lighting, mood, staging; or internal thoughts/realizations/perception shifts when the style guide encourages interiority); describe what happens and optionally how it looks/feels or what internal shift occurs, not quoted speech
+
+5. **SCENES (OPTIONAL)**: When adding or revising a chapter that has 4+ beats, you MAY add or update a '### Scenes' block after ### Beats to group beats for fiction generation. Format: 'Scene: [Name] — Beats [e.g. 1-3 or 1, 2, 4] (optional hint)'. This guides the fiction agent to combine related beats into single paragraphs where appropriate.
 
 **NOTE**: If this request is actually a question that can be answered without edits, return 0 operations and put your answer in the summary field."""
                 
@@ -1860,13 +1795,14 @@ Since this file is empty (only frontmatter), follow these rules:
         
         # Use standardized helper for message construction with conversation history
         messages_list = state.get("messages", [])
-        messages = _build_editing_agent_messages(
+        messages = MessagePreprocessor.build_editing_messages(
             system_prompt=system_prompt,
             context_parts=context_parts,
             current_request=request_with_instructions,
             messages_list=messages_list,
             look_back_limit=6,
-            get_datetime_context=get_datetime_context
+            datetime_context=get_datetime_context(),
+            sanitize_ai_responses=True,
         )
         
         # Check frontmatter for temperature override (default: 0.3 for outline generation)
@@ -2261,6 +2197,17 @@ async def resolve_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
         body_only = strip_frontmatter_block(outline)
         is_empty_file = not body_only.strip()
         
+        # Precompute chapter boundaries for "no chapter content in Synopsis/Notes" guard
+        _chapter_boundary_pattern = re.compile(r"\n##\s+Chapter\s+\d+", re.MULTILINE)
+        _chapter_boundary_matches = list(_chapter_boundary_pattern.finditer(outline, fm_end_idx))
+        _first_chapter_start = (_chapter_boundary_matches[0].start() + 1) if _chapter_boundary_matches else None
+        if _chapter_boundary_matches:
+            _last = _chapter_boundary_matches[-1]
+            _next_after_last = _chapter_boundary_pattern.search(outline, _last.end())
+            _insert_after_last_chapter_pos = _next_after_last.start() if _next_after_last else len(outline)
+        else:
+            _insert_after_last_chapter_pos = None
+        
         editor_operations = []
         failed_operations = state.get("failed_operations", []) or []
         operations = structured_edit.get("operations", [])
@@ -2386,12 +2333,31 @@ async def resolve_operations_node(state: Dict[str, Any]) -> Dict[str, Any]:
                             resolved_end = fm_end_idx
                             resolved_confidence = 0.4
                 
+                op_type = op.get("op_type", "")
                 # Special handling for empty files: ensure operations insert after frontmatter
                 if is_empty_file and resolved_start < fm_end_idx:
                     resolved_start = fm_end_idx
                     resolved_end = fm_end_idx
                     resolved_confidence = 0.7
                     logger.info(f"Empty file detected - adjusting operation to insert after frontmatter at {fm_end_idx}")
+                
+                # Guard: never place chapter content before the first chapter (Synopsis/Notes area)
+                # When anchor_text matches text in Synopsis/Notes, the resolver can place inserts there
+                if (
+                    op_type in ("insert_after_heading", "insert_after")
+                    and "## Chapter" in (op_text or "")
+                    and _first_chapter_start is not None
+                    and _insert_after_last_chapter_pos is not None
+                    and resolved_start != -1
+                    and resolved_start < _first_chapter_start
+                ):
+                    resolved_start = _insert_after_last_chapter_pos
+                    resolved_end = _insert_after_last_chapter_pos
+                    resolved_confidence = min(resolved_confidence, 0.7)
+                    logger.info(
+                        f"Chapter content would have been placed before first chapter; "
+                        f"relocating to after last chapter at {resolved_start}"
+                    )
                 
                 logger.info(f"Resolved {op.get('op_type')} [{resolved_start}:{resolved_end}] confidence={resolved_confidence:.2f}")
                 
@@ -2524,7 +2490,6 @@ async def format_response_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 if len(editor_operations) == 0:
                     # Pure question with no operations - return summary as response
                     logger.info("Question request with no operations - using summary as response")
-                    from datetime import datetime
                     return {
                         "response": {
                             "response": summary,
@@ -2646,7 +2611,6 @@ async def format_response_node(state: Dict[str, Any]) -> Dict[str, Any]:
         manuscript_edit_metadata = create_manuscript_edit_metadata(structured_edit, editor_operations)
         
         # Build standard response using AgentResponse contract (WITHOUT editor_operations/manuscript_edit)
-        from datetime import datetime
         logger.info(f"📊 OUTLINE SUBGRAPH FORMAT: Creating AgentResponse with task_status='{task_status}', {len(editor_operations)} operation(s)")
         standard_response = AgentResponse(
             response=response_text,
@@ -2866,7 +2830,21 @@ def build_outline_editing_subgraph(
     
     # Status generation always goes to edit plan (which will incorporate status updates)
     workflow.add_edge("generate_status_summary", "generate_edit_plan")
-    workflow.add_edge("generate_edit_plan", "resolve_operations")
+
+    def route_after_generate_edit_plan(state: Dict[str, Any]) -> str:
+        """Skip resolve_operations when generation failed (e.g. LLM empty response)."""
+        if state.get("task_status") == "error":
+            return "format_response"
+        return "resolve_operations"
+
+    workflow.add_conditional_edges(
+        "generate_edit_plan",
+        route_after_generate_edit_plan,
+        {
+            "format_response": "format_response",
+            "resolve_operations": "resolve_operations"
+        }
+    )
     workflow.add_edge("resolve_operations", "format_response")
     workflow.add_edge("format_response", END)
     

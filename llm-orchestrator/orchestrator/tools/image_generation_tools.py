@@ -3,9 +3,12 @@ Image Generation Tools - Image generation and reference lookup via backend gRPC
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 from orchestrator.backend_tool_client import get_backend_tool_client
+from orchestrator.utils.action_io_registry import register_action
 
 logger = logging.getLogger(__name__)
 
@@ -38,26 +41,25 @@ async def generate_image_tool(
     num_images: int = 1,
     negative_prompt: Optional[str] = None,
     model: Optional[str] = None,
-) -> str:
-    """
-    Generate image(s) from a text prompt.
-
-    Args:
-        prompt: Description of the image to generate (required).
-        user_id: User ID (injected by engine if omitted).
-        size: Image size, e.g. "1024x1024", "512x512". Default "1024x1024".
-        num_images: Number of images to generate (1-4). Default 1.
-        negative_prompt: Optional; what to avoid in the image.
-        model: Optional model name (user preference may override).
-
-    Returns:
-        Summary with image URL(s) or error message.
-    """
+    check_reference_first: bool = False,
+    folder_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Generate image(s) from a text prompt. When check_reference_first=True, returns reference image if one exists for the prompt/object name. Pass folder_id to place promoted documents in a specific folder."""
     try:
         if not prompt or not prompt.strip():
-            return "Error: prompt is required."
-        logger.info("generate_image: prompt=%s size=%s", prompt[:80], size)
+            msg = "Error: prompt is required."
+            return {"success": False, "error": msg, "formatted": msg, "image_count": 0, "image_urls": [], "document_ids": [], "found": False}
         client = await get_backend_tool_client()
+        if check_reference_first:
+            data = await client.get_reference_image_for_object(
+                object_name=prompt.strip(),
+                user_id=user_id,
+            )
+            if data:
+                msg = f"Reference image found for '{prompt.strip()[:80]}'. You can describe this object in the prompt when generating."
+                return {"found": True, "formatted": msg, "success": True, "image_count": 0, "image_urls": [], "document_ids": []}
+            # Fall through to generation
+        logger.info("generate_image: prompt=%s size=%s", prompt[:80], size)
         result = await client.generate_image(
             prompt=prompt.strip(),
             size=size,
@@ -70,41 +72,38 @@ async def generate_image_tool(
             reference_image_data=None,
             reference_image_url=None,
             reference_strength=0.5,
+            folder_id=folder_id,
         )
-        return _format_generate_result(result)
+        out = dict(result) if isinstance(result, dict) else {}
+        out["formatted"] = _format_generate_result(result)
+        images = out.get("images") or []
+        out["image_count"] = len(images)
+        out["image_urls"] = [img.get("url") for img in images if img.get("url")]
+        out["document_ids"] = [img.get("document_id") for img in images if img.get("document_id")]
+        return out
     except Exception as e:
         logger.error("generate_image_tool error: %s", e)
-        return f"Error: {str(e)}"
+        err = str(e)
+        return {"success": False, "error": err, "formatted": f"Error: {err}", "image_count": 0, "image_urls": [], "document_ids": [], "found": False}
 
 
-async def get_reference_image_tool(
-    object_name: str,
-    user_id: str = "system",
-) -> str:
-    """
-    Check whether a reference image exists for a named object (e.g. from the user's images).
-    Used to improve accuracy when the user wants a specific object in a generated image.
-    Returns a message only; the actual reference is used by the backend when generating.
+class GenerateImageInputs(BaseModel):
+    prompt: str = Field(description="Description of the image to generate")
+    folder_id: Optional[str] = Field(
+        default=None,
+        description="Optional folder ID where promoted image documents should be placed",
+    )
 
-    Args:
-        object_name: Name of the object (e.g. "Farmall tractor", "blue sedan").
-        user_id: User ID (injected by engine if omitted).
 
-    Returns:
-        Message indicating whether a reference was found (for LLM context).
-    """
-    try:
-        if not object_name or not object_name.strip():
-            return "Error: object_name is required."
-        logger.info("get_reference_image: object=%s", object_name[:80])
-        client = await get_backend_tool_client()
-        data = await client.get_reference_image_for_object(
-            object_name=object_name.strip(),
-            user_id=user_id,
-        )
-        if data:
-            return f"Reference image found for '{object_name}'. You can describe this object in the prompt when generating."
-        return f"No reference image found for '{object_name}'."
-    except Exception as e:
-        logger.error("get_reference_image_tool error: %s", e)
-        return f"Error: {str(e)}"
+class ImageGenerationOutputs(BaseModel):
+    """Outputs for generate_image_tool."""
+    formatted: str = Field(description="Human-readable result")
+    success: bool = True
+    error: Optional[str] = None
+    found: Optional[bool] = None
+    image_count: int = Field(default=0, description="Number of images generated")
+    image_urls: List[str] = Field(default_factory=list, description="URLs of generated images")
+    document_ids: List[str] = Field(default_factory=list, description="Document IDs if saved to workspace")
+
+
+register_action(name="generate_image", category="image", description="Generate image(s) from a text prompt; set check_reference_first=True to return reference image if one exists", inputs_model=GenerateImageInputs, outputs_model=ImageGenerationOutputs, tool_function=generate_image_tool)

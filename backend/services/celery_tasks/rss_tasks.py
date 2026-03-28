@@ -3,13 +3,14 @@ RSS Celery Tasks
 Background processing for RSS feed monitoring and article processing
 """
 
-import logging
 import asyncio
+import logging
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 
 from services.celery_app import celery_app, update_task_progress, TaskStatus
-from celery.exceptions import SoftTimeLimitExceeded
+from services.celery_tasks.async_runner import run_async
+from services.celery_tasks.celery_error_handling import SOFT_TIME_LIMIT_EXCEEDED_TYPES
 from services.celery_utils import (
     safe_serialize_error, 
     safe_update_task_state, 
@@ -28,25 +29,17 @@ def extract_full_content_task(
     article_ids: List[str]
 ) -> Dict[str, Any]:
     """
-    Background task for extracting full content from RSS articles using Crawl4AI
-    
-    **BULLY!** This task uses Crawl4AI to extract complete article content!
+    Background task for extracting full content from RSS articles using Crawl4AI.
     """
     try:
         logger.info(f"🕷️ RSS TASK: Starting full content extraction for {len(article_ids)} articles")
         
         update_task_progress(self, 1, 4, "Initializing Crawl4AI extraction...")
-        
-        # Create new event loop for this task to avoid "Event loop is closed" errors
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(_async_extract_full_content(
-                self, user_id, article_ids
-            ))
-        finally:
-            loop.close()
-        
+
+        result = run_async(_async_extract_full_content(
+            self, user_id, article_ids
+        ))
+
         logger.info(f"✅ RSS TASK: Completed full content extraction successfully")
         return result
         
@@ -67,6 +60,31 @@ def extract_full_content_task(
             "error": str(e),
             "message": "Background full content extraction failed"
         }
+
+
+@celery_app.task(name="services.celery_tasks.rss_tasks.scheduled_rss_full_content_backfill_task")
+def scheduled_rss_full_content_backfill_task() -> Dict[str, Any]:
+    """Periodic retry of Crawl4AI full-content extraction for articles that still have no body text."""
+    try:
+        return run_async(_async_scheduled_full_content_backfill())
+    except Exception as e:
+        logger.error("RSS full-content backfill task failed: %s", e)
+        return {"success": False, "error": str(e)}
+
+
+async def _async_scheduled_full_content_backfill() -> Dict[str, Any]:
+    from tools_service.services.rss_service import get_rss_service
+
+    rss_service = await get_rss_service()
+    articles = await rss_service.get_articles_for_full_content_backfill(limit=10)
+    if not articles:
+        return {
+            "success": True,
+            "articles_processed": 0,
+            "message": "No articles pending full-content backfill",
+        }
+    ids = [a.article_id for a in articles]
+    return await _async_extract_full_content(None, "scheduled", ids)
 
 
 async def _cleanup_stuck_polling_feeds():
@@ -140,42 +158,30 @@ def poll_rss_feeds_task(
     force_poll: bool = False
 ) -> Dict[str, Any]:
     """
-    Background task for RSS feed polling with concurrency control
-    
-    **BULLY!** This task handles scheduled RSS feed monitoring and article discovery!
+    Background task for RSS feed polling with concurrency control.
     """
     try:
-        logger.info(f"📡 RSS TASK: Starting RSS feed polling for user {user_id}")
-        
+        logger.info(f"📡 RSS TASK: Starting RSS feed polling for user {user_id if user_id else 'all (scheduled)'}")
+
         # First, cleanup any stuck polling feeds
         try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            cleaned_count = loop.run_until_complete(_cleanup_stuck_polling_feeds())
+            cleaned_count = run_async(_cleanup_stuck_polling_feeds())
             if cleaned_count > 0:
                 logger.info(f"🧹 RSS TASK: Cleaned up {cleaned_count} stuck polling feeds before polling")
         except Exception as e:
             logger.warning(f"⚠️ RSS TASK: Failed to cleanup stuck polling feeds: {e}")
-        finally:
-            loop.close()
-        
-        update_task_progress(self, 1, 4, "Initializing RSS background agent...")
-        
-        # Create new event loop for this task to avoid "Event loop is closed" errors
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(_async_poll_rss_feeds(
-                self, user_id, feed_ids, force_poll
-            ))
-        finally:
-            loop.close()
-        
+
+        update_task_progress(self, 1, 4, "Initializing RSS polling service...")
+
+        result = run_async(_async_poll_rss_feeds(
+            self, user_id, feed_ids, force_poll
+        ))
+
         logger.info(f"✅ RSS TASK: Completed RSS feed polling successfully")
         return result
         
-    except SoftTimeLimitExceeded as e:
-        logger.error(f"❌ RSS TASK ERROR: Soft time limit exceeded: {e}")
+    except SOFT_TIME_LIMIT_EXCEEDED_TYPES:
+        logger.error("RSS TASK ERROR: Soft time limit exceeded")
         self.update_state(
             state=TaskStatus.FAILURE,
             meta={
@@ -223,28 +229,27 @@ def process_rss_article_task(
     self,
     article_id: str,
     user_id: str,
-    collection_name: Optional[str] = None
+    collection_name: Optional[str] = None,
+    target_folder_id: Optional[str] = None,
+    user_role: str = "user",
 ) -> Dict[str, Any]:
     """
-    Background task for processing individual RSS articles
-    
-    **By George!** This task handles full article download, processing, and embedding!
+    Background task for processing individual RSS articles (download, process, embed).
     """
     try:
         logger.info(f"📰 RSS TASK: Starting article processing for article {article_id} (Task ID: {self.request.id})")
         
         update_task_progress(self, 1, 5, "Initializing article processing...")
-        
-        # Create new event loop for this task to avoid "Event loop is closed" errors
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(_async_process_rss_article(
-                self, article_id, user_id, collection_name
-            ))
-        finally:
-            loop.close()
-        
+
+        result = run_async(_async_process_rss_article(
+            self,
+            article_id,
+            user_id,
+            collection_name,
+            target_folder_id=target_folder_id,
+            user_role=user_role or "user",
+        ))
+
         logger.info(f"✅ RSS TASK: Completed article processing successfully")
         return result
         
@@ -270,23 +275,14 @@ def process_rss_article_task(
 @celery_app.task(bind=True, name="services.celery_tasks.rss_tasks.cleanup_stuck_rss_feeds_task")
 def cleanup_stuck_rss_feeds_task(self) -> Dict[str, Any]:
     """
-    Background task for cleaning up RSS feeds stuck in polling state
-
-    **Trust busting for stuck RSS feeds!** This task cleans up feeds that have been
-    stuck in polling state for too long, preventing them from being polled again!
+    Background task for cleaning up RSS feeds stuck in polling state.
     """
     try:
         logger.info(f"🧹 RSS TASK: Starting cleanup of stuck RSS feeds")
 
         update_task_progress(self, 1, 2, "Cleaning up stuck RSS feeds...")
 
-        # Create new event loop for this task to avoid "Event loop is closed" errors
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            cleaned_count = loop.run_until_complete(_cleanup_stuck_polling_feeds())
-        finally:
-            loop.close()
+        cleaned_count = run_async(_cleanup_stuck_polling_feeds())
 
         update_task_progress(self, 2, 2, "Cleanup completed")
 
@@ -321,23 +317,15 @@ def cleanup_stuck_rss_feeds_task(self) -> Dict[str, Any]:
 @celery_app.task(bind=True, name="services.celery_tasks.rss_tasks.rss_health_check_task")
 def rss_health_check_task(self) -> Dict[str, Any]:
     """
-    Background task for RSS feed health monitoring
-    
-    **Trust busting for unhealthy RSS feeds!** This task monitors feed reliability!
+    Background task for RSS feed health monitoring.
     """
     try:
         logger.info(f"🏥 RSS TASK: Starting RSS feed health check")
         
         update_task_progress(self, 1, 3, "Checking RSS feed health...")
-        
-        # Create new event loop for this task to avoid "Event loop is closed" errors
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(_async_rss_health_check(self))
-        finally:
-            loop.close()
-        
+
+        result = run_async(_async_rss_health_check(self))
+
         logger.info(f"✅ RSS TASK: Completed RSS health check successfully")
         return result
         
@@ -368,13 +356,11 @@ async def _async_poll_rss_feeds(
 ) -> Dict[str, Any]:
     """Async RSS feed polling processing"""
     try:
-        update_task_progress(task, 2, 4, "Creating RSS background agent...")
+        update_task_progress(task, 2, 4, "Creating RSS polling service...")
         
-        # Initialize RSS background agent - LAZY IMPORT
-        from services.langgraph_agents.rss_background_agent import RSSBackgroundAgent
-        rss_agent = RSSBackgroundAgent()
+        from services.rss_polling_service import RSSPollingService
+        polling = RSSPollingService()
         
-        # Prepare state for RSS processing
         state = {
             "user_id": user_id,
             "feeds_to_poll": feed_ids,
@@ -384,8 +370,7 @@ async def _async_poll_rss_feeds(
         
         update_task_progress(task, 3, 4, "Polling RSS feeds...")
         
-        # Process RSS feeds (RSSBackgroundAgent exposes process(), not _process_request)
-        result = await rss_agent.process(state)
+        result = await polling.poll_feeds(state)
         
         update_task_progress(task, 4, 4, "RSS feed polling completed")
         
@@ -408,7 +393,10 @@ async def _async_process_rss_article(
     task,
     article_id: str,
     user_id: str,
-    collection_name: Optional[str]
+    collection_name: Optional[str],
+    *,
+    target_folder_id: Optional[str] = None,
+    user_role: str = "user",
 ) -> Dict[str, Any]:
     """Async RSS article processing"""
     try:
@@ -549,10 +537,6 @@ async def _async_process_rss_article(
             # Clean up any remaining excessive whitespace
             clean_content = re.sub(r'\s+', ' ', clean_content)
             clean_content = clean_content.strip()
-            
-            # Limit content length
-            if len(clean_content) > 50000:
-                clean_content = clean_content[:50000] + "..."
         
         update_task_progress(task, 4, 5, "Processing and embedding article...")
         
@@ -666,6 +650,21 @@ async def _async_process_rss_article(
             logger.info(f"📁 Initializing FileManager for RSS article placement...")
             await file_manager.initialize()
             logger.info(f"📁 FileManager initialized successfully")
+
+            placement_target_id: Optional[str] = None
+            if target_folder_id:
+                from services.rss_import_placement import resolve_rss_import_target_folder_id
+
+                placement_target_id = await resolve_rss_import_target_folder_id(
+                    target_folder_id,
+                    user_id=user_id,
+                    user_role=user_role or "user",
+                )
+                if not placement_target_id:
+                    logger.warning(
+                        "RSS import: target_folder_id %s rejected at placement; using default layout",
+                        target_folder_id,
+                    )
             
             placement_request = FilePlacementRequest(
                 content=clean_content,
@@ -680,7 +679,7 @@ async def _async_process_rss_article(
                     "rss_feed_id": article.feed_id,
                     "rss_feed_owner": feed.user_id,
                     "rss_feed_scope": "global" if feed.user_id is None else "user",
-                    "images": enhanced_images  # **BULLY!** Pass through extracted images
+                    "images": enhanced_images
                 },
                 doc_type=DocumentType.TXT,
                 category=DocumentCategory.NEWS,
@@ -691,7 +690,8 @@ async def _async_process_rss_article(
                 collection_type=collection_type,
                 current_user_role=current_user_role,
                 admin_user_id=admin_user_id,
-                process_immediately=True  # Process immediately to create chunks for vector search
+                process_immediately=True,  # Process immediately to create chunks for vector search
+                target_folder_id=placement_target_id,
             )
             
             # Place file using FileManager
@@ -803,7 +803,8 @@ async def _async_process_rss_article(
 async def _async_extract_full_content(task, user_id: str, article_ids: List[str]) -> Dict[str, Any]:
     """Async full content extraction using Crawl4AI"""
     try:
-        update_task_progress(task, 2, 4, "Retrieving articles needing full content...")
+        if task:
+            update_task_progress(task, 2, 4, "Retrieving articles needing full content...")
         
         # Get RSS service
         from tools_service.services.rss_service import get_rss_service
@@ -823,23 +824,31 @@ async def _async_extract_full_content(task, user_id: str, article_ids: List[str]
                 "message": "No articles found for full content extraction"
             }
         
-        update_task_progress(task, 3, 4, f"Extracting full content for {len(articles)} articles...")
+        if task:
+            update_task_progress(
+                task, 3, 4, f"Extracting full content for {len(articles)} articles..."
+            )
         
-        # Initialize RSS background agent for content extraction - LAZY IMPORT
-        from services.langgraph_agents.rss_background_agent import RSSBackgroundAgent
-        rss_agent = RSSBackgroundAgent()
+        from services.rss_polling_service import RSSPollingService
+        polling = RSSPollingService()
         
         articles_processed = 0
         articles_successful = 0
         
         for article in articles:
             try:
-                # Extract full content (text + HTML) and images using Crawl4AI
-                full_content, full_content_html, images = await rss_agent._extract_full_content_with_crawl4ai(article.link)
+                full_content, full_content_html, images = await polling.extract_full_content(article.link)
                 
-                if full_content:
-                    # Update article with full content and images
-                    success = await rss_service.update_article_full_content(article.article_id, full_content, images, full_content_html)
+                if full_content or full_content_html:
+                    plain = polling._html_to_plain_text(full_content or full_content_html or "")
+                    html_safe = (
+                        polling._sanitize_article_html(full_content_html, article.link)
+                        if full_content_html
+                        else None
+                    )
+                    success = await rss_service.update_article_full_content(
+                        article.article_id, plain, images, html_safe
+                    )
                     if success:
                         articles_successful += 1
                         logger.info(f"✅ Successfully extracted full content for article {article.article_id}")
@@ -854,7 +863,8 @@ async def _async_extract_full_content(task, user_id: str, article_ids: List[str]
                 logger.error(f"❌ Failed to extract full content for article {article.article_id}: {e}")
                 articles_processed += 1
         
-        update_task_progress(task, 4, 4, "Full content extraction completed")
+        if task:
+            update_task_progress(task, 4, 4, "Full content extraction completed")
         
         return {
             "success": True,
@@ -904,29 +914,32 @@ async def _async_rss_health_check(task) -> Dict[str, Any]:
 @celery_app.task(bind=True, name="services.celery_tasks.rss_tasks.scheduled_rss_poll_task")
 def scheduled_rss_poll_task(self) -> Dict[str, Any]:
     """
-    Scheduled task for automatic RSS feed polling
-
-    **BULLY!** This is the scheduled cavalry charge that keeps RSS feeds fresh!
-    This task is triggered by Celery Beat to poll all active feeds
+    Scheduled task for automatic RSS feed polling.
+    Triggered by Celery Beat to poll all active feeds.
     """
     try:
-        logger.info(f"⏰ RSS TASK: Starting scheduled RSS feed polling - cavalry charge commencing!")
+        logger.info("⏰ RSS TASK: Starting scheduled RSS feed polling")
 
         update_task_progress(self, 1, 3, "Checking feeds needing poll...")
 
-        # First, get a summary of feeds that need polling for better logging
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            feeds_summary = loop.run_until_complete(_get_feeds_summary())
-        finally:
-            loop.close()
+        feeds_summary = run_async(_get_feeds_summary())
 
         logger.info(f"📊 RSS TASK: Found {feeds_summary['total_feeds']} total feeds, {feeds_summary['feeds_needing_poll']} need polling")
 
-        update_task_progress(self, 2, 3, f"Polling {feeds_summary['feeds_needing_poll']} RSS feeds...")
+        need_poll = feeds_summary["feeds_needing_poll"]
+        if need_poll == 0:
+            update_task_progress(self, 3, 3, "No feeds need polling; skipping queue")
+            logger.info("✅ RSS TASK: No feeds need polling - skipping poll task")
+            return {
+                "success": True,
+                "scheduled_task_id": None,
+                "timestamp": datetime.now().isoformat(),
+                "feeds_summary": feeds_summary,
+                "message": "No feeds need polling - poll task not queued"
+            }
 
-        # Poll all active feeds
+        update_task_progress(self, 2, 3, f"Polling {need_poll} RSS feeds...")
+
         result = poll_rss_feeds_task.delay(
             user_id=None,  # Global polling
             feed_ids=None,  # All feeds
@@ -942,7 +955,7 @@ def scheduled_rss_poll_task(self) -> Dict[str, Any]:
             "scheduled_task_id": result.id,
             "timestamp": datetime.now().isoformat(),
             "feeds_summary": feeds_summary,
-            "message": f"Scheduled RSS polling initiated - {feeds_summary['feeds_needing_poll']} feeds queued for polling"
+            "message": f"Scheduled RSS polling initiated - {need_poll} feeds queued for polling"
         }
 
     except Exception as e:
@@ -959,48 +972,40 @@ def scheduled_rss_poll_task(self) -> Dict[str, Any]:
 def purge_old_news_task(self):
     """Purge synthesized news articles older than retention_days."""
     try:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        def _run():
-            async def _purge():
-                try:
-                    from services.settings_service import settings_service
-                    from services.database_manager.database_helpers import execute
-                    
-                    if not getattr(settings_service, "_initialized", False):
-                        await settings_service.initialize()
-                    days = await settings_service.get_setting("news.retention_days", 14)
-                    days = int(days or 14)
-                    # First fetch file paths to delete from disk
-                    from services.database_manager.database_helpers import fetch_all
-                    rows = await fetch_all(
-                        "SELECT file_path FROM news_articles WHERE updated_at < (NOW() - ($1 || ' days')::interval)",
-                        days,
-                    )
-                    import os
-                    deleted_files = 0
-                    for row in rows or []:
-                        p = row.get("file_path")
-                        try:
-                            if p and os.path.exists(p):
-                                os.remove(p)
-                                deleted_files += 1
-                        except Exception:
-                            pass
-                    # Then delete SQL rows
-                    await execute(
-                        "DELETE FROM news_articles WHERE updated_at < (NOW() - ($1 || ' days')::interval)",
-                        days,
-                    )
-                    return {"status": "ok", "purged": True, "retention_days": days, "files_deleted": deleted_files}
-                except Exception as e:
-                    return {"status": "error", "error": str(e)}
-            return loop.run_until_complete(_purge())
-        try:
-            result = _run()
-        finally:
-            loop.close()
-        return result
+        async def _purge():
+            try:
+                from services.settings_service import settings_service
+                from services.database_manager.database_helpers import execute
+
+                if not getattr(settings_service, "_initialized", False):
+                    await settings_service.initialize()
+                days = await settings_service.get_setting("news.retention_days", 14)
+                days = int(days or 14)
+                # First fetch file paths to delete from disk
+                from services.database_manager.database_helpers import fetch_all
+                rows = await fetch_all(
+                    "SELECT file_path FROM news_articles WHERE updated_at < (NOW() - ($1 || ' days')::interval)",
+                    days,
+                )
+                import os
+                deleted_files = 0
+                for row in rows or []:
+                    p = row.get("file_path")
+                    try:
+                        if p and os.path.exists(p):
+                            os.remove(p)
+                            deleted_files += 1
+                    except Exception:
+                        pass
+                # Then delete SQL rows
+                await execute(
+                    "DELETE FROM news_articles WHERE updated_at < (NOW() - ($1 || ' days')::interval)",
+                    days,
+                )
+                return {"status": "ok", "purged": True, "retention_days": days, "files_deleted": deleted_files}
+            except Exception as e:
+                return {"status": "error", "error": str(e)}
+        return run_async(_purge())
     except Exception as e:
         logger.error(f"❌ PURGE NEWS TASK ERROR: {e}")
         return {"status": "error", "error": str(e)}

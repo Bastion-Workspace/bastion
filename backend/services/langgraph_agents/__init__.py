@@ -1,14 +1,12 @@
 """
-LangGraph Agents - Roosevelt's "Clean Cavalry" Agents
-Minimal agent set for bulletproof functionality
+LangGraph Agents - minimal backend agent surface.
+
+Import specific modules directly when needed (e.g. BaseAgent).
+RSS polling runs in services.rss_polling_service (Celery), not here.
 """
 
-# Core agents removed from top-level to avoid dependency bloat in Celery Beat/Flower
-# Import these directly from their modules when needed:
-# from services.langgraph_agents.rss_agent import RSSAgent
-# from services.langgraph_agents.base_agent import BaseAgent
+from services.langgraph_agents.base_agent import BaseAgent
 
 __all__ = [
     "BaseAgent",
-    "RSSAgent"
 ]

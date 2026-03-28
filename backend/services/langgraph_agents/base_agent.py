@@ -81,8 +81,7 @@ class BaseAgent:
             # data_formatting_agent removed - migrated to llm-orchestrator gRPC service
             # weather_agent removed - migrated to llm-orchestrator gRPC service
             "calculate_agent": AgentType.CALCULATE_AGENT,
-            "rss_background_agent": AgentType.RSS_BACKGROUND_AGENT,
-            "rss_agent": AgentType.RSS_AGENT,
+            # RSS polling is services.rss_polling_service (Celery); RSS UI/tools are Agent Factory + gRPC
             # org_inbox_agent removed - migrated to llm-orchestrator gRPC service
             # org_project_agent removed - migrated to llm-orchestrator gRPC service
             # image_generation_agent removed - migrated to llm-orchestrator gRPC service

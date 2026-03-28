@@ -2445,6 +2445,11 @@ engines:
     shortcut: mp
     disabled: true
 
+  - name: national vulnerability database
+    engine: nvd
+    shortcut: nvd
+    disabled: true
+
   - name: naver
     categories: [general, web]
     engine: naver
@@ -2657,6 +2662,12 @@ engines:
     engine: wttr
     shortcut: wttr
     timeout: 9.0
+
+  - name: braveapi
+    engine: braveapi
+    # read https://docs.searxng.org/dev/engines/online/brave.html
+    api_key: ""
+    inactive: true
 
   - name: brave
     engine: brave

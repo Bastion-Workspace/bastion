@@ -42,7 +42,7 @@ class ChatService:
     
     async def initialize(self, shared_db_pool=None, shared_embedding_manager=None, shared_kg_service=None):
         """Initialize chat service with parallel component loading and shared dependencies"""
-        logger.debug("🔧 Initializing Chat Service with ROOSEVELT'S PARALLEL OPTIMIZATION...")
+        logger.debug("Initializing Chat Service (parallel optimization)")
         
         # Initialize synchronous components first (fast)
         # Use OpenRouterClient wrapper for automatic reasoning support
@@ -545,6 +545,12 @@ class ChatService:
                 description="Open-source model with strong performance"
             )
         ]
+
+    async def _org_chat_selectable_model_ids(self) -> List[str]:
+        """Org-level chat dropdown: enabled ∩ catalog, excluding image-generation model."""
+        from services.model_source_resolver import get_chat_selectable_model_ids_for_user
+
+        return await get_chat_selectable_model_ids_for_user(None)
     
     async def update_model(self, model_name: str):
         """Update the selected model (called when user selects from Chat UI dropdown)"""
@@ -552,11 +558,13 @@ class ChatService:
             # Import settings service to avoid circular imports
             from services.settings_service import settings_service
             
-            # Verify the model is still enabled
-            enabled_models = await settings_service.get_enabled_models()
-            
-            if model_name not in enabled_models:
-                logger.warning(f"🔄 Cannot select model {model_name} - not in enabled models: {enabled_models}")
+            selectable = await self._org_chat_selectable_model_ids()
+            if model_name not in selectable:
+                logger.warning(
+                    "Cannot select model %s — not in chat-selectable list: %s",
+                    model_name,
+                    selectable,
+                )
                 return
             
             # Update current model
@@ -586,37 +594,31 @@ class ChatService:
                 logger.info("🔧 Initializing settings service in worker context...")
                 await settings_service.initialize()
             
-            # Get enabled models
-            enabled_models = await settings_service.get_enabled_models()
-            logger.info(f"🔍 Found {len(enabled_models)} enabled models: {enabled_models}")
+            selectable = await self._org_chat_selectable_model_ids()
+            logger.info("Found %s chat-selectable models: %s", len(selectable), selectable)
             
-            if len(enabled_models) == 1:
-                # Only one model enabled, auto-select it
-                selected_model = enabled_models[0]
+            if len(selectable) == 1:
+                selected_model = selectable[0]
                 self.current_model = selected_model
                 self.models_enabled = True
-                logger.info(f"🎯 Auto-selected model (only one enabled): {selected_model}")
+                logger.info("Auto-selected model (only one chat-selectable): %s", selected_model)
                 
-                # Also update the persistent setting
                 await settings_service.set_llm_model(selected_model)
                 
-            elif len(enabled_models) > 1:
-                # Multiple models enabled, check if we have a saved preference
+            elif len(selectable) > 1:
                 saved_model = await settings_service.get_llm_model()
-                if saved_model and saved_model in enabled_models:
+                if saved_model and saved_model in selectable:
                     self.current_model = saved_model
                     self.models_enabled = True
-                    logger.info(f"🔄 Using saved model preference: {saved_model}")
+                    logger.info("Using saved model preference: %s", saved_model)
                 else:
-                    # No saved preference or saved model not in enabled list, use first enabled
-                    self.current_model = enabled_models[0]
+                    self.current_model = selectable[0]
                     self.models_enabled = True
-                    logger.info(f"🎯 Using first enabled model: {enabled_models[0]}")
-                    await settings_service.set_llm_model(enabled_models[0])
+                    logger.info("Using first chat-selectable model: %s", selectable[0])
+                    await settings_service.set_llm_model(selectable[0])
             
-            elif len(enabled_models) == 0:
-                # No models enabled - chat should not work
-                logger.error(f"❌ No LLM models are enabled! Chat functionality will be disabled.")
+            elif len(selectable) == 0:
+                logger.error("No chat-selectable models (check enabled list and provider catalog).")
                 self.current_model = None
                 self.models_enabled = False
             
@@ -632,39 +634,30 @@ class ChatService:
             # Import settings service to avoid circular imports
             from services.settings_service import settings_service
             
-            # Get current enabled models from database
-            enabled_models = await settings_service.get_enabled_models()
+            selectable = await self._org_chat_selectable_model_ids()
             
-            if len(enabled_models) == 0:
-                # No models enabled
-                logger.warning("🔄 No LLM models are currently enabled")
+            if len(selectable) == 0:
+                logger.warning("No chat-selectable models")
                 self.current_model = None
                 self.models_enabled = False
                 return
             
-            # Check if current model (selected from Chat UI dropdown) is still valid
-            if self.current_model and self.current_model in enabled_models:
-                # User's selected model is still enabled, keep it
-                logger.debug(f"🔄 Keeping user-selected model: {self.current_model}")
+            if self.current_model and self.current_model in selectable:
+                logger.debug("Keeping user-selected model: %s", self.current_model)
                 self.models_enabled = True
                 return
             
-            # Current model is not set or not in enabled list, need to pick a new one
-            if len(enabled_models) == 1:
-                # Only one model enabled, use it
-                self.current_model = enabled_models[0]
-                logger.info(f"🔄 Auto-selected single enabled model: {self.current_model}")
+            if len(selectable) == 1:
+                self.current_model = selectable[0]
+                logger.info("Auto-selected single chat-selectable model: %s", self.current_model)
             else:
-                # Multiple models enabled, check for saved preference from last manual selection
                 saved_model = await settings_service.get_llm_model()
-                if saved_model and saved_model in enabled_models:
+                if saved_model and saved_model in selectable:
                     self.current_model = saved_model
-                    logger.info(f"🔄 Restored last selected model: {self.current_model}")
+                    logger.info("Restored last selected model: %s", self.current_model)
                 else:
-                    # No valid saved preference, use first enabled model
-                    self.current_model = enabled_models[0]
-                    logger.info(f"🔄 Defaulted to first enabled model: {self.current_model}")
-                    # Save this selection as the new preference
+                    self.current_model = selectable[0]
+                    logger.info("Defaulted to first chat-selectable model: %s", self.current_model)
                     await settings_service.set_llm_model(self.current_model)
             
             # Update enabled status
@@ -682,28 +675,25 @@ class ChatService:
             # Import settings service to avoid circular imports
             from services.settings_service import settings_service
             
-            # Get current enabled models from database
-            enabled_models = await settings_service.get_enabled_models()
+            selectable = await self._org_chat_selectable_model_ids()
             
-            if len(enabled_models) == 0:
-                logger.warning("🔄 No LLM models are currently enabled")
+            if len(selectable) == 0:
+                logger.warning("No chat-selectable models")
                 return False
             
-            # Check if we have a current model that's still valid
-            if self.current_model and self.current_model in enabled_models:
-                logger.info(f"✅ Model already selected and valid: {self.current_model}")
+            if self.current_model and self.current_model in selectable:
+                logger.info("Model already selected and valid: %s", self.current_model)
                 return True
             
-            # Try to get the saved model from settings
             saved_model = await settings_service.get_llm_model()
-            if saved_model and saved_model in enabled_models:
+            if saved_model and saved_model in selectable:
                 self.current_model = saved_model
-                logger.info(f"🔄 Restored saved model on startup: {self.current_model}")
+                logger.info("Restored saved model on startup: %s", self.current_model)
                 return True
             
-            # Fallback to first enabled model
-            self.current_model = enabled_models[0]
-            logger.info(f"🔄 Selected first enabled model on startup: {self.current_model}")
+            self.current_model = selectable[0]
+            await settings_service.set_llm_model(self.current_model)
+            logger.info("Selected first chat-selectable model on startup: %s", self.current_model)
             return True
             
         except Exception as e:

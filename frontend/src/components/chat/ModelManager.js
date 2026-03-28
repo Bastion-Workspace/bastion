@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import apiService from '../../services/apiService';
+import { getSelectableChatModels } from '../../utils/chatSelectableModels';
 
 export const useModelManager = () => {
   const queryClient = useQueryClient();
@@ -48,11 +49,14 @@ export const useModelManager = () => {
     selectModelMutation.mutate(modelName);
   };
 
+  const chatSelectableModels = getSelectableChatModels(enabledModelsData);
+
   return {
     enabledModelsData,
     currentModelData,
     availableModelsData,
     selectModelMutation,
     handleModelSelect,
+    chatSelectableModels,
   };
 }; 

@@ -63,7 +63,8 @@ class GeneralProjectPlanNodes:
             
             # Get current project plan content
             from orchestrator.tools.document_tools import get_document_content_tool
-            current_content = await get_document_content_tool(project_plan_doc_id, user_id)
+            _r = await get_document_content_tool(project_plan_doc_id, user_id)
+            current_content = _r.get("content", _r) if isinstance(_r, dict) else _r
             if current_content.startswith("Error"):
                 logger.warning("Could not read project plan content - skipping update")
                 return {

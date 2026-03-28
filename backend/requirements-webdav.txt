@@ -1,0 +1,9 @@
+# WebDAV server - minimal dependencies only
+WsgiDAV==4.3.3
+Cheroot==10.0.1
+psycopg2-binary==2.9.10
+asyncpg==0.30.0
+passlib[bcrypt]==1.7.4
+bcrypt==3.2.2
+pydantic-settings==2.6.1
+python-dotenv==1.0.1

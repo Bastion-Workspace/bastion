@@ -4,6 +4,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    libopus-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY connections-service/requirements.txt .
@@ -16,7 +17,8 @@ RUN python -m grpc_tools.protoc \
     -I/app \
     --python_out=/app \
     --grpc_python_out=/app \
-    /app/protos/connections_service.proto
+    /app/protos/connections_service.proto \
+    /app/protos/voice_service.proto
 
 # Generated _pb2 modules are written under the proto path (e.g. /app/protos/)
 # so Python must have /app/protos on the path to find connections_service_pb2

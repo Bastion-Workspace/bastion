@@ -20,6 +20,9 @@ class InboundMessage:
     platform: str  # "telegram" or "discord"
     timestamp: Optional[str] = None  # ISO format
     connection_id: Optional[str] = None  # external_connections.id for routing
+    chat_title: Optional[str] = None  # Group/channel title or private chat display name
+    chat_username: Optional[str] = None  # @username for public chats
+    chat_type: Optional[str] = None  # "private", "group", "supergroup", "channel"
 
 
 @dataclass
@@ -74,6 +77,8 @@ class BaseMessagingProvider(ABC):
         pass
 
     @abstractmethod
-    async def get_bot_info(self, bot_token: str) -> Dict[str, Any]:
-        """Validate token and return bot identity. Keys: username (str), error (optional)."""
+    async def get_bot_info(
+        self, bot_token: str, config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Validate token and return bot identity. Keys: username (str), error (optional). config is provider-specific (e.g. SMS needs account_sid, from_number)."""
         pass

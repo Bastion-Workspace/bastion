@@ -99,6 +99,15 @@ class QueryTypeDetection(BaseModel):
     )
 
 
+class ResponseQualityEvaluation(BaseModel):
+    """Structured output for post-synthesis quality evaluation."""
+    rating: Literal["sufficient", "insufficient", "off_topic"] = Field(
+        description="sufficient: response directly answers the question; insufficient: partial or weak answer; off_topic: response does not address the query"
+    )
+    reasoning: str = Field(
+        default="",
+        description="Brief explanation for the rating"
+    )
 
 
 

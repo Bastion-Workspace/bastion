@@ -1,8 +1,7 @@
 """
 Universal Content Extractor Service
 
-**BULLY!** This service uses the most proven content extraction libraries to focus on main content!
-**By George!** We're using the same algorithms that power Firefox Reader Mode and major RSS readers!
+Orchestrates proven content-extraction libraries to isolate main article text and HTML.
 
 Uses:
 - readability-lxml: Mozilla's Readability algorithm (Firefox Reader Mode)
@@ -20,9 +19,8 @@ logger = logging.getLogger(__name__)
 
 class UniversalContentExtractor:
     """
-    Universal content extraction service using the most proven libraries
-    
-    **Trust busting for website chrome!** This service focuses on main content!
+    Universal content extraction service using the most proven libraries.
+    Focuses on main article content and strips common site chrome.
     """
     
     def __init__(self):
@@ -63,10 +61,12 @@ class UniversalContentExtractor:
     
     async def extract_main_content(self, html_content: str, url: str = None) -> Tuple[str, str, List[Dict[str, Any]]]:
         """
-        Extract main content using the most proven method available
-        
+        Extract main content using the most proven method available.
+
         Returns:
-            Tuple of (cleaned_text, original_html, images)
+            Tuple of (cleaned_text, article_html, images). The HTML slot holds
+            Readability summary HTML, Trafilatura XML (or formatted text fallback),
+            or an empty string when only Newspaper3k succeeds (text-only).
         """
         if not html_content:
             return "", "", []
@@ -165,7 +165,7 @@ class UniversalContentExtractor:
             cleaned_text = self._clean_extracted_text(main_text)
             
             logger.info(f"✅ Newspaper3k extracted {len(cleaned_text)} chars and {len(images)} images")
-            return cleaned_text, main_text, images
+            return cleaned_text, "", images
             
         except Exception as e:
             logger.error(f"❌ Newspaper3k extraction failed: {e}")
@@ -228,22 +228,28 @@ class UniversalContentExtractor:
         """Extract content using Trafilatura (modern, fast)"""
         try:
             import trafilatura
-            
-            # Extract main content
-            extracted_text = trafilatura.extract(html_content, include_formatting=True, include_links=True)
-            
+
+            extracted_text = trafilatura.extract(
+                html_content, include_formatting=True, include_links=True
+            )
+            extracted_html = trafilatura.extract(
+                html_content,
+                output_format="xml",
+                include_links=True,
+                include_images=True,
+            )
+
             if not extracted_text:
                 return "", "", []
-            
-            # Extract images from the HTML content
+
             images = self._extract_images_from_html(html_content, url)
-            
-            # Clean the extracted text
+
             cleaned_text = self._clean_extracted_text(extracted_text)
-            
+            html_out = (extracted_html or "").strip() or extracted_text
+
             logger.info(f"✅ Trafilatura extracted {len(cleaned_text)} chars and {len(images)} images")
-            return cleaned_text, extracted_text, images
-            
+            return cleaned_text, html_out, images
+
         except Exception as e:
             logger.error(f"❌ Trafilatura extraction failed: {e}")
             return "", "", []
@@ -366,8 +372,7 @@ class UniversalContentExtractor:
         text = re.sub(r'\s+', ' ', text)
         text = text.strip()
         
-        # **BULLY!** Remove advertisement JSON widget configurations first
-        # These are the pesky ruamupr.com and adcovery widgets that slip through
+        # Remove advertisement JSON widget configurations (e.g. embedded widget configs)
         text = re.sub(r'\{[^}]*"client_callback_domain"[^}]*\}', ' ', text, flags=re.IGNORECASE)
         text = re.sub(r'\{[^}]*"widget_type"[^}]*\}', ' ', text, flags=re.IGNORECASE)
         text = re.sub(r'\{[^}]*"publisher_website_id"[^}]*\}', ' ', text, flags=re.IGNORECASE)
@@ -405,10 +410,6 @@ class UniversalContentExtractor:
         # Clean up any remaining excessive whitespace
         text = re.sub(r'\s+', ' ', text)
         text = text.strip()
-        
-        # Limit content length to prevent database issues
-        if len(text) > 50000:
-            text = text[:50000] + "..."
         
         return text
 

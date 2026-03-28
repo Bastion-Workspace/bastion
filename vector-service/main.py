@@ -86,7 +86,10 @@ async def serve():
         # Start server
         await server.start()
         logger.info(f"Vector Service ready on port {settings.GRPC_PORT}")
-        logger.info(f"OpenAI Model: {settings.OPENAI_EMBEDDING_MODEL}")
+        logger.info(
+            f"Embedding provider: {service_impl.embedding_engine.provider.provider_name if service_impl.embedding_engine.provider else 'none'} "
+            f"model={service_impl.embedding_engine.model or 'n/a'}"
+        )
         logger.info(f"Cache enabled: {settings.EMBEDDING_CACHE_ENABLED}")
         logger.info(f"Cache TTL: {settings.EMBEDDING_CACHE_TTL}s")
         

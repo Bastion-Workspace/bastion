@@ -289,7 +289,7 @@ const inlineEditSuggestionsPlugin = ViewPlugin.fromClass(class {
     });
     
     this.view.dispatch({
-      effects: setSuggestions.of(Decoration.set(decos))
+      effects: setSuggestions.of(Decoration.set(decos, true))
     });
   }
   

@@ -122,8 +122,8 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
                         content={"detail": "Authentication service not ready"}
                     )
                 
-                logger.info(f"🔍 Validating token for path: {path}")
-                logger.info(f"🔍 Token received: {token[:50]}...")
+                logger.debug("Validating token for path: %s", path)
+                logger.debug("Token received: %s...", token[:50] if token else "")
                 
                 # For refresh endpoint, skip user validation (refresh_token handles it)
                 if is_refresh_endpoint:

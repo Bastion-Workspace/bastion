@@ -360,7 +360,7 @@ class ParallelDocumentProcessor:
             
             # Store entities in knowledge graph if available
             if result.entities and hasattr(self, 'kg_service') and self.kg_service:
-                await self.kg_service.store_entities(result.entities, job.document_id)
+                await self.kg_service.store_entities(result.entities, job.document_id, result.chunks)
                 logger.info(f"🔗 Stored {len(result.entities)} entities for document {job.document_id}")
             
             # Update final status to completed

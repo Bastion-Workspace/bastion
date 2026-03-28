@@ -27,6 +27,19 @@ class StatusBarDataResponse(BaseModel):
     app_version: str
 
 
+class VersionResponse(BaseModel):
+    """Response model for app version"""
+    version: str
+
+
+@router.get("/api/version", response_model=VersionResponse)
+async def get_version(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+) -> VersionResponse:
+    """Get app version (single source of truth from root VERSION file)"""
+    return VersionResponse(version=__version__)
+
+
 @router.get("/api/status-bar/data", response_model=StatusBarDataResponse)
 async def get_status_bar_data(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)

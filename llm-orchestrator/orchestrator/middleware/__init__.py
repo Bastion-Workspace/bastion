@@ -6,11 +6,15 @@ Adapt LangChain middleware concepts as reusable LangGraph nodes
 from .summarization_node import SummarizationNode
 from .tool_retry_node import ToolRetryNode
 from .call_limit_node import ModelCallLimitNode, ToolCallLimitNode
+from .message_preprocessor import MessagePreprocessor
+from .structured_output_parser import StructuredOutputParser
 
 __all__ = [
     'SummarizationNode',
     'ToolRetryNode',
     'ModelCallLimitNode',
     'ToolCallLimitNode',
+    'MessagePreprocessor',
+    'StructuredOutputParser',
 ]
 

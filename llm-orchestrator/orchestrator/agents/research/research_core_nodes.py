@@ -298,7 +298,7 @@ Respond with ONLY valid JSON matching this exact schema:
 Your decision:"""
 
         llm = agent._get_llm(temperature=0.3, state=state)
-        datetime_context = agent._get_datetime_context()
+        datetime_context = agent._get_datetime_context(state)
 
         decision_messages = [
             SystemMessage(content="You are a document analysis decision maker. Always respond with valid JSON matching the exact schema provided."),

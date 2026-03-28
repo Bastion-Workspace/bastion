@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from typing import List
+from fastapi import APIRouter, Depends, HTTPException, File, Query, UploadFile
+from fastapi.responses import StreamingResponse
+from typing import List, Optional
 import logging
 import os
 import uuid
@@ -7,7 +8,7 @@ import uuid
 from models.data_workspace_models import (
     CreateWorkspaceRequest, UpdateWorkspaceRequest, WorkspaceResponse,
     CreateDatabaseRequest, DatabaseResponse,
-    CreateTableRequest, TableResponse,
+    CreateTableRequest, UpdateTableRequest, TableResponse,
     PreviewImportRequest, PreviewImportResponse,
     ExecuteImportRequest, ImportJobResponse,
     TableDataResponse, InsertRowRequest, UpdateRowRequest, UpdateCellRequest,
@@ -446,7 +447,8 @@ async def create_table(
             name=request.name,
             user_id=current_user.user_id,
             description=request.description,
-            table_schema=request.table_schema
+            table_schema=request.table_schema,
+            metadata=request.metadata
         )
         return table
     except HTTPException:
@@ -508,6 +510,38 @@ async def get_table(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.put("/api/data/tables/{table_id}", response_model=TableResponse)
+async def update_table(
+    table_id: str,
+    request: UpdateTableRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Update table metadata (name, description, columns/schema) (requires write permission)"""
+    try:
+        workspace_id = await get_workspace_for_table(table_id, current_user)
+        await require_workspace_permission(workspace_id, 'write', current_user)
+        
+        client = get_grpc_client()
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+        table = await client.update_table(
+            table_id=table_id,
+            user_id=current_user.user_id,
+            user_team_ids=user_team_ids,
+            name=request.name,
+            description=request.description,
+            table_schema=request.table_schema,
+            metadata=request.metadata
+        )
+        if not table:
+            raise HTTPException(status_code=404, detail="Table not found")
+        return table
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update table: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.delete("/api/data/tables/{table_id}")
 async def delete_table(
     table_id: str,
@@ -542,12 +576,12 @@ async def get_table_data(
     table_id: str,
     offset: int = 0,
     limit: int = 100,
+    database_id: Optional[str] = None,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Get table data with pagination (requires read permission)"""
+    """Get table data with pagination (requires read permission). Pass database_id for schema-only (DDL-created) tables."""
     try:
-        # Verify workspace read access via table lookup
-        workspace_id = await get_workspace_for_table(table_id, current_user)
+        workspace_id = await get_workspace_for_table(table_id, current_user, database_id=database_id)
         
         client = get_grpc_client()
         user_team_ids = await _get_user_team_ids(current_user.user_id)
@@ -556,13 +590,66 @@ async def get_table_data(
             offset, 
             limit,
             user_id=current_user.user_id,
-            user_team_ids=user_team_ids
+            user_team_ids=user_team_ids,
+            database_id=database_id
         )
         return data
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to get table data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/data/tables/{table_id}/export")
+async def export_table(
+    table_id: str,
+    export_format: str = Query("csv", alias="format"),
+    database_id: Optional[str] = None,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Stream full table export as CSV, Parquet, or Arrow IPC (requires read permission)."""
+    fmt = (export_format or "csv").lower().strip()
+    if fmt not in ("csv", "parquet", "arrow_ipc"):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid format; use csv, parquet, or arrow_ipc",
+        )
+    media = {
+        "csv": "text/csv; charset=utf-8",
+        "parquet": "application/octet-stream",
+        "arrow_ipc": "application/vnd.apache.arrow.stream",
+    }[fmt]
+    try:
+        workspace_id = await get_workspace_for_table(
+            table_id, current_user, database_id=database_id
+        )
+        await require_workspace_permission(workspace_id, "read", current_user)
+
+        client = get_grpc_client()
+        user_team_ids = await _get_user_team_ids(current_user.user_id)
+
+        async def stream_body():
+            async for blk in client.export_table_data_stream(
+                table_id=table_id,
+                user_id=current_user.user_id,
+                fmt=fmt,
+                user_team_ids=user_team_ids,
+                database_id=database_id,
+            ):
+                yield blk
+
+        ext = {"csv": "csv", "parquet": "parquet", "arrow_ipc": "arrow"}[fmt]
+        disposition = f'attachment; filename="table-{table_id[:8]}.{ext}"'
+        return StreamingResponse(
+            stream_body(),
+            media_type=media,
+            headers={"Content-Disposition": disposition},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to export table: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -783,16 +870,26 @@ async def list_shared_workspaces(
 
 
 # Query Endpoints
+def _is_write_statement(sql: str) -> bool:
+    """True if SQL is INSERT, UPDATE, DELETE, or DDL (CREATE/ALTER/DROP)."""
+    t = sql.strip().upper()
+    if t.startswith('INSERT') or t.startswith('UPDATE') or t.startswith('DELETE'):
+        return True
+    if t.startswith('CREATE') or t.startswith('ALTER') or t.startswith('DROP'):
+        return True
+    return False
+
+
 @router.post("/api/data/workspaces/{workspace_id}/query/sql", response_model=QueryResultResponse)
 async def execute_sql_query(
     workspace_id: str,
     request: SQLQueryRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Execute SQL query against workspace databases (requires read permission)"""
+    """Execute SQL query against workspace. Read permission for SELECT; write permission for INSERT/UPDATE/DELETE."""
     try:
-        # Check workspace read permission
-        await require_workspace_permission(workspace_id, 'read', current_user)
+        is_write = _is_write_statement(request.query)
+        await require_workspace_permission(workspace_id, 'write' if is_write else 'read', current_user)
         
         client = get_grpc_client()
         user_team_ids = await _get_user_team_ids(current_user.user_id)
@@ -802,12 +899,22 @@ async def execute_sql_query(
             query=request.query,
             user_id=current_user.user_id,
             limit=request.limit,
+            params=request.params,
             user_team_ids=user_team_ids
         )
         
-        # Parse results_json to List[Dict]
         import json
-        results = json.loads(result['results_json']) if result.get('results_json') else []
+        results = result.get('results')
+        if results is None:
+            results = (
+                json.loads(result['results_json']) if result.get('results_json') else []
+            )
+        returning_rows = None
+        if result.get('returning_rows_json'):
+            try:
+                returning_rows = json.loads(result['returning_rows_json'])
+            except json.JSONDecodeError:
+                pass
         
         return QueryResultResponse(
             query_id=result['query_id'],
@@ -816,7 +923,9 @@ async def execute_sql_query(
             result_count=result['result_count'],
             execution_time_ms=result['execution_time_ms'],
             generated_sql=result.get('generated_sql'),
-            error_message=result.get('error_message')
+            error_message=result.get('error_message'),
+            rows_affected=result.get('rows_affected', 0),
+            returning_rows=returning_rows
         )
     except HTTPException:
         raise
@@ -847,10 +956,13 @@ async def execute_nl_query(
             user_team_ids=user_team_ids
         )
         
-        # Parse results_json to List[Dict]
         import json
-        results = json.loads(result['results_json']) if result.get('results_json') else []
-        
+        results = result.get('results')
+        if results is None:
+            results = (
+                json.loads(result['results_json']) if result.get('results_json') else []
+            )
+
         return QueryResultResponse(
             query_id=result['query_id'],
             column_names=result['column_names'],

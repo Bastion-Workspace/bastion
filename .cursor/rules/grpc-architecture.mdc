@@ -76,17 +76,12 @@ The system currently uses **bidirectional gRPC communication** between two servi
 Defines the **LLM Orchestrator Service** that the backend calls:
 
 - **`StreamChat`** - Primary streaming chat interface (returns stream of `ChatChunk`)
-- **`StartTask`** - Async task processing
-- **`GetTaskStatus`** - Task status queries
-- **`ApprovePermission`** - HITL permission approval
-- **`GetPendingPermissions`** - List pending permissions
 - **`HealthCheck`** - Service health
+- **`GetActions`** / **`GetPlugins`** - Agent Factory action I/O registry and plugin metadata
 
 **Key Message Types:**
 - `ChatRequest` - User query with conversation context
 - `ChatChunk` - Streaming response chunks with type/message/metadata
-- `TaskRequest`/`TaskResponse` - Async task management
-- `PermissionApproval` - HITL permission handling
 
 #### `tool_service.proto`
 

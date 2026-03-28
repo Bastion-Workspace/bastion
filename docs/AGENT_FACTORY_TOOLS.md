@@ -1,7 +1,7 @@
 # Agent Factory: Tool Catalog & Registry
 
 **Document Version:** 1.0
-**Last Updated:** February 14, 2026
+**Last Updated:** February 24, 2026
 **Companion to:** `AGENT_FACTORY.md`, `AGENT_FACTORY_TECHNICAL_GUIDE.md`, `AGENT_FACTORY_EXAMPLES.md`
 
 ---
@@ -25,18 +25,18 @@ All tools are registered in the **Action I/O Registry** (see `AGENT_FACTORY_TECH
 
 | Category | Tools | Status | Source |
 |----------|-------|--------|--------|
-| [File Operations](#1-file-operations) | 11 | Mostly exists | Native |
+| [File Operations](#1-file-operations) | 8 existing, 3 to be built | Document + file management packs | Native |
 | [Search & Discovery](#2-search--discovery) | 6 | Exists | Native |
-| [Task Management](#3-task-management) | 5 | Partial (org-mode) | Native |
-| [Notifications & Messaging](#4-notifications--messaging) | 3 | Partial | Native + Connections Service |
-| [Knowledge Graph](#5-knowledge-graph) | 5 | Documented in tech guide | Native |
+| [Task Management](#3-task-management) | 8 | Exists (org-mode) | Native |
+| [Notifications & Messaging](#4-notifications--messaging) | 3 | Exists | Native + Connections Service |
+| [Knowledge Graph](#5-knowledge-graph) | 5 | Exists | Native |
 | [Data Workspace](#6-data-workspace) | 4 | Exists | Native |
 | [Text & Content Processing](#7-text--content-processing) | 5 | Exists | Native |
-| [Web & Crawling](#8-web--crawling) | 3 | Exists | Native |
-| [Email](#9-email) | 6 | Exists | Native (via connections) |
-| [Monitor Detection](#10-monitor-detection) | 7 | New (Agent Factory) | Native |
-| [Agent Internal](#11-agent-internal) | 7 | New (Agent Factory) | Native |
-| [External Integrations](#12-external-integrations) | Variable | New (plugins) | Plugin / Connector |
+| [Web & Crawling](#8-web--crawling) | 2 | Exists (in discovery pack) | Native |
+| [Email](#9-email) | 11 | Exists | Native (via connections) |
+| [Monitor Detection](#10-monitor-detection) | 7 | Exists | Native |
+| [Agent Internal](#11-agent-internal) | 7 | Exists | Native |
+| [External Integrations](#12-external-integrations) | Variable | Plugins / Connectors | Plugin / Connector |
 
 ---
 
@@ -139,7 +139,7 @@ get_file_metadata:
 
 create_file:
   description: Create a new document in user's or team's document library
-  maps_to: create_document_tool / create_user_file_tool
+  maps_to: create_typed_document_tool / create_user_file_tool
   inputs:
     content: string             # File content (required)
     title: string               # Document title (required)
@@ -157,38 +157,41 @@ create_file:
   scope_restriction: no global_docs writes
 
 patch_file:
-  description: Edit a specific section of an existing document
-  maps_to: propose_document_edit_tool / update_document_content_tool
+  description: Propose a batch of edits to a document for user approval. Creates a single proposal; user sees diffs in editor. Implemented in orchestrator/tools/file_editing_tools.py.
   inputs:
     document_id: string         # Document to edit (required)
-    edits: object[]             # List of edit operations (required)
-    # Each edit: {operation, target, content}
-    # Operations:
-    #   "insert_after_heading" — Insert content below a heading
-    #   "replace_range" — Replace text matching original_text
-    #   "append" — Append to end of document
-    #   "prepend" — Prepend to start of document (after frontmatter)
-    #   "insert_at_line" — Insert at specific line number
+    edits: object[]             # List of edits (required). Each: {operation, target?, content?}
+    # operation: "insert_after_heading" | "replace" | "delete" | "append"
+    # target: heading text (insert_after_heading), or verbatim original text (replace/delete). Omit for append.
+    # content: new content to insert/replace; required for all except delete.
   params:
-    create_if_missing: boolean  # Create file if it doesn't exist (default: false)
+    summary: string             # Human-readable summary (default: "")
+    agent_name: string          # Proposing agent (default: "unknown")
   outputs:
     success: boolean
-    operations_applied: integer
-    new_content_length: integer
+    proposal_id: string         # For frontend approval flow
+    document_id: string
+    operations_applied: integer # Number of edits resolved and proposed
+    skipped_edits: string[]     # Reasons for any edits that failed resolution
+    formatted: string
   scope_restriction: no global_docs writes
 
 append_to_file:
-  description: Append content to the end of an existing document
-  maps_to: append_to_document_tool
+  description: Propose appending content to the end of a document. Optional heading to prepend. Creates a proposal for user approval. Implemented in orchestrator/tools/file_editing_tools.py.
   inputs:
     document_id: string         # Document to append to (required)
     content: string             # Content to append (required)
   params:
-    separator: string           # Separator before appended content (default: "\n\n")
-    heading: string             # Optional heading for the appended section
+    heading: string             # Optional heading for the appended section (e.g. "## New Section")
+    summary: string             # Human-readable summary (default: "")
+    agent_name: string          # Proposing agent (default: "unknown")
   outputs:
     success: boolean
-    new_content_length: integer
+    proposal_id: string
+    document_id: string
+    operations_applied: integer  # 0 or 1
+    skipped_edits: string[]
+    formatted: string
   scope_restriction: no global_docs writes
 ```
 
@@ -230,22 +233,26 @@ copy_file:
   scope_restriction: source can be any scope; target must be my_docs or team_docs
 ```
 
-### File Operations Tool Pack
+### Document Management Tool Pack
 
 ```yaml
-tool_pack: file_operations
+tool_pack: document_management
 tools:
-  - read_file
-  - find_file_by_name
-  - find_file_by_vectors
-  - search_within_file
-  - get_file_metadata
-  - create_file
-  - patch_file
-  - append_to_file
-  - delete_file
-  - move_file
-  - copy_file
+  - create_typed_document   # Typed docs with frontmatter templates
+  - update_document_content # Replace or append content
+  - get_document_metadata   # Read metadata without full content
+```
+
+### File Management Tool Pack
+
+```yaml
+tool_pack: file_management
+tools:
+  - list_folders
+  - create_user_file
+  - create_user_folder
+  - patch_file              # Batched edits with proposal workflow
+  - append_to_file          # Append with optional heading
 ```
 
 ---
@@ -307,7 +314,7 @@ The existing system uses **org-mode** as the native task format. These tools wra
 ```yaml
 create_todo:
   description: Create a new todo item in the user's inbox
-  maps_to: add_org_inbox_item_tool
+  maps_to: create_todo_tool
   inputs:
     title: string               # Task title (required)
     body: string                # Task description/details (optional)
@@ -325,7 +332,7 @@ create_todo:
 
 list_todos:
   description: List current todo items, filterable by state, tag, or date
-  maps_to: list_org_todos_tool
+  maps_to: list_todos_tool
   inputs:
     state: string               # Filter by state: "TODO", "DONE", "all" (optional)
   params:
@@ -337,13 +344,10 @@ list_todos:
     todos:                      # type: todo[]
       fields: [todo_id, title, state, priority, deadline, scheduled, tags, file_path]
     count: integer
-```
 
-### New Tools (to be built)
-
-```yaml
 update_todo:
   description: Update a todo item's state, priority, deadline, or content
+  maps_to: update_todo_tool
   inputs:
     todo_id: string             # Todo to update (required)
   params:
@@ -358,26 +362,49 @@ update_todo:
     success: boolean
     updated_fields: string[]
 
-complete_todo:
-  description: Mark a todo as DONE
+toggle_todo:
+  description: Toggle a todo between TODO and DONE
+  maps_to: toggle_todo_tool
   inputs:
-    todo_id: string             # Todo to complete (required)
-  params:
-    completion_note: string     # Note about completion (optional)
+    todo_id: string             # Todo to toggle (required)
   outputs:
     success: boolean
-    completed_at: date
+    new_state: string           # "TODO" or "DONE"
 
-search_todos:
-  description: Full-text search across all todo items
+delete_todo:
+  description: Delete a todo item
+  maps_to: delete_todo_tool
   inputs:
-    query: string               # Search query (required)
-  params:
-    states: string[]            # Filter by states
-    include_done: boolean       # Include completed items (default: false)
+    todo_id: string             # Todo to delete (required)
   outputs:
-    todos: todo[]
-    count: integer
+    success: boolean
+
+archive_done:
+  description: Move DONE items to archive
+  maps_to: archive_done_tool
+  inputs:
+    file_id: string             # Optional; archive from specific file
+  outputs:
+    success: boolean
+    archived_count: integer
+
+refile_todo:
+  description: Move a todo to a different heading or file
+  maps_to: refile_todo_tool
+  inputs:
+    todo_id: string             # Todo to refile (required)
+    target_heading: string      # Target heading or file path
+  outputs:
+    success: boolean
+    file_path: string
+
+discover_refile_targets:
+  description: List valid refile targets (headings/files) for moving todos
+  maps_to: discover_refile_targets_tool
+  inputs:
+    file_id: string             # Optional; scope to file
+  outputs:
+    targets: list                # Headings and file paths
 ```
 
 ### Task Management Tool Pack
@@ -388,8 +415,11 @@ tools:
   - create_todo
   - list_todos
   - update_todo
-  - complete_todo
-  - search_todos
+  - toggle_todo
+  - delete_todo
+  - archive_done
+  - refile_todo
+  - discover_refile_targets
 ```
 
 ---
@@ -400,24 +430,24 @@ Tools for sending notifications to the user through in-app channels and external
 
 The connections-service already supports Telegram and Discord, with Slack, Mattermost, Signal, and Matrix planned. These tools abstract the messaging infrastructure so playbooks can send messages without knowing which provider is configured.
 
-### New Tools (to be built)
+### Existing Tools (wrapped)
 
 ```yaml
-send_notification:
-  description: Send an in-app notification to the user (appears in notification center)
+notify_user:
+  description: Send a notification to the user; respects user channel preferences (in-app or configured channels)
+  maps_to: notify_user_tool
   inputs:
     message: string             # Notification text (required)
   params:
     title: string               # Notification title (optional)
     priority: string            # "low", "normal", "high", "urgent" (default: "normal")
-    action_url: string          # Deep link when notification is clicked (optional)
-    action_label: string        # Label for the action (optional)
   outputs:
     notification_id: string
     success: boolean
 
 send_channel_message:
-  description: Send a message through a configured messaging channel (Telegram, Discord, Slack, etc.)
+  description: Send a message through a specific configured channel (Telegram, Discord, Slack, etc.)
+  maps_to: send_channel_message_tool
   inputs:
     message: string             # Message content (required)
   params:
@@ -431,31 +461,29 @@ send_channel_message:
     success: boolean
   note: |
     Uses the connections-service provider infrastructure. The user must have
-    the target channel configured in their external connections. Falls back to
-    in-app notification if no channel is configured.
+    the target channel configured in their external connections.
 
-broadcast_to_team:
-  description: Send a message to all members of a team via their preferred channels
+schedule_reminder:
+  description: Schedule a future notification for the user
+  maps_to: schedule_reminder_tool
   inputs:
-    message: string             # Message content (required)
-    team_id: string             # Team to broadcast to (required)
+    message: string             # Reminder text (required)
+    when: date                  # When to send (required; ISO 8601)
   params:
-    channel: string             # Force specific channel or "preferred" (default: "preferred")
+    title: string               # Reminder title (optional)
   outputs:
-    delivered_to: integer       # Number of team members reached
-    failures: integer           # Number of delivery failures
+    reminder_id: string
     success: boolean
-  requires: team_post_access
 ```
 
-### Notifications & Messaging Tool Pack
+### Notifications Tool Pack
 
 ```yaml
 tool_pack: notifications
 tools:
-  - send_notification
+  - notify_user
   - send_channel_message
-  - broadcast_to_team
+  - schedule_reminder
 ```
 
 ---
@@ -467,11 +495,11 @@ Tools for interacting with the Neo4j knowledge graph. Documented in full in `AGE
 ```yaml
 tool_pack: knowledge_graph
 tools:
-  - search_knowledge_graph
-  - extract_entities
-  - resolve_entities
-  - cross_reference
-  - analyze_graph
+  - find_documents_by_entities
+  - find_related_documents_by_entities
+  - find_co_occurring_entities
+  - search_entities
+  - get_entity
 ```
 
 ---
@@ -530,7 +558,7 @@ tools:
 Tools for transforming, analyzing, and formatting text content. All exist as native tools.
 
 ```yaml
-tool_pack: text_processing
+tool_pack: text_transforms
 tools:
   - summarize_text        # maps_to: summarize_text_tool
   - extract_structured    # maps_to: extract_structured_data_tool
@@ -543,12 +571,13 @@ tools:
 
 ## 8. Web & Crawling
 
+Web tools are included in the `discovery` tool pack.
+
 ```yaml
 tool_pack: web
 tools:
   - search_web            # maps_to: search_web_tool (SearXNG)
   - crawl_url             # maps_to: crawl_web_content_tool (Crawl4AI)
-  - search_web_structured # maps_to: search_web_structured
 ```
 
 ---
@@ -562,12 +591,17 @@ Tools for reading and sending email. Requires user to have email connection conf
 
 tool_pack: email
 tools:
-  - get_emails            # maps_to: get_emails_tool (list inbox)
+  - get_emails            # maps_to: get_emails_tool (list inbox); alias list_emails
   - search_emails         # maps_to: search_emails_tool
   - get_email_thread      # maps_to: get_email_thread_tool
-  - get_email_stats       # maps_to: get_email_statistics_tool
+  - read_email            # maps_to: read_email_tool
   - send_email            # maps_to: send_email_tool (with confirmation)
   - reply_to_email        # maps_to: reply_to_email_tool (with confirmation)
+  - create_draft          # maps_to: create_draft_tool
+  - move_email            # maps_to: move_email_tool
+  - update_email          # maps_to: update_email_tool
+  - get_email_folders     # maps_to: get_email_folders_tool; alias list_email_folders
+  - get_email_stats       # maps_to: get_email_statistics_tool
 ```
 
 ---
@@ -592,7 +626,11 @@ tools:
 
 ## 11. Agent Internal
 
-Tools automatically available to all custom agents for journaling and team interaction. Documented in full in `AGENT_FACTORY_TECHNICAL_GUIDE.md` action I/O registry.
+Tools automatically available to all custom agents for journaling, team interaction, and agent-to-agent communication.
+
+### Journal & Debugging
+
+The journal serves as both activity log and debugging interface. Users can ask agents about failures, and the `query_journal` tool searches structured diagnostic context stored with each entry.
 
 ```yaml
 tool_pack: agent_journal
@@ -600,6 +638,43 @@ tools:
   - write_journal_entry
   - query_journal
 
+write_journal_entry:
+  description: Write a structured journal entry summarizing work done (called automatically at end of every execution)
+  inputs:
+    summary: string             # Human-readable summary of work done
+  params:
+    detail_entries: object[]    # Structured per-step details
+    diagnostic_context: object  # Execution trace, failure details, connector diagnostics (see tech guide)
+    entities_mentioned: string[]
+    outputs_produced: object[]
+    task_status: string         # "complete", "error", "partial", "awaiting_approval"
+    error_summary: string       # One-line error summary (for list views)
+    failed_step_name: string    # Which step failed (NULL if no failure)
+    steps_completed: integer
+    steps_total: integer
+  outputs:
+    journal_entry_id: string
+    success: boolean
+
+query_journal:
+  description: Search the agent's work journal by date, keyword, entity, status — used when users ask about past work or failures
+  inputs:
+    query: string               # Natural language query about past work (required)
+  params:
+    date_from: date             # Filter by date range
+    date_to: date
+    status: string              # "complete", "error", "partial", "all"
+    entity_name: string         # Filter by entity mentioned
+    include_diagnostics: boolean # Include full diagnostic_context in results (default: false)
+    limit: integer              # Max entries to return (default: 10)
+  outputs:
+    entries: journal_entry[]    # [{id, summary, task_status, error_summary, created_at, steps_completed, steps_total, ...}]
+    count: integer
+```
+
+### Team Interaction
+
+```yaml
 tool_pack: team_interaction    # Conditionally available based on team_config
 tools:
   - search_team_files
@@ -607,6 +682,61 @@ tools:
   - search_team_posts
   - write_team_post
   - summarize_team_thread
+```
+
+### Agent-to-Agent Communication
+
+Tools for inter-agent messaging, enabling handoff, request-response, and conversational loop patterns. All messages are journaled on both sides.
+
+```yaml
+tool_pack: agent_communication
+tools:
+  - send_to_agent
+  - start_agent_conversation
+  - halt_agent_conversation
+
+send_to_agent:
+  description: Send a message or data payload to another custom agent
+  inputs:
+    target_agent: string        # @handle of the receiving agent (required)
+    message: string             # Natural language message/query (required)
+  params:
+    data: any                   # Typed data payload from upstream step outputs (optional)
+    wait_for_response: boolean  # true = block until target responds; false = fire-and-forget (default: false)
+    timeout_minutes: integer    # Max wait time if wait_for_response is true (default: 60)
+  outputs:
+    message_id: string          # ID of the sent message
+    conversation_id: string     # Conversation this message belongs to
+    response: object            # Target agent's response (only if wait_for_response: true)
+    response_status: string     # "received", "completed", "timeout", "error"
+  security:
+    - Same-owner requirement: target agent must be owned by the same user or shared to the same team
+    - Counts against daily agent-to-agent message limit
+
+start_agent_conversation:
+  description: Start a multi-turn conversation between two or more agents
+  inputs:
+    participants: object[]      # [{agent: "@handle", role: "researcher"}, ...] (required, min 2)
+    seed_message: string        # Initial message to start the conversation (required)
+  params:
+    max_turns: integer          # Hard limit on total turns (default: 10, admin ceiling enforced)
+    termination_condition: string # Natural language condition for LLM to evaluate
+    output_destinations: object[] # Where to stream the conversation: chat, channel_message, document
+  outputs:
+    conversation_id: string     # ID to track/halt this conversation
+    status: string              # "started", "error"
+  security:
+    - All participants must be owned by the same user or shared to the same team
+    - Max turns has an admin-configurable ceiling (prevents runaway dialogues)
+
+halt_agent_conversation:
+  description: Stop a running agent-to-agent conversation
+  inputs:
+    conversation_id: string     # Conversation to halt (required)
+  outputs:
+    success: boolean
+    turns_completed: integer    # How many turns ran before halt
+    final_state: string         # "halted_by_user", "error"
 ```
 
 ---
@@ -1001,22 +1131,22 @@ No orchestrator code changes needed. No registry updates needed. The plugin syst
 |----------|---------|-----|-------|
 | File Operations | 8 | 3 | 11 |
 | Search & Discovery | 6 | 0 | 6 |
-| Task Management | 2 | 3 | 5 |
-| Notifications & Messaging | 0 | 3 | 3 |
-| Knowledge Graph | 0* | 5 | 5 |
+| Task Management | 8 | 0 | 8 |
+| Notifications & Messaging | 3 | 0 | 3 |
+| Knowledge Graph | 5 | 0 | 5 |
 | Data Workspace | 4 | 0 | 4 |
 | Text & Content | 5 | 0 | 5 |
-| Web & Crawling | 3 | 0 | 3 |
-| Email | 6 | 0 | 6 |
-| Monitor Detection | 0 | 7 | 7 |
-| Agent Internal | 0 | 7 | 7 |
+| Web & Crawling | 2 | 0 | 2 |
+| Email | 11 | 0 | 11 |
+| Monitor Detection | 7 | 0 | 7 |
+| Agent Internal (Journal) | 2 | 0 | 2 |
+| Agent Internal (Team) | 5 | 0 | 5 |
+| Agent Communication | 3 | 0 | 3 |
 | Trello | 0 | 6 | 6 |
 | Notion | 0 | 6 | 6 |
 | Slack | 0 | 3 | 3 |
 | CalDAV | 0 | 4 | 4 |
-| **Total** | **34** | **47** | **81** |
+| **Total** | **66** | **22** | **88** |
 
-*Knowledge graph tools exist conceptually but need Agent Factory wrappers with I/O contracts.
-
-New tools to build: 47 (across native tools and plugin integrations)
-Existing tools to wrap: 34 (add I/O contracts for the Workflow Composer)
+New tools to build: 22 (across plugin integrations and 3 file ops: delete_file, move_file, copy_file).
+Existing tools wrapped with I/O contracts: 66.

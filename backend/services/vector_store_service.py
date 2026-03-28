@@ -274,6 +274,12 @@ class VectorStoreService:
             
             # Build filters for Vector Service
             filters = []
+            # Exclude image sidecar chunks so document search returns only text documents
+            filters.append({
+                "field": "is_image_sidecar",
+                "value": "true",
+                "operator": "not_equals"
+            })
             if filter_category:
                 filters.append({
                     "field": "document_category",

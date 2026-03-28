@@ -9,7 +9,48 @@ import math
 import operator
 from typing import Dict, Any, Optional, List
 
+from pydantic import BaseModel, Field
+
+from orchestrator.utils.action_io_registry import register_action
+
 logger = logging.getLogger(__name__)
+
+
+# ── I/O models for calculate_expression_tool ───────────────────────────────
+
+class CalculateExpressionInputs(BaseModel):
+    """Required inputs for expression evaluation."""
+    expression: str = Field(description="Mathematical expression (e.g. 300 * 25 * 1.2)")
+
+
+class CalculateExpressionParams(BaseModel):
+    """Optional configuration."""
+    variables: Optional[Dict[str, float]] = Field(default=None, description="Variable values for substitution")
+
+
+class CalculateExpressionOutputs(BaseModel):
+    """Typed outputs for calculate_expression_tool."""
+    result: Optional[float] = Field(description="Evaluated result")
+    expression: str = Field(description="Expression that was evaluated")
+    success: bool = Field(description="Whether evaluation succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    steps: List[str] = Field(default_factory=list, description="Human-readable calculation steps")
+    variables_used: List[str] = Field(default_factory=list, description="Variable names used")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
+
+
+class ListAvailableFormulasInputs(BaseModel):
+    """No required inputs for list_available_formulas_tool."""
+    pass
+
+
+class ListAvailableFormulasOutputs(BaseModel):
+    """Typed outputs for list_available_formulas_tool."""
+    formulas: List[Dict[str, Any]] = Field(description="List of formula dicts with name, description, required_inputs, optional_inputs, output_unit")
+    count: int = Field(description="Number of formulas available")
+    success: bool = Field(description="Whether the call succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
 
 
 # Allowed AST operations for safe expression evaluation
@@ -152,25 +193,29 @@ async def calculate_expression_tool(
         steps = _generate_calculation_steps(expression, result)
         
         logger.info(f"Calculation result: {result}")
-        
+        variables_used = list(variables.keys()) if variables else []
+        formatted = f"{expression} = {result}"
         return {
             "result": result,
             "steps": steps,
             "expression": expression,
-            "variables_used": list(variables.keys()) if variables else [],
+            "variables_used": variables_used,
             "success": True,
-            "error": None
+            "error": None,
+            "formatted": formatted,
         }
-        
+
     except Exception as e:
         logger.error(f"Expression calculation failed: {e}")
+        formatted = f"Error: {e}"
         return {
             "result": None,
             "steps": [],
             "expression": expression,
             "variables_used": [],
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "formatted": formatted,
         }
 
 
@@ -194,20 +239,45 @@ async def list_available_formulas_tool() -> Dict[str, Any]:
                 "output_unit": formula_def.get("output_unit", "")
             })
         
+        formatted = f"Available formulas ({len(formulas)}): " + ", ".join(f["name"] for f in formulas[:15])
+        if len(formulas) > 15:
+            formatted += f" ... and {len(formulas) - 15} more"
         return {
             "formulas": formulas,
             "count": len(formulas),
-            "success": True
+            "success": True,
+            "error": None,
+            "formatted": formatted,
         }
-        
+
     except Exception as e:
         logger.error(f"Failed to list formulas: {e}")
         return {
             "formulas": [],
             "count": 0,
             "success": False,
-            "error": str(e)
+            "error": str(e),
+            "formatted": f"Failed to list formulas: {str(e)}",
         }
+
+
+register_action(
+    name="calculate_expression",
+    category="math",
+    description="Safely evaluate a mathematical expression with optional variable substitution",
+    inputs_model=CalculateExpressionInputs,
+    params_model=CalculateExpressionParams,
+    outputs_model=CalculateExpressionOutputs,
+    tool_function=calculate_expression_tool,
+)
+register_action(
+    name="list_available_formulas",
+    category="math",
+    description="List all available formulas in the formula library",
+    inputs_model=ListAvailableFormulasInputs,
+    outputs_model=ListAvailableFormulasOutputs,
+    tool_function=list_available_formulas_tool,
+)
 
 
 # Tool registry (imports done lazily to avoid circular imports)
@@ -225,4 +295,3 @@ def _get_math_tools_registry():
 
 # Create registry
 MATH_TOOLS = _get_math_tools_registry()
-

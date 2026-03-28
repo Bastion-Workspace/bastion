@@ -214,7 +214,8 @@ class NavigationTools:
         """Compute route between two points (location IDs or coordinate string)."""
         try:
             from services.database_manager.database_helpers import fetch_all
-            from services.osrm_service import get_route, OSRMError
+            from services.routing_service import get_route
+            from services.osrm_service import OSRMError
         except ImportError as e:
             logger.error(f"Navigation tools backend import failed: {e}")
             return {"success": False, "error": "Backend services not available"}

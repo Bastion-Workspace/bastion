@@ -8,8 +8,12 @@ from typing import Any, Dict, Optional, Type
 from providers.base_provider import BaseProvider
 from providers.base_messaging_provider import BaseMessagingProvider
 from providers.microsoft_provider import MicrosoftGraphProvider
+from providers.imap_smtp_provider import ImapSmtpProvider
+from providers.caldav_provider import CalDAVProvider
 from providers.telegram_provider import TelegramProvider
 from providers.discord_provider import DiscordProvider
+from providers.slack_provider import SlackProvider
+from providers.sms_provider import SMSProvider
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +28,8 @@ def get_messaging_providers() -> Dict[str, Type[BaseMessagingProvider]]:
         _messaging_providers = {
             "telegram": TelegramProvider,
             "discord": DiscordProvider,
+            "slack": SlackProvider,
+            "sms": SMSProvider,
         }
     return _messaging_providers
 
@@ -41,6 +47,8 @@ def get_providers() -> Dict[str, BaseProvider]:
     if _providers is None:
         _providers = {
             "microsoft": MicrosoftGraphProvider(),
+            "imap_smtp": ImapSmtpProvider(),
+            "caldav": CalDAVProvider(),
             "": MicrosoftGraphProvider(),  # default
         }
     return _providers

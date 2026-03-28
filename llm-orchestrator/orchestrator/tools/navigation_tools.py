@@ -6,7 +6,10 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from pydantic import BaseModel, Field
+
 from orchestrator.backend_tool_client import get_backend_tool_client
+from orchestrator.utils.action_io_registry import register_action
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,40 @@ def _format_dict_result(data: Dict[str, Any], default_msg: str = "Done.") -> str
     return "\n".join(parts) if parts else default_msg
 
 
+# Granular I/O models for registry (individually addressable fields + formatted)
+class LocationRef(BaseModel):
+    """Reference to a saved location."""
+    location_id: str = Field(description="Location ID")
+    name: str = Field(description="Short name")
+    address: str = Field(default="", description="Full address")
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    notes: Optional[str] = None
+
+
+class RouteRef(BaseModel):
+    """Reference to a saved route."""
+    route_id: str = Field(description="Route ID")
+    name: str = Field(description="Route name")
+    distance_meters: Optional[float] = None
+    duration_seconds: Optional[float] = None
+
+
+class NavigationOutputs(BaseModel):
+    """Common output shape for navigation tools (granular fields for wiring)."""
+    formatted: str = Field(description="Human-readable summary")
+    success: Optional[bool] = None
+    error: Optional[str] = None
+    location_id: Optional[str] = Field(default=None, description="Created or selected location ID")
+    locations: List[LocationRef] = Field(default_factory=list, description="List of locations")
+    count: int = Field(default=0, description="Number of locations returned")
+    routes: List[RouteRef] = Field(default_factory=list, description="List of saved routes")
+    total: int = Field(default=0, description="Number of routes returned")
+    route_id: Optional[str] = Field(default=None, description="Created or selected route ID")
+    distance_meters: Optional[float] = None
+    duration_seconds: Optional[float] = None
+
+
 async def create_location_tool(
     user_id: str = "system",
     name: str = "",
@@ -63,7 +100,7 @@ async def create_location_tool(
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
     notes: Optional[str] = None,
-) -> str:
+) -> Dict[str, Any]:
     """
     Create a saved location (geocodes address if needed).
 
@@ -80,7 +117,8 @@ async def create_location_tool(
     """
     try:
         if not name or not address:
-            return "Error: name and address are required."
+            msg = "Error: name and address are required."
+            return {"success": False, "error": msg, "formatted": msg, "location_id": None, "locations": [], "count": 0, "routes": [], "total": 0, "route_id": None, "distance_meters": None, "duration_seconds": None}
         logger.info("create_location: name=%s address=%s", name, address[:80])
         client = await get_backend_tool_client()
         result = await client.create_location(
@@ -94,13 +132,23 @@ async def create_location_tool(
             metadata=None,
             user_role="user",
         )
-        return _format_dict_result(result, "Location created.")
+        out = dict(result) if isinstance(result, dict) else {}
+        out["formatted"] = _format_dict_result(result, "Location created.")
+        out["location_id"] = out.get("location_id")
+        out.setdefault("locations", [])
+        out.setdefault("count", 0)
+        out.setdefault("routes", [])
+        out.setdefault("total", 0)
+        out.setdefault("route_id", None)
+        out.setdefault("distance_meters", None)
+        out.setdefault("duration_seconds", None)
+        return out
     except Exception as e:
         logger.error("create_location_tool error: %s", e)
-        return f"Error: {str(e)}"
+        return {"success": False, "error": str(e), "formatted": f"Error: {str(e)}", "location_id": None, "locations": [], "count": 0, "routes": [], "total": 0, "route_id": None, "distance_meters": None, "duration_seconds": None}
 
 
-async def list_locations_tool(user_id: str = "system") -> str:
+async def list_locations_tool(user_id: str = "system") -> Dict[str, Any]:
     """
     List all saved locations for the user.
 
@@ -114,16 +162,27 @@ async def list_locations_tool(user_id: str = "system") -> str:
         logger.info("list_locations")
         client = await get_backend_tool_client()
         result = await client.list_locations(user_id=user_id, user_role="user")
-        return _format_dict_result(result, "No locations saved.")
+        out = dict(result) if isinstance(result, dict) else {}
+        out["formatted"] = _format_dict_result(result, "No locations saved.")
+        locs = out.get("locations") or out.get("items") or []
+        out["locations"] = locs
+        out["count"] = len(locs)
+        out.setdefault("location_id", None)
+        out.setdefault("routes", [])
+        out.setdefault("total", 0)
+        out.setdefault("route_id", None)
+        out.setdefault("distance_meters", None)
+        out.setdefault("duration_seconds", None)
+        return out
     except Exception as e:
         logger.error("list_locations_tool error: %s", e)
-        return f"Error: {str(e)}"
+        return {"formatted": f"Error: {str(e)}", "location_id": None, "locations": [], "count": 0, "routes": [], "total": 0, "route_id": None, "distance_meters": None, "duration_seconds": None}
 
 
 async def delete_location_tool(
     user_id: str = "system",
     location_id: str = "",
-) -> str:
+) -> Dict[str, Any]:
     """
     Delete a saved location by ID.
 
@@ -136,7 +195,8 @@ async def delete_location_tool(
     """
     try:
         if not location_id:
-            return "Error: location_id is required."
+            msg = "Error: location_id is required."
+            return {"formatted": msg}
         logger.info("delete_location: location_id=%s", location_id[:50])
         client = await get_backend_tool_client()
         result = await client.delete_location(
@@ -144,10 +204,21 @@ async def delete_location_tool(
             location_id=location_id,
             user_role="user",
         )
-        return _format_dict_result(result, "Location deleted.")
+        out = dict(result) if isinstance(result, dict) else {}
+        out["formatted"] = _format_dict_result(result, "Location deleted.")
+        out.setdefault("success", True)
+        out.setdefault("location_id", None)
+        out.setdefault("locations", [])
+        out.setdefault("count", 0)
+        out.setdefault("routes", [])
+        out.setdefault("total", 0)
+        out.setdefault("route_id", None)
+        out.setdefault("distance_meters", None)
+        out.setdefault("duration_seconds", None)
+        return out
     except Exception as e:
         logger.error("delete_location_tool error: %s", e)
-        return f"Error: {str(e)}"
+        return {"formatted": f"Error: {str(e)}", "success": False, "location_id": None, "locations": [], "count": 0, "routes": [], "total": 0, "route_id": None, "distance_meters": None, "duration_seconds": None}
 
 
 async def compute_route_tool(
@@ -156,7 +227,7 @@ async def compute_route_tool(
     to_location_id: Optional[str] = None,
     coordinates: Optional[str] = None,
     profile: str = "driving",
-) -> str:
+) -> Dict[str, Any]:
     """
     Compute a route between two points. Use location IDs from list_locations, or a coordinates string.
 
@@ -181,10 +252,20 @@ async def compute_route_tool(
             profile=profile,
             user_role="user",
         )
-        return _format_dict_result(result, "No route computed.")
+        out = dict(result) if isinstance(result, dict) else {}
+        out["formatted"] = _format_dict_result(result, "No route computed.")
+        out.setdefault("location_id", None)
+        out.setdefault("locations", [])
+        out.setdefault("count", 0)
+        out.setdefault("routes", [])
+        out.setdefault("total", 0)
+        out.setdefault("route_id", None)
+        out.setdefault("distance_meters", out.get("distance"))
+        out.setdefault("duration_seconds", out.get("duration"))
+        return out
     except Exception as e:
         logger.error("compute_route_tool error: %s", e)
-        return f"Error: {str(e)}"
+        return {"formatted": f"Error: {str(e)}", "location_id": None, "locations": [], "count": 0, "routes": [], "total": 0, "route_id": None, "distance_meters": None, "duration_seconds": None}
 
 
 async def save_route_tool(
@@ -196,7 +277,7 @@ async def save_route_tool(
     distance_meters: float = 0,
     duration_seconds: float = 0,
     profile: str = "driving",
-) -> str:
+) -> Dict[str, Any]:
     """
     Save a previously computed route. Call compute_route first, then pass its waypoints/geometry/steps here.
 
@@ -215,7 +296,7 @@ async def save_route_tool(
     """
     try:
         if not name:
-            return "Error: name is required."
+            return {"formatted": "Error: name is required.", "location_id": None, "locations": [], "count": 0, "routes": [], "total": 0, "route_id": None, "distance_meters": None, "duration_seconds": None}
         waypoints_list = json.loads(waypoints) if isinstance(waypoints, str) and waypoints else (waypoints or [])
         geometry_dict = json.loads(geometry) if isinstance(geometry, str) and geometry else (geometry or {})
         steps_list = json.loads(steps) if isinstance(steps, str) and steps else (steps or [])
@@ -238,13 +319,23 @@ async def save_route_tool(
             profile=profile,
             user_role="user",
         )
-        return _format_dict_result(result, "Route saved.")
+        out = dict(result) if isinstance(result, dict) else {}
+        out["formatted"] = _format_dict_result(result, "Route saved.")
+        out.setdefault("location_id", None)
+        out.setdefault("locations", [])
+        out.setdefault("count", 0)
+        out.setdefault("routes", [])
+        out.setdefault("total", 0)
+        out.setdefault("route_id", out.get("route_id"))
+        out.setdefault("distance_meters", None)
+        out.setdefault("duration_seconds", None)
+        return out
     except Exception as e:
         logger.error("save_route_tool error: %s", e)
-        return f"Error: {str(e)}"
+        return {"formatted": f"Error: {str(e)}", "location_id": None, "locations": [], "count": 0, "routes": [], "total": 0, "route_id": None, "distance_meters": None, "duration_seconds": None}
 
 
-async def list_saved_routes_tool(user_id: str = "system") -> str:
+async def list_saved_routes_tool(user_id: str = "system") -> Dict[str, Any]:
     """
     List saved routes for the user.
 
@@ -258,7 +349,50 @@ async def list_saved_routes_tool(user_id: str = "system") -> str:
         logger.info("list_saved_routes")
         client = await get_backend_tool_client()
         result = await client.list_saved_routes(user_id=user_id, user_role="user")
-        return _format_dict_result(result, "No saved routes.")
+        out = dict(result) if isinstance(result, dict) else {}
+        out["formatted"] = _format_dict_result(result, "No saved routes.")
+        out.setdefault("location_id", None)
+        out.setdefault("locations", [])
+        out.setdefault("count", 0)
+        routes = out.get("routes") or out.get("items") or []
+        out["routes"] = routes
+        out["total"] = len(routes)
+        out.setdefault("route_id", None)
+        out.setdefault("distance_meters", None)
+        out.setdefault("duration_seconds", None)
+        return out
     except Exception as e:
         logger.error("list_saved_routes_tool error: %s", e)
-        return f"Error: {str(e)}"
+        return {"formatted": f"Error: {str(e)}", "location_id": None, "locations": [], "count": 0, "routes": [], "total": 0, "route_id": None, "distance_meters": None, "duration_seconds": None}
+
+
+# Registry: use minimal input models (required args only) and NavigationOutputs
+class CreateLocationInputs(BaseModel):
+    name: str = Field(description="Short name for the location")
+    address: str = Field(description="Full address")
+
+
+class ListLocationsInputs(BaseModel):
+    pass
+
+
+class DeleteLocationInputs(BaseModel):
+    location_id: str = Field(description="ID of the location to delete")
+
+
+class ComputeRouteInputs(BaseModel):
+    from_location_id: Optional[str] = None
+    to_location_id: Optional[str] = None
+    coordinates: Optional[str] = None
+
+
+class SaveRouteInputs(BaseModel):
+    name: str = Field(description="Name for the saved route")
+
+
+register_action(name="create_location", category="navigation", description="Create a saved location", inputs_model=CreateLocationInputs, outputs_model=NavigationOutputs, tool_function=create_location_tool)
+register_action(name="list_locations", category="navigation", description="List saved locations", inputs_model=ListLocationsInputs, outputs_model=NavigationOutputs, tool_function=list_locations_tool)
+register_action(name="delete_location", category="navigation", description="Delete a saved location by ID", inputs_model=DeleteLocationInputs, outputs_model=NavigationOutputs, tool_function=delete_location_tool)
+register_action(name="compute_route", category="navigation", description="Compute a route between two points", inputs_model=ComputeRouteInputs, outputs_model=NavigationOutputs, tool_function=compute_route_tool)
+register_action(name="save_route", category="navigation", description="Save a computed route", inputs_model=SaveRouteInputs, outputs_model=NavigationOutputs, tool_function=save_route_tool)
+register_action(name="list_saved_routes", category="navigation", description="List saved routes", inputs_model=ListLocationsInputs, outputs_model=NavigationOutputs, tool_function=list_saved_routes_tool)

@@ -103,7 +103,7 @@ const OrgSearchView = ({ onOpenDocument }) => {
       return;
     }
 
-    console.log('✅ ROOSEVELT: Opening org file:', result.document_id);
+    console.log('Opening org file:', result.document_id);
     
     // Open document with scroll parameters
     onOpenDocument({

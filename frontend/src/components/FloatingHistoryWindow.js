@@ -25,7 +25,6 @@ import {
 import {
   Close,
   Search,
-  Add,
   PushPin,
   Chat,
   MoreVert,
@@ -104,7 +103,7 @@ const FloatingHistoryWindow = ({
   };
 
   const formatLastActivity = (conversation) => {
-    // ROOSEVELT'S TIMESTAMP FIX: Show last activity time instead of empty preview
+    // Show last activity time when preview is empty
     const lastActivity = conversation.updated_at || conversation.created_at;
     if (!lastActivity) return '';
     
@@ -315,15 +314,22 @@ const FloatingHistoryWindow = ({
             justifyContent: 'space-between'
           }}>
             <Typography variant="h6" sx={{ fontWeight: 500 }}>
-              Chat History
+              Chats
             </Typography>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Button
+                variant="contained"
+                size="small"
+                onClick={onNewChat}
+                sx={{ py: 0.5 }}
+              >
+                New
+              </Button>
               {filteredConversations.length > 0 && (
                 <Button
                   variant="outlined"
                   size="small"
                   color="error"
-                  startIcon={<Delete />}
                   onClick={handleDeleteAllClick}
                   sx={{ 
                     minWidth: 'auto',
@@ -344,7 +350,7 @@ const FloatingHistoryWindow = ({
           {/* Search */}
           <Box sx={{ p: 2 }}>
             <TextField
-              placeholder="Search conversations..."
+              placeholder="Search chats..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               size="small"
@@ -381,9 +387,11 @@ const FloatingHistoryWindow = ({
                         }}
                       >
                         <ListItemText
+                          primaryTypographyProps={{ component: 'div' }}
+                          secondaryTypographyProps={{ component: 'div' }}
                           primary={
                             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                              <Typography variant="body2" sx={{ fontWeight: 500 }}>
+                              <Typography variant="body2" sx={{ fontSize: '0.8125rem', fontWeight: 500, lineHeight: 1.35 }}>
                                 {conversation.title || 'Untitled Conversation'}
                               </Typography>
                               {conversation.is_pinned && (
@@ -428,18 +436,6 @@ const FloatingHistoryWindow = ({
             )}
           </Box>
 
-          {/* New Chat Button */}
-          <Box sx={{ p: 2, borderTop: 1, borderColor: 'divider' }}>
-            <Button
-              variant="contained"
-              fullWidth
-              startIcon={<Add />}
-              onClick={onNewChat}
-              sx={{ py: 1 }}
-            >
-              New Chat
-            </Button>
-          </Box>
         </Box>
       </ClickAwayListener>
 

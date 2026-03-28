@@ -25,7 +25,7 @@ router = APIRouter(tags=["external-connections"])
 OAUTH_STATE_TTL = 600
 MICROSOFT_AUTHORIZE_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
 MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
-MICROSOFT_SCOPES = "openid profile email Mail.Read Mail.ReadWrite Mail.Send MailboxSettings.Read User.Read"
+MICROSOFT_SCOPES = "offline_access openid profile email Mail.Read Mail.ReadWrite Mail.Send MailboxSettings.Read User.Read Calendars.ReadWrite Contacts.ReadWrite"
 
 
 class AuthorizeResponse(BaseModel):
@@ -40,6 +40,37 @@ class TelegramConnectRequest(BaseModel):
 class DiscordConnectRequest(BaseModel):
     bot_token: str
     guild_ids: Optional[List[str]] = None
+
+
+class SlackConnectRequest(BaseModel):
+    bot_token: str
+    app_token: str  # xapp-... for Socket Mode
+
+
+class SMSConnectRequest(BaseModel):
+    account_sid: str
+    auth_token: str
+    from_number: str
+
+
+class ImapSmtpConnectRequest(BaseModel):
+    imap_host: str
+    imap_port: int = 993
+    imap_ssl: bool = True
+    smtp_host: str
+    smtp_port: int = 587
+    smtp_tls: bool = True
+    username: str
+    imap_password: str
+    smtp_password: str
+    display_name: Optional[str] = None
+
+
+class CalDAVConnectRequest(BaseModel):
+    url: str
+    username: str
+    password: str
+    display_name: Optional[str] = None
 
 
 async def _get_redis():
@@ -201,6 +232,33 @@ async def list_connections(
     return {"connections": connections}
 
 
+class ConnectionLockUpdate(BaseModel):
+    """Body for PATCH /connections/{connection_id} - lock toggle only."""
+    is_locked: bool
+
+
+@router.patch("/connections/{connection_id:int}")
+async def update_connection_lock(
+    connection_id: int,
+    body: ConnectionLockUpdate,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Set lock state on an external connection. Owner only; only is_locked and updated_at are updated."""
+    conn = await external_connections_service.get_connection_by_id(connection_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.get("user_id") != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Not allowed to update this connection")
+    updated = await external_connections_service.set_connection_lock(
+        connection_id, current_user.user_id, body.is_locked,
+        rls_context={"user_id": current_user.user_id},
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    conn_after = await external_connections_service.get_connection_by_id(connection_id)
+    return {"connection": conn_after}
+
+
 @router.delete("/connections/{connection_id:int}")
 async def revoke_connection(
     connection_id: int,
@@ -212,6 +270,8 @@ async def revoke_connection(
         raise HTTPException(status_code=404, detail="Connection not found")
     if conn.get("user_id") != current_user.user_id:
         raise HTTPException(status_code=403, detail="Not allowed to revoke this connection")
+    if conn.get("is_locked"):
+        raise HTTPException(status_code=403, detail="Connection is locked; unlock to revoke")
     if conn.get("connection_type") == "chat_bot":
         try:
             from clients.connections_service_client import get_connections_service_client
@@ -246,6 +306,24 @@ async def get_bot_status(
         return {"status": "error", "bot_username": "", "error": str(e)}
 
 
+@router.get("/connections/{connection_id:int}/known-chats")
+async def get_known_chats(
+    connection_id: int,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Get known chats for a messaging bot connection (chats that have messaged the bot). Used for recipient dropdown."""
+    conn = await external_connections_service.get_connection_by_id(connection_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+    if conn.get("user_id") != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Not allowed to view this connection")
+    metadata = external_connections_service._parse_provider_metadata(conn.get("provider_metadata"))
+    known_chats = metadata.get("known_chats") or []
+    if not isinstance(known_chats, list):
+        known_chats = []
+    return {"known_chats": [c for c in known_chats if isinstance(c, dict) and c.get("chat_id")]}
+
+
 @router.post("/connections/{connection_id:int}/refresh")
 async def refresh_connection(
     connection_id: int,
@@ -257,7 +335,9 @@ async def refresh_connection(
         raise HTTPException(status_code=404, detail="Connection not found")
     if conn.get("user_id") != current_user.user_id:
         raise HTTPException(status_code=403, detail="Not allowed to refresh this connection")
-    ok = await external_connections_service.refresh_access_token(connection_id)
+    ok = await external_connections_service.refresh_access_token(
+        connection_id, rls_context={"user_id": current_user.user_id}
+    )
     return {"ok": ok}
 
 
@@ -285,6 +365,20 @@ async def _validate_discord_token(bot_token: str) -> str:
         resp.raise_for_status()
         data = resp.json()
     return data.get("username", "") or ""
+
+
+async def _validate_slack_token(bot_token: str) -> str:
+    """Validate Slack bot token via auth.test and return bot user name."""
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            "https://slack.com/api/auth.test",
+            headers={"Authorization": f"Bearer {bot_token}"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    if not data.get("ok"):
+        raise ValueError(data.get("error", "Invalid token"))
+    return data.get("user", "") or ""
 
 
 @router.post("/connections/telegram")
@@ -365,3 +459,119 @@ async def connect_discord_bot(
         if not result.get("success") and result.get("error"):
             logger.warning("Connections-service RegisterBot failed: %s", result.get("error"))
     return {"connection_id": conn_id, "bot_username": bot_username}
+
+
+@router.post("/connections/slack")
+async def connect_slack_bot(
+    body: SlackConnectRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Register a Slack bot for the current user (Socket Mode: bot_token + app_token)."""
+    try:
+        bot_username = await _validate_slack_token(body.bot_token)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid Slack token: {e}")
+    config = {"app_token": body.app_token}
+    conn_id = await external_connections_service.store_connection(
+        user_id=current_user.user_id,
+        provider="slack",
+        connection_type="chat_bot",
+        account_identifier=bot_username or "slack_bot",
+        access_token=body.bot_token,
+        refresh_token=body.bot_token,
+        expires_in=365 * 24 * 3600,
+        scopes=["bot"],
+        display_name=bot_username or None,
+        provider_metadata=config,
+    )
+    token = await external_connections_service.get_valid_access_token(conn_id)
+    if token:
+        from clients.connections_service_client import get_connections_service_client
+        client = await get_connections_service_client()
+        result = await client.register_bot(
+            connection_id=conn_id,
+            user_id=current_user.user_id,
+            provider="slack",
+            bot_token=token,
+            display_name=bot_username or "",
+            config=config,
+        )
+        if not result.get("success") and result.get("error"):
+            logger.warning("Connections-service RegisterBot failed: %s", result.get("error"))
+    return {"connection_id": conn_id, "bot_username": bot_username}
+
+
+@router.post("/connections/sms")
+async def connect_sms(
+    body: SMSConnectRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Register Twilio SMS for the current user (outbound-only). Validation is done by connections-service via RegisterBot."""
+    config = {"account_sid": body.account_sid.strip(), "from_number": body.from_number.strip()}
+    conn_id = await external_connections_service.store_connection(
+        user_id=current_user.user_id,
+        provider="sms",
+        connection_type="chat_bot",
+        account_identifier=body.from_number.strip(),
+        access_token=body.auth_token.strip(),
+        refresh_token=body.auth_token.strip(),
+        expires_in=365 * 24 * 3600,
+        scopes=["sms"],
+        display_name=body.from_number.strip() or None,
+        provider_metadata=config,
+    )
+    token = await external_connections_service.get_valid_access_token(conn_id)
+    if token:
+        from clients.connections_service_client import get_connections_service_client
+        client = await get_connections_service_client()
+        result = await client.register_bot(
+            connection_id=conn_id,
+            user_id=current_user.user_id,
+            provider="sms",
+            bot_token=token,
+            display_name=body.from_number.strip() or "",
+            config=config,
+        )
+        if not result.get("success") and result.get("error"):
+            raise HTTPException(status_code=400, detail=result.get("error", "SMS connection validation failed"))
+    return {"connection_id": conn_id, "bot_username": body.from_number.strip()}
+
+
+@router.post("/connections/imap-smtp")
+async def connect_imap_smtp(
+    body: ImapSmtpConnectRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Register an IMAP/SMTP email account for the current user."""
+    conn_id = await external_connections_service.store_imap_smtp_connection(
+        user_id=current_user.user_id,
+        imap_host=body.imap_host,
+        imap_port=body.imap_port,
+        imap_ssl=body.imap_ssl,
+        smtp_host=body.smtp_host,
+        smtp_port=body.smtp_port,
+        smtp_tls=body.smtp_tls,
+        username=body.username,
+        imap_password=body.imap_password,
+        smtp_password=body.smtp_password,
+        display_name=body.display_name,
+    )
+    return {"connection_id": conn_id}
+
+
+@router.post("/connections/caldav")
+async def connect_caldav(
+    body: CalDAVConnectRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Register a CalDAV calendar for the current user."""
+    conn_id = await external_connections_service.store_caldav_connection(
+        user_id=current_user.user_id,
+        url=body.url,
+        username=body.username,
+        password=body.password,
+        display_name=body.display_name,
+    )
+    return {"connection_id": conn_id}
+
+

@@ -9,8 +9,16 @@
 
 **What it does:**
 - Opens quick capture modal
-- Add TODO, note, journal entry, or meeting notes
-- Appends to inbox.org
+- Add TODO, note, contact, or meeting notes to inbox
+- Appends to inbox.org (journal entries use **Ctrl+Shift+J** instead)
+
+### Journal for the day
+**Hotkey:** `Ctrl+Shift+J` (Windows/Linux) or `Cmd+Shift+J` (Mac)
+
+**What it does:**
+- Opens journal-for-the-day modal
+- View or edit today’s journal entry (or pick another date)
+- Creates the day heading if missing; uses your configured journal file (Settings > Org-Mode)
 
 **Usage:**
 - Press hotkey from anywhere in the app
@@ -109,7 +117,8 @@
 - ✅ **Cross-platform**: Works on Windows, Linux, and Mac (with Cmd instead of Ctrl)
 
 **Mnemonic:**
-- **Ctrl+Shift+C** = **C**apture (create new entry)
+- **Ctrl+Shift+C** = **C**apture (quick capture to inbox)
+- **Ctrl+Shift+J** = **J**ournal (journal for the day)
 - **Ctrl+Shift+M** = **M**ove/refile (move existing entry)
 - **Ctrl+Shift+A** = **A**rchive (archive DONE entries)
 - **Ctrl+Shift+E** = tag **E**ntry (add tags to entry)
@@ -168,6 +177,7 @@
 │                                                         │
 │ GLOBAL (Anywhere in app):                              │
 │   Ctrl+Shift+C    Quick Capture to inbox.org          │
+│   Ctrl+Shift+J    Journal for the day                 │
 │                                                         │
 │ IN ORG EDITOR:                                          │
 │   Ctrl+Shift+M    Refile entry at cursor (M = Move)   │

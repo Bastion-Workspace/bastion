@@ -10,6 +10,7 @@ from pathlib import Path
 from datetime import datetime
 
 from config import settings
+from utils.org_header_parser import OrgFileHeader, filetags_to_list
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,8 @@ class OrgRefileService:
             
             # Find all org files
             org_files = list(user_base_dir.rglob("*.org"))
+            # Exclude files inside .versions directories (historical snapshots)
+            org_files = [f for f in org_files if "/.versions/" not in str(f) and "\\.versions\\" not in str(f)]
             
             targets = []
             
@@ -187,19 +190,22 @@ class OrgRefileService:
             if not target_path.exists():
                 raise ValueError(f"Target file not found: {target_file}")
             
-            # Read both files
+            # Read both files (BOM-safe for target so header parsing is correct)
             with open(source_path, 'r', encoding='utf-8') as f:
                 source_content = f.read()
-            
-            with open(target_path, 'r', encoding='utf-8') as f:
+            with open(target_path, 'r', encoding='utf-8-sig') as f:
                 target_content = f.read()
-            
+
             # Extract the entry from source
             entry_lines, new_source_content = self._extract_entry(source_content, source_line)
-            
             if not entry_lines:
                 raise ValueError(f"No entry found at line {source_line}")
-            
+
+            # Apply target file's in-buffer settings to refiled entry (category, filetags)
+            from utils.org_header_parser import parse_org_file_header
+            target_header = parse_org_file_header(target_content)
+            entry_lines = self._apply_target_header_to_entry(entry_lines, target_header)
+
             # Insert entry into target
             new_target_content = self._insert_entry(target_content, entry_lines, target_heading_line)
             
@@ -273,7 +279,55 @@ class OrgRefileService:
         new_lines = lines[:idx] + lines[i:]
         
         return entry_lines, '\n'.join(new_lines)
-    
+
+    def _apply_target_header_to_entry(
+        self, entry_lines: List[str], header: Optional[OrgFileHeader]
+    ) -> List[str]:
+        """
+        Apply target file's #+CATEGORY: and #+FILETAGS: to the refiled entry when missing.
+        """
+        if header is None:
+            return entry_lines
+        if not entry_lines:
+            return entry_lines
+        lines = list(entry_lines)
+
+        # Add or set :CATEGORY: from target file if entry has none
+        if header.category:
+            in_drawer = False
+            end_idx = None
+            has_category = False
+            for i, line in enumerate(lines):
+                stripped = line.strip()
+                if stripped == ":PROPERTIES:":
+                    in_drawer = True
+                elif in_drawer and stripped == ":END:":
+                    end_idx = i
+                    break
+                elif in_drawer and (stripped.startswith(":CATEGORY:") or stripped.startswith(":Category:")):
+                    has_category = True
+                    break
+            if not has_category and end_idx is not None:
+                lines.insert(end_idx, f":CATEGORY: {header.category}")
+            elif not has_category:
+                # No PROPERTIES drawer: add one after heading
+                props = [":PROPERTIES:", f":CATEGORY: {header.category}", ":END:"]
+                lines = [lines[0]] + props + lines[1:]
+
+        # Add file tags to heading line if it has no org-style tags
+        if header.filetags:
+            first = lines[0]
+            if not re.search(r"\s+:[A-Za-z0-9_@]+(?::[A-Za-z0-9_@]+)*:\s*$", first):
+                tag_list = filetags_to_list(header.filetags)
+                if tag_list:
+                    suffix = "  :" + ":".join(tag_list) + ":"
+                    new_first = first.rstrip() + suffix
+                    if not new_first.endswith("\n"):
+                        new_first += "\n"
+                    lines[0] = new_first
+
+        return lines
+
     def _adjust_heading_level(self, entry_lines: List[str], level_adjustment: int) -> List[str]:
         """
         Adjust the level of all headings in entry_lines

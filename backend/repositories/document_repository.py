@@ -1091,7 +1091,8 @@ class DocumentRepository:
             user_id=row.get("user_id", None),
             folder_id=row.get("folder_id", None),
             collection_type=row.get("collection_type", "user"),  # CRITICAL: Must include collection_type!
-            exempt_from_vectorization=row.get("exempt_from_vectorization", None)
+            exempt_from_vectorization=row.get("exempt_from_vectorization", None),
+            has_pending_proposals=bool(row.get("has_pending_proposals", False)),
         )
     
     async def execute_query(self, query: str, *params, rls_context: Dict[str, Any] = None) -> List[Dict[str, Any]]:
@@ -1821,10 +1822,15 @@ class DocumentRepository:
                 rls_context = {'user_id': '', 'user_role': 'admin'}
             
             rows = await fetch_all("""
-                SELECT folder_id, name, parent_folder_id, user_id, collection_type, created_at, updated_at
-                FROM document_folders 
-                WHERE parent_folder_id = $1
-                ORDER BY name
+                SELECT f.folder_id, f.name, f.parent_folder_id, f.user_id, f.collection_type, f.created_at, f.updated_at,
+                       COUNT(DISTINCT d.document_id) AS document_count,
+                       COUNT(DISTINCT sf.folder_id) AS subfolder_count
+                FROM document_folders f
+                LEFT JOIN document_metadata d ON d.folder_id = f.folder_id
+                LEFT JOIN document_folders sf ON sf.parent_folder_id = f.folder_id
+                WHERE f.parent_folder_id = $1
+                GROUP BY f.folder_id, f.name, f.parent_folder_id, f.user_id, f.collection_type, f.created_at, f.updated_at
+                ORDER BY f.name
             """, parent_folder_id, rls_context=rls_context)
             
             return rows
@@ -1849,29 +1855,38 @@ class DocumentRepository:
                 rls_context = {'user_id': '', 'user_role': 'admin'}
                 logger.debug(f"🔍 Repository: Using admin context for folder query")
             
+            has_pending_subquery = """
+                EXISTS (
+                    SELECT 1 FROM document_edit_proposals dep
+                    WHERE dep.document_id = document_metadata.document_id
+                    AND (dep.expires_at IS NULL OR dep.expires_at > NOW())
+                ) AS has_pending_proposals
+            """
             if folder_id is None:
                 count_row = await fetch_one("""
                     SELECT COUNT(*) AS c FROM document_metadata WHERE folder_id IS NULL
                 """, rls_context=rls_context)
                 if limit is not None:
-                    rows = await fetch_all("""
+                    rows = await fetch_all(f"""
                         SELECT document_id, filename, title, category, tags, description, author, language,
                                publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
                                quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                                submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
-                               reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
+                               reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization,
+                               {has_pending_subquery}
                         FROM document_metadata 
                         WHERE folder_id IS NULL
                         ORDER BY filename
                         LIMIT $1 OFFSET $2
                     """, limit, offset, rls_context=rls_context)
                 else:
-                    rows = await fetch_all("""
+                    rows = await fetch_all(f"""
                         SELECT document_id, filename, title, category, tags, description, author, language,
                                publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
                                quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                                submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
-                               reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
+                               reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization,
+                               {has_pending_subquery}
                         FROM document_metadata 
                         WHERE folder_id IS NULL
                         ORDER BY filename
@@ -1881,24 +1896,26 @@ class DocumentRepository:
                     SELECT COUNT(*) AS c FROM document_metadata WHERE folder_id = $1
                 """, folder_id, rls_context=rls_context)
                 if limit is not None:
-                    rows = await fetch_all("""
+                    rows = await fetch_all(f"""
                         SELECT document_id, filename, title, category, tags, description, author, language,
                                publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
                                quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                                submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
-                               reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
+                               reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization,
+                               {has_pending_subquery}
                         FROM document_metadata 
                         WHERE folder_id = $1
                         ORDER BY filename
                         LIMIT $2 OFFSET $3
                     """, folder_id, limit, offset, rls_context=rls_context)
                 else:
-                    rows = await fetch_all("""
+                    rows = await fetch_all(f"""
                         SELECT document_id, filename, title, category, tags, description, author, language,
                                publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
                                quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                                submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
-                               reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
+                               reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization,
+                               {has_pending_subquery}
                         FROM document_metadata 
                         WHERE folder_id = $1
                         ORDER BY filename
@@ -1933,18 +1950,26 @@ class DocumentRepository:
             """, collection_type, rls_context=rls_context)
             total = int(count_row['c']) if count_row else 0
             
+            has_pending_subquery = """
+                EXISTS (
+                    SELECT 1 FROM document_edit_proposals dep
+                    WHERE dep.document_id = document_metadata.document_id
+                    AND (dep.expires_at IS NULL OR dep.expires_at > NOW())
+                ) AS has_pending_proposals
+            """
             suffix = ""
             args = [collection_type]
             if limit is not None:
                 suffix = " LIMIT $2 OFFSET $3"
                 args.extend([limit, offset])
             
-            rows = await fetch_all("""
+            rows = await fetch_all(f"""
                 SELECT document_id, filename, title, category, tags, description, author, language,
                        publication_date, doc_type, file_size, file_hash, processing_status, upload_date,
                        quality_score, page_count, chunk_count, entity_count, metadata_json, user_id,
                        submission_status, submitted_by, submitted_at, submission_reason, reviewed_by,
-                       reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization
+                       reviewed_at, review_comment, collection_type, folder_id, exempt_from_vectorization,
+                       {has_pending_subquery}
                 FROM document_metadata 
                 WHERE folder_id IS NULL AND collection_type = $1
                 ORDER BY filename
@@ -1996,7 +2021,58 @@ class DocumentRepository:
         except Exception as e:
             logger.error(f"❌ Failed to get subfolder count for folder {folder_id}: {e}")
             return 0
-    
+
+    async def get_batch_folder_counts(
+        self, folder_ids: List[str], user_id: str = None, user_role: str = "user"
+    ) -> Dict[str, Dict[str, int]]:
+        """Get document_count and subfolder_count for many folders in two queries.
+        Returns {folder_id: {"document_count": n, "subfolder_count": m}}.
+        """
+        if not folder_ids:
+            return {}
+        try:
+            from services.database_manager.database_helpers import fetch_all
+
+            if user_id:
+                rls_context = {"user_id": user_id, "user_role": user_role}
+            else:
+                rls_context = {"user_id": "", "user_role": "admin"}
+
+            doc_rows = await fetch_all(
+                """
+                SELECT folder_id, COUNT(*) AS count
+                FROM document_metadata
+                WHERE folder_id = ANY($1::text[])
+                GROUP BY folder_id
+                """,
+                folder_ids,
+                rls_context=rls_context,
+            )
+            sub_rows = await fetch_all(
+                """
+                SELECT parent_folder_id AS folder_id, COUNT(*) AS count
+                FROM document_folders
+                WHERE parent_folder_id = ANY($1::text[])
+                GROUP BY parent_folder_id
+                """,
+                folder_ids,
+                rls_context=rls_context,
+            )
+
+            result = {fid: {"document_count": 0, "subfolder_count": 0} for fid in folder_ids}
+            for row in doc_rows or []:
+                fid = row.get("folder_id")
+                if fid is not None and fid in result:
+                    result[fid]["document_count"] = row.get("count", 0) or 0
+            for row in sub_rows or []:
+                fid = row.get("folder_id")
+                if fid is not None and fid in result:
+                    result[fid]["subfolder_count"] = row.get("count", 0) or 0
+            return result
+        except Exception as e:
+            logger.error(f"Failed to get batch folder counts: {e}")
+            return {fid: {"document_count": 0, "subfolder_count": 0} for fid in folder_ids}
+
     async def update_folder(self, folder_id: str, updates: Dict[str, Any], user_id: str = None, user_role: str = "user") -> bool:
         """Update folder information with proper RLS context"""
         try:

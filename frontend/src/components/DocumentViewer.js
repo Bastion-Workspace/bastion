@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Box,
   Typography,
@@ -13,6 +13,7 @@ import {
   Select,
   MenuItem,
   FormControl,
+  InputLabel,
   Menu,
   ListItemIcon,
   ListItemText
@@ -27,12 +28,19 @@ import {
   Edit,
   Save,
   Visibility,
+  VisibilityOff,
+  ViewAgenda,
   FileDownload,
   Schedule,
   Fullscreen,
   FullscreenExit,
   InfoOutlined,
-  Subject
+  Subject,
+  History,
+  Restore,
+  VolumeUp,
+  Stop,
+  AudioFile
 } from '@mui/icons-material';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -41,7 +49,7 @@ import rehypeSanitize from 'rehype-sanitize';
 import apiService from '../services/apiService';
 import exportService from '../services/exportService';
 import settingsService from '../services/settings/SettingsService';
-import { Dialog, DialogTitle, DialogContent, DialogActions, FormGroup, FormControlLabel, Checkbox, Button, Stack, Switch, Popover } from '@mui/material';
+import { Dialog, DialogTitle, DialogContent, DialogActions, FormGroup, FormControlLabel, Checkbox, Button, Stack, Switch, Popover, Drawer, FormLabel, RadioGroup, Radio } from '@mui/material';
 import OrgRenderer from './OrgRenderer';
 import OrgCMEditor from './OrgCMEditor';
 import MarkdownCMEditor from './MarkdownCMEditor';
@@ -51,8 +59,10 @@ import OrgTagDialog from './OrgTagDialog';
 import PDFDocumentViewer from './PDFDocumentViewer';
 import AudioPlayer from './AudioPlayer';
 import DocxViewer from './DocxViewer';
+import PptxViewer from './PptxViewer';
 import EMLViewer from './EMLViewer';
 import { useEditor } from '../contexts/EditorContext';
+import { useChatSidebar } from '../contexts/ChatSidebarContext';
 import { parseFrontmatter } from '../utils/frontmatterUtils';
 import { useTheme } from '../contexts/ThemeContext';
 // Correct import path for documentDiffStore
@@ -61,6 +71,9 @@ import { useImageLightbox } from './common/ImageLightbox';
 import FaceTagSuggestions from './images/FaceTagSuggestions';
 import ImageMetadataModal from './images/ImageMetadataModal';
 import { useAuth } from '../contexts/AuthContext';
+import { stripTextForSpeech } from '../utils/textForSpeech';
+import { useTTS } from '../hooks/useTTS';
+import AudioExportDialog from './AudioExportDialog';
 
 // Normalize bbox from face or object (supports bbox_x/bbox_y/bbox_width/bbox_height or left/top/right/bottom)
 const getBbox = (item) => {
@@ -476,11 +489,43 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   // Track if user manually entered edit mode (vs auto-entered)
   const manuallyEditingRef = React.useRef(false);
   const [saving, setSaving] = useState(false);
-  const [showPreview, setShowPreview] = useState(false);
+  // View mode for editable docs: 'edit' (editor only) | 'split' (editor + preview) | 'preview' (preview only)
+  const [viewMode, setViewMode] = useState('edit');
   const { setEditorState } = useEditor();
-  const { darkMode } = useTheme();
+  const { messages: sidebarMessages = [] } = useChatSidebar();
+  const { darkMode, accentId } = useTheme();
   const [exportOpen, setExportOpen] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [pdfExportDialogOpen, setPdfExportDialogOpen] = useState(false);
+  const [audioExportOpen, setAudioExportOpen] = useState(false);
+  const [pdfExportOrientation, setPdfExportOrientation] = useState('portrait');
+  const [pdfIncludeToc, setPdfIncludeToc] = useState(false);
+  const [pdfTocDepth, setPdfTocDepth] = useState(3);
+  const [pdfPageNumbers, setPdfPageNumbers] = useState(true);
+  const [pdfWatermarkText, setPdfWatermarkText] = useState('');
+  const [pdfWatermarkAllPages, setPdfWatermarkAllPages] = useState(true);
+  const [pdfPageBreakHeadings, setPdfPageBreakHeadings] = useState([]);
+  const [pdfLayout, setPdfLayout] = useState('article');
+  const [pdfFontPreset, setPdfFontPreset] = useState('liberation');
+  const [pdfTypefaceStyle, setPdfTypefaceStyle] = useState('mixed');
+  const [pdfHeadingOutline, setPdfHeadingOutline] = useState([]);
+  const [pdfOutlineLoading, setPdfOutlineLoading] = useState(false);
+  const [pdfBookMarginTopMm, setPdfBookMarginTopMm] = useState(20);
+  const [pdfBookMarginRightMm, setPdfBookMarginRightMm] = useState(20);
+  const [pdfBookMarginBottomMm, setPdfBookMarginBottomMm] = useState(28);
+  const [pdfBookMarginLeftMm, setPdfBookMarginLeftMm] = useState(20);
+  const [pdfBookIndentBody, setPdfBookIndentBody] = useState(true);
+  const [pdfBookNoIndentAfterHeading, setPdfBookNoIndentAfterHeading] = useState(true);
+  const [pdfBookPageNumFormat, setPdfBookPageNumFormat] = useState('n_of_total');
+  const [pdfBookPageNumVertical, setPdfBookPageNumVertical] = useState('bottom');
+  const [pdfBookPageNumHorizontal, setPdfBookPageNumHorizontal] = useState('center');
+  const [pdfBookSuppressFirstPage, setPdfBookSuppressFirstPage] = useState(false);
+  const [pdfSectionOverrides, setPdfSectionOverrides] = useState({});
+  const pdfOutlineTimerRef = useRef(null);
+  const pdfSourceFormat = useMemo(() => {
+    const n = (document?.filename || '').toLowerCase();
+    return n.endsWith('.org') ? 'org' : 'markdown';
+  }, [document?.filename]);
   const [epubTitle, setEpubTitle] = useState('');
   const [epubAuthorFirst, setEpubAuthorFirst] = useState('');
   const [epubAuthorLast, setEpubAuthorLast] = useState('');
@@ -510,6 +555,18 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   const [tagSourceHeading, setTagSourceHeading] = useState('');
   const orgEditorRef = React.useRef(null);
   const markdownEditorRef = React.useRef(null);
+  // Scroll position to restore after a refresh (editor remount). Set before fetchDocument so we have it when the new editor mounts.
+  const pendingScrollAfterRefreshRef = React.useRef(null);
+  // Proposal IDs recently accepted/rejected/terminal-failed; skip re-injecting from DB for TTL window.
+  const resolvedProposalIdsRef = React.useRef(new Map());
+  const [versionHistoryOpen, setVersionHistoryOpen] = useState(false);
+  const [versionsList, setVersionsList] = useState([]);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [versionViewContent, setVersionViewContent] = useState(null);
+  const [versionViewMeta, setVersionViewMeta] = useState(null);
+  const [versionDiffResult, setVersionDiffResult] = useState(null);
+  const [rollbackConfirmVersion, setRollbackConfirmVersion] = useState(null);
+  const [rollbacking, setRollbacking] = useState(false);
   const [editingTitle, setEditingTitle] = useState(false);
   const [editingFilename, setEditingFilename] = useState(false);
   const [editedTitle, setEditedTitle] = useState('');
@@ -517,9 +574,14 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   const [updatingMetadata, setUpdatingMetadata] = useState(false);
   const [externalUpdateNotification, setExternalUpdateNotification] = useState(null);
   const [downloadMenuAnchor, setDownloadMenuAnchor] = useState(null);
+  // Scroll position to restore after a full-document refresh (e.g. Accept All). Cleared after editor applies it.
+  const [restoreScrollAfterRefresh, setRestoreScrollAfterRefresh] = useState(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const fullscreenContainerRef = React.useRef(null);
   const [currentSection, setCurrentSection] = useState(null);
+  const { isSpeaking: isReadingAloud, canSpeak, speak } = useTTS({
+    stopEventName: 'document-read-aloud-stop',
+  });
 
   // Helper functions for unsaved content persistence
   const getUnsavedContentKey = (docId) => `unsaved_content_${docId}`;
@@ -573,6 +635,48 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     if (collectionType === 'user' && docUserId === currentUserId) return true;
     
     return false;
+  };
+
+  const readAloudFilenameLower = (document?.filename || '').toLowerCase();
+  const isReadableTextDocument =
+    !!document?.filename &&
+    (
+      readAloudFilenameLower.endsWith('.md') ||
+      readAloudFilenameLower.endsWith('.txt') ||
+      readAloudFilenameLower.endsWith('.org')
+    );
+
+  const getPreferredTextToRead = () => {
+    const selectedFromOrg = orgEditorRef.current?.getSelectedText?.();
+    const selectedFromMarkdown = markdownEditorRef.current?.getSelectedText?.();
+    const selectedText = selectedFromOrg || selectedFromMarkdown;
+    if (selectedText && String(selectedText).trim()) {
+      return String(selectedText);
+    }
+    if (isEditing) {
+      return editContent || '';
+    }
+    return document?.content || '';
+  };
+
+  const handleToggleReadAloud = async () => {
+    if (!canSpeak || !isReadableTextDocument) return;
+
+    if (isReadingAloud) {
+      window.dispatchEvent(new CustomEvent('document-read-aloud-stop'));
+      return;
+    }
+
+    const sourceText = getPreferredTextToRead();
+    const mode = readAloudFilenameLower.endsWith('.org') ? 'org' : 'markdown';
+    const speechText = stripTextForSpeech(sourceText, mode);
+    if (!speechText) return;
+
+    try {
+      await speak(speechText);
+    } catch (error) {
+      console.error('Document read aloud failed:', error);
+    }
   };
   
   const saveUnsavedContent = (docId, content) => {
@@ -631,7 +735,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           } else if (canEdit) {
             // User can edit - always open in edit mode
             setIsEditing(true);
-            setShowPreview(false);
+            setViewMode('edit');
             manuallyEditingRef.current = false;
             setEditModePreference(true); // Remember preference
           } else {
@@ -678,7 +782,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
         // User can edit - always open in edit mode
         console.log('✅ Opening document in edit mode (user has permission)');
         setIsEditing(true);
-        setShowPreview(false);
+        setViewMode('edit');
         manuallyEditingRef.current = false; // Auto-entered
         setEditModePreference(true); // Remember preference
       } else {
@@ -700,6 +804,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
   useEffect(() => {
     if (documentId) {
       manuallyEditingRef.current = false; // Reset manual edit flag when switching documents
+      setViewMode('edit'); // Start each document in edit-only view
       fetchDocument(false);
     }
   }, [documentId, fetchDocument]);
@@ -714,6 +819,16 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     window.addEventListener('journalDocumentUpdated', handler);
     return () => window.removeEventListener('journalDocumentUpdated', handler);
   }, [documentId, fetchDocument]);
+
+  // Clear pending scroll ref after editor has restored (so we don't keep forcing the same scroll)
+  useEffect(() => {
+    if (!document || loading || pendingScrollAfterRefreshRef.current == null) return;
+    const t = setTimeout(() => {
+      pendingScrollAfterRefreshRef.current = null;
+      setRestoreScrollAfterRefresh(null);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [document?.document_id, loading]);
 
   // Save unsaved content whenever editContent changes (debounced)
   useEffect(() => {
@@ -772,6 +887,152 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     };
   }, []);
 
+  const docViewerWsRef = useRef(null);
+  const docViewerReconnectAttemptsRef = useRef(0);
+  const docViewerReconnectTimeoutRef = useRef(null);
+  const acceptShieldUntilRef = useRef(0);
+  const refreshCooldownUntilRef = useRef(0);
+  const acceptAllInProgressRef = useRef(false);
+  const rejectAllInProgressRef = useRef(false);
+  const syncPendingProposalsAbortRef = useRef(null);
+  const documentIdRef = useRef(documentId);
+  documentIdRef.current = documentId;
+
+  // Centralized: capture scroll and do a single refresh (guards against duplicate refresh bursts).
+  const refreshWithScrollCapture = React.useCallback(() => {
+    if (Date.now() < refreshCooldownUntilRef.current) return;
+    const scrollPos = orgEditorRef.current?.getScrollPosition?.() ?? markdownEditorRef.current?.getScrollPosition?.() ?? contentBoxRef?.current?.scrollTop ?? 0;
+    if (typeof onScrollChange === 'function') onScrollChange(scrollPos);
+    pendingScrollAfterRefreshRef.current = scrollPos;
+    setRestoreScrollAfterRefresh(scrollPos);
+    refreshCooldownUntilRef.current = Date.now() + 3000;
+    fetchDocument(true, true);
+  }, [fetchDocument, onScrollChange]);
+
+  const handleScrollRestored = React.useCallback(() => {
+    pendingScrollAfterRefreshRef.current = null;
+    setRestoreScrollAfterRefresh(null);
+  }, []);
+
+  // Handle edit proposals - route through live-diff path (same as writing assistant)
+  const handleEditProposal = React.useCallback(async (proposal) => {
+    if (!proposal || !documentId) return;
+    if (proposal.document_id != null && proposal.document_id !== documentId) return;
+
+    try {
+      const currentContent = editContentRef.current || editContent || document?.content || '';
+      const proposalId = proposal.proposal_id ?? proposal.id ?? `proposal-${Date.now()}`;
+      let ops = [];
+
+      const parseOperations = (raw) => {
+        if (Array.isArray(raw)) return raw;
+        if (typeof raw === 'string') {
+          try {
+            const parsed = JSON.parse(raw);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch (_) {
+            return [];
+          }
+        }
+        return [];
+      };
+
+      if (proposal.edit_type === 'content' && proposal.content_edit) {
+        const contentEdit = proposal.content_edit;
+        const contentLength = currentContent.length;
+        if (contentEdit.edit_mode === 'append') {
+          ops = [{
+            op_type: 'insert_after',
+            start: contentLength,
+            end: contentLength,
+            text: contentEdit.content || '',
+          }];
+        } else if (contentEdit.edit_mode === 'replace') {
+          ops = [{
+            op_type: 'replace_range',
+            start: 0,
+            end: contentLength,
+            text: contentEdit.content || '',
+            original_text: currentContent,
+          }];
+        }
+      } else {
+        const rawOps = proposal.operations ?? proposal.editor_operations;
+        ops = parseOperations(rawOps);
+      }
+
+      if (ops.length > 0) {
+        const taggedOps = ops.map((op, idx) => {
+          const base = { ...op };
+          if (proposal.edit_type === 'operations') {
+            base.proposal_operation_index =
+              op.proposal_operation_index !== undefined && op.proposal_operation_index !== null
+                ? Number(op.proposal_operation_index)
+                : idx;
+          }
+          return base;
+        });
+        documentDiffStore.mergeProposalDiff(documentId, taggedOps, proposalId, currentContent);
+        if (isEditing) {
+          window.dispatchEvent(
+            new CustomEvent('editorOperationsLive', {
+              detail: {
+                operations: taggedOps,
+                messageId: proposalId,
+                documentId,
+                filename: document?.filename,
+                preserveExisting: true,
+              },
+            })
+          );
+        }
+      } else if (proposal.edit_type === 'operations' || proposal.operations != null || proposal.editor_operations != null) {
+        console.warn('handleEditProposal: no ops after parse', {
+          documentId,
+          proposal_id: proposalId,
+          edit_type: proposal.edit_type,
+          rawOperationsType: typeof (proposal.operations ?? proposal.editor_operations),
+          rawOperationsPreview: JSON.stringify((proposal.operations ?? proposal.editor_operations)?.slice?.(0, 1) ?? proposal.operations ?? proposal.editor_operations).slice(0, 120),
+        });
+      }
+    } catch (err) {
+      console.error('Error handling edit proposal:', err);
+    }
+  }, [documentId, isEditing, editContent, document]);
+
+  const handleEditProposalRef = React.useRef(handleEditProposal);
+  handleEditProposalRef.current = handleEditProposal;
+
+  const syncPendingProposalsFromDb = React.useCallback((reason) => {
+    if (!documentId) return;
+    const now = Date.now();
+    const resolved = resolvedProposalIdsRef.current;
+    for (const [id, exp] of resolved.entries()) {
+      if (exp <= now) resolved.delete(id);
+    }
+    const fetchedForDocId = documentId;
+    syncPendingProposalsAbortRef.current?.abort();
+    const controller = new AbortController();
+    syncPendingProposalsAbortRef.current = controller;
+
+    apiService.getPendingProposals(documentId, { signal: controller.signal })
+      .then((proposals) => {
+        if (controller.signal.aborted) return;
+        if (documentIdRef.current !== fetchedForDocId) return;
+        if (!Array.isArray(proposals)) return;
+        const handler = handleEditProposalRef.current;
+        if (!handler) return;
+        for (const p of proposals) {
+          const pid = p.proposal_id ?? p.id;
+          if (pid && resolved.has(pid) && resolved.get(pid) > now) continue;
+          handler(p);
+        }
+      })
+      .catch((err) => {
+        if (err?.name === 'AbortError') return;
+      });
+  }, [documentId]);
+
   // WebSocket listener for real-time document updates
   useEffect(() => {
     if (!documentId) return;
@@ -783,13 +1044,22 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     }
 
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/ws/folders?token=${encodeURIComponent(token)}`;
-    let ws = null;
+    const MAX_RECONNECT_ATTEMPTS = 5;
 
-    try {
-      ws = new WebSocket(wsUrl);
-      
+    const connect = () => {
+      let ws;
+      try {
+        ws = new WebSocket(wsUrl);
+        docViewerWsRef.current = ws;
+      } catch (err) {
+        console.error('❌ Failed to create document WebSocket:', err);
+        return;
+      }
+
       ws.onopen = () => {
         console.log('📡 DocumentViewer: Connected to updates WebSocket');
+        docViewerReconnectAttemptsRef.current = 0;
+        syncPendingProposalsFromDb('ws_reconnect');
       };
 
       ws.onmessage = (event) => {
@@ -804,42 +1074,56 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
             // This ensures users see agent changes in real-time, even if they have unsaved content
             if (update.status === 'completed') {
               console.log('🔄 Auto-refreshing document content (status: completed - agent finished work)...');
-              
-              // Check if user has unsaved changes
               const hasUnsaved = getUnsavedContent(documentId) !== null;
               if (hasUnsaved) {
                 console.log('⚠️ Document has unsaved changes, but refreshing due to agent completion');
-                // Show notification that file was updated externally
                 setExternalUpdateNotification({
                   message: 'File was updated by agent. Your unsaved changes were overwritten.',
                   timestamp: Date.now()
                 });
-                // Clear notification after 5 seconds
                 setTimeout(() => setExternalUpdateNotification(null), 5000);
               }
-              
-              // Clear unsaved content since agent update takes precedence
               clearUnsavedContent(documentId);
-              
-              // Force refresh to get latest content from server, preserving edit mode if user was editing
-              fetchDocument(true, true); // preserveEditMode = true
+              if (!acceptAllInProgressRef.current && !rejectAllInProgressRef.current) {
+                refreshWithScrollCapture();
+              }
             } else if (update.status === 'processing') {
-              // Document is being processed - don't refresh yet, wait for 'completed'
               console.log('⏳ Document is being processed, waiting for completion...');
+            } else if (update.status === 'edit_proposal_applied') {
+              if (!acceptAllInProgressRef.current && !rejectAllInProgressRef.current) {
+                refreshWithScrollCapture();
+              }
+            } else if (update.status === 'edit_proposal_rejected') {
+              // Skip refresh during bulk reject - single refresh happens in finally block
+              if (!rejectAllInProgressRef.current && !isEditing) {
+                // Single reject when not editing: allow one refresh
+                if (Date.now() < acceptShieldUntilRef.current) {
+                  console.log('⏸️ Within accept shield window, skipping refresh');
+                } else {
+                  console.log('🔄 Auto-refreshing document content (proposal rejected, not editing)...');
+                  fetchDocument(true);
+                }
+              }
             } else if (!isEditing) {
-              // If not editing and status changed, refresh
-              console.log('🔄 Auto-refreshing document content (not editing, status changed)...');
-              fetchDocument(true);
+              // If not editing and status changed, refresh (unless within accept shield or bulk operations)
+              if (rejectAllInProgressRef.current || acceptAllInProgressRef.current) {
+                console.log('⏸️ Bulk operation in progress, skipping refresh');
+              } else if (Date.now() < acceptShieldUntilRef.current) {
+                console.log('⏸️ Within accept shield window, skipping refresh');
+              } else {
+                console.log('🔄 Auto-refreshing document content (not editing, status changed)...');
+                fetchDocument(true);
+              }
             } else {
               // User is editing and status is not completed - don't interrupt them
               console.log('⏸️ User is editing and status is not completed, skipping auto-refresh');
             }
           }
           
-          // Listen for document edit proposals
+          // Listen for document edit proposals (trigger-only: sync from DB as single source of truth)
           if (update.type === 'document_edit_proposal' && update.document_id === documentId) {
-            console.log('📝 Received edit proposal for this document:', update);
-            handleEditProposal(update);
+            console.log('📝 Edit proposal signal for this document, syncing from DB');
+            syncPendingProposalsFromDb('ws_edit_proposal');
           }
         } catch (err) {
           console.error('❌ Error parsing WebSocket message:', err);
@@ -852,114 +1136,208 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
 
       ws.onclose = () => {
         console.log('📡 DocumentViewer: WebSocket connection closed');
+        docViewerWsRef.current = null;
+
+        const attempts = docViewerReconnectAttemptsRef.current;
+        if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+          console.warn('📡 DocumentViewer WebSocket: max reconnect attempts reached, giving up');
+          return;
+        }
+        docViewerReconnectAttemptsRef.current = attempts + 1;
+        const delay = Math.min(1000 * Math.pow(2, attempts), 30000);
+        console.log(`📡 DocumentViewer WebSocket: reconnecting in ${delay}ms (attempt ${attempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+        docViewerReconnectTimeoutRef.current = setTimeout(connect, delay);
       };
+    };
 
-    } catch (err) {
-      console.error('❌ Failed to establish WebSocket connection:', err);
-    }
+    connect();
 
-    // Cleanup on unmount
     return () => {
-      if (ws) {
-        ws.close();
+      syncPendingProposalsAbortRef.current?.abort();
+      if (docViewerReconnectTimeoutRef.current) {
+        clearTimeout(docViewerReconnectTimeoutRef.current);
+        docViewerReconnectTimeoutRef.current = null;
+      }
+      if (docViewerWsRef.current && docViewerWsRef.current.readyState === WebSocket.OPEN) {
+        docViewerWsRef.current.close();
+        docViewerWsRef.current = null;
       }
     };
-  }, [documentId, isEditing, fetchDocument]);
+  }, [documentId, isEditing, fetchDocument, syncPendingProposalsFromDb, refreshWithScrollCapture]);
 
-  // Handle edit proposals - convert to inline suggestions
-  const handleEditProposal = React.useCallback(async (proposal) => {
-    if (!proposal || !isEditing) return; // Only show suggestions in edit mode
-    
-    try {
-      // Fetch current document content to find text positions
-      const currentContent = editContent || document?.content || '';
-      
-      // Convert proposal to inline suggestions
-      if (proposal.edit_type === 'content' && proposal.content_edit) {
-        const contentEdit = proposal.content_edit;
-        
-        if (contentEdit.edit_mode === 'append') {
-          // Append: show suggestion at end of document
-          const from = currentContent.length;
-          const to = currentContent.length;
-          const original = '';
-          const suggested = contentEdit.content;
-          
-          // Dispatch suggestion event
-          window.dispatchEvent(new CustomEvent('inlineEditSuggestion', {
-            detail: {
-              suggestionId: `suggestion-${proposal.proposal_id}-append`,
-              from,
-              to,
-              original,
-              suggested,
-              proposalId: proposal.proposal_id,
-              onAccept: async (proposalId) => {
-                // Apply the edit
-                await apiService.applyDocumentEditProposal(proposalId);
-              },
-              onReject: async (proposalId) => {
-                // Reject the edit (could mark as rejected in backend)
-                console.log('Rejected proposal:', proposalId);
-              }
-            }
+  // Listen for accept/reject from liveEditDiffExtension and call backend; dispatch Done so plugin can remove ops (proposal-level clear)
+  useEffect(() => {
+    if (!documentId) return;
+    const RESOLVED_TTL_MS = 60000;
+    const markResolved = (proposalId) => {
+      if (proposalId) {
+        resolvedProposalIdsRef.current.set(proposalId, Date.now() + RESOLVED_TTL_MS);
+      }
+    };
+    const onProposalAccept = async (e) => {
+      const { documentId: evDocId, proposalId, operationId, proposalOperationIndex } = e.detail || {};
+      if (evDocId !== documentId || !proposalId) return;
+      const hasOpIndex =
+        proposalOperationIndex !== undefined &&
+        proposalOperationIndex !== null &&
+        !Number.isNaN(Number(proposalOperationIndex));
+      const selectedIndices = hasOpIndex ? [Number(proposalOperationIndex)] : null;
+      try {
+        await apiService.applyDocumentEditProposal(proposalId, selectedIndices);
+        if (hasOpIndex && operationId) {
+          window.dispatchEvent(new CustomEvent('proposalAcceptDone', {
+            detail: { documentId, operationIds: [operationId] },
           }));
-        } else if (contentEdit.edit_mode === 'replace') {
-          // Replace: find the section to replace
-          // For now, show as append if we can't find exact match
-          const from = 0;
-          const to = currentContent.length;
-          const original = currentContent;
-          const suggested = contentEdit.content;
-          
-          window.dispatchEvent(new CustomEvent('inlineEditSuggestion', {
-            detail: {
-              suggestionId: `suggestion-${proposal.proposal_id}-replace`,
-              from,
-              to,
-              original,
-              suggested,
-              proposalId: proposal.proposal_id,
-              onAccept: async (proposalId) => {
-                await apiService.applyDocumentEditProposal(proposalId);
-              },
-              onReject: async (proposalId) => {
-                console.log('Rejected proposal:', proposalId);
-              }
-            }
+          setTimeout(() => syncPendingProposalsFromDb('proposal_partial_apply'), 350);
+        } else {
+          markResolved(proposalId);
+          window.dispatchEvent(new CustomEvent('proposalAcceptDone', {
+            detail: { documentId, proposalId, clearAllForProposal: true },
           }));
         }
-      } else if (proposal.edit_type === 'operations' && proposal.operations) {
-        // Operation-based edits: create suggestions for each operation
-        proposal.operations.forEach((op, idx) => {
-          const suggestionId = `suggestion-${proposal.proposal_id}-op-${idx}`;
-          const from = op.start || 0;
-          const to = op.end || 0;
-          const original = op.original_text || currentContent.slice(from, to);
-          const suggested = op.text || '';
-          
-          window.dispatchEvent(new CustomEvent('inlineEditSuggestion', {
-            detail: {
-              suggestionId,
-              from,
-              to,
-              original,
-              suggested,
-              proposalId: proposal.proposal_id,
-              onAccept: async (proposalId) => {
-                await apiService.applyDocumentEditProposal(proposalId, [idx]);
-              },
-              onReject: async (proposalId) => {
-                console.log('Rejected operation:', proposalId, idx);
-              }
-            }
-          }));
-        });
+        refreshWithScrollCapture();
+      } catch (err) {
+        console.error('Apply document edit proposal failed:', err);
       }
-    } catch (err) {
-      console.error('❌ Error handling edit proposal:', err);
-    }
-  }, [documentId, isEditing, editContent, document]);
+    };
+    const onProposalReject = async (e) => {
+      const { documentId: evDocId, proposalId, operationId, operationIds } = e.detail || {};
+      if (evDocId !== documentId || !proposalId) return;
+      // Clear diff decoration and store immediately (same race fix as accept)
+      markResolved(proposalId);
+      window.dispatchEvent(new CustomEvent('proposalRejectDone', {
+        detail: { documentId, proposalId, clearAllForProposal: true }
+      }));
+      try {
+        await apiService.rejectDocumentEditProposal(proposalId);
+      } catch (err) {
+        console.error('Reject document edit proposal failed:', err);
+        const status = err?.response?.status;
+        const isTerminal = status >= 400 && status < 500;
+        if (isTerminal) {
+          markResolved(proposalId);
+          window.dispatchEvent(new CustomEvent('proposalRejectDone', {
+            detail: { documentId, proposalId, clearAllForProposal: true }
+          }));
+        }
+      }
+    };
+    const onProposalAcceptAll = async (e) => {
+      const { documentId: evDocId, proposalIds } = e.detail || {};
+      if (evDocId !== documentId || !Array.isArray(proposalIds)) return;
+      acceptAllInProgressRef.current = true;
+      // Clear diff decorations immediately so UI updates without waiting for backend
+      proposalIds.forEach((proposalId) => {
+        markResolved(proposalId);
+        window.dispatchEvent(new CustomEvent('proposalAcceptDone', {
+          detail: { documentId, proposalId, clearAllForProposal: true }
+        }));
+      });
+      try {
+        for (const proposalId of proposalIds) {
+          try {
+            await apiService.applyDocumentEditProposal(proposalId);
+          } catch (err) {
+            const status = err?.response?.status;
+            if (status >= 400 && status < 500) {
+              markResolved(proposalId);
+              window.dispatchEvent(new CustomEvent('proposalAcceptDone', {
+                detail: { documentId, proposalId, clearAllForProposal: true }
+              }));
+            }
+          }
+        }
+      } finally {
+        acceptAllInProgressRef.current = false;
+        refreshWithScrollCapture();
+      }
+    };
+    const onProposalRejectAll = async (e) => {
+      const { documentId: evDocId, proposalIds } = e.detail || {};
+      if (evDocId !== documentId || !Array.isArray(proposalIds)) return;
+      rejectAllInProgressRef.current = true;
+      // Clear diff decorations immediately so UI updates without waiting for backend
+      proposalIds.forEach((proposalId) => {
+        markResolved(proposalId);
+        window.dispatchEvent(new CustomEvent('proposalRejectDone', {
+          detail: { documentId, proposalId, clearAllForProposal: true }
+        }));
+      });
+      try {
+        await Promise.all(
+          proposalIds.map(async (proposalId) => {
+            try {
+              await apiService.rejectDocumentEditProposal(proposalId);
+            } catch (err) {
+              const status = err?.response?.status;
+              // 404 means proposal already deleted - treat as success (idempotent)
+              if (status === 404) {
+                return; // Already rejected, no-op
+              }
+              // Other 4xx errors: already cleared upfront, just log
+              if (status >= 400 && status < 500) {
+                console.warn(`Reject proposal ${proposalId} failed with ${status}, but UI already cleared`);
+                return;
+              }
+              // Re-throw unexpected errors
+              throw err;
+            }
+          })
+        );
+      } finally {
+        rejectAllInProgressRef.current = false;
+        refreshWithScrollCapture();
+      }
+    };
+    window.addEventListener('proposalAccept', onProposalAccept);
+    window.addEventListener('proposalReject', onProposalReject);
+    window.addEventListener('proposalAcceptAll', onProposalAcceptAll);
+    window.addEventListener('proposalRejectAll', onProposalRejectAll);
+    return () => {
+      window.removeEventListener('proposalAccept', onProposalAccept);
+      window.removeEventListener('proposalReject', onProposalReject);
+      window.removeEventListener('proposalAcceptAll', onProposalAcceptAll);
+      window.removeEventListener('proposalRejectAll', onProposalRejectAll);
+    };
+  }, [documentId, fetchDocument, refreshWithScrollCapture, syncPendingProposalsFromDb]);
+
+  // Load pending proposals from DB when document opens or when entering edit mode (single path).
+  useEffect(() => {
+    if (!documentId || !isEditing) return;
+    const timer = setTimeout(() => {
+      syncPendingProposalsFromDb('initial');
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [documentId, isEditing, syncPendingProposalsFromDb]);
+
+  // Re-sync pending proposals when agent stream completes
+  useEffect(() => {
+    if (!documentId || !isEditing) return;
+    const refetch = () => syncPendingProposalsFromDb('agent_stream_complete');
+    window.addEventListener('agentStreamComplete', refetch);
+    return () => window.removeEventListener('agentStreamComplete', refetch);
+  }, [documentId, isEditing, syncPendingProposalsFromDb]);
+
+  // Auto-save content to backend immediately when a proposal is accepted (avoids race with WebSocket refresh)
+  useEffect(() => {
+    const handleApplied = async (e) => {
+      const { documentId: docId, content } = e.detail || {};
+      if (!docId || docId !== documentId || !content) return;
+
+      acceptShieldUntilRef.current = Date.now() + 2000;
+
+      try {
+        await apiService.updateDocumentContent(docId, content);
+        setServerContent(content);
+        clearUnsavedContent(docId);
+      } catch (err) {
+        console.error('Failed to auto-save after accept:', err);
+        saveUnsavedContent(docId, content);
+      }
+    };
+    window.addEventListener('liveEditApplied', handleApplied);
+    return () => window.removeEventListener('liveEditApplied', handleApplied);
+  }, [documentId]);
 
   // Extract headers from document content for navigation dropdown
   const headers = React.useMemo(() => {
@@ -1646,15 +2024,108 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     }
   };
 
-  // Export as PDF handler
-  const handleExportPdf = async () => {
+  const openPdfExportDialog = () => {
     handleDownloadMenuClose();
+    setPdfExportOrientation('portrait');
+    setPdfIncludeToc(false);
+    setPdfTocDepth(3);
+    setPdfPageNumbers(true);
+    setPdfWatermarkText('');
+    setPdfWatermarkAllPages(true);
+    setPdfPageBreakHeadings([]);
+    setPdfLayout('article');
+    setPdfFontPreset('liberation');
+    setPdfTypefaceStyle('mixed');
+    setPdfHeadingOutline([]);
+    setPdfSectionOverrides({});
+    setPdfBookMarginTopMm(20);
+    setPdfBookMarginRightMm(20);
+    setPdfBookMarginBottomMm(28);
+    setPdfBookMarginLeftMm(20);
+    setPdfBookIndentBody(true);
+    setPdfBookNoIndentAfterHeading(true);
+    setPdfBookPageNumFormat('n_of_total');
+    setPdfBookPageNumVertical('bottom');
+    setPdfBookPageNumHorizontal('center');
+    setPdfBookSuppressFirstPage(false);
+    setPdfExportDialogOpen(true);
+  };
+
+  useEffect(() => {
+    if (!pdfExportDialogOpen || pdfLayout !== 'book' || pdfPageBreakHeadings.length === 0) {
+      setPdfHeadingOutline([]);
+      setPdfOutlineLoading(false);
+      return undefined;
+    }
+    const md = editContent || document?.content || '';
+    if (pdfOutlineTimerRef.current) {
+      clearTimeout(pdfOutlineTimerRef.current);
+    }
+    pdfOutlineTimerRef.current = setTimeout(async () => {
+      try {
+        setPdfOutlineLoading(true);
+        const res = await exportService.fetchPdfHeadingOutline(md, {
+          sourceFormat: pdfSourceFormat,
+        });
+        setPdfHeadingOutline(Array.isArray(res.headings) ? res.headings : []);
+      } catch (e) {
+        console.error('PDF heading outline failed:', e);
+        setPdfHeadingOutline([]);
+      } finally {
+        setPdfOutlineLoading(false);
+      }
+    }, 400);
+    return () => {
+      if (pdfOutlineTimerRef.current) {
+        clearTimeout(pdfOutlineTimerRef.current);
+      }
+    };
+  }, [
+    pdfExportDialogOpen,
+    pdfLayout,
+    pdfPageBreakHeadings,
+    editContent,
+    document?.content,
+    pdfSourceFormat,
+  ]);
+
+  const handleConfirmPdfExport = async () => {
     try {
       setExporting(true);
       const content = editContent || document.content || '';
+      const bookSectionOverrides = Object.entries(pdfSectionOverrides)
+        .filter(([, v]) => v?.enabled)
+        .map(([headingId, v]) => ({
+          heading_id: headingId,
+          page_numbers: v.pageNumbers === 'inherit' ? null : v.pageNumbers === 'on',
+          plain_first_page: !!v.plainFirstPage,
+        }));
       await exportService.exportMarkdownAsPDF(content, {
-        filename: document.filename || 'document'
+        filename: document.filename || 'document',
+        pageOrientation: pdfExportOrientation,
+        includeToc: pdfIncludeToc,
+        tocDepth: pdfTocDepth,
+        pageNumbers: pdfPageNumbers,
+        watermarkText: pdfWatermarkText.trim() || null,
+        watermarkOnAllPages: pdfWatermarkAllPages,
+        pageBreakBeforeHeadings: pdfPageBreakHeadings,
+        pdfLayout,
+        bookMarginTopMm: pdfBookMarginTopMm,
+        bookMarginRightMm: pdfBookMarginRightMm,
+        bookMarginBottomMm: pdfBookMarginBottomMm,
+        bookMarginLeftMm: pdfBookMarginLeftMm,
+        bookIndentBodyParagraphs: pdfBookIndentBody,
+        bookNoIndentAfterSectionHeading: pdfBookNoIndentAfterHeading,
+        bookPageNumberFormat: pdfBookPageNumFormat,
+        bookPageNumberVertical: pdfBookPageNumVertical,
+        bookPageNumberHorizontal: pdfBookPageNumHorizontal,
+        bookSuppressPageNumberOnFirstPage: pdfBookSuppressFirstPage,
+        bookSectionOverrides,
+        pdfSourceFormat,
+        pdfFontPreset,
+        pdfTypefaceStyle,
       });
+      setPdfExportDialogOpen(false);
     } catch (error) {
       console.error('PDF export failed:', error);
       alert(`PDF export failed: ${error.message}`);
@@ -1788,6 +2259,69 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
     };
   }, []);
 
+  const canShowVersionHistory = document && canUserEditDocument(document);
+
+  const openVersionHistory = async () => {
+    if (!documentId || !document) return;
+    setVersionHistoryOpen(true);
+    setVersionsLoading(true);
+    setVersionsList([]);
+    setVersionViewContent(null);
+    setVersionDiffResult(null);
+    try {
+      const res = await apiService.getDocumentVersions(documentId);
+      setVersionsList(res.versions || []);
+    } catch (e) {
+      console.error('Failed to load versions', e);
+    } finally {
+      setVersionsLoading(false);
+    }
+  };
+
+  const handleViewVersion = async (version) => {
+    try {
+      const res = await apiService.getVersionContent(documentId, version.version_id);
+      setVersionViewContent(res.content);
+      setVersionViewMeta(version);
+      setVersionDiffResult(null);
+    } catch (e) {
+      console.error('Failed to load version content', e);
+    }
+  };
+
+  const handleDiffWithCurrent = async (version) => {
+    const currentVersion = versionsList.find((v) => v.is_current) || versionsList[0];
+    if (!currentVersion || currentVersion.version_id === version.version_id) return;
+    try {
+      const res = await apiService.diffVersions(documentId, version.version_id, currentVersion.version_id);
+      setVersionDiffResult(res);
+      setVersionViewContent(null);
+      setVersionViewMeta({ from: version, to: currentVersion });
+    } catch (e) {
+      console.error('Failed to load diff', e);
+    }
+  };
+
+  const handleRollbackClick = (version) => {
+    setRollbackConfirmVersion(version);
+  };
+
+  const handleRollbackConfirm = async () => {
+    if (!rollbackConfirmVersion || !documentId) return;
+    setRollbacking(true);
+    try {
+      await apiService.rollbackToVersion(documentId, rollbackConfirmVersion.version_id);
+      setRollbackConfirmVersion(null);
+      setVersionHistoryOpen(false);
+      fetchDocument(true);
+    } catch (e) {
+      console.error('Rollback failed', e);
+      alert('Rollback failed: ' + (e.message || e));
+    } finally {
+      setRollbacking(false);
+    }
+  };
+
   if (loading) {
     return (
       <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
@@ -1814,10 +2348,23 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
 
   const fnameLower = (document.filename || '').toLowerCase();
 
+  // Use pending scroll after refresh so remounted editor restores position (avoids parent state timing)
+  const effectiveInitialScroll = pendingScrollAfterRefreshRef.current ?? initialScrollPosition;
+
   // DocX files get specialized viewer with formatting preserved
   if (fnameLower.endsWith('.docx')) {
     return (
       <DocxViewer 
+        documentId={documentId}
+        filename={document.filename}
+      />
+    );
+  }
+
+  // PowerPoint files get specialized slide viewer
+  if (fnameLower.endsWith('.pptx') || fnameLower.endsWith('.ppt')) {
+    return (
+      <PptxViewer
         documentId={documentId}
         filename={document.filename}
       />
@@ -2122,7 +2669,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                     setEditModePreference(true); // Remember user prefers edit mode
                     const fname = (document.filename || '').toLowerCase();
                     if (fname.endsWith('.md') || fname.endsWith('.org')) {
-                      setShowPreview(false);
+                      setViewMode('edit');
                     }
                   }}>
                     <Edit fontSize="small" />
@@ -2224,10 +2771,26 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                 </Tooltip>
               )
             )}
+            {canShowVersionHistory && (
+              <Tooltip title="Version history">
+                <IconButton size="small" onClick={openVersionHistory}>
+                  <History fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            )}
             {isEditing && (
-              <Tooltip title={showPreview ? 'Hide Preview' : 'Show Preview'}>
-                <IconButton size="small" onClick={() => setShowPreview((p) => !p)}>
-                  <Visibility fontSize="small" />
+              <Tooltip title={
+                viewMode === 'edit' ? 'Show preview' :
+                viewMode === 'split' ? 'Preview only' : 'Edit only'
+              }>
+                <IconButton
+                  size="small"
+                  onClick={() => setViewMode((m) => (m === 'edit' ? 'split' : m === 'split' ? 'preview' : 'edit'))}
+                  color={viewMode === 'edit' ? 'default' : 'primary'}
+                >
+                  {viewMode === 'edit' && <VisibilityOff fontSize="small" />}
+                  {viewMode === 'split' && <ViewAgenda fontSize="small" />}
+                  {viewMode === 'preview' && <Visibility fontSize="small" />}
                 </IconButton>
               </Tooltip>
             )}
@@ -2236,6 +2799,19 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                 {isFullscreen ? <FullscreenExit fontSize="small" /> : <Fullscreen fontSize="small" />}
               </IconButton>
             </Tooltip>
+            {isReadableTextDocument && (
+              <Tooltip title={isReadingAloud ? 'Stop reading' : 'Read aloud'}>
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={handleToggleReadAloud}
+                    disabled={!canSpeak}
+                  >
+                    {isReadingAloud ? <Stop fontSize="small" /> : <VolumeUp fontSize="small" />}
+                  </IconButton>
+                </span>
+              </Tooltip>
+            )}
             <Tooltip title="Download or Export">
               <IconButton size="small" onClick={handleDownloadMenuOpen}>
                 <Download fontSize="small" />
@@ -2260,13 +2836,26 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                 </ListItemIcon>
                 <ListItemText>Download</ListItemText>
               </MenuItem>
+              {isReadableTextDocument && (
+                <MenuItem
+                  onClick={() => {
+                    handleDownloadMenuClose();
+                    setAudioExportOpen(true);
+                  }}
+                >
+                  <ListItemIcon>
+                    <AudioFile fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText>Export as Audio…</ListItemText>
+                </MenuItem>
+              )}
               {isEditing && document.filename && fnameLower.endsWith('.md') && (
                 <>
-                  <MenuItem onClick={handleExportPdf}>
+                  <MenuItem onClick={openPdfExportDialog}>
                     <ListItemIcon>
                       <FileDownload fontSize="small" />
                     </ListItemIcon>
-                    <ListItemText>Export to PDF</ListItemText>
+                    <ListItemText>Export to PDF…</ListItemText>
                   </MenuItem>
                   <MenuItem onClick={handleExportEpub}>
                     <ListItemIcon>
@@ -2277,15 +2866,132 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                 </>
               )}
             </Menu>
+            <Drawer
+              anchor="right"
+              open={versionHistoryOpen}
+              onClose={() => { setVersionHistoryOpen(false); setVersionViewContent(null); setVersionDiffResult(null); setVersionViewMeta(null); }}
+              PaperProps={{ sx: { width: 420, maxWidth: '100%' } }}
+            >
+              <Box sx={{ p: 2, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+                <Typography variant="h6" sx={{ mb: 2 }}>Version history</Typography>
+                {versionsLoading ? (
+                  <Box sx={{ display: 'flex', justifyContent: 'center', py: 2 }}><CircularProgress size={24} /></Box>
+                ) : (
+                  <Box sx={{ flex: 1, overflow: 'auto' }}>
+                    {versionViewContent != null ? (
+                      <Box>
+                        <Button size="small" onClick={() => { setVersionViewContent(null); setVersionViewMeta(null); }} sx={{ mb: 1 }}>Back to list</Button>
+                        <Typography variant="subtitle2" color="text.secondary">Version {versionViewMeta?.version_number} — {versionViewMeta?.change_source}</Typography>
+                        <Paper variant="outlined" sx={{ p: 1, mt: 1, maxHeight: 400, overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.85rem' }}>
+                          {versionViewContent}
+                        </Paper>
+                      </Box>
+                    ) : versionDiffResult ? (
+                      <Box>
+                        <Button size="small" onClick={() => setVersionDiffResult(null)} sx={{ mb: 1 }}>Back to list</Button>
+                        <Typography variant="subtitle2" color="text.secondary">
+                          Diff v{versionViewMeta?.from?.version_number} → v{versionViewMeta?.to?.version_number} (+{versionDiffResult.additions} / -{versionDiffResult.deletions})
+                        </Typography>
+                        <Paper variant="outlined" sx={{ p: 1, mt: 1, maxHeight: 400, overflow: 'auto', whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '0.75rem' }}>
+                          {versionDiffResult.diff || 'No changes'}
+                        </Paper>
+                      </Box>
+                    ) : (
+                      <Stack spacing={1}>
+                        {versionsList.length === 0 && <Typography color="text.secondary">No versions yet. Edits will create versions.</Typography>}
+                        {versionsList.map((v) => (
+                          <Paper key={v.version_id} variant="outlined" sx={{ p: 1.5 }}>
+                            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 0.5 }}>
+                              <Box>
+                                <Typography variant="subtitle2">v{v.version_number}</Typography>
+                                <Typography variant="caption" color="text.secondary">
+                                  {v.created_at ? new Date(v.created_at).toLocaleString() : ''} · {v.change_source || '—'}
+                                  {v.is_current && <Chip size="small" label="Current" sx={{ ml: 0.5 }} />}
+                                </Typography>
+                              </Box>
+                              <Box sx={{ display: 'flex', gap: 0.5 }}>
+                                <Button size="small" variant="outlined" onClick={() => handleViewVersion(v)}>View</Button>
+                                {!v.is_current && versionsList[0] && (
+                                  <Button size="small" variant="outlined" onClick={() => handleDiffWithCurrent(v)}>Diff</Button>
+                                )}
+                                {!v.is_current && (
+                                  <Button size="small" color="primary" startIcon={<Restore fontSize="small" />} onClick={() => handleRollbackClick(v)}>Rollback</Button>
+                                )}
+                              </Box>
+                            </Box>
+                            {v.change_summary && <Typography variant="caption" display="block" sx={{ mt: 0.5 }}>{v.change_summary}</Typography>}
+                          </Paper>
+                        ))}
+                      </Stack>
+                    )}
+                  </Box>
+                )}
+              </Box>
+            </Drawer>
+            <Dialog open={Boolean(rollbackConfirmVersion)} onClose={() => setRollbackConfirmVersion(null)}>
+              <DialogTitle>Rollback to this version?</DialogTitle>
+              <DialogContent>
+                {rollbackConfirmVersion && (
+                  <Typography>Current content will be saved as a new version first, then the document will be restored to version {rollbackConfirmVersion.version_number}. You can undo by rolling back again.</Typography>
+                )}
+              </DialogContent>
+              <DialogActions>
+                <Button onClick={() => setRollbackConfirmVersion(null)}>Cancel</Button>
+                <Button variant="contained" color="primary" onClick={handleRollbackConfirm} disabled={rollbacking}>
+                  {rollbacking ? 'Rolling back…' : 'Rollback'}
+                </Button>
+              </DialogActions>
+            </Dialog>
           </Box>
         </Box>
 
         {/* Content area (single scroll) */}
-        <Box ref={contentBoxRef} sx={{ flex: 1, minHeight: 0, overflow: 'auto', p: 2, backgroundColor: 'background.default' }}>
-          <Paper variant="outlined" sx={{ p: 2, backgroundColor: darkMode ? '#1e1e1e' : 'grey.50' }}>
+        <Box
+          ref={contentBoxRef}
+          sx={{
+            flex: 1,
+            minHeight: 0,
+            overflow: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 'hidden' : 'auto',
+            p: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 1 : 2,
+            backgroundColor: 'background.default',
+          }}
+        >
+          <Paper
+            variant="outlined"
+            sx={{
+              p: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 1 : 2,
+              backgroundColor: 'background.paper',
+              height: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? '100%' : undefined,
+              display: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 'flex' : undefined,
+              flexDirection: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 'column' : undefined,
+              minHeight: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 0 : undefined,
+              overflow: isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? 'hidden' : undefined,
+            }}
+          >
             {isEditing && (fnameLower.endsWith('.md') || fnameLower.endsWith('.txt') || fnameLower.endsWith('.org')) ? (
               fnameLower.endsWith('.org') ? (
-                showPreview ? (
+                viewMode === 'preview' ? (
+                  // Preview only for Org
+                  <Box sx={{ flex: 1, border: '1px solid #e0e0e0', borderRadius: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                    <Typography variant="subtitle2" sx={{ p: 1, backgroundColor: 'grey.100', borderBottom: '1px solid #e0e0e0', fontWeight: 'bold' }}>
+                      Preview
+                    </Typography>
+                    <Box sx={{ p: 1, flex: 1, overflow: 'auto' }}>
+                      <OrgRenderer 
+                        content={editContent}
+                        onNavigate={async (navInfo) => {
+                          if (navInfo.type === 'file') {
+                            console.log('🔗 Navigating to file:', navInfo.path);
+                            alert(`File navigation coming soon!\nTarget: ${navInfo.path}`);
+                          } else if (navInfo.type === 'id') {
+                            console.log('🔗 Navigating to ID:', navInfo.id);
+                            alert(`File navigation coming soon!\nTarget ID: ${navInfo.id}`);
+                          }
+                        }}
+                      />
+                    </Box>
+                  </Box>
+                ) : viewMode === 'split' ? (
                   // Split view for OrgMode: Editor + Preview
                   <Box sx={{ display: 'flex', gap: 2, height: '70vh' }}>
                     <Box sx={{ flex: 1, border: '1px solid #e0e0e0', borderRadius: 1 }}>
@@ -2294,16 +3000,17 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                       </Typography>
                       <Box sx={{ p: 1, height: 'calc(100% - 40px)', overflow: 'auto' }}>
                         <OrgCMEditor 
+                          key={`org-${documentId}-${darkMode ? 'dark' : 'light'}-${accentId}`}
                           ref={orgEditorRef}
                           value={editContent} 
                           onChange={setEditContent}
                           scrollToLine={scrollToLine}
                           scrollToHeading={scrollToHeading}
-                          initialScrollPosition={initialScrollPosition}
+                          initialScrollPosition={effectiveInitialScroll}
                           onScrollChange={onScrollChange}
                           canonicalPath={document?.canonical_path}
                           filename={document?.filename}
-                          documentId={document?.document_id}
+                          documentId={documentId}
                           folderId={document?.folder_id}
                           onCurrentSectionChange={handleCurrentSectionChange}
                           darkMode={darkMode}
@@ -2331,25 +3038,89 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                     </Box>
                   </Box>
                 ) : (
-                  // Editor only for OrgMode
-                  <OrgCMEditor 
-                    ref={orgEditorRef}
-                    value={editContent} 
-                    onChange={setEditContent}
-                    scrollToLine={scrollToLine}
-                    scrollToHeading={scrollToHeading}
-                    initialScrollPosition={initialScrollPosition}
-                    onScrollChange={onScrollChange}
-                    canonicalPath={document?.canonical_path}
-                    filename={document?.filename}
-                    documentId={document?.document_id}
-                    folderId={document?.folder_id}
-                    onCurrentSectionChange={handleCurrentSectionChange}
-                    darkMode={darkMode}
-                  />
+                  <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                    <OrgCMEditor 
+                      key={`org-${documentId}-${darkMode ? 'dark' : 'light'}-${accentId}`}
+                      ref={orgEditorRef}
+                      value={editContent} 
+                      onChange={setEditContent}
+                      scrollToLine={scrollToLine}
+                      scrollToHeading={scrollToHeading}
+                      initialScrollPosition={effectiveInitialScroll}
+                      onScrollChange={onScrollChange}
+                      canonicalPath={document?.canonical_path}
+                      filename={document?.filename}
+                      documentId={documentId}
+                      folderId={document?.folder_id}
+                      onCurrentSectionChange={handleCurrentSectionChange}
+                      darkMode={darkMode}
+                    />
+                  </Box>
                 )
               ) : fnameLower.endsWith('.md') ? (
-                showPreview ? (
+                viewMode === 'preview' ? (
+                  // Preview only for Markdown
+                  <Box sx={{ flex: 1, border: '1px solid #e0e0e0', borderRadius: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                    <Typography variant="subtitle2" sx={{ p: 1, backgroundColor: 'grey.100', borderBottom: '1px solid #e0e0e0', fontWeight: 'bold' }}>
+                      Preview
+                    </Typography>
+                    <Box sx={{ 
+                      p: 2, 
+                      flex: 1,
+                      overflow: 'auto',
+                      '& h1, & h2, & h3, & h4, & h5, & h6': { mt: 2, mb: 1, fontWeight: 'bold' },
+                      '& p': { mb: 1.5, lineHeight: 1.6 },
+                      '& img': { maxWidth: '100%', height: 'auto', borderRadius: 1, my: 2 },
+                      '& a': { color: 'primary.main', textDecoration: 'none', '&:hover': { textDecoration: 'underline' } },
+                      '& blockquote': { borderLeft: 3, borderColor: 'primary.main', pl: 2, ml: 0, my: 2, backgroundColor: 'grey.100', py: 1, pr: 2 },
+                      '& code': { backgroundColor: 'grey.200', px: 0.5, py: 0.25, borderRadius: 0.5, fontFamily: 'monospace', fontSize: '0.875em' },
+                      '& pre': { backgroundColor: 'grey.200', p: 2, borderRadius: 1, overflow: 'auto', '& code': { backgroundColor: 'transparent', p: 0 } },
+                      '& ul, & ol': { pl: 3, mb: 1.5 },
+                      '& li': { mb: 0.5 },
+                      '& strong': { fontWeight: 'bold' },
+                      '& em': { fontStyle: 'italic' },
+                      '& details': { mb: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1, p: 1 },
+                      '& summary': { cursor: 'pointer', fontWeight: 'medium', py: 1, '&:hover': { opacity: 0.8 } }
+                    }}>
+                      <ReactMarkdown 
+                        remarkPlugins={[remarkGfm]}
+                        rehypePlugins={[
+                          rehypeRaw,
+                          [
+                            rehypeSanitize,
+                            {
+                              tagNames: [
+                                'details', 'summary', 'div', 'span',
+                                'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+                                'p', 'br', 'strong', 'em', 'b', 'i', 'u', 's',
+                                'ul', 'ol', 'li',
+                                'blockquote', 'pre', 'code',
+                                'table', 'thead', 'tbody', 'tr', 'th', 'td',
+                                'a', 'img',
+                                'hr'
+                              ],
+                              attributes: {
+                                '*': ['class', 'id'],
+                                'a': ['href', 'title'],
+                                'img': ['src', 'alt', 'title', 'width', 'height'],
+                                'div': ['style'],
+                                'span': ['style'],
+                                'details': ['open'],
+                                'summary': []
+                              },
+                              protocols: {
+                                href: ['http', 'https', 'mailto'],
+                                src: ['http', 'https', 'data', '']
+                              }
+                            }
+                          ]
+                        ]}
+                      >
+                        {editContent}
+                      </ReactMarkdown>
+                    </Box>
+                  </Box>
+                ) : viewMode === 'split' ? (
                   // Split view for Markdown: Editor + Preview
                   <Box sx={{ display: 'flex', gap: 2, height: '70vh' }}>
                     <Box sx={{ flex: 1, border: '1px solid #e0e0e0', borderRadius: 1 }}>
@@ -2358,13 +3129,16 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                       </Typography>
                       <Box sx={{ p: 1, height: 'calc(100% - 40px)', overflow: 'auto' }}>
                         <MarkdownCMEditor 
+                          key={`md-${documentId}-${darkMode ? 'dark' : 'light'}-${accentId}`}
                           ref={markdownEditorRef}
                           value={editContent} 
                           onChange={setEditContent} 
                           filename={document.filename}
                           canonicalPath={document.canonical_path}
-                          documentId={document.document_id} 
-                          initialScrollPosition={initialScrollPosition}
+                          documentId={documentId} 
+                          initialScrollPosition={effectiveInitialScroll}
+                          restoreScrollAfterRefresh={restoreScrollAfterRefresh}
+                          onScrollRestored={handleScrollRestored}
                           onScrollChange={onScrollChange}
                           onCurrentSectionChange={handleCurrentSectionChange}
                         />
@@ -2420,7 +3194,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                                 },
                                 protocols: {
                                   href: ['http', 'https', 'mailto'],
-                                  src: ['http', 'https']
+                                  src: ['http', 'https', 'data', '']
                                 }
                               }
                             ]
@@ -2432,18 +3206,22 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                     </Box>
                   </Box>
                 ) : (
-                  // Editor only for Markdown
-                  <MarkdownCMEditor 
-                    ref={markdownEditorRef}
-                    value={editContent} 
-                    onChange={setEditContent} 
-                    filename={document.filename}
-                    canonicalPath={document.canonical_path}
-                    documentId={document.document_id} 
-                    initialScrollPosition={initialScrollPosition}
-                    onScrollChange={onScrollChange}
-                    onCurrentSectionChange={handleCurrentSectionChange}
-                  />
+                  <Box sx={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+                    <MarkdownCMEditor 
+                      key={`md-${documentId}-${darkMode ? 'dark' : 'light'}-${accentId}`}
+                      ref={markdownEditorRef}
+                      value={editContent} 
+                      onChange={setEditContent} 
+                      filename={document.filename}
+                      canonicalPath={document.canonical_path}
+                      documentId={documentId} 
+                      initialScrollPosition={effectiveInitialScroll}
+                      restoreScrollAfterRefresh={restoreScrollAfterRefresh}
+                      onScrollRestored={handleScrollRestored}
+                      onScrollChange={onScrollChange}
+                      onCurrentSectionChange={handleCurrentSectionChange}
+                    />
+                  </Box>
                 )
               ) : (
                 <TextField
@@ -2506,7 +3284,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                         },
                         protocols: {
                           href: ['http', 'https', 'mailto'],
-                          src: ['http', 'https']
+                          src: ['http', 'https', 'data', '']
                         }
                       }
                     ]
@@ -2607,7 +3385,7 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
                 sx={{ 
                   whiteSpace: 'pre-wrap', 
                   lineHeight: 1.6,
-                  color: darkMode ? '#d4d4d4' : 'text.primary',
+                  color: 'text.primary',
                   fontFamily: 'monospace',
                   fontSize: '14px'
                 }}
@@ -2618,6 +3396,345 @@ const DocumentViewer = React.memo(({ documentId, onClose, scrollToLine = null, s
           </Paper>
         </Box>
       </Box>
+      <AudioExportDialog
+        open={audioExportOpen}
+        onClose={() => setAudioExportOpen(false)}
+        documentId={documentId}
+        documentContent={getPreferredTextToRead()}
+        documentTitle={document?.title}
+        documentFilename={document?.filename}
+        speechMode={readAloudFilenameLower.endsWith('.org') ? 'org' : 'markdown'}
+      />
+      {/* PDF Export Dialog */}
+      <Dialog open={pdfExportDialogOpen} onClose={() => !exporting && setPdfExportDialogOpen(false)} maxWidth="md" fullWidth>
+        <DialogTitle>Export to PDF</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2} sx={{ mt: 0.5 }}>
+            <FormControl component="fieldset" variant="standard">
+              <FormLabel component="legend">Layout</FormLabel>
+              <RadioGroup
+                value={pdfLayout}
+                onChange={(e) => setPdfLayout(e.target.value)}
+              >
+                <FormControlLabel value="article" control={<Radio size="small" />} label="Article" />
+                <FormControlLabel value="book" control={<Radio size="small" />} label="Book" />
+              </RadioGroup>
+            </FormControl>
+            <Typography variant="body2" color="text.secondary">
+              Article uses the standard single-column layout. Book adds margins, paragraph indents, configurable page numbers, and optional per-section overrides.
+            </Typography>
+            <FormControl component="fieldset" variant="standard">
+              <FormLabel component="legend">Orientation</FormLabel>
+              <RadioGroup
+                value={pdfExportOrientation}
+                onChange={(e) => setPdfExportOrientation(e.target.value)}
+              >
+                <FormControlLabel value="portrait" control={<Radio />} label="Portrait" />
+                <FormControlLabel value="landscape" control={<Radio />} label="Landscape" />
+              </RadioGroup>
+            </FormControl>
+            <Typography variant="body2" color="text.secondary">
+              Landscape swaps width and height for the same paper size.
+            </Typography>
+            <FormControl fullWidth size="small">
+              <InputLabel id="pdf-font-preset-label">Font (PDF)</InputLabel>
+              <Select
+                labelId="pdf-font-preset-label"
+                label="Font (PDF)"
+                value={pdfFontPreset}
+                onChange={(e) => setPdfFontPreset(e.target.value)}
+              >
+                <MenuItem value="liberation">Liberation Serif / Sans</MenuItem>
+                <MenuItem value="dejavu">DejaVu Serif / Sans</MenuItem>
+                <MenuItem value="noto">Noto Serif / Sans</MenuItem>
+                <MenuItem value="times_helvetica">Times / Helvetica</MenuItem>
+              </Select>
+            </FormControl>
+            <FormControl component="fieldset" variant="standard">
+              <FormLabel component="legend">Typeface</FormLabel>
+              <RadioGroup
+                value={pdfTypefaceStyle}
+                onChange={(e) => setPdfTypefaceStyle(e.target.value)}
+              >
+                <FormControlLabel value="mixed" control={<Radio size="small" />} label="Mixed (serif body, sans headings)" />
+                <FormControlLabel value="serif" control={<Radio size="small" />} label="Serif (body and headings)" />
+                <FormControlLabel value="sans" control={<Radio size="small" />} label="Sans-serif (body and headings)" />
+              </RadioGroup>
+            </FormControl>
+            {pdfSourceFormat === 'org' && (
+              <Typography variant="caption" color="text.secondary" display="block">
+                Org headlines are converted for PDF so heading levels use distinct sizes.
+              </Typography>
+            )}
+            <FormControlLabel
+              control={<Checkbox checked={pdfPageNumbers} onChange={(e) => setPdfPageNumbers(e.target.checked)} />}
+              label={pdfLayout === 'book' ? 'Page numbers (default)' : 'Page numbers in footer'}
+            />
+            <FormGroup>
+              <FormControlLabel
+                control={<Checkbox checked={pdfIncludeToc} onChange={(e) => setPdfIncludeToc(e.target.checked)} />}
+                label="Include table of contents"
+              />
+            </FormGroup>
+            <FormControl fullWidth size="small" disabled={!pdfIncludeToc}>
+              <InputLabel id="pdf-toc-depth-label">TOC depth (max heading level)</InputLabel>
+              <Select
+                labelId="pdf-toc-depth-label"
+                label="TOC depth (max heading level)"
+                value={pdfTocDepth}
+                onChange={(e) => setPdfTocDepth(Number(e.target.value))}
+              >
+                {[1, 2, 3, 4, 5, 6].map((n) => (
+                  <MenuItem key={n} value={n}>
+                    Through H{n}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <Box>
+              <FormLabel component="legend">Page break before headings</FormLabel>
+              <FormGroup row sx={{ flexWrap: 'wrap' }}>
+                {[1, 2, 3, 4, 5, 6].map((lvl) => (
+                  <FormControlLabel
+                    key={`pdf-pb-${lvl}`}
+                    control={(
+                      <Checkbox
+                        size="small"
+                        checked={pdfPageBreakHeadings.includes(lvl)}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setPdfPageBreakHeadings((prev) =>
+                            checked
+                              ? Array.from(new Set([...prev, lvl])).sort((a, b) => a - b)
+                              : prev.filter((v) => v !== lvl)
+                          );
+                        }}
+                      />
+                    )}
+                    label={`H${lvl}`}
+                  />
+                ))}
+              </FormGroup>
+            </Box>
+            {pdfLayout === 'book' && (
+              <>
+                <Divider />
+                <Typography variant="subtitle2">Book margins (mm)</Typography>
+                <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                  <TextField
+                    label="Top"
+                    type="number"
+                    size="small"
+                    inputProps={{ min: 5, max: 80, step: 1 }}
+                    value={pdfBookMarginTopMm}
+                    onChange={(e) => setPdfBookMarginTopMm(Number(e.target.value))}
+                    sx={{ width: 100 }}
+                  />
+                  <TextField
+                    label="Right"
+                    type="number"
+                    size="small"
+                    inputProps={{ min: 5, max: 80, step: 1 }}
+                    value={pdfBookMarginRightMm}
+                    onChange={(e) => setPdfBookMarginRightMm(Number(e.target.value))}
+                    sx={{ width: 100 }}
+                  />
+                  <TextField
+                    label="Bottom"
+                    type="number"
+                    size="small"
+                    inputProps={{ min: 5, max: 80, step: 1 }}
+                    value={pdfBookMarginBottomMm}
+                    onChange={(e) => setPdfBookMarginBottomMm(Number(e.target.value))}
+                    sx={{ width: 100 }}
+                  />
+                  <TextField
+                    label="Left"
+                    type="number"
+                    size="small"
+                    inputProps={{ min: 5, max: 80, step: 1 }}
+                    value={pdfBookMarginLeftMm}
+                    onChange={(e) => setPdfBookMarginLeftMm(Number(e.target.value))}
+                    sx={{ width: 100 }}
+                  />
+                </Stack>
+                <FormGroup>
+                  <FormControlLabel
+                    control={<Checkbox checked={pdfBookIndentBody} onChange={(e) => setPdfBookIndentBody(e.target.checked)} />}
+                    label="Indent body paragraphs"
+                  />
+                  <FormControlLabel
+                    control={<Checkbox checked={pdfBookNoIndentAfterHeading} onChange={(e) => setPdfBookNoIndentAfterHeading(e.target.checked)} />}
+                    label="No indent on first paragraph after a heading"
+                  />
+                  <FormControlLabel
+                    control={<Checkbox checked={pdfBookSuppressFirstPage} onChange={(e) => setPdfBookSuppressFirstPage(e.target.checked)} />}
+                    label="Suppress page number on first page of document"
+                  />
+                </FormGroup>
+                <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+                  <FormControl size="small" sx={{ minWidth: 160 }}>
+                    <InputLabel id="pdf-pnf-label">Page # format</InputLabel>
+                    <Select
+                      labelId="pdf-pnf-label"
+                      label="Page # format"
+                      value={pdfBookPageNumFormat}
+                      onChange={(e) => setPdfBookPageNumFormat(e.target.value)}
+                    >
+                      <MenuItem value="n_of_total">N of total</MenuItem>
+                      <MenuItem value="n_only">N only</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" sx={{ minWidth: 140 }}>
+                    <InputLabel id="pdf-pnv-label">Number band</InputLabel>
+                    <Select
+                      labelId="pdf-pnv-label"
+                      label="Number band"
+                      value={pdfBookPageNumVertical}
+                      onChange={(e) => setPdfBookPageNumVertical(e.target.value)}
+                    >
+                      <MenuItem value="bottom">Bottom</MenuItem>
+                      <MenuItem value="top">Top</MenuItem>
+                    </Select>
+                  </FormControl>
+                  <FormControl size="small" sx={{ minWidth: 140 }}>
+                    <InputLabel id="pdf-pnh-label">Number align</InputLabel>
+                    <Select
+                      labelId="pdf-pnh-label"
+                      label="Number align"
+                      value={pdfBookPageNumHorizontal}
+                      onChange={(e) => setPdfBookPageNumHorizontal(e.target.value)}
+                    >
+                      <MenuItem value="left">Left</MenuItem>
+                      <MenuItem value="center">Center</MenuItem>
+                      <MenuItem value="right">Right</MenuItem>
+                    </Select>
+                  </FormControl>
+                </Stack>
+                {pdfPageBreakHeadings.length === 0 ? (
+                  <Typography variant="body2" color="text.secondary">
+                    Select at least one heading level above for page breaks to list sections and apply per-section rules.
+                  </Typography>
+                ) : (
+                  <>
+                    <Typography variant="subtitle2">Sections (headings at page-break levels)</Typography>
+                    {pdfOutlineLoading ? (
+                      <Typography variant="body2" color="text.secondary">Loading headings…</Typography>
+                    ) : (
+                      <Box sx={{ maxHeight: 280, overflow: 'auto', border: 1, borderColor: 'divider', borderRadius: 1, p: 1 }}>
+                        {pdfHeadingOutline
+                          .filter((h) => pdfPageBreakHeadings.includes(h.level))
+                          .map((h) => {
+                            const ov = pdfSectionOverrides[h.id];
+                            const enabled = !!ov?.enabled;
+                            return (
+                              <Box key={h.id} sx={{ py: 1, borderBottom: 1, borderColor: 'divider' }}>
+                                <Typography variant="body2" sx={{ fontWeight: 600 }}>{h.text || '(empty)'}</Typography>
+                                <Typography variant="caption" color="text.secondary">H{h.level} · {h.id}</Typography>
+                                <FormControlLabel
+                                  control={(
+                                    <Checkbox
+                                      size="small"
+                                      checked={enabled}
+                                      onChange={(e) => {
+                                        const on = e.target.checked;
+                                        if (on) {
+                                          setPdfSectionOverrides((prev) => ({
+                                            ...prev,
+                                            [h.id]: { enabled: true, pageNumbers: 'inherit', plainFirstPage: false },
+                                          }));
+                                        } else {
+                                          setPdfSectionOverrides((prev) => {
+                                            const next = { ...prev };
+                                            delete next[h.id];
+                                            return next;
+                                          });
+                                        }
+                                      }}
+                                    />
+                                  )}
+                                  label="Custom rules for this section"
+                                />
+                                {enabled && (
+                                  <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} alignItems="flex-start" sx={{ pl: 1, mt: 0.5 }}>
+                                    <FormControl size="small" sx={{ minWidth: 160 }}>
+                                      <InputLabel id={`pn-${h.id}`}>Page numbers</InputLabel>
+                                      <Select
+                                        labelId={`pn-${h.id}`}
+                                        label="Page numbers"
+                                        value={ov?.pageNumbers ?? 'inherit'}
+                                        onChange={(e) => setPdfSectionOverrides((prev) => ({
+                                          ...prev,
+                                          [h.id]: { ...prev[h.id], enabled: true, pageNumbers: e.target.value, plainFirstPage: !!prev[h.id]?.plainFirstPage },
+                                        }))}
+                                      >
+                                        <MenuItem value="inherit">Inherit default</MenuItem>
+                                        <MenuItem value="on">Show</MenuItem>
+                                        <MenuItem value="off">Hide</MenuItem>
+                                      </Select>
+                                    </FormControl>
+                                    <FormControlLabel
+                                      control={(
+                                        <Checkbox
+                                          size="small"
+                                          checked={!!ov?.plainFirstPage}
+                                          onChange={(e) => setPdfSectionOverrides((prev) => ({
+                                            ...prev,
+                                            [h.id]: {
+                                              ...prev[h.id],
+                                              enabled: true,
+                                              pageNumbers: prev[h.id]?.pageNumbers ?? 'inherit',
+                                              plainFirstPage: e.target.checked,
+                                            },
+                                          }))}
+                                        />
+                                      )}
+                                      label="Plain first page of section (no page number on opening page)"
+                                    />
+                                  </Stack>
+                                )}
+                              </Box>
+                            );
+                          })}
+                        {pdfHeadingOutline.filter((x) => pdfPageBreakHeadings.includes(x.level)).length === 0 && !pdfOutlineLoading ? (
+                          <Typography variant="body2" color="text.secondary">No matching headings in the document.</Typography>
+                        ) : null}
+                      </Box>
+                    )}
+                  </>
+                )}
+              </>
+            )}
+            <TextField
+              label="Watermark text"
+              placeholder="e.g. DRAFT, CONFIDENTIAL"
+              value={pdfWatermarkText}
+              onChange={(e) => setPdfWatermarkText(e.target.value)}
+              fullWidth
+              size="small"
+            />
+            {(pdfWatermarkText || '').trim() !== '' && (
+              <FormControl component="fieldset" variant="standard">
+                <FormLabel component="legend">Watermark pages</FormLabel>
+                <RadioGroup
+                  row
+                  value={pdfWatermarkAllPages ? 'all' : 'first'}
+                  onChange={(e) => setPdfWatermarkAllPages(e.target.value === 'all')}
+                >
+                  <FormControlLabel value="all" control={<Radio size="small" />} label="All pages" />
+                  <FormControlLabel value="first" control={<Radio size="small" />} label="First page only" />
+                </RadioGroup>
+              </FormControl>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPdfExportDialogOpen(false)} disabled={exporting}>Cancel</Button>
+          <Button variant="contained" onClick={handleConfirmPdfExport} disabled={exporting}>
+            {exporting ? 'Exporting…' : 'Export'}
+          </Button>
+        </DialogActions>
+      </Dialog>
       {/* EPUB Export Dialog */}
       <Dialog open={exportOpen} onClose={() => setExportOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle>Export as EPUB</DialogTitle>

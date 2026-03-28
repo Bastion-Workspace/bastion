@@ -8,7 +8,27 @@ Now includes hybrid semantic + keyword-based discovery for next-generation tool 
 import logging
 from typing import Dict, Any, List, Optional
 
+from pydantic import BaseModel, Field
+
 logger = logging.getLogger(__name__)
+
+
+# ── I/O models for analyze_tool_needs_for_research ─────────────────────────
+
+class AnalyzeToolNeedsInputs(BaseModel):
+    """Required inputs for analyze_tool_needs_for_research."""
+    query: str = Field(description="User query to analyze for tool needs")
+
+
+class AnalyzeToolNeedsOutputs(BaseModel):
+    """Outputs for analyze_tool_needs_for_research."""
+    core_tools: List[str] = Field(description="Tools always needed")
+    conditional_tools: List[str] = Field(description="Tools triggered by query")
+    all_tools: List[str] = Field(description="Combined list of tools")
+    categories: List[str] = Field(description="Detected tool categories")
+    tool_count: int = Field(description="Total number of tools")
+    reasoning: str = Field(description="Brief reasoning for tool selection")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
 
 
 class OrchestratorToolCategory:
@@ -23,29 +43,40 @@ class OrchestratorToolCategory:
     VISUALIZATION = "visualization"
     IMAGE_SEARCH = "image_search"  # Image/comic/visual content search
     DATA_WORKSPACE = "data_workspace"  # Data workspace queries
+    LOCAL_PROXY = "local_proxy"  # Local machine tools via Bastion Local Proxy daemon
 
 
 # Tool name to category mapping
 TOOL_CATEGORY_MAP = {
     "search_documents_tool": OrchestratorToolCategory.SEARCH_LOCAL,
-    "search_documents_structured": OrchestratorToolCategory.SEARCH_LOCAL,
+    "search_documents_tool": OrchestratorToolCategory.SEARCH_LOCAL,
     "get_document_content_tool": OrchestratorToolCategory.DOCUMENT_OPS,
     "search_within_document_tool": OrchestratorToolCategory.DOCUMENT_OPS,
     "search_web_tool": OrchestratorToolCategory.SEARCH_WEB,
-    "search_web_structured": OrchestratorToolCategory.SEARCH_WEB,
+    "search_web_tool": OrchestratorToolCategory.SEARCH_WEB,
     "crawl_web_content_tool": OrchestratorToolCategory.SEARCH_WEB,
     "search_and_crawl_tool": OrchestratorToolCategory.SEARCH_WEB,
-    "expand_query_tool": OrchestratorToolCategory.EXPANSION,
+    "enhance_query_tool": OrchestratorToolCategory.EXPANSION,
     "search_conversation_cache_tool": OrchestratorToolCategory.CACHE,
     "search_segments_across_documents_tool": OrchestratorToolCategory.SEGMENT_SEARCH,
     "extract_relevant_content_section": OrchestratorToolCategory.SEGMENT_SEARCH,
-    "analyze_information_needs_tool": OrchestratorToolCategory.INFORMATION_ANALYSIS,
-    "generate_project_aware_queries_tool": OrchestratorToolCategory.INFORMATION_ANALYSIS,
     "create_chart_tool": OrchestratorToolCategory.VISUALIZATION,
     "search_images_tool": OrchestratorToolCategory.IMAGE_SEARCH,  # Image/comic search tool
     "list_data_workspaces_tool": OrchestratorToolCategory.DATA_WORKSPACE,
     "get_workspace_schema_tool": OrchestratorToolCategory.DATA_WORKSPACE,
     "query_data_workspace_tool": OrchestratorToolCategory.DATA_WORKSPACE,
+    # Local proxy tools (user's machine via daemon)
+    "local_screenshot_tool": OrchestratorToolCategory.LOCAL_PROXY,
+    "local_clipboard_read_tool": OrchestratorToolCategory.LOCAL_PROXY,
+    "local_clipboard_write_tool": OrchestratorToolCategory.LOCAL_PROXY,
+    "local_system_info_tool": OrchestratorToolCategory.LOCAL_PROXY,
+    "local_desktop_notify_tool": OrchestratorToolCategory.LOCAL_PROXY,
+    "local_shell_execute_tool": OrchestratorToolCategory.LOCAL_PROXY,
+    "local_read_file_tool": OrchestratorToolCategory.LOCAL_PROXY,
+    "local_list_directory_tool": OrchestratorToolCategory.LOCAL_PROXY,
+    "local_write_file_tool": OrchestratorToolCategory.LOCAL_PROXY,
+    "local_list_processes_tool": OrchestratorToolCategory.LOCAL_PROXY,
+    "local_open_url_tool": OrchestratorToolCategory.LOCAL_PROXY,
 }
 
 
@@ -68,13 +99,26 @@ CATEGORY_KEYWORDS = {
     OrchestratorToolCategory.IMAGE_SEARCH: [
         "show me", "display", "find image", "show image", "comic", "comics",
         "picture", "pictures", "photo", "photos", "artwork", "meme", "memes",
-        "screenshot", "diagram", "visual", "image", "images", "show", "see"
+        "screenshot", "diagram", "visual", "image", "images", "show", "see",
+        "face", "faces", "portrait", "portraits", "selfie", "selfies",
     ],
     OrchestratorToolCategory.DATA_WORKSPACE: [
         "workspace", "data workspace", "vendor", "vendors", "transaction", "transactions",
         "table", "tables", "query data", "database query", "sql", "query workspace",
         "spending", "purchase", "purchases", "cost", "costs", "price", "prices",
         "data", "workspace data", "my data", "my vendors", "my transactions"
+    ],
+    OrchestratorToolCategory.LOCAL_PROXY: [
+        "screenshot", "screen shot", "capture screen", "my screen", "local screen",
+        "clipboard", "copy paste", "paste from clipboard", "read clipboard",
+        "system info", "local machine", "my computer", "hostname", "cpu", "memory", "disk",
+        "desktop notification", "notify me", "show notification", "popup",
+        "shell", "run command", "execute command", "terminal", "cmd", "command line",
+        "read file", "open file", "read local file", "file on my machine",
+        "list directory", "list folder", "list files", "directory contents",
+        "write file", "save file", "write to file", "create file",
+        "list processes", "running processes", "top processes", "task list",
+        "open url", "open link", "open in browser", "open website", "browser",
     ],
 }
 
@@ -151,7 +195,7 @@ async def analyze_tool_needs_for_research(query: str, conversation_context: Opti
     core_tools = [
         "search_documents_tool",
         "get_document_content_tool",
-        "expand_query_tool",
+        "enhance_query_tool",
         "search_conversation_cache_tool"
     ]
     
@@ -230,7 +274,11 @@ async def analyze_tool_needs_for_research(query: str, conversation_context: Opti
     
     # Combine all tools
     all_tools = list(set(core_tools + conditional_tools))
-    
+    reasoning_str = "; ".join(reasoning_parts)
+    formatted = (
+        f"Tool analysis: {len(all_tools)} tools ({len(core_tools)} core, {len(conditional_tools)} conditional). "
+        f"Categories: {', '.join(categories)}. {reasoning_str}"
+    )
     return {
         "core_tools": core_tools,
         "conditional_tools": conditional_tools,
@@ -238,10 +286,12 @@ async def analyze_tool_needs_for_research(query: str, conversation_context: Opti
         "categories": categories,
         "semantic_discoveries": semantic_discoveries,
         "keyword_matches": keyword_tools,
-        "reasoning": "; ".join(reasoning_parts),
+        "reasoning": reasoning_str,
         "tool_count": len(all_tools),
         "core_count": len(core_tools),
-        "conditional_count": len(conditional_tools)
+        "conditional_count": len(conditional_tools),
+        "formatted": formatted,
     }
 
 
+# Not registered: used internally by full_research_agent only. Not exposed in Agent Factory tool list.

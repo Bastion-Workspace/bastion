@@ -4,6 +4,7 @@ Settings API - Handles all settings-related endpoints
 
 import logging
 import re
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException, Depends, status
 from pydantic import BaseModel, Field
@@ -54,6 +55,34 @@ class PreferredNameRequest(BaseModel):
 
 class AiContextRequest(BaseModel):
     ai_context: str
+
+
+class PhoneNumberRequest(BaseModel):
+    phone_number: str
+
+
+class BirthdayRequest(BaseModel):
+    birthday: str
+
+
+class UserFactRequest(BaseModel):
+    fact_key: str
+    value: str
+    category: str = "general"
+    expires_at: Optional[str] = None
+
+
+class FactsPreferencesResponse(BaseModel):
+    facts_inject_enabled: bool = True
+    facts_write_enabled: bool = True
+
+
+class EpisodesPreferencesResponse(BaseModel):
+    episodes_inject_enabled: bool = True
+
+
+class ResolvePendingFactRequest(BaseModel):
+    action: str = "accept"
 
 
 class VisionFeaturesRequest(BaseModel):
@@ -359,15 +388,20 @@ async def set_user_time_format(
 
 @router.get("/api/settings/prompt", response_model=PromptSettingsResponse)
 async def get_prompt_settings(current_user: AuthenticatedUserResponse = Depends(get_current_user)):
-    """Get current user's prompt settings"""
+    """Get current user's prompt settings (from default persona when available)."""
     try:
-        # Get user's current settings from database
+        persona = await settings_service.get_default_persona(current_user.user_id)
+        if persona:
+            return PromptSettingsResponse(
+                ai_name=persona.get("ai_name") or "Alex",
+                political_bias=PoliticalBias(persona.get("political_bias") or "neutral"),
+                persona_style=PersonaStyle.PROFESSIONAL,
+                available_biases=[bias.value for bias in PoliticalBias],
+                available_personas=[p.value for p in PersonaStyle]
+            )
         user_settings = await settings_service.get_user_prompt_settings(current_user.user_id)
-        
-        # If no settings exist, return defaults
         if user_settings is None:
             user_settings = UserPromptSettings()
-        
         return PromptSettingsResponse(
             ai_name=user_settings.ai_name,
             political_bias=user_settings.political_bias,
@@ -459,6 +493,211 @@ async def get_prompt_options():
     }
 
 
+# -------------------------------------------------------------------------
+# Personas API (built-in + custom; default persona in user settings)
+# -------------------------------------------------------------------------
+
+class PersonaCreateRequest(BaseModel):
+    """Request model for creating a custom persona"""
+    name: str = Field(..., min_length=1, max_length=255)
+    ai_name: Optional[str] = Field("Alex", max_length=100)
+    style_instruction: Optional[str] = Field("", description="Free-form style instructions")
+    political_bias: str = Field("neutral", max_length=50)
+    description: Optional[str] = Field("", max_length=2000)
+
+
+class PersonaUpdateRequest(BaseModel):
+    """Request model for updating a custom persona"""
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    ai_name: Optional[str] = Field(None, max_length=100)
+    style_instruction: Optional[str] = None
+    political_bias: Optional[str] = Field(None, max_length=50)
+    description: Optional[str] = Field(None, max_length=2000)
+
+
+class DefaultPersonaRequest(BaseModel):
+    """Request model for setting default persona"""
+    persona_id: Optional[str] = Field(None, description="UUID of persona, or null to clear default")
+
+
+class DefaultChatAgentProfileRequest(BaseModel):
+    """Set which non-built-in agent profile is used for chat when there is no @mention / sticky profile."""
+    agent_profile_id: Optional[str] = Field(
+        None,
+        description="UUID of a non-built-in active agent profile, or null to use factory built-in",
+    )
+
+
+@router.get("/api/personas")
+async def list_personas(
+    include_builtin: bool = True,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """List all personas available to the user (built-in + custom)."""
+    try:
+        personas = await settings_service.get_personas(current_user.user_id, include_builtin=include_builtin)
+        return {"personas": personas}
+    except Exception as e:
+        logger.error(f"Failed to list personas: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/personas/{persona_id}")
+async def get_persona(
+    persona_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get a single persona by id."""
+    try:
+        persona = await settings_service.get_persona_by_id(persona_id, current_user.user_id)
+        if not persona:
+            raise HTTPException(status_code=404, detail="Persona not found")
+        return persona
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get persona {persona_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/personas")
+async def create_persona(
+    request: PersonaCreateRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Create a custom persona."""
+    try:
+        persona = await settings_service.create_persona(
+            user_id=current_user.user_id,
+            name=request.name,
+            ai_name=request.ai_name or "Alex",
+            style_instruction=request.style_instruction or "",
+            political_bias=request.political_bias or "neutral",
+            description=request.description or "",
+        )
+        return persona
+    except Exception as e:
+        logger.error(f"Failed to create persona: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/personas/{persona_id}")
+async def update_persona(
+    persona_id: str,
+    request: PersonaUpdateRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Update a custom persona (built-in personas cannot be edited)."""
+    try:
+        persona = await settings_service.update_persona(
+            persona_id=persona_id,
+            user_id=current_user.user_id,
+            name=request.name,
+            ai_name=request.ai_name,
+            style_instruction=request.style_instruction,
+            political_bias=request.political_bias,
+            description=request.description,
+        )
+        if not persona:
+            raise HTTPException(status_code=404, detail="Persona not found or cannot be edited")
+        return persona
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update persona {persona_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/api/personas/{persona_id}")
+async def delete_persona(
+    persona_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Delete a custom persona (built-in personas cannot be deleted)."""
+    try:
+        success = await settings_service.delete_persona(persona_id, current_user.user_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Persona not found or cannot be deleted")
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete persona {persona_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/default-persona")
+async def get_default_persona(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get the user's default persona."""
+    try:
+        persona = await settings_service.get_default_persona(current_user.user_id)
+        return {"persona": persona}
+    except Exception as e:
+        logger.error(f"Failed to get default persona: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/settings/default-persona")
+async def set_default_persona(
+    request: DefaultPersonaRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Set the user's default persona (pass null to clear)."""
+    try:
+        success = await settings_service.set_default_persona(
+            current_user.user_id,
+            request.persona_id,
+        )
+        if not success and request.persona_id is not None:
+            raise HTTPException(status_code=404, detail="Persona not found")
+        return {"success": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to set default persona: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/default-chat-agent-profile")
+async def get_default_chat_agent_profile(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Non-built-in agent profile used for chat without @mention; null means factory built-in."""
+    try:
+        detail = await settings_service.get_default_chat_agent_profile_detail(current_user.user_id)
+        return detail
+    except Exception as e:
+        logger.error("Failed to get default chat agent profile: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/settings/default-chat-agent-profile")
+async def set_default_chat_agent_profile(
+    request: DefaultChatAgentProfileRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Set or clear default chat agent profile (must be non-built-in and active when set)."""
+    try:
+        success = await settings_service.set_default_chat_agent_profile_id(
+            current_user.user_id,
+            request.agent_profile_id,
+        )
+        if not success and request.agent_profile_id is not None:
+            raise HTTPException(
+                status_code=404,
+                detail="Agent profile not found, inactive, or built-in profiles cannot be set as default",
+            )
+        out = await settings_service.get_default_chat_agent_profile_detail(current_user.user_id)
+        return {"success": True, **out}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to set default chat agent profile: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/api/settings/user/preferred-name")
 async def get_user_preferred_name(
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
@@ -504,6 +743,101 @@ async def set_user_preferred_name(
         
     except Exception as e:
         logger.error(f"❌ Failed to set preferred name for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/user/phone-number")
+async def get_user_phone_number(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get current user's phone number."""
+    try:
+        phone_number = await settings_service.get_user_phone_number(current_user.user_id)
+        return {
+            "success": True,
+            "phone_number": phone_number or "",
+            "user_id": current_user.user_id
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to get phone number for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/settings/user/phone-number")
+async def set_user_phone_number(
+    request: PhoneNumberRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Set current user's phone number."""
+    try:
+        phone_number = (request.phone_number or "").strip()
+        if phone_number and not re.match(r"^[\d+\-().\s]{7,25}$", phone_number):
+            raise HTTPException(status_code=400, detail="Invalid phone number format")
+
+        success = await settings_service.set_user_phone_number(current_user.user_id, phone_number)
+        if success:
+            return {
+                "success": True,
+                "message": "Phone number updated successfully",
+                "phone_number": phone_number,
+                "user_id": current_user.user_id
+            }
+        return {
+            "success": False,
+            "message": "Failed to update phone number"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to set phone number for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/user/birthday")
+async def get_user_birthday(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get current user's birthday."""
+    try:
+        birthday = await settings_service.get_user_birthday(current_user.user_id)
+        return {
+            "success": True,
+            "birthday": birthday or "",
+            "user_id": current_user.user_id
+        }
+    except Exception as e:
+        logger.error(f"❌ Failed to get birthday for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/api/settings/user/birthday")
+async def set_user_birthday(
+    request: BirthdayRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Set current user's birthday (YYYY-MM-DD)."""
+    try:
+        birthday = (request.birthday or "").strip()
+        if birthday:
+            datetime.strptime(birthday, "%Y-%m-%d")
+        success = await settings_service.set_user_birthday(current_user.user_id, birthday)
+        if success:
+            return {
+                "success": True,
+                "message": "Birthday updated successfully",
+                "birthday": birthday,
+                "user_id": current_user.user_id
+            }
+        return {
+            "success": False,
+            "message": "Failed to update birthday"
+        }
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Birthday must be in YYYY-MM-DD format")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to set birthday for user {current_user.username}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -558,7 +892,290 @@ async def set_user_ai_context(
         raise
     except Exception as e:
         logger.error(f"❌ Failed to set AI context for user {current_user.username}: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e)) 
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/user/facts")
+async def get_user_facts(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get all facts for the current user"""
+    try:
+        logger.info(f"Getting user facts for user: {current_user.username}")
+        facts = await settings_service.get_user_facts(current_user.user_id)
+        return {
+            "success": True,
+            "facts": facts,
+            "user_id": current_user.user_id
+        }
+    except Exception as e:
+        logger.error(f"Failed to get user facts for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/settings/user/facts")
+async def add_user_fact(
+    request: UserFactRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Create or update a single user fact"""
+    try:
+        if not request.fact_key or not request.fact_key.strip():
+            raise HTTPException(status_code=400, detail="fact_key is required")
+        logger.info(f"Upserting fact {request.fact_key} for user {current_user.username}")
+        result = await settings_service.upsert_user_fact(
+            current_user.user_id,
+            request.fact_key.strip(),
+            request.value or "",
+            request.category or "general",
+            source="user_manual",
+            expires_at=request.expires_at,
+        )
+        if result.get("success"):
+            return {
+                "success": True,
+                "message": "Fact saved",
+                "fact_key": request.fact_key.strip(),
+                "value": request.value,
+                "category": request.category or "general",
+                "user_id": current_user.user_id
+            }
+        if result.get("status") == "pending_review":
+            return {
+                "success": False,
+                "message": "Fact is set by you; agent update queued for review",
+                "fact_key": result.get("fact_key"),
+                "current_value": result.get("current_value"),
+            }
+        return {
+            "success": False,
+            "message": result.get("error", "Failed to save fact")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to add user fact for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/api/settings/user/facts/{fact_key}")
+async def delete_user_fact(
+    fact_key: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Delete a single user fact by key"""
+    try:
+        logger.info(f"Deleting fact {fact_key} for user {current_user.username}")
+        success = await settings_service.delete_user_fact(current_user.user_id, fact_key)
+        if success:
+            return {
+                "success": True,
+                "message": "Fact deleted",
+                "fact_key": fact_key,
+                "user_id": current_user.user_id
+            }
+        return {
+            "success": False,
+            "message": "Failed to delete fact"
+        }
+    except Exception as e:
+        logger.error(f"Failed to delete user fact for user {current_user.username}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/user/facts-preferences")
+async def get_facts_preferences(current_user: AuthenticatedUserResponse = Depends(get_current_user)):
+    try:
+        inject = await settings_service.get_facts_inject_enabled(current_user.user_id)
+        write = await settings_service.get_facts_write_enabled(current_user.user_id)
+        return {"facts_inject_enabled": inject, "facts_write_enabled": write}
+    except Exception as e:
+        logger.error("Failed to get facts preferences: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/settings/user/facts-preferences")
+async def set_facts_preferences(
+    request: FactsPreferencesResponse,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    try:
+        from services.user_settings_kv_service import set_user_setting
+        await set_user_setting(
+            current_user.user_id, "facts_inject_enabled",
+            "true" if request.facts_inject_enabled else "false", "boolean"
+        )
+        await set_user_setting(
+            current_user.user_id, "facts_write_enabled",
+            "true" if request.facts_write_enabled else "false", "boolean"
+        )
+        return {"facts_inject_enabled": request.facts_inject_enabled, "facts_write_enabled": request.facts_write_enabled}
+    except Exception as e:
+        logger.error("Failed to set facts preferences: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/user/episodes")
+async def get_user_episodes(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+    limit: int = 50,
+    days: Optional[int] = 30,
+):
+    """Get recent activity episodes for the current user"""
+    try:
+        from services.episode_service import episode_service
+        episodes = await episode_service.get_user_episodes(
+            current_user.user_id, limit=limit, days=days
+        )
+        return {
+            "success": True,
+            "episodes": episodes,
+            "user_id": current_user.user_id,
+        }
+    except Exception as e:
+        logger.error("Failed to get user episodes: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/api/settings/user/episodes/{episode_id}")
+async def delete_user_episode(
+    episode_id: int,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Delete a single episode by id"""
+    try:
+        from services.episode_service import episode_service
+        success = await episode_service.delete_episode(current_user.user_id, episode_id)
+        if success:
+            return {
+                "success": True,
+                "message": "Episode deleted",
+                "episode_id": episode_id,
+                "user_id": current_user.user_id,
+            }
+        return {"success": False, "message": "Failed to delete episode"}
+    except Exception as e:
+        logger.error("Failed to delete episode: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/api/settings/user/episodes")
+async def delete_all_user_episodes(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Delete all episodes for the current user"""
+    try:
+        from services.episode_service import episode_service
+        deleted = await episode_service.delete_all_episodes(current_user.user_id)
+        return {
+            "success": True,
+            "message": f"Deleted {deleted} episode(s)",
+            "deleted_count": deleted,
+            "user_id": current_user.user_id,
+        }
+    except Exception as e:
+        logger.error("Failed to delete all episodes: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/user/episodes-preferences")
+async def get_episodes_preferences(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    try:
+        inject = await settings_service.get_episodes_inject_enabled(current_user.user_id)
+        return {"episodes_inject_enabled": inject}
+    except Exception as e:
+        logger.error("Failed to get episodes preferences: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/settings/user/episodes-preferences")
+async def set_episodes_preferences(
+    request: EpisodesPreferencesResponse,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    try:
+        from services.user_settings_kv_service import set_user_setting
+        await set_user_setting(
+            current_user.user_id,
+            "episodes_inject_enabled",
+            "true" if request.episodes_inject_enabled else "false",
+            "boolean",
+        )
+        return {"episodes_inject_enabled": request.episodes_inject_enabled}
+    except Exception as e:
+        logger.error("Failed to set episodes preferences: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/user/facts/pending")
+async def get_pending_facts(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Get pending fact updates (agent proposed changes awaiting user review)."""
+    try:
+        pending = await settings_service.get_pending_facts(current_user.user_id)
+        return {
+            "success": True,
+            "pending": pending,
+            "user_id": current_user.user_id,
+        }
+    except Exception as e:
+        logger.error("Failed to get pending facts: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/settings/user/facts/pending/{history_id}/resolve")
+async def resolve_pending_fact(
+    history_id: int,
+    request: ResolvePendingFactRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Accept or reject a pending fact update."""
+    try:
+        action = (request.action or "accept").strip().lower()
+        if action not in ("accept", "reject"):
+            raise HTTPException(status_code=400, detail="action must be 'accept' or 'reject'")
+        result = await settings_service.resolve_pending_fact(
+            current_user.user_id, history_id, action
+        )
+        if result.get("success"):
+            return {
+                "success": True,
+                "message": result.get("message", ""),
+                "user_id": current_user.user_id,
+            }
+        return {
+            "success": False,
+            "message": result.get("message", "Failed to resolve"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to resolve pending fact: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/user/facts/history")
+async def get_fact_history(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+    fact_key: Optional[str] = None,
+    limit: int = 50,
+):
+    """Get fact change history, optionally filtered by fact_key."""
+    try:
+        history = await settings_service.get_fact_history(
+            current_user.user_id, fact_key=fact_key, limit=limit
+        )
+        return {
+            "success": True,
+            "history": history,
+            "user_id": current_user.user_id,
+        }
+    except Exception as e:
+        logger.error("Failed to get fact history: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/api/vision/service-status")
@@ -642,4 +1259,67 @@ async def get_settings_by_category(category: str):
         }
     except Exception as e:
         logger.error(f"❌ Failed to get settings for category {category}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# --- Device tokens (Bastion Local Proxy) ---
+
+class DeviceTokenCreateRequest(BaseModel):
+    device_name: str = Field(..., min_length=1, max_length=255)
+
+
+class DeviceTokenCreateResponse(BaseModel):
+    token_id: str
+    token: str
+    device_name: str
+    message: str = "Copy the token now; it will not be shown again."
+
+
+@router.post("/api/settings/device-tokens", response_model=DeviceTokenCreateResponse)
+async def create_device_token(
+    request: DeviceTokenCreateRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Create a new device token for the Bastion Local Proxy daemon."""
+    try:
+        from services.device_token_service import create_device_token as svc_create
+        token_id, raw_token = await svc_create(current_user.user_id, request.device_name)
+        return DeviceTokenCreateResponse(
+            token_id=token_id,
+            token=raw_token,
+            device_name=request.device_name,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to create device token: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/settings/device-tokens")
+async def list_device_tokens(
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """List device tokens for the current user (without raw token)."""
+    try:
+        from services.device_token_service import list_device_tokens as svc_list
+        tokens = await svc_list(current_user.user_id)
+        return {"tokens": tokens}
+    except Exception as e:
+        logger.error(f"Failed to list device tokens: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/api/settings/device-tokens/{token_id}")
+async def revoke_device_token(
+    token_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Revoke a device token."""
+    try:
+        from services.device_token_service import revoke_device_token as svc_revoke
+        await svc_revoke(token_id, current_user.user_id)
+        return {"success": True, "message": "Token revoked"}
+    except Exception as e:
+        logger.error(f"Failed to revoke device token: {e}")
         raise HTTPException(status_code=500, detail=str(e))

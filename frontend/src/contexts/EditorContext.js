@@ -29,7 +29,7 @@ export const EditorProvider = ({ children }) => {
     
     // Clear editor state when NOT on documents page to prevent checkbox from hanging around
     if (!onDocumentsPage && editorState.isEditable) {
-      console.log('🧹 ROOSEVELT: Leaving documents page - clearing editor state');
+      console.log('Leaving documents page — clearing editor state');
       setEditorState({
         isEditable: false,
         filename: null,

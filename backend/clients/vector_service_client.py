@@ -48,15 +48,16 @@ class VectorServiceClient:
             
             # Create insecure channel with increased message size limits and better concurrency handling
             # Default is 4MB, increase to 100MB for large batch embedding responses
+            # Keepalive at 5 min to avoid GOAWAY "too_many_pings" (ENHANCE_YOUR_CALM) from server/proxy
             options = [
                 ('grpc.max_send_message_length', 100 * 1024 * 1024),  # 100 MB
                 ('grpc.max_receive_message_length', 100 * 1024 * 1024),  # 100 MB
-                ('grpc.keepalive_time_ms', 30000),  # Send keepalive ping every 30s
-                ('grpc.keepalive_timeout_ms', 10000),  # Wait 10s for keepalive response
+                ('grpc.keepalive_time_ms', 300000),  # Send keepalive ping every 5 min
+                ('grpc.keepalive_timeout_ms', 20000),  # Wait 20s for keepalive response
                 ('grpc.keepalive_permit_without_calls', 1),  # Allow keepalive pings when no calls
                 ('grpc.http2.max_pings_without_data', 0),  # No limit on pings without data
-                ('grpc.http2.min_time_between_pings_ms', 10000),  # Min 10s between pings
-                ('grpc.http2.min_ping_interval_without_data_ms', 30000),  # Min 30s between pings without data
+                ('grpc.http2.min_time_between_pings_ms', 60000),  # Min 60s between pings
+                ('grpc.http2.min_ping_interval_without_data_ms', 300000),  # Min 5 min between pings without data
             ]
             self.channel = grpc.aio.insecure_channel(self.service_url, options=options)
             self.stub = vector_service_pb2_grpc.VectorServiceStub(self.channel)
@@ -255,8 +256,8 @@ class VectorServiceClient:
             
             return {
                 "status": response.status,
-                "service_name": response.service_name,
-                "version": response.version,
+                "openai_available": response.openai_available,
+                "version": response.service_version,
                 "details": dict(response.details) if response.details else {}
             }
             
@@ -366,13 +367,14 @@ class VectorServiceClient:
             vector_filters = []
             if filters:
                 for f in filters:
-                    vector_filters.append(
-                        vector_service_pb2.VectorFilter(
-                            field=f.get("field", ""),
-                            value=f.get("value", ""),
-                            operator=f.get("operator", "equals")
-                        )
+                    vf = vector_service_pb2.VectorFilter(
+                        field=f.get("field", ""),
+                        value=f.get("value", ""),
+                        operator=f.get("operator", "equals")
                     )
+                    if f.get("values") is not None:
+                        vf.values.extend(f.get("values"))
+                    vector_filters.append(vf)
             
             request = vector_service_pb2.SearchVectorsRequest(
                 collection_name=collection_name,
@@ -595,7 +597,7 @@ class VectorServiceClient:
                 distance=distance
             )
             
-            response = await self.stub.CreateCollection(request, timeout=10.0)
+            response = await self.stub.CreateCollection(request, timeout=60.0)
             
             return {
                 "success": response.success,
@@ -636,7 +638,7 @@ class VectorServiceClient:
                 collection_name=collection_name
             )
             
-            response = await self.stub.DeleteCollection(request, timeout=10.0)
+            response = await self.stub.DeleteCollection(request, timeout=60.0)
             
             return {
                 "success": response.success,

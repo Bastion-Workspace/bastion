@@ -180,14 +180,10 @@ async def clear_neo4j(
 ):
     """Clear all data from Neo4j knowledge graph (admin only)"""
     try:
-        logger.info(f"🗑️ Admin {current_user.username} clearing Neo4j knowledge graph")
-        
-        # Import the function from main.py to avoid code duplication
-        from main import clear_neo4j as main_clear_neo4j
-        
-        # Call the main function with the current user
-        return await main_clear_neo4j(current_user)
-        
+        from api.document_api import clear_neo4j as document_api_clear_neo4j
+        return await document_api_clear_neo4j(current_user)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to clear Neo4j: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to clear Neo4j: {str(e)}")
@@ -199,21 +195,13 @@ async def clear_qdrant(
 ):
     """Clear all data from Qdrant vector database (admin only)"""
     try:
-        logger.info(f"🗑️ Admin {current_user.username} clearing Qdrant vector database")
-        
-        # Import the function from main.py to avoid code duplication
-        from main import clear_qdrant as main_clear_qdrant
-        
-        # Call the main function with the current user
-        return await main_clear_qdrant(current_user)
-        
+        from api.document_api import clear_qdrant as document_api_clear_qdrant
+        return await document_api_clear_qdrant(current_user)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"❌ Failed to clear Qdrant: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to clear Qdrant: {str(e)}")
-
-
-        logger.error(f"❌ Failed to review submission: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ===== SYSTEM EMAIL (admin-only designation) =====

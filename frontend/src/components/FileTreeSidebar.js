@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   Box,
   Typography,
@@ -57,7 +57,10 @@ import {
   Audiotrack,
   ImageSearch,
   Download,
-  AccountTree
+  AccountTree,
+  Hub,
+  Search,
+  DoneAll
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -71,6 +74,9 @@ import rssService from '../services/rssService';
 import DataWorkspacesSection from './data_workspace/DataWorkspacesSection';
 import ImageMetadataModal from './images/ImageMetadataModal';
 import DescribeFolderImagesDialog from './images/DescribeFolderImagesDialog';
+import DocumentSearchOverlay from './DocumentSearchOverlay';
+import { documentDiffStore } from '../services/documentDiffStore';
+import { formatInstantDateTime } from '../utils/userTimeDisplay';
 
 // Helper function to filter out .metadata.json files from document lists
 const filterMetadataFiles = (documents) => {
@@ -81,11 +87,69 @@ const filterMetadataFiles = (documents) => {
   });
 };
 
+/** Group RSS feeds by feed.category for sidebar hierarchy (virtual folders only). */
+function groupRssFeedsByCategory(feeds) {
+  if (!Array.isArray(feeds) || feeds.length === 0) return [];
+  const m = new Map();
+  for (const f of feeds) {
+    const raw = (f.category || '').trim() || 'uncategorized';
+    const key = raw.toLowerCase();
+    if (!m.has(key)) {
+      const label =
+        key === 'uncategorized'
+          ? 'Uncategorized'
+          : raw
+              .split(/[\s_]+/)
+              .filter(Boolean)
+              .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+              .join(' ');
+      m.set(key, { key, label, feeds: [] });
+    }
+    m.get(key).feeds.push(f);
+  }
+  const arr = Array.from(m.values());
+  arr.sort((a, b) => {
+    if (a.key === 'uncategorized') return 1;
+    if (b.key === 'uncategorized') return -1;
+    return a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
+  });
+  return arr;
+}
+
+/** Poll many RSS feeds with bounded concurrency. */
+async function refreshRssFeedIdsWithPool(feedIds, poolSize = 3) {
+  const ids = [...new Set((feedIds || []).filter(Boolean))];
+  let failed = 0;
+  for (let i = 0; i < ids.length; i += poolSize) {
+    const chunk = ids.slice(i, i + poolSize);
+    const results = await Promise.allSettled(
+      chunk.map((id) => rssService.refreshFeed(id))
+    );
+    failed += results.filter((r) => r.status === 'rejected').length;
+  }
+  return { total: ids.length, failed };
+}
+
+/** Mark all articles read for each feed, sequentially (server is per-feed). */
+async function markAllRssFeedsReadSequential(feedIds) {
+  const ids = [...new Set((feedIds || []).filter(Boolean))];
+  let failed = 0;
+  for (const id of ids) {
+    try {
+      await rssService.markAllArticlesRead(id);
+    } catch {
+      failed += 1;
+    }
+  }
+  return { total: ids.length, failed };
+}
+
 const FileTreeSidebar = ({ 
   selectedFolderId, 
   onFolderSelect, 
   onFileSelect,
   onRSSFeedClick,
+  onRSSCategoryClick,
   onAddRSSFeed,
   width = 280,
   isCollapsed: collapsedProp,
@@ -149,12 +213,34 @@ const FileTreeSidebar = ({
   const [moveTarget, setMoveTarget] = useState(null); // { type: 'folder'|'file', data }
   const [moveDestinationId, setMoveDestinationId] = useState(null);
   const [rssFeedsExpanded, setRssFeedsExpanded] = useState(false);
+  const [expandedRSSCategories, setExpandedRSSCategories] = useState(() => new Set());
+  const [rssBulkBusy, setRssBulkBusy] = useState(false);
   // Allow parent-controlled collapse to reclaim layout space
   const [internalCollapsed, setInternalCollapsed] = useState(false);
   const isControlledCollapse = typeof collapsedProp === 'boolean';
   const isCollapsed = isControlledCollapse ? collapsedProp : internalCollapsed;
   const [processingFiles, setProcessingFiles] = useState([]);
   const [documentsMenuAnchor, setDocumentsMenuAnchor] = useState(null);
+  const [searchOverlayOpen, setSearchOverlayOpen] = useState(false);
+  // Bump when documentDiffStore notifies so file tree re-renders (teal check reflects cleared diffs)
+  const [diffStoreRevision, setDiffStoreRevision] = useState(0);
+  // Folders we've already refetched once due to empty cache (avoid infinite refetch)
+  const emptiedFolderRefetchesRef = useRef(new Set());
+  // Ref so WebSocket handlers always see current expanded list (avoids stale closure)
+  const expandedFoldersRef = useRef(expandedFolders);
+  const folderWsRef = useRef(null);
+  const folderReconnectAttemptsRef = useRef(0);
+  const folderReconnectTimeoutRef = useRef(null);
+  useEffect(() => {
+    expandedFoldersRef.current = expandedFolders;
+  }, [expandedFolders]);
+
+  // Subscribe to diff store so file tree teal indicator updates when user clears diffs
+  useEffect(() => {
+    const handleDiffChange = () => setDiffStoreRevision(r => r + 1);
+    documentDiffStore.subscribe(handleDiffChange);
+    return () => documentDiffStore.unsubscribe(handleDiffChange);
+  }, []);
 
   // Save expanded folders to localStorage whenever they change
   useEffect(() => {
@@ -215,13 +301,21 @@ const FileTreeSidebar = ({
     }
 
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/api/ws/folders?token=${encodeURIComponent(token)}`;
-    let ws = null;
+    const MAX_RECONNECT_ATTEMPTS = 5;
 
-    try {
-      ws = new WebSocket(wsUrl);
-      
+    const connect = () => {
+      let ws;
+      try {
+        ws = new WebSocket(wsUrl);
+        folderWsRef.current = ws;
+      } catch (err) {
+        console.error('❌ Failed to create folder WebSocket:', err);
+        return;
+      }
+
       ws.onopen = () => {
         console.log('📡 Connected to folder updates WebSocket');
+        folderReconnectAttemptsRef.current = 0;
       };
 
       ws.onmessage = (event) => {
@@ -230,7 +324,28 @@ const FileTreeSidebar = ({
           
           if (update.type === 'document_status_update') {
             console.log('🔄 Received document status update:', update);
-            
+
+            // Update has_pending_proposals for a document across all folder state (e.g. after apply/reject)
+            if (update.document_id != null && typeof update.has_pending_proposals === 'boolean') {
+              setFolderContents(prev => {
+                const next = { ...prev };
+                for (const folderId of Object.keys(next)) {
+                  const contents = next[folderId];
+                  if (contents?.documents?.length) {
+                    next[folderId] = {
+                      ...contents,
+                      documents: contents.documents.map(doc =>
+                        doc.document_id === update.document_id
+                          ? { ...doc, has_pending_proposals: update.has_pending_proposals }
+                          : doc
+                      )
+                    };
+                  }
+                }
+                return next;
+              });
+            }
+
             // Update specific folder contents when document status changes - REAL-TIME!
             if (update.folder_id) {
               console.log(`📁 Real-time status update for folder ${update.folder_id}`);
@@ -412,6 +527,30 @@ const FileTreeSidebar = ({
             // Folder was deleted from disk but not found in DB - refresh tree to ensure consistency
             queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]);
             showToast('🔄 Folder tree refreshed', 'info');
+            // Refetch contents for all expanded folders so folderContents drops deleted subfolders
+            const virtualRoots = new Set(['my_documents_root', 'global_documents_root']);
+            const expanded = expandedFoldersRef.current;
+            const toRefetch = Array.from(expanded).filter(id => !virtualRoots.has(id));
+            if (toRefetch.length > 0) {
+              Promise.all(
+                toRefetch.map(folderId =>
+                  apiService.getFolderContents(folderId).then(contents => ({ folderId, contents })).catch(() => ({ folderId, contents: null }))
+                )
+              ).then(results => {
+                setFolderContents(prev => {
+                  const next = { ...prev };
+                  results.forEach(({ folderId, contents }) => {
+                    if (!contents) return;
+                    next[folderId] = {
+                      ...contents,
+                      documents: filterMetadataFiles(contents.documents || []),
+                      subfolders: Array.isArray(contents.subfolders) ? contents.subfolders : []
+                    };
+                  });
+                  return next;
+                });
+              });
+            }
             
           } else if (update.type === 'folder_event') {
             console.log('🔄 Received folder event notification:', update);
@@ -420,7 +559,55 @@ const FileTreeSidebar = ({
             if (update.action === 'created') {
               const folderName = update.folder?.name || 'New folder';
               showToast(`📁 ${folderName} created`, 'success');
-              
+              // Refetch tree so new folder appears live (works with shallow tree and agent-created folders)
+              queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]);
+              // If parent is expanded, refresh its contents so the new subfolder appears in the list
+              if (update.folder?.parent_folder_id) {
+                apiService.getFolderContents(update.folder.parent_folder_id)
+                  .then(contents => {
+                    setFolderContents(prev => ({
+                      ...prev,
+                      [update.folder.parent_folder_id]: {
+                        ...contents,
+                        documents: filterMetadataFiles(contents.documents || []),
+                        subfolders: Array.isArray(contents.subfolders) ? contents.subfolders : []
+                      }
+                    }));
+                  })
+                  .catch(() => {});
+              }
+
+              // Refetch contents for any expanded folder that has no cache or empty cache, so tree
+              // invalidation or agent-created files don't leave them stuck empty (e.g. Reference).
+              setFolderContents(prev => {
+                const roots = new Set(['my_documents_root', 'global_documents_root']);
+                const expanded = expandedFoldersRef.current;
+                expanded.forEach(fid => {
+                  if (roots.has(fid)) return;
+                  const c = prev[fid];
+                  const docLen = (c?.documents && c.documents.length) || 0;
+                  const subLen = (c?.subfolders && c.subfolders.length) || 0;
+                  if (docLen > 0 || subLen > 0) return;
+                  apiService.getFolderContents(fid)
+                    .then(contents => {
+                      if (!contents) return;
+                      const docs = Array.isArray(contents.documents) ? contents.documents : [];
+                      const subs = Array.isArray(contents.subfolders) ? contents.subfolders : [];
+                      if (docs.length === 0 && subs.length === 0) return;
+                      setFolderContents(p => ({
+                        ...p,
+                        [fid]: {
+                          ...contents,
+                          documents: filterMetadataFiles(docs),
+                          subfolders: subs
+                        }
+                      }));
+                    })
+                    .catch(() => {});
+                });
+                return prev;
+              });
+
               // Optimistic update - add folder to tree immediately
               queryClient.setQueryData(['folders', 'tree', user?.user_id, user?.role], (oldData) => {
                 if (!oldData) return oldData;
@@ -517,16 +704,34 @@ const FileTreeSidebar = ({
                 setExpandedFolders(prev => {
                   const newExpanded = new Set(prev);
                   newExpanded.add(update.folder.parent_folder_id);
-                  console.log(`📁 BULLY! Auto-expanding parent folder ${update.folder.parent_folder_id} for new subfolder`);
+                  console.log(`Auto-expanding parent folder ${update.folder.parent_folder_id} for new subfolder`);
                   return newExpanded;
                 });
               }
             } else if (update.action === 'deleted') {
               const folderName = update.folder?.name || 'Folder';
+              const deletedFolderId = update.folder?.folder_id;
+              const parentFolderId = update.folder?.parent_folder_id;
               showToast(`🗑️ ${folderName} deleted`, 'success');
               
               // Invalidate folder contents to ensure counts are updated
               queryClient.invalidateQueries(['folderContents']);
+              
+              // Remove deleted folder from local folderContents so it disappears immediately
+              // (with shallow tree, subfolders are shown from folderContents, not from the tree)
+              setFolderContents(prev => {
+                const next = { ...prev };
+                if (deletedFolderId) delete next[deletedFolderId];
+                if (parentFolderId && next[parentFolderId]?.subfolders) {
+                  next[parentFolderId] = {
+                    ...next[parentFolderId],
+                    subfolders: next[parentFolderId].subfolders.filter(
+                      s => s.folder_id !== deletedFolderId
+                    )
+                  };
+                }
+                return next;
+              });
               
               // Optimistic update - remove folder from tree immediately
               queryClient.setQueryData(['folders', 'tree', user?.user_id, user?.role], (oldData) => {
@@ -798,21 +1003,64 @@ const FileTreeSidebar = ({
                 return newExpanded;
               });
               
-              // **ROOSEVELT FIX**: Refresh BOTH folder contents AND the folder tree!
-              // This ensures document counts update and new items appear immediately
+              // Refresh folder contents and tree so new file appears. Don't overwrite non-empty with empty.
               Promise.all([
                 apiService.getFolderContents(update.folder_id),
                 queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role])
               ])
                 .then(([contents]) => {
-                  setFolderContents(prev => ({ ...prev, [update.folder_id]: contents }));
+                  const docs = filterMetadataFiles(contents?.documents || []);
+                  const subs = Array.isArray(contents?.subfolders) ? contents.subfolders : [];
+                  setFolderContents(prev => {
+                    const existing = prev[update.folder_id];
+                    if (existing && (existing.documents?.length > 0 || existing.subfolders?.length > 0) && docs.length === 0 && subs.length === 0) {
+                      return prev;
+                    }
+                    return {
+                      ...prev,
+                      [update.folder_id]: {
+                        ...contents,
+                        documents: docs,
+                        subfolders: subs
+                      }
+                    };
+                  });
                   console.log(`✅ Updated folder ${update.folder_id} contents AND tree via WebSocket for ${update.action}`);
-                  
-                  // **BULLY!** Also re-check for org files if this might be a new org file
+
                   if (update.metadata?.filename?.toLowerCase().endsWith('.org')) {
                     setHasOrgFiles(true);
                     console.log('📋 Detected new org file, enabling Org Tools');
                   }
+
+                  // Refetch any expanded folder with no/empty cache so tree under e.g. Reference repopulates after agent-created file
+                  setFolderContents(prev => {
+                    const roots = new Set(['my_documents_root', 'global_documents_root']);
+                    const expanded = expandedFoldersRef.current;
+                    expanded.forEach(fid => {
+                      if (roots.has(fid)) return;
+                      const c = prev[fid];
+                      const docLen = (c?.documents && c.documents.length) || 0;
+                      const subLen = (c?.subfolders && c.subfolders.length) || 0;
+                      if (docLen > 0 || subLen > 0) return;
+                      apiService.getFolderContents(fid)
+                        .then(res => {
+                          if (!res) return;
+                          const docList = Array.isArray(res.documents) ? res.documents : [];
+                          const subList = Array.isArray(res.subfolders) ? res.subfolders : [];
+                          if (docList.length === 0 && subList.length === 0) return;
+                          setFolderContents(p => ({
+                            ...p,
+                            [fid]: {
+                              ...res,
+                              documents: filterMetadataFiles(docList),
+                              subfolders: subList
+                            }
+                          }));
+                        })
+                        .catch(() => {});
+                    });
+                    return prev;
+                  });
                 })
                 .catch(error => {
                   console.error(`❌ Failed to refresh folder ${update.folder_id}:`, error);
@@ -829,25 +1077,39 @@ const FileTreeSidebar = ({
 
       ws.onclose = (event) => {
         console.log(`📡 Disconnected from folder updates WebSocket. Code: ${event.code}, Reason: ${event.reason}`);
-        
-        // If closed due to auth error, log it clearly
+        folderWsRef.current = null;
+
         if (event.code === 1008) {
           console.error(`❌ WebSocket authentication failed: ${event.reason}`);
+          return;
         }
+
+        const attempts = folderReconnectAttemptsRef.current;
+        if (attempts >= MAX_RECONNECT_ATTEMPTS) {
+          console.warn('📡 Folder WebSocket: max reconnect attempts reached, giving up');
+          return;
+        }
+        folderReconnectAttemptsRef.current = attempts + 1;
+        const delay = Math.min(1000 * Math.pow(2, attempts), 30000);
+        console.log(`📡 Folder WebSocket: reconnecting in ${delay}ms (attempt ${attempts + 1}/${MAX_RECONNECT_ATTEMPTS})`);
+        folderReconnectTimeoutRef.current = setTimeout(connect, delay);
       };
 
       ws.onerror = (error) => {
         console.error('❌ Folder WebSocket error:', error);
       };
+    };
 
-    } catch (error) {
-      console.error('❌ Failed to connect to folder updates WebSocket:', error);
-    }
+    connect();
 
-    // Cleanup on unmount
     return () => {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.close();
+      if (folderReconnectTimeoutRef.current) {
+        clearTimeout(folderReconnectTimeoutRef.current);
+        folderReconnectTimeoutRef.current = null;
+      }
+      if (folderWsRef.current && folderWsRef.current.readyState === WebSocket.OPEN) {
+        folderWsRef.current.close();
+        folderWsRef.current = null;
       }
     };
   }, [user?.user_id, apiService, showToast]); // Add showToast to dependencies
@@ -855,7 +1117,7 @@ const FileTreeSidebar = ({
   // Queries
   const { data: folderTree, isLoading, error, refetch } = useQuery(
     ['folders', 'tree', user?.user_id, user?.role],
-    () => apiService.get('/api/folders/tree'),
+    () => apiService.get('/api/folders/tree?shallow=true'),
     {
       refetchOnWindowFocus: false,
       staleTime: 30000, // 30 seconds
@@ -895,20 +1157,34 @@ const FileTreeSidebar = ({
       : (folderTree?.folders || folderTree?.data?.folders || folderTree?.result?.folders || []);
     const treeNodes = Array.isArray(rawNodes) ? rawNodes : [];
     collectValidIds(treeNodes);
+
+    // With a shallow tree, subfolders (e.g. under "reference") only exist in folderContents, not in the tree.
+    // Treat any folder that appears as a subfolder in loaded contents as valid so we don't collapse them.
+    const validSubfolderIds = new Set();
+    Object.values(folderContents).forEach(contents => {
+      (contents?.subfolders || []).forEach(s => {
+        if (s?.folder_id) validSubfolderIds.add(s.folder_id);
+      });
+    });
+    const isValidFolderId = (folderId) =>
+      validFolderIds.has(folderId) || folderContents[folderId] || validSubfolderIds.has(folderId);
     
-    // Load contents for all expanded folders that aren't virtual roots AND exist in the current tree
-    // Fetch on refresh to ensure files appear without manual toggle (avoid gating on existing cache)
-    const realFolders = Array.from(expandedFolders).filter(folderId => 
-      folderId !== 'my_documents_root' && 
+    // Load contents only for expanded folders that don't already have cached contents.
+    // Use isValidFolderId (not just validFolderIds) so second-level subfolders that came from
+    // a parent's folderContents (not the shallow tree) are also loaded on mount/tree-change.
+    const realFolders = Array.from(expandedFolders).filter(folderId =>
+      folderId !== 'my_documents_root' &&
       folderId !== 'global_documents_root' &&
-      validFolderIds.has(folderId)
+      isValidFolderId(folderId) &&
+      !folderContents[folderId]
     );
     
-    // Remove any expanded folders that no longer exist in the tree
-    const invalidExpandedFolders = Array.from(expandedFolders).filter(folderId => 
-      folderId !== 'my_documents_root' && 
+    // Remove only expanded folders that are truly invalid: not in tree, no contents, and not a subfolder in any loaded contents.
+    // With a shallow tree, subfolders under e.g. "reference" only exist in folderContents; don't collapse them.
+    const invalidExpandedFolders = Array.from(expandedFolders).filter(folderId =>
+      folderId !== 'my_documents_root' &&
       folderId !== 'global_documents_root' &&
-      !validFolderIds.has(folderId)
+      !isValidFolderId(folderId)
     );
     
     if (invalidExpandedFolders.length > 0) {
@@ -919,12 +1195,13 @@ const FileTreeSidebar = ({
         return newExpanded;
       });
       
-      // Update localStorage
+      // Persist expanded state: include roots and any folder valid by tree, contents, or as a subfolder in contents.
+      // Otherwise we'd save a truncated list and subfolders under e.g. "reference" would stay collapsed after reload.
       try {
-        const validExpanded = Array.from(expandedFolders).filter(folderId => 
-          folderId === 'my_documents_root' || 
+        const validExpanded = Array.from(expandedFolders).filter(folderId =>
+          folderId === 'my_documents_root' ||
           folderId === 'global_documents_root' ||
-          validFolderIds.has(folderId)
+          isValidFolderId(folderId)
         );
         localStorage.setItem('expandedFolders', JSON.stringify(validExpanded));
       } catch (error) {
@@ -947,22 +1224,60 @@ const FileTreeSidebar = ({
           }
         })
       ).then(results => {
-        // Update folder contents in batch
+        // Update folder contents in batch. Don't overwrite non-empty with empty (avoids race where stale response clears subfolders).
         setFolderContents(prev => {
           const newContents = { ...prev };
           results.forEach(({ folderId, contents }) => {
-            if (contents) {
-              newContents[folderId] = {
-                ...contents,
-                documents: filterMetadataFiles(contents.documents || [])
-              };
+            if (!contents) return;
+            const docs = filterMetadataFiles(contents.documents || []);
+            const subs = Array.isArray(contents.subfolders) ? contents.subfolders : [];
+            const existing = prev[folderId];
+            if (existing && (existing.documents?.length > 0 || existing.subfolders?.length > 0) && docs.length === 0 && subs.length === 0) {
+              return;
             }
+            newContents[folderId] = {
+              ...contents,
+              documents: docs,
+              subfolders: subs
+            };
           });
           return newContents;
         });
       });
     }
-  }, [folderTree, expandedFolders]); // Trigger when tree loads or expanded set changes (avoid loops on contents update)
+  }, [folderTree, expandedFolders, folderContents]); // folderContents: don't treat lazy-loaded subfolders as invalid
+
+  // If a folder is expanded but we have empty cached contents (0 docs, 0 subfolders), refetch once.
+  // Fixes case where first response was empty (e.g. timing/race) but folder actually has content.
+  useEffect(() => {
+    const virtualRoots = new Set(['my_documents_root', 'global_documents_root']);
+    expandedFolders.forEach(folderId => {
+      if (virtualRoots.has(folderId)) return;
+      if (emptiedFolderRefetchesRef.current.has(folderId)) return;
+      const contents = folderContents[folderId];
+      if (!contents) return;
+      const docLen = (contents.documents && contents.documents.length) || 0;
+      const subLen = (contents.subfolders && contents.subfolders.length) || 0;
+      if (docLen > 0 || subLen > 0) return;
+      emptiedFolderRefetchesRef.current.add(folderId);
+      apiService.getFolderContents(folderId)
+        .then(c => {
+          if (!c) return;
+          const docs = Array.isArray(c.documents) ? c.documents : [];
+          const subs = Array.isArray(c.subfolders) ? c.subfolders : [];
+          if (docs.length === 0 && subs.length === 0) return;
+          setFolderContents(prev => ({
+            ...prev,
+            [folderId]: {
+              ...c,
+              documents: filterMetadataFiles(docs),
+              subfolders: subs
+            }
+          }));
+        })
+        .catch(() => {});
+    });
+  }, [expandedFolders, folderContents, apiService]);
 
   // Get documents not in any folder (root documents)
   const { data: rootDocuments, error: documentsError, isLoading: documentsLoading } = useQuery(
@@ -1146,6 +1461,51 @@ const FileTreeSidebar = ({
       staleTime: 30000, // 30 seconds
     }
   );
+
+  const { data: rssUserTimeFormatData } = useQuery(
+    'userTimeFormat',
+    () => apiService.settings.getUserTimeFormat(),
+    {
+      staleTime: 5 * 60 * 1000,
+      refetchOnWindowFocus: false,
+    }
+  );
+  const { data: rssUserTimezoneData } = useQuery(
+    'userTimezone',
+    () => apiService.getUserTimezone(),
+    {
+      staleTime: 5 * 60 * 1000,
+      refetchOnWindowFocus: false,
+    }
+  );
+  const rssDisplayTimeFormat = rssUserTimeFormatData?.time_format || '24h';
+  const rssDisplayTimeZone = rssUserTimezoneData?.timezone || undefined;
+
+  useEffect(() => {
+    const onUnreadUpdated = () => {
+      queryClient.invalidateQueries(['rss', 'unread-counts']);
+    };
+    window.addEventListener('rss-unread-counts-updated', onUnreadUpdated);
+    return () => window.removeEventListener('rss-unread-counts-updated', onUnreadUpdated);
+  }, [queryClient]);
+
+  const userRssByCategory = useMemo(
+    () => groupRssFeedsByCategory(userRSSFeeds),
+    [userRSSFeeds]
+  );
+  const globalRssByCategory = useMemo(
+    () => groupRssFeedsByCategory(globalRSSFeeds),
+    [globalRSSFeeds]
+  );
+
+  const toggleRSSCategoryExpand = useCallback((scopeKey) => {
+    setExpandedRSSCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(scopeKey)) next.delete(scopeKey);
+      else next.add(scopeKey);
+      return next;
+    });
+  }, []);
 
   // Mutations
   const createProjectMutation = useMutation(
@@ -1333,6 +1693,23 @@ const FileTreeSidebar = ({
         // Snapshot the previous value (use full query key with user info)
         const previousFolders = queryClient.getQueryData(['folders', 'tree', user?.user_id, user?.role]);
         
+        // Optimistically remove from folderContents so folder disappears immediately (shallow tree shows subfolders from folderContents)
+        let previousFolderContents;
+        setFolderContents(prev => {
+          previousFolderContents = prev;
+          const next = { ...prev };
+          delete next[folderId];
+          Object.keys(next).forEach(pid => {
+            if (next[pid].subfolders?.some(s => s.folder_id === folderId)) {
+              next[pid] = {
+                ...next[pid],
+                subfolders: next[pid].subfolders.filter(s => s.folder_id !== folderId)
+              };
+            }
+          });
+          return next;
+        });
+        
         // Helper function to recursively remove a folder from the tree
         const removeFolderFromTree = (folders, targetId) => {
           return folders
@@ -1402,7 +1779,7 @@ const FileTreeSidebar = ({
         });
         
         // Return context with the previous data
-        return { previousFolders };
+        return { previousFolders, previousFolderContents };
       },
       onSuccess: (response, variables) => {
         setContextMenu(null);
@@ -1418,6 +1795,9 @@ const FileTreeSidebar = ({
         // Rollback on error
         if (context?.previousFolders) {
           queryClient.setQueryData(['folders', 'tree', user?.user_id, user?.role], context.previousFolders);
+        }
+        if (context?.previousFolderContents != null) {
+          setFolderContents(context.previousFolderContents);
         }
         console.error('❌ Folder deletion failed:', error);
         
@@ -1457,7 +1837,7 @@ const FileTreeSidebar = ({
         
         if (isAlreadyComplete) {
           // File processed instantly - no spinner needed!
-          console.log(`⚡ BULLY! "${variables.filename}" processed instantly (${result.status})`);
+          console.log(`"${variables.filename}" processed instantly (${result.status})`);
           showToast(`✅ "${variables.filename}" uploaded and ready!`, 'success');
         } else {
           // File still processing - show spinner
@@ -1477,7 +1857,7 @@ const FileTreeSidebar = ({
             apiService.get(`/api/user/documents/${result.document_id}`)
               .then(doc => {
                 if (doc.processing_status === 'completed' || doc.processing_status === 'failed') {
-                  console.log(`⏰ ROOSEVELT FALLBACK: Manually removing "${variables.filename}" from processing (status: ${doc.processing_status})`);
+                  console.log(`Fallback: manually removing "${variables.filename}" from processing (status: ${doc.processing_status})`);
                   setProcessingFiles(prev => prev.filter(f => f.documentId !== result.document_id));
                 }
               })
@@ -1656,6 +2036,7 @@ const FileTreeSidebar = ({
       onSuccess: (data, feedId) => {
         console.log(`✅ RSS feed ${feedId} refreshed:`, data);
         queryClient.invalidateQueries(['rss', 'feeds']);
+        queryClient.invalidateQueries(['rss', 'feeds', 'categorized']);
         queryClient.invalidateQueries(['rss', 'unread-counts']);
         // Show toast notification
         // TODO: Add toast notification system
@@ -1673,6 +2054,7 @@ const FileTreeSidebar = ({
       onSuccess: () => {
         queryClient.invalidateQueries(['rss', 'feeds']);
         queryClient.invalidateQueries(['rss', 'unread-counts']);
+        queryClient.invalidateQueries({ queryKey: ['folders', 'tree'], exact: false });
         setContextMenu(null);
       },
       onError: (error) => {
@@ -1693,11 +2075,24 @@ const FileTreeSidebar = ({
         // Always load folder contents when expanding to ensure we have the latest data
         apiService.getFolderContents(folderId)
           .then(contents => {
-            console.log(`📁 Loading contents for folder ${folderId}:`, contents);
-            setFolderContents(prev => ({
-              ...prev,
-              [folderId]: contents
-            }));
+            if (!contents) return;
+            const docs = Array.isArray(contents.documents) ? contents.documents : [];
+            const subs = Array.isArray(contents.subfolders) ? contents.subfolders : [];
+            setFolderContents(prev => {
+              const existing = prev[folderId];
+              // Don't overwrite non-empty contents with an empty response (e.g. race or stale response)
+              if (existing && (existing.documents?.length > 0 || existing.subfolders?.length > 0) && docs.length === 0 && subs.length === 0) {
+                return prev;
+              }
+              return {
+                ...prev,
+                [folderId]: {
+                  ...contents,
+                  documents: filterMetadataFiles(docs),
+                  subfolders: subs
+                }
+              };
+            });
           })
           .catch(error => {
             console.error('Failed to load folder contents:', error);
@@ -1709,9 +2104,13 @@ const FileTreeSidebar = ({
 
   const handleFolderClick = useCallback((folderId) => {
     // Handle RSS virtual directories - open them in the tabbed content area
-    if (folderId === 'rss_feeds_virtual' || folderId === 'global_rss_feeds_virtual') {
-      // For RSS virtual directories, we want to show the RSS feeds
-      // This will be handled by the parent component through onFolderSelect
+    if (folderId === 'rss_feeds_virtual') {
+      const feedIds = (userRSSFeeds || []).map((f) => f.feed_id).filter(Boolean);
+      onRSSCategoryClick?.('RSS Feeds', feedIds, 'user');
+      onFolderSelect?.(folderId);
+    } else if (folderId === 'global_rss_feeds_virtual') {
+      const feedIds = (globalRSSFeeds || []).map((f) => f.feed_id).filter(Boolean);
+      onRSSCategoryClick?.('Global RSS Feeds', feedIds, 'global');
       onFolderSelect?.(folderId);
     } else if (folderId === 'news_virtual') {
       try {
@@ -1722,7 +2121,7 @@ const FileTreeSidebar = ({
     } else {
       onFolderSelect?.(folderId);
     }
-  }, [onFolderSelect]);
+  }, [onFolderSelect, onRSSCategoryClick, userRSSFeeds, globalRSSFeeds]);
 
   const handleContextMenu = useCallback((event, target) => {
     event.preventDefault();
@@ -2124,6 +2523,83 @@ const FileTreeSidebar = ({
     }
   }, [deleteRSSFeedMutation]);
 
+  const invalidateRssQueries = useCallback(() => {
+    queryClient.invalidateQueries(['rss', 'feeds']);
+    queryClient.invalidateQueries(['rss', 'feeds', 'categorized']);
+    queryClient.invalidateQueries(['rss', 'unread-counts']);
+  }, [queryClient]);
+
+  const handleBulkRefreshRssFeeds = useCallback(
+    async (feedIds) => {
+      const ids = [...new Set((feedIds || []).filter(Boolean))];
+      if (ids.length === 0 || rssBulkBusy) return;
+      handleContextMenuClose();
+      setRssBulkBusy(true);
+      try {
+        const { total, failed } = await refreshRssFeedIdsWithPool(ids, 3);
+        invalidateRssQueries();
+        if (failed === 0) {
+          showToast(`Refreshed ${total} feed(s)`, 'success');
+        } else {
+          showToast(
+            `Refreshed ${total - failed}/${total} feed(s); ${failed} failed`,
+            failed === total ? 'error' : 'info'
+          );
+        }
+      } catch (e) {
+        showToast(`Refresh failed: ${e?.message || 'Unknown error'}`, 'error');
+      } finally {
+        setRssBulkBusy(false);
+      }
+    },
+    [rssBulkBusy, invalidateRssQueries, showToast, handleContextMenuClose]
+  );
+
+  const handleBulkMarkRssFeedsRead = useCallback(
+    async (feedIds, categoryLabel) => {
+      const ids = [...new Set((feedIds || []).filter(Boolean))];
+      if (ids.length === 0 || rssBulkBusy) return;
+      const label = categoryLabel || 'this category';
+      if (!window.confirm(`Mark all articles read in "${label}"?`)) {
+        handleContextMenuClose();
+        return;
+      }
+      handleContextMenuClose();
+      setRssBulkBusy(true);
+      try {
+        const { total, failed } = await markAllRssFeedsReadSequential(ids);
+        invalidateRssQueries();
+        if (failed === 0) {
+          showToast(`Marked all read in ${total} feed(s)`, 'success');
+        } else {
+          showToast(
+            `Marked read in ${total - failed}/${total} feed(s); ${failed} failed`,
+            failed === total ? 'error' : 'info'
+          );
+        }
+      } catch (e) {
+        showToast(`Mark all read failed: ${e?.message || 'Unknown error'}`, 'error');
+      } finally {
+        setRssBulkBusy(false);
+      }
+    },
+    [rssBulkBusy, invalidateRssQueries, showToast, handleContextMenuClose]
+  );
+
+  const handleMarkSingleRssFeedAllRead = useCallback(
+    async (feedId) => {
+      try {
+        await rssService.markAllArticlesRead(feedId);
+        invalidateRssQueries();
+        showToast('All articles in this feed marked read', 'success');
+      } catch (e) {
+        showToast(e?.message || 'Failed to mark read', 'error');
+      }
+      handleContextMenuClose();
+    },
+    [invalidateRssQueries, showToast, handleContextMenuClose]
+  );
+
   const handleFileDrop = useCallback((event, targetFolderId) => {
     event.preventDefault();
     setIsDragging(false);
@@ -2354,7 +2830,9 @@ const FileTreeSidebar = ({
   const renderFolderItem = useCallback((folder, level = 0) => {
     const isExpanded = expandedFolders.has(folder.folder_id);
     const isSelected = selectedFolderId === folder.folder_id;
-    const hasSubfolders = folder.children && folder.children.length > 0;
+    const hasSubfolders =
+      (folder.children && folder.children.length > 0) ||
+      (folderContents[folder.folder_id]?.subfolders?.length > 0);
     const hasDocuments = folderContents[folder.folder_id]?.documents && folderContents[folder.folder_id].documents.length > 0;
     
     // Check if this is a virtual root folder first
@@ -2375,10 +2853,12 @@ const FileTreeSidebar = ({
     const hasLoadedSubfolders = loadedContents && loadedContents.total_subfolders > 0;
     const hasLoadedDocuments = loadedContents && loadedContents.total_documents > 0;
     
-    // Also check the folder's own count fields from the tree structure (before contents are loaded)
+    // Also check the folder's own count fields from the tree structure (before contents are loaded).
+    // If count data is absent (folder came from a subfolders list without counts), treat as potentially having children.
     const treeDocCount = folder.document_count || 0;
     const treeSubCount = folder.subfolder_count || 0;
-    const hasCounts = isRealFolder && (treeDocCount > 0 || treeSubCount > 0);
+    const countsAbsent = folder.document_count === undefined && folder.subfolder_count === undefined;
+    const hasCounts = isRealFolder && (countsAbsent || treeDocCount > 0 || treeSubCount > 0);
     
     const mightHaveDocuments = isRealFolder && (hasLoadedSubfolders || hasLoadedDocuments || hasCounts);
     
@@ -2509,7 +2989,7 @@ const FileTreeSidebar = ({
                     const effective = getEffectiveFolderExemption(folder.folder_id);
                     if (effective.status === true) {
                       return (
-                        <Tooltip title="Folder is not being vectorized" placement="top">
+                        <Tooltip title="Folder is excluded from search" placement="top">
                           <Box
                             sx={{
                               display: 'inline-flex',
@@ -2534,7 +3014,7 @@ const FileTreeSidebar = ({
                     }
                     return null;
                   })()}
-                  {folder.is_virtual_source && (
+                  {folder.is_virtual_source && !isRSSVirtual && (
                     <Chip
                       size="small"
                       label="Virtual"
@@ -2568,68 +3048,170 @@ const FileTreeSidebar = ({
         {hasChildren && (
           <Collapse in={isExpanded} timeout="auto" unmountOnExit>
             <List component="div" disablePadding>
-              {folder.children.map(child => renderFolderItem(child, level + 1))}
+              {(isExpanded && folderContents[folder.folder_id]?.subfolders?.length > 0
+                ? folderContents[folder.folder_id].subfolders
+                : (folder.children || [])
+              ).map(child => renderFolderItem(child, level + 1))}
               
-              {/* Render RSS feeds for RSS virtual directories */}
-              {isRSSVirtual && (
-                <>
-                  {/* Show user feeds in rss_feeds_virtual, global feeds in global_rss_feeds_virtual */}
-                  {(folder.folder_id === 'rss_feeds_virtual' ? userRSSFeeds : globalRSSFeeds).map(feed => {
-                    console.log('🔍 Processing RSS feed:', feed);
-                    console.log('🔍 Feed ID:', feed?.feed_id);
-                    console.log('🔍 Feed name:', feed?.feed_name);
-                    console.log('🔍 Feed location:', folder.folder_id === 'rss_feeds_virtual' ? 'User' : 'Global');
-                    const unreadCount = rssUnreadCounts?.[feed.feed_id] || 0;
-                    return (
-                      <ListItem
-                        key={feed.feed_id}
-                        disablePadding
-                        sx={{ pl: (level + 1) * 2 + 2 }}
-                        onContextMenu={(e) => {
-                          e.preventDefault();
-                          setContextMenu({
-                            mouseX: e.clientX + 2,
-                            mouseY: e.clientY - 6,
-                          });
-                          setContextMenuTarget({ ...feed, type: 'rss_feed' });
-                        }}
-                        {...createLongPressHandlers({ ...feed, type: 'rss_feed' })}
-                      >
-                        <ListItemButton
-                          onClick={() => handleRSSFeedClick(feed.feed_id, feed.feed_name)}
-                          sx={{ minHeight: 30 }}
-                        >
-                          <ListItemIcon sx={{ minWidth: 24 }}>
-                            <RssFeed color="primary" />
-                          </ListItemIcon>
-                          <ListItemText
-                            primary={
-                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                <Typography variant="body2" noWrap sx={{ flex: 1 }}>
-                                  {feed.feed_name}
-                                </Typography>
-                                {unreadCount > 0 && (
-                                  <Chip
-                                    size="small"
-                                    label={unreadCount}
-                                    color="primary"
-                                    sx={{ height: 16, fontSize: '0.7rem', minWidth: 20 }}
-                                  />
-                                )}
-                              </Box>
+              {/* RSS virtual dirs: category folders, then feeds (expand chevron); category row opens merged tab */}
+              {isRSSVirtual && (() => {
+                const byCat =
+                  folder.folder_id === 'rss_feeds_virtual' ? userRssByCategory : globalRssByCategory;
+                const scope = folder.folder_id === 'rss_feeds_virtual' ? 'user' : 'global';
+                return (
+                  <>
+                    {byCat.map((cat) => {
+                      const scopeKey = `${folder.folder_id}::${cat.key}`;
+                      const expandedCat = expandedRSSCategories.has(scopeKey);
+                      const catUnread = cat.feeds.reduce(
+                        (sum, ff) =>
+                          sum +
+                          (rssUnreadCounts?.[ff.feed_id] ??
+                            rssUnreadCounts?.[String(ff.feed_id)] ??
+                            0),
+                        0
+                      );
+                      const categoryFeedIds = cat.feeds.map((ff) => ff.feed_id).filter(Boolean);
+                      const rssCategoryMenuTarget = {
+                        type: 'rss_category',
+                        categoryKey: cat.key,
+                        categoryLabel: cat.label,
+                        scope,
+                        feedIds: categoryFeedIds,
+                      };
+                      return (
+                        <React.Fragment key={scopeKey}>
+                          <ListItem
+                            disablePadding
+                            secondaryAction={
+                              <IconButton
+                                edge="end"
+                                size="small"
+                                aria-label={expandedCat ? 'Collapse feeds' : 'Expand feeds'}
+                                onClick={() => toggleRSSCategoryExpand(scopeKey)}
+                              >
+                                {expandedCat ? <ExpandLess /> : <ExpandMore />}
+                              </IconButton>
                             }
-                            secondary={
-                              <Typography variant="caption" color="text.secondary">
-                                Last updated: {feed.last_updated ? new Date(feed.last_updated).toLocaleDateString() : 'Never'}
-                              </Typography>
-                            }
-                          />
-                        </ListItemButton>
-                      </ListItem>
-                    );
-                  })}
-                </>
-              )}
+                            sx={{ pl: (level + 1) * 2 + 2, pr: 0.5 }}
+                            onContextMenu={(e) => {
+                              e.preventDefault();
+                              handleContextMenu(e, rssCategoryMenuTarget);
+                            }}
+                            {...createLongPressHandlers(rssCategoryMenuTarget)}
+                          >
+                            <ListItemButton
+                              onClick={() => {
+                                const ids = cat.feeds.map((ff) => ff.feed_id);
+                                if (onRSSCategoryClick && ids.length > 0) {
+                                  onRSSCategoryClick(cat.label, ids, scope);
+                                }
+                              }}
+                              sx={{
+                                minHeight: 32,
+                                pr: 6,
+                              }}
+                            >
+                              <ListItemIcon sx={{ minWidth: 24, color: 'primary.main' }}>
+                                <Folder fontSize="small" />
+                              </ListItemIcon>
+                              <ListItemText
+                                primary={
+                                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                    <Typography variant="body2" noWrap sx={{ flex: 1 }}>
+                                      {cat.label}
+                                    </Typography>
+                                    {catUnread > 0 && (
+                                      <Chip
+                                        size="small"
+                                        label={catUnread}
+                                        color="primary"
+                                        sx={{ height: 16, fontSize: '0.7rem', minWidth: 20 }}
+                                      />
+                                    )}
+                                  </Box>
+                                }
+                                secondary={
+                                  <Typography variant="caption" color="text.secondary" noWrap>
+                                    {cat.feeds.length} feed{cat.feeds.length !== 1 ? 's' : ''}
+                                    {onRSSCategoryClick ? ' · open all articles' : ''}
+                                  </Typography>
+                                }
+                              />
+                            </ListItemButton>
+                          </ListItem>
+                          <Collapse in={expandedCat} timeout="auto" unmountOnExit>
+                            <List component="div" disablePadding>
+                              {cat.feeds.map((feed) => {
+                                const unreadCount =
+                                  rssUnreadCounts?.[feed.feed_id] ??
+                                  rssUnreadCounts?.[String(feed.feed_id)] ??
+                                  0;
+                                return (
+                                  <ListItem
+                                    key={feed.feed_id}
+                                    disablePadding
+                                    sx={{ pl: (level + 2) * 2 + 2 }}
+                                    onContextMenu={(e) => {
+                                      e.preventDefault();
+                                      setContextMenu({
+                                        mouseX: e.clientX + 2,
+                                        mouseY: e.clientY - 6,
+                                      });
+                                      setContextMenuTarget({ ...feed, type: 'rss_feed' });
+                                    }}
+                                    {...createLongPressHandlers({ ...feed, type: 'rss_feed' })}
+                                  >
+                                    <ListItemButton
+                                      onClick={() => handleRSSFeedClick(feed.feed_id, feed.feed_name)}
+                                      sx={{ minHeight: 30 }}
+                                    >
+                                      <ListItemIcon sx={{ minWidth: 24 }}>
+                                        <RssFeed color="primary" />
+                                      </ListItemIcon>
+                                      <ListItemText
+                                        primary={
+                                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                            <Typography variant="body2" noWrap sx={{ flex: 1 }}>
+                                              {feed.feed_name}
+                                            </Typography>
+                                            {unreadCount > 0 && (
+                                              <Chip
+                                                size="small"
+                                                label={unreadCount}
+                                                color="primary"
+                                                sx={{ height: 16, fontSize: '0.7rem', minWidth: 20 }}
+                                              />
+                                            )}
+                                          </Box>
+                                        }
+                                        secondary={
+                                          <Typography variant="caption" color="text.secondary">
+                                            Last updated:{' '}
+                                            {feed.last_check || feed.last_updated
+                                              ? formatInstantDateTime(
+                                                  feed.last_check || feed.last_updated,
+                                                  {
+                                                    timeFormat: rssDisplayTimeFormat,
+                                                    timeZone: rssDisplayTimeZone,
+                                                  }
+                                                )
+                                              : 'Never'}
+                                          </Typography>
+                                        }
+                                      />
+                                    </ListItemButton>
+                                  </ListItem>
+                                );
+                              })}
+                            </List>
+                          </Collapse>
+                        </React.Fragment>
+                      );
+                    })}
+                  </>
+                );
+              })()}
             </List>
           </Collapse>
         )}
@@ -2669,7 +3251,14 @@ const FileTreeSidebar = ({
     handleRSSFeedClick,
     user,
     getEffectiveFolderExemption,
-    theme
+    theme,
+    expandedRSSCategories,
+    toggleRSSCategoryExpand,
+    onRSSCategoryClick,
+    userRssByCategory,
+    globalRssByCategory,
+    rssDisplayTimeFormat,
+    rssDisplayTimeZone
   ]);
 
   // Render file item (parentFolder used for context menu to know collection_type)
@@ -2702,12 +3291,20 @@ const FileTreeSidebar = ({
       return baseIcon;
     };
 
-    const getStatusIcon = (status, isExemptFromVectorization = false) => {
+    const getStatusIcon = (status, isExemptFromVectorization = false, hasPendingProposals = false) => {
       const getStatusIconWithTooltip = (icon, title) => (
         <Tooltip title={title} placement="top">
           {icon}
         </Tooltip>
       );
+
+      // Pending edit proposals: turquoise indicator first (so it shows even when exempt from vectorization)
+      if (hasPendingProposals && (status === 'completed' || !status)) {
+        return getStatusIconWithTooltip(
+          <CheckCircle sx={{ color: '#00bcd4', fontSize: 16 }} />,
+          'Agent edits pending review - open to accept or reject'
+        );
+      }
 
       // If exempt from vectorization and file is completed/okay, show white CheckCircle
       if (isExemptFromVectorization && (status === 'completed' || !status || status === 'pending')) {
@@ -2731,7 +3328,7 @@ const FileTreeSidebar = ({
               fontSize: 14,
             }} />
           </Box>,
-          'File is ready but not being vectorized'
+          'File is excluded from search'
         );
       }
 
@@ -2837,7 +3434,9 @@ const FileTreeSidebar = ({
                   // Normalize status - handle both 'status' and 'processing_status' fields, and ensure it's a string
                   const fileStatus = file.status || file.processing_status || null;
                   const normalizedStatus = fileStatus ? String(fileStatus).toLowerCase() : null;
-                  return getStatusIcon(normalizedStatus, effective.status === true);
+                  // Teal when backend says pending; optional store check removed so icon updates as soon as WebSocket delivers
+                  const hasPendingProposals = file.has_pending_proposals === true;
+                  return getStatusIcon(normalizedStatus, effective.status === true, hasPendingProposals);
                 })()}
               </Box>
             }
@@ -2845,7 +3444,7 @@ const FileTreeSidebar = ({
         </ListItemButton>
       </ListItem>
     );
-  }, [getEffectiveFileExemption, handleContextMenu, createLongPressHandlers, onFileSelect, theme, handleDragStart, handleDragEnd, draggedItem]);
+  }, [getEffectiveFileExemption, handleContextMenu, createLongPressHandlers, onFileSelect, theme, handleDragStart, handleDragEnd, draggedItem, diffStoreRevision]);
 
   // Render destination item for Move dialog
   const renderDestinationItem = useCallback((folder, level = 0) => {
@@ -2936,9 +3535,23 @@ const FileTreeSidebar = ({
         height: '100%',
       }}
     >
-      {/* Header */}
-      <Box sx={{ py: 0.75, px: 1.5, height: 44, borderBottom: 1, borderColor: 'divider', backgroundColor: 'background.paper' }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', mb: 1 }}>
+      {/* Header — match TabbedContentManager tab row (44px, 16px horizontal padding) */}
+      <Box
+        sx={{
+          flexShrink: 0,
+          boxSizing: 'border-box',
+          minHeight: 44,
+          height: 44,
+          px: 2,
+          py: 0,
+          borderBottom: 1,
+          borderColor: 'divider',
+          backgroundColor: 'background.paper',
+          display: 'flex',
+          alignItems: 'center',
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
           <Typography variant="h6" sx={{ fontWeight: 600, fontSize: 'var(--font-size-lg)' }}>
             Documents
           </Typography>
@@ -2964,6 +3577,17 @@ const FileTreeSidebar = ({
               slotProps={{ paper: { sx: { minWidth: 220 } } }}
             >
               <MenuItem
+                onClick={() => {
+                  setDocumentsMenuAnchor(null);
+                  setSearchOverlayOpen(true);
+                }}
+              >
+                <ListItemIcon>
+                  <Search fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>Search Documents</ListItemText>
+              </MenuItem>
+              <MenuItem
                 onClick={async () => {
                   setDocumentsMenuAnchor(null);
                   try {
@@ -2979,17 +3603,20 @@ const FileTreeSidebar = ({
                 </ListItemIcon>
                 <ListItemText>Download my Library</ListItemText>
               </MenuItem>
-              <MenuItem
-                onClick={() => {
-                  setDocumentsMenuAnchor(null);
-                  refetch();
-                }}
-              >
-                <ListItemIcon>
-                  <Refresh fontSize="small" />
-                </ListItemIcon>
-                <ListItemText>Refresh File List</ListItemText>
-              </MenuItem>
+              {user?.role === 'admin' && (
+                <MenuItem
+                  onClick={() => {
+                    setDocumentsMenuAnchor(null);
+                    refetch();
+                  }}
+                  title="Update folder tree (structure and counts). Open folders keep current list until you expand again."
+                >
+                  <ListItemIcon>
+                    <Refresh fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText primary="Refresh folder tree" secondary="Updates structure and counts" />
+                </MenuItem>
+              )}
               <MenuItem
                 onClick={async () => {
                   setDocumentsMenuAnchor(null);
@@ -2998,7 +3625,7 @@ const FileTreeSidebar = ({
                       'Scan filesystem for files not in database?\n\n' +
                       'This will:\n' +
                       '• Find files that exist on disk but not in the database\n' +
-                      '• Re-add them without re-vectorizing if vectors exist\n' +
+                      '• Re-add them without re-indexing if search index exists\n' +
                       '• Create "Recovered Files" folder for orphans\n\n' +
                       'Continue?'
                     );
@@ -3038,6 +3665,32 @@ const FileTreeSidebar = ({
                   <AccountTree fontSize="small" />
                 </ListItemIcon>
                 <ListItemText>File Relations (link map)</ListItemText>
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  setDocumentsMenuAnchor(null);
+                  if (window.tabbedContentManagerRef?.openEntityGraph) {
+                    window.tabbedContentManagerRef.openEntityGraph();
+                  }
+                }}
+              >
+                <ListItemIcon>
+                  <Hub fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>Entity Graph (knowledge map)</ListItemText>
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  setDocumentsMenuAnchor(null);
+                  if (window.tabbedContentManagerRef?.openUnifiedGraph) {
+                    window.tabbedContentManagerRef.openUnifiedGraph();
+                  }
+                }}
+              >
+                <ListItemIcon>
+                  <Hub fontSize="small" />
+                </ListItemIcon>
+                <ListItemText>Unified Knowledge Graph</ListItemText>
               </MenuItem>
             </Menu>
             <Tooltip title="Collapse Documents">
@@ -3111,8 +3764,8 @@ const FileTreeSidebar = ({
                 </Typography>
               </Box>
               <Collapse in={orgToolsExpanded} timeout="auto">
-                <List dense>
-            <ListItem disablePadding sx={{ mb: 0.5 }}>
+                <List dense sx={{ py: 0 }}>
+            <ListItem disablePadding>
               <ListItemButton 
                 onClick={() => {
                   // Open org-agenda tab
@@ -3122,20 +3775,17 @@ const FileTreeSidebar = ({
                 }}
                 sx={{ 
                   borderRadius: 1,
+                  minHeight: 36,
                   '&:hover': { backgroundColor: 'action.hover' }
                 }}
               >
                 <ListItemIcon sx={{ minWidth: 32 }}>
                   <Typography sx={{ fontSize: '18px' }}>📅</Typography>
                 </ListItemIcon>
-                <ListItemText 
-                  primary={<Typography variant="body2">Agenda View</Typography>}
-                  secondary={<Typography variant="caption" color="text.secondary">Scheduled & deadlines</Typography>}
-                />
+                <ListItemText primary={<Typography variant="body2">Agenda View</Typography>} />
               </ListItemButton>
             </ListItem>
-            
-            <ListItem disablePadding sx={{ mb: 0.5 }}>
+            <ListItem disablePadding>
               <ListItemButton 
                 onClick={() => {
                   if (window.tabbedContentManagerRef?.openOrgView) {
@@ -3144,20 +3794,17 @@ const FileTreeSidebar = ({
                 }}
                 sx={{ 
                   borderRadius: 1,
+                  minHeight: 36,
                   '&:hover': { backgroundColor: 'action.hover' }
                 }}
               >
                 <ListItemIcon sx={{ minWidth: 32 }}>
                   <Typography sx={{ fontSize: '18px' }}>🔍</Typography>
                 </ListItemIcon>
-                <ListItemText 
-                  primary={<Typography variant="body2">Search Org Files</Typography>}
-                  secondary={<Typography variant="caption" color="text.secondary">Full-text search</Typography>}
-                />
+                <ListItemText primary={<Typography variant="body2">Search Org Files</Typography>} />
               </ListItemButton>
             </ListItem>
-            
-            <ListItem disablePadding sx={{ mb: 0.5 }}>
+            <ListItem disablePadding>
               <ListItemButton 
                 onClick={() => {
                   if (window.tabbedContentManagerRef?.openOrgView) {
@@ -3166,20 +3813,17 @@ const FileTreeSidebar = ({
                 }}
                 sx={{ 
                   borderRadius: 1,
+                  minHeight: 36,
                   '&:hover': { backgroundColor: 'action.hover' }
                 }}
               >
                 <ListItemIcon sx={{ minWidth: 32 }}>
                   <Typography sx={{ fontSize: '18px' }}>✅</Typography>
                 </ListItemIcon>
-                <ListItemText 
-                  primary={<Typography variant="body2">All TODOs</Typography>}
-                  secondary={<Typography variant="caption" color="text.secondary">Across all files</Typography>}
-                />
+                <ListItemText primary={<Typography variant="body2">All TODOs</Typography>} />
               </ListItemButton>
             </ListItem>
-            
-            <ListItem disablePadding sx={{ mb: 0.5 }}>
+            <ListItem disablePadding>
               <ListItemButton 
                 onClick={() => {
                   if (window.tabbedContentManagerRef?.openOrgView) {
@@ -3188,19 +3832,16 @@ const FileTreeSidebar = ({
                 }}
                 sx={{ 
                   borderRadius: 1,
+                  minHeight: 36,
                   '&:hover': { backgroundColor: 'action.hover' }
                 }}
               >
                 <ListItemIcon sx={{ minWidth: 32 }}>
                   <Typography sx={{ fontSize: '18px' }}>👤</Typography>
                 </ListItemIcon>
-                <ListItemText 
-                  primary={<Typography variant="body2">Contacts</Typography>}
-                  secondary={<Typography variant="caption" color="text.secondary">View all contacts</Typography>}
-                />
+                <ListItemText primary={<Typography variant="body2">Contacts</Typography>} />
               </ListItemButton>
             </ListItem>
-            
             <ListItem disablePadding>
               <ListItemButton 
                 onClick={() => {
@@ -3210,16 +3851,14 @@ const FileTreeSidebar = ({
                 }}
                 sx={{ 
                   borderRadius: 1,
+                  minHeight: 36,
                   '&:hover': { backgroundColor: 'action.hover' }
                 }}
               >
                 <ListItemIcon sx={{ minWidth: 32 }}>
                   <Typography sx={{ fontSize: '18px' }}>🏷️</Typography>
                 </ListItemIcon>
-                <ListItemText 
-                  primary={<Typography variant="body2">Tags Browser</Typography>}
-                  secondary={<Typography variant="caption" color="text.secondary">Browse by tags</Typography>}
-                />
+                <ListItemText primary={<Typography variant="body2">Tags Browser</Typography>} />
               </ListItemButton>
             </ListItem>
                 </List>
@@ -3231,7 +3870,7 @@ const FileTreeSidebar = ({
         {/* DATA WORKSPACES SECTION */}
         <DataWorkspacesSection onWorkspaceClick={(workspace) => {
           if (window.tabbedContentManagerRef?.openDataWorkspace) {
-            window.tabbedContentManagerRef.openDataWorkspace(workspace.workspace_id);
+            window.tabbedContentManagerRef.openDataWorkspace(workspace.workspace_id, workspace.name);
           }
         }} />
 
@@ -3268,6 +3907,49 @@ const FileTreeSidebar = ({
             : undefined
         }
       >
+        {contextMenuTarget?.type === 'rss_category' && (
+          <>
+            <MenuItem
+              onClick={() => {
+                onAddRSSFeed?.({
+                  isGlobal: contextMenuTarget.scope === 'global',
+                  defaultCategory: contextMenuTarget.categoryKey,
+                  defaultCategoryLabel: contextMenuTarget.categoryLabel,
+                });
+                handleContextMenuClose();
+              }}
+            >
+              <ListItemIcon>
+                <RssFeed fontSize="small" />
+              </ListItemIcon>
+              Add feed to this category
+            </MenuItem>
+            <MenuItem
+              onClick={() => handleBulkRefreshRssFeeds(contextMenuTarget.feedIds)}
+              disabled={rssBulkBusy || !contextMenuTarget.feedIds?.length}
+            >
+              <ListItemIcon>
+                <Refresh fontSize="small" />
+              </ListItemIcon>
+              Refresh Feeds
+            </MenuItem>
+            <MenuItem
+              onClick={() =>
+                handleBulkMarkRssFeedsRead(
+                  contextMenuTarget.feedIds,
+                  contextMenuTarget.categoryLabel
+                )
+              }
+              disabled={rssBulkBusy || !contextMenuTarget.feedIds?.length}
+            >
+              <ListItemIcon>
+                <DoneAll fontSize="small" />
+              </ListItemIcon>
+              Mark All As Read
+            </MenuItem>
+          </>
+        )}
+
         {contextMenuTarget?.folder_id && !contextMenuTarget?.document_id && (
           <>
             {/* Show different options for virtual roots vs regular folders */}
@@ -3394,19 +4076,40 @@ const FileTreeSidebar = ({
             
             {/* RSS-specific options for RSS virtual directories */}
             {(contextMenuTarget.folder_id === 'rss_feeds_virtual' || contextMenuTarget.folder_id === 'global_rss_feeds_virtual') && (
-              <MenuItem
-                onClick={() => {
-                  // Pass the context menu target to determine scope
-                  const isGlobal = contextMenuTarget.folder_id === 'global_rss_feeds_virtual';
-                  onAddRSSFeed({ isGlobal, folderContext: contextMenuTarget });
-                  handleContextMenuClose();
-                }}
-              >
-                <ListItemIcon>
-                  <RssFeed fontSize="small" />
-                </ListItemIcon>
-                Add RSS Feed
-              </MenuItem>
+              <>
+                <MenuItem
+                  onClick={() => {
+                    const ids =
+                      contextMenuTarget.folder_id === 'global_rss_feeds_virtual'
+                        ? (globalRSSFeeds || []).map((f) => f.feed_id).filter(Boolean)
+                        : (userRSSFeeds || []).map((f) => f.feed_id).filter(Boolean);
+                    handleBulkRefreshRssFeeds(ids);
+                  }}
+                  disabled={
+                    rssBulkBusy ||
+                    (contextMenuTarget.folder_id === 'global_rss_feeds_virtual'
+                      ? !(globalRSSFeeds && globalRSSFeeds.length)
+                      : !(userRSSFeeds && userRSSFeeds.length))
+                  }
+                >
+                  <ListItemIcon>
+                    <Refresh fontSize="small" />
+                  </ListItemIcon>
+                  Refresh All Feeds
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    const isGlobal = contextMenuTarget.folder_id === 'global_rss_feeds_virtual';
+                    onAddRSSFeed({ isGlobal, folderContext: contextMenuTarget });
+                    handleContextMenuClose();
+                  }}
+                >
+                  <ListItemIcon>
+                    <RssFeed fontSize="small" />
+                  </ListItemIcon>
+                  Add RSS Feed
+                </MenuItem>
+              </>
             )}
             
             {/* Only show rename/move/delete for non-virtual folders */}
@@ -3438,7 +4141,7 @@ const FileTreeSidebar = ({
                 
                 <Divider />
                 
-                {/* Vectorization Settings - Submenu */}
+                {/* Search Settings - Submenu */}
                 <MenuItem
                   onClick={(e) => {
                     setVectorizationSubmenu(e.currentTarget);
@@ -3447,7 +4150,7 @@ const FileTreeSidebar = ({
                   <ListItemIcon>
                     <FindInPage fontSize="small" />
                   </ListItemIcon>
-                  <ListItemText primary="Vectorization" />
+                  <ListItemText primary="Search" />
                   <ChevronRight fontSize="small" />
                 </MenuItem>
                 
@@ -3464,12 +4167,12 @@ const FileTreeSidebar = ({
                     }
                   }}
                 >
-                  {/* Option 1: Don't vectorize (exempt) */}
+                  {/* Option 1: Exempt from search */}
                   <MenuItem
                     onClick={async () => {
                       try {
                         await apiService.exemptFolder(contextMenuTarget.folder_id);
-                        alert('Folder set to not vectorize. All files in this folder and subfolders will be skipped.');
+                        alert('Folder set to exempt from search. All files in this folder and subfolders will be excluded from search.');
                         setVectorizationSubmenu(null);
                         handleContextMenuClose();
                         queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]);
@@ -3500,17 +4203,17 @@ const FileTreeSidebar = ({
                       )}
                     </ListItemIcon>
                     <ListItemText 
-                      primary="Don't vectorize"
-                      secondary="Files won't be indexed"
+                      primary="Exempt from search"
+                      secondary="Excluded from search"
                     />
                   </MenuItem>
                   
-                  {/* Option 2: Vectorize (override parent) */}
+                  {/* Option 2: Include in search (override parent) */}
                   <MenuItem
                     onClick={async () => {
                       try {
                         await apiService.overrideFolderExemption(contextMenuTarget.folder_id);
-                        alert('Folder set to vectorize. Files will be indexed even if parent folder is exempt.');
+                        alert('Folder set to include in search. Files will be included even if parent folder is exempt.');
                         setVectorizationSubmenu(null);
                         handleContextMenuClose();
                         queryClient.invalidateQueries(['folders', 'tree', user?.user_id, user?.role]);
@@ -3541,8 +4244,8 @@ const FileTreeSidebar = ({
                       )}
                     </ListItemIcon>
                     <ListItemText 
-                      primary="Vectorize"
-                      secondary="Files will be indexed"
+                      primary="Include in search"
+                      secondary="Included in search"
                     />
                   </MenuItem>
                   
@@ -3690,7 +4393,7 @@ const FileTreeSidebar = ({
             
             <Divider />
             
-            {/* Vectorization Settings - Submenu for Documents */}
+            {/* Search Settings - Submenu for Documents */}
             <MenuItem
               onClick={(e) => {
                 setVectorizationSubmenu(e.currentTarget);
@@ -3699,7 +4402,7 @@ const FileTreeSidebar = ({
               <ListItemIcon>
                 <FindInPage fontSize="small" />
               </ListItemIcon>
-              <ListItemText primary="Vectorization" />
+              <ListItemText primary="Search" />
               <ChevronRight fontSize="small" />
             </MenuItem>
             
@@ -3711,12 +4414,12 @@ const FileTreeSidebar = ({
               transformOrigin={{ vertical: 'top', horizontal: 'left' }}
               MenuListProps={{ onMouseLeave: () => setVectorizationSubmenu(null) }}
             >
-              {/* Option 1: Don't vectorize (exempt) */}
+              {/* Option 1: Exempt from search */}
               <MenuItem
                 onClick={async () => {
                   try {
                     await apiService.exemptDocument(contextMenuTarget.document_id);
-                    alert('Document set to not vectorize. This file will not be indexed for search.');
+                    alert('Document set to exempt from search. This file will not appear in search results.');
                     setVectorizationSubmenu(null);
                     handleContextMenuClose();
                     const folderId = contextMenuTarget.folder_id || 
@@ -3748,17 +4451,17 @@ const FileTreeSidebar = ({
                   )}
                 </ListItemIcon>
                 <ListItemText 
-                  primary="Don't vectorize"
-                  secondary="File won't be indexed"
+                  primary="Exempt from search"
+                  secondary="Excluded from search"
                 />
               </MenuItem>
               
-              {/* Option 2: Vectorize (explicit) */}
+              {/* Option 2: Include in search (explicit) */}
               <MenuItem
                 onClick={async () => {
                   try {
                     await apiService.removeDocumentExemption(contextMenuTarget.document_id, false);
-                    alert('Document set to vectorize. This file will be indexed for search.');
+                    alert('Document set to include in search. This file will be indexed for search.');
                     setVectorizationSubmenu(null);
                     handleContextMenuClose();
                     const folderId = contextMenuTarget.folder_id || 
@@ -3790,8 +4493,8 @@ const FileTreeSidebar = ({
                   )}
                 </ListItemIcon>
                 <ListItemText 
-                  primary="Vectorize"
-                  secondary="File will be indexed"
+                  primary="Include in search"
+                  secondary="Included in search"
                 />
               </MenuItem>
               
@@ -3859,14 +4562,23 @@ const FileTreeSidebar = ({
                 handleRefreshRSSFeed(contextMenuTarget.feed_id);
                 handleContextMenuClose();
               }}
-              disabled={refreshRSSFeedMutation.isLoading}
+              disabled={refreshRSSFeedMutation.isLoading || rssBulkBusy}
             >
               <ListItemIcon>
                 <Refresh fontSize="small" />
               </ListItemIcon>
               Refresh Feed
             </MenuItem>
-            
+            <MenuItem
+              onClick={() => handleMarkSingleRssFeedAllRead(contextMenuTarget.feed_id)}
+              disabled={rssBulkBusy}
+            >
+              <ListItemIcon>
+                <DoneAll fontSize="small" />
+              </ListItemIcon>
+              Mark All As Read
+            </MenuItem>
+
             <Divider />
             
             <MenuItem
@@ -4341,6 +5053,7 @@ const FileTreeSidebar = ({
           </Box>
         )}
 
+      <DocumentSearchOverlay open={searchOverlayOpen} onClose={() => setSearchOverlayOpen(false)} />
       </Box>
     );
   };

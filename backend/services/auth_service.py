@@ -4,6 +4,7 @@ Authentication Service - Handles user authentication, sessions, and JWT tokens
 
 import asyncio
 import hashlib
+import hmac
 import json
 import secrets
 import logging
@@ -138,19 +139,31 @@ class AuthenticationService:
         return pwd_context.verify(password, password_hash)
     
     def _generate_jwt_token(self, user_data: Dict[str, Any]) -> Tuple[str, datetime]:
-        """Generate JWT token for user"""
+        """Generate JWT token for user.
+        When JWT_EXPIRATION_MINUTES is 0 or negative, the token has no expiration (no exp claim).
+        """
         now = datetime.utcnow()
-        expiration = now + timedelta(minutes=settings.JWT_EXPIRATION_MINUTES)
-        
-        # Convert to Unix timestamps for JWT standard compliance
-        payload = {
-            "user_id": user_data["user_id"],
-            "username": user_data["username"],
-            "role": user_data["role"],
-            "exp": int(expiration.timestamp()),
-            "iat": int(now.timestamp())
-        }
-        
+        mins = getattr(settings, "JWT_EXPIRATION_MINUTES", 1440) or 0
+        no_expiration = mins <= 0
+
+        if no_expiration:
+            expiration = now + timedelta(days=365 * 10)  # Far future for session row only
+            payload = {
+                "user_id": user_data["user_id"],
+                "username": user_data["username"],
+                "role": user_data["role"],
+                "iat": int(now.timestamp()),
+            }
+        else:
+            expiration = now + timedelta(minutes=mins)
+            payload = {
+                "user_id": user_data["user_id"],
+                "username": user_data["username"],
+                "role": user_data["role"],
+                "exp": int(expiration.timestamp()),
+                "iat": int(now.timestamp()),
+            }
+
         token = jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
         return token, expiration
     
@@ -169,7 +182,7 @@ class AuthenticationService:
     async def _create_default_admin_user(self):
         """Create default admin user if it doesn't exist"""
         try:
-            logger.info(f"🔧 ROOSEVELT'S ADMIN CREATION: Attempting to create default admin user")
+            logger.info("Attempting to create default admin user")
             logger.info(f"🔧 Username from settings: {settings.ADMIN_USERNAME}")
             logger.info(f"🔧 Password length from settings: {len(settings.ADMIN_PASSWORD)} chars")
             logger.info(f"🔧 Email from settings: {settings.ADMIN_EMAIL}")
@@ -337,10 +350,13 @@ class AuthenticationService:
                     logger.info(f"✅ User authenticated successfully: {login_request.username}")
                     
                     logger.info(f"🔍 About to return LoginResponse")
+                    expires_secs = (settings.JWT_EXPIRATION_MINUTES or 0) * 60
+                    if expires_secs <= 0:
+                        expires_secs = 0  # No expiration
                     response = LoginResponse(
                         access_token=token,
                         user=user_data,
-                        expires_in=settings.JWT_EXPIRATION_MINUTES * 60
+                        expires_in=expires_secs
                     )
                     logger.info(f"🔍 LoginResponse created, transaction about to commit")
                     
@@ -382,7 +398,8 @@ class AuthenticationService:
                         logger.info(f"✅ IMMEDIATE CACHE (Redis): User session cached for token: {token_hash[:20]}...")
                     
                     # EMERGENCY FALLBACK: Also cache in memory for immediate access
-                    expiry_time = datetime.utcnow() + timedelta(minutes=settings.JWT_EXPIRATION_MINUTES)
+                    mins = getattr(settings, "JWT_EXPIRATION_MINUTES", 1440) or 0
+                    expiry_time = datetime.utcnow() + (timedelta(minutes=mins) if mins > 0 else timedelta(days=365 * 10))
                     self._emergency_session_cache[token_hash] = (cached_user, expiry_time)
                     logger.info(f"✅ EMERGENCY CACHE: User session cached in memory for token: {token_hash[:20]}...")
                     
@@ -397,7 +414,115 @@ class AuthenticationService:
             import traceback
             logger.error(f"❌ Full traceback: {traceback.format_exc()}")
             return None
-    
+
+    def build_greader_auth_token(self, user_id: str, username: str) -> str:
+        """Stable token for Google Reader API (Authorization: GoogleLogin auth=...)."""
+        digest = hmac.new(
+            settings.JWT_SECRET_KEY.encode("utf-8"),
+            f"greader|{user_id}|{username}".encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return f"{user_id}/{digest}"
+
+    def greader_session_token_value(self, auth_token: str) -> str:
+        """57-character session token for GReader write operations (T parameter)."""
+        base = hashlib.sha256(auth_token.encode("utf-8")).hexdigest()[:40]
+        padded = (base + "Z" * 20)[:57]
+        return padded.ljust(57, "Z")[:57]
+
+    async def verify_greader_auth_token(self, auth_token: str) -> Optional[AuthenticatedUserResponse]:
+        """Resolve GReader auth token to AuthenticatedUserResponse."""
+        if not auth_token or "/" not in auth_token:
+            return None
+        parts = auth_token.strip().split("/", 1)
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            return None
+        user_id, _ = parts
+        try:
+            async with self.db_pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT user_id, username, email, role, display_name, is_active, preferences
+                    FROM users WHERE user_id = $1
+                    """,
+                    user_id,
+                )
+            if not row or not row["is_active"]:
+                return None
+            expected = self.build_greader_auth_token(row["user_id"], row["username"])
+            if not hmac.compare_digest(auth_token.strip(), expected):
+                return None
+            prefs = row["preferences"] if row["preferences"] else {}
+            if isinstance(prefs, str):
+                try:
+                    prefs = json.loads(prefs)
+                except json.JSONDecodeError:
+                    prefs = {}
+            return AuthenticatedUserResponse(
+                user_id=row["user_id"],
+                username=row["username"],
+                email=row["email"] or "",
+                display_name=row["display_name"],
+                role=row["role"] or "user",
+                preferences=prefs if isinstance(prefs, dict) else {},
+            )
+        except Exception as e:
+            logger.error("GReader token verification failed: %s", e)
+            return None
+
+    async def authenticate_greader_client_login(
+        self, email: str, password: str
+    ) -> Optional[str]:
+        """
+        Validate username (Email field) and password; return GReader auth token.
+        Does not create a JWT session.
+        """
+        if not email or not password:
+            return None
+        try:
+            async with self.db_pool.acquire() as conn:
+                user_row = await conn.fetchrow(
+                    """
+                    SELECT user_id, username, email, password_hash, salt, role, is_active, failed_login_attempts
+                    FROM users WHERE username = $1
+                    """,
+                    email.strip(),
+                )
+                if not user_row:
+                    return None
+                if not user_row["is_active"]:
+                    return None
+                if user_row["failed_login_attempts"] >= settings.MAX_FAILED_LOGINS:
+                    return None
+                if not self._verify_password(
+                    password,
+                    user_row["salt"],
+                    user_row["password_hash"],
+                ):
+                    await conn.execute(
+                        """
+                        UPDATE users SET failed_login_attempts = failed_login_attempts + 1,
+                            last_failed_login = $1 WHERE user_id = $2
+                        """,
+                        datetime.utcnow(),
+                        user_row["user_id"],
+                    )
+                    return None
+                await conn.execute(
+                    """
+                    UPDATE users SET failed_login_attempts = 0, last_login = $1
+                    WHERE user_id = $2
+                    """,
+                    datetime.utcnow(),
+                    user_row["user_id"],
+                )
+            return self.build_greader_auth_token(
+                user_row["user_id"], user_row["username"]
+            )
+        except Exception as e:
+            logger.error("GReader ClientLogin failed: %s", e)
+            return None
+
     async def _get_cached_user(self, token_hash: str) -> Optional[AuthenticatedUserResponse]:
         """Get user from cache"""
         
@@ -561,17 +686,21 @@ class AuthenticationService:
                             cached_user.model_dump_json()
                         )
                     
-                    expiry_time = datetime.utcnow() + timedelta(minutes=settings.JWT_EXPIRATION_MINUTES)
+                    mins = getattr(settings, "JWT_EXPIRATION_MINUTES", 1440) or 0
+                    expiry_time = datetime.utcnow() + (timedelta(minutes=mins) if mins > 0 else timedelta(days=365 * 10))
                     self._emergency_session_cache[new_token_hash] = (cached_user, expiry_time)
                 except Exception as cache_e:
                     logger.warning(f"Failed to cache refreshed session: {cache_e}")
                 
                 logger.info(f"✅ Token refreshed successfully for user: {user_row['username']}")
                 
+                expires_secs = (settings.JWT_EXPIRATION_MINUTES or 0) * 60
+                if expires_secs <= 0:
+                    expires_secs = 0
                 return LoginResponse(
                     access_token=new_token,
                     user=user_data,
-                    expires_in=settings.JWT_EXPIRATION_MINUTES * 60
+                    expires_in=expires_secs
                 )
                 
         except Exception as e:
@@ -616,55 +745,47 @@ class AuthenticationService:
                 if not session_row:
                     logger.warning("⚠️ Database session not found or expired - checking JWT token validity")
                     
-                    # Check if JWT token is still valid (not expired)
-                    # exp is a Unix timestamp (number) from JWT payload
+                    # Check if JWT token is still valid (not expired), or has no exp (long-lived)
                     exp_timestamp = payload.get('exp')
-                    if exp_timestamp and isinstance(exp_timestamp, (int, float)):
+                    if exp_timestamp is None:
+                        # No exp claim: token never expires (JWT_EXPIRATION_MINUTES <= 0)
+                        token_valid = True
+                    elif isinstance(exp_timestamp, (int, float)):
                         current_timestamp = datetime.utcnow().timestamp()
-                        if current_timestamp < exp_timestamp:
-                            logger.info("✅ JWT token is still valid - proceeding with JWT-only authentication")
-                            
-                            # Get user details directly from JWT payload
-                            user_row = await conn.fetchrow("""
-                                SELECT user_id, username, email, role, display_name, preferences, is_active
-                                FROM users 
-                                WHERE user_id = $1 AND is_active = true
-                            """, payload["user_id"])
-                            
-                            if not user_row:
-                                logger.warning("❌ User not found or inactive")
-                                return None
-                            
-                            # Handle preferences properly
-                            preferences = user_row["preferences"]
-                            if isinstance(preferences, str):
-                                try:
-                                    preferences = json.loads(preferences)
-                                except (json.JSONDecodeError, TypeError):
-                                    preferences = {}
-                            elif preferences is None:
-                                preferences = {}
-                            
-                            user = AuthenticatedUserResponse(
-                                user_id=user_row["user_id"],
-                                username=user_row["username"],
-                                email=user_row["email"],
-                                role=user_row["role"],
-                                display_name=user_row["display_name"],
-                                preferences=preferences
-                            )
-                            
-                            # Cache the user data
-                            await self._cache_user(token_hash, user)
-                            logger.info(f"✅ JWT-only authentication successful for user: {user.username}")
-                            
-                            return user
-                        else:
-                            logger.warning("❌ JWT token has expired")
-                            return None
+                        token_valid = current_timestamp < exp_timestamp
                     else:
-                        logger.warning("❌ JWT token missing or invalid exp claim")
-                        return None
+                        token_valid = False
+                    if token_valid:
+                        logger.info("✅ JWT token is still valid - proceeding with JWT-only authentication")
+                        user_row = await conn.fetchrow("""
+                            SELECT user_id, username, email, role, display_name, preferences, is_active
+                            FROM users 
+                            WHERE user_id = $1 AND is_active = true
+                        """, payload["user_id"])
+                        if not user_row:
+                            logger.warning("❌ User not found or inactive")
+                            return None
+                        preferences = user_row["preferences"]
+                        if isinstance(preferences, str):
+                            try:
+                                preferences = json.loads(preferences)
+                            except (json.JSONDecodeError, TypeError):
+                                preferences = {}
+                        elif preferences is None:
+                            preferences = {}
+                        user = AuthenticatedUserResponse(
+                            user_id=user_row["user_id"],
+                            username=user_row["username"],
+                            email=user_row["email"],
+                            role=user_row["role"],
+                            display_name=user_row["display_name"],
+                            preferences=preferences
+                        )
+                        await self._cache_user(token_hash, user)
+                        logger.info(f"✅ JWT-only authentication successful for user: {user.username}")
+                        return user
+                    logger.warning("❌ JWT token has expired or invalid exp claim")
+                    return None
                 
                 logger.info(f"✅ Session found for user: {session_row['user_id']}")
                 
@@ -781,6 +902,17 @@ class AuthenticationService:
                     await set_user_setting(user_id, "ORG_ARCHIVE_PATH", org_info.get("archive_path", ""))
                 except Exception as pe:
                     logger.error(f"❌ Post-create provisioning failed for {user_id}: {pe}")
+
+                # Seed default Agent Factory profile for new user
+                try:
+                    from services.agent_factory_service import (
+                        seed_default_agent_profiles,
+                        seed_rss_manager_profiles,
+                    )
+                    await seed_default_agent_profiles(user_id)
+                    await seed_rss_manager_profiles(user_id)
+                except Exception as af_e:
+                    logger.warning("Default agent profile seed for new user failed: %s", af_e)
 
                 return UserResponse(
                     user_id=user_id,

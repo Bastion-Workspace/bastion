@@ -7,7 +7,58 @@ These tools help agents understand what information is needed and generate proje
 import logging
 from typing import Dict, Any, List, Optional
 
+from pydantic import BaseModel, Field
+
+from orchestrator.utils.action_io_registry import register_action
+
 logger = logging.getLogger(__name__)
+
+
+# ── I/O models for information analysis tools ────────────────────────────────
+
+class AnalyzeInformationNeedsInputs(BaseModel):
+    """Required inputs for analyze_information_needs_tool."""
+    query: str = Field(description="User query to analyze")
+    query_type: str = Field(description="Type of query e.g. circuit_design, character_development")
+    project_context: Dict[str, Any] = Field(description="Project context by category")
+
+
+class AnalyzeInformationNeedsParams(BaseModel):
+    """Optional parameters."""
+    context_keys: Optional[List[str]] = Field(default=None, description="Context keys to include")
+    domain_name: str = Field(default="project", description="Domain name for prompt customization")
+
+
+class AnalyzeInformationNeedsOutputs(BaseModel):
+    """Typed outputs for analyze_information_needs_tool."""
+    information_gaps: List[str] = Field(default_factory=list, description="Identified information gaps")
+    relevant_entities: List[str] = Field(default_factory=list, description="Relevant entities from context")
+    content_type: str = Field(description="new, update, or both")
+    detail_level: str = Field(description="overview, detailed, or implementation")
+    related_sections: List[str] = Field(default_factory=list, description="Related sections that might need updates")
+    search_focus: str = Field(description="What to focus search on")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
+
+
+class GenerateProjectAwareQueriesInputs(BaseModel):
+    """Required inputs for generate_project_aware_queries_tool."""
+    query: str = Field(description="Original query")
+    query_type: str = Field(description="Type of query")
+    information_needs: Dict[str, Any] = Field(description="Result from analyze_information_needs_tool")
+    project_context: Dict[str, Any] = Field(description="Project context by category")
+
+
+class GenerateProjectAwareQueriesParams(BaseModel):
+    """Optional parameters."""
+    domain_examples: Optional[List[str]] = Field(default=None, description="Domain-specific examples")
+    num_queries: int = Field(default=5, description="Number of queries to generate")
+
+
+class GenerateProjectAwareQueriesOutputs(BaseModel):
+    """Typed outputs for generate_project_aware_queries_tool."""
+    search_queries: List[Dict[str, Any]] = Field(description="List of query dicts with query, priority, focus")
+    query_expansion_used: bool = Field(description="Whether query expansion was used")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
 
 
 async def analyze_information_needs_tool(
@@ -180,18 +231,20 @@ Return ONLY valid JSON:
         
         logger.info(f"🔍 Information needs analyzed: {len(result_dict.get('information_gaps', []))} gaps identified")
         
-        return result_dict
+        gaps = result_dict.get("information_gaps", [])
+        formatted = f"Information needs: {len(gaps)} gap(s) identified. Content type: {result_dict.get('content_type', 'new')}. Detail: {result_dict.get('detail_level', 'detailed')}. Search focus: {result_dict.get('search_focus', '')}"
+        return {**result_dict, "formatted": formatted}
         
     except Exception as e:
         logger.error(f"❌ Information needs analysis failed: {e}")
-        # Return safe defaults
         return {
             "information_gaps": [],
             "relevant_entities": [],
             "content_type": "new",
             "detail_level": "detailed",
             "related_sections": [],
-            "search_focus": query
+            "search_focus": query,
+            "formatted": f"Information needs analysis failed; using query as search focus: {query}"
         }
 
 
@@ -371,8 +424,8 @@ Return ONLY valid JSON:
         except Exception as e:
             logger.warning(f"⚠️ Structured output failed, trying fallback: {e}")
             # Fallback: use query expansion tool
-            from orchestrator.tools.enhancement_tools import expand_query_tool
-            expansion_result = await expand_query_tool(query, num_variations=3)
+            from orchestrator.tools.enhancement_tools import _expand_query_impl
+            expansion_result = await _expand_query_impl(query, num_variations=3)
             expanded_queries = expansion_result.get('expanded_queries', [query])
             
             # Add project context to expanded queries
@@ -402,21 +455,28 @@ Return ONLY valid JSON:
         for i, sq in enumerate(search_queries[:3], 1):
             logger.info(f"  {i}. [{sq.get('priority', '?')}] {sq.get('query', '')[:80]}")
         
+        formatted = f"Generated {len(search_queries)} project-aware search query(ies): " + "; ".join(
+            q.get("query", "")[:60] for q in search_queries[:3]
+        )
+        if len(search_queries) > 3:
+            formatted += f" ... and {len(search_queries) - 3} more"
         return {
             "search_queries": search_queries,
-            "query_expansion_used": result_dict.get("query_expansion_used", False)
+            "query_expansion_used": result_dict.get("query_expansion_used", False),
+            "formatted": formatted
         }
         
     except Exception as e:
         logger.error(f"❌ Project-aware query generation failed: {e}")
-        # Fallback to simple query
         return {
             "search_queries": [{"query": query, "priority": 1, "focus": "General search"}],
-            "query_expansion_used": False
+            "query_expansion_used": False,
+            "formatted": f"Query generation failed; using original query: {query}"
         }
 
 
-# Tool registry
+# Not registered: used internally by enhance_query_tool (orchestrator/tools/enhancement_tools.py)
+# Tool registry kept for any internal reference
 INFORMATION_ANALYSIS_TOOLS = {
     'analyze_information_needs': analyze_information_needs_tool,
     'generate_project_aware_queries': generate_project_aware_queries_tool

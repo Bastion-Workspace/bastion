@@ -122,6 +122,7 @@ from orchestrator.subgraphs.fiction_context_subgraph import (
 # Generation (flat nodes)
 from orchestrator.subgraphs.fiction_generation_subgraph import (
     build_generation_context_node,
+    plan_scene_structure_node,
     build_generation_prompt_node,
     call_generation_llm_node,
     validate_generated_output_node,
@@ -266,6 +267,11 @@ def build_fiction_editing_subgraph(checkpointer, llm_factory, get_datetime_conte
 
     # --- Generation (flat) ---
     workflow.add_node("build_generation_context", build_generation_context_node)
+
+    async def plan_scene_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
+        return await plan_scene_structure_node(state, llm_factory)
+
+    workflow.add_node("plan_scene_structure", plan_scene_wrapper)
     workflow.add_node("build_generation_prompt", build_generation_prompt_node)
     workflow.add_node("call_llm", call_llm_wrapper)
     # --- Two-pass chapter generation (flat) ---
@@ -343,8 +349,9 @@ def build_fiction_editing_subgraph(checkpointer, llm_factory, get_datetime_conte
 
     # --- Full generation path ---
     workflow.add_edge("prepare_generation", "build_generation_context")
+    workflow.add_edge("build_generation_context", "plan_scene_structure")
     workflow.add_conditional_edges(
-        "build_generation_context",
+        "plan_scene_structure",
         route_generation_mode,
         {
             "build_draft_prompt": "build_draft_prompt",

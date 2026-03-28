@@ -7,8 +7,8 @@ import asyncio
 import logging
 import re
 from pathlib import Path
-from datetime import datetime, date
-from typing import Optional, Tuple
+from datetime import datetime, date, timedelta
+from typing import Optional, Tuple, List, Dict, Any
 from zoneinfo import ZoneInfo
 
 from config import settings
@@ -67,6 +67,20 @@ class OrgJournalService:
             file_path = await self._determine_journal_file_path(
                 user_id, username, entry_date, journal_prefs
             )
+
+            # Snapshot before write for versioning (if document is in DB)
+            doc_id = await self._document_id_for_path(file_path, username, user_id)
+            if doc_id:
+                try:
+                    from services.document_version_service import snapshot_before_write
+                    await snapshot_before_write(
+                        doc_id, user_id, "quick_capture_journal", None, None
+                    )
+                except Exception as verr:
+                    logger.debug(
+                        "Version snapshot before journal capture failed (non-fatal): %s",
+                        verr,
+                    )
 
             async with self._capture_lock:
                 # Serialize read-modify-write per process so sequential quick captures
@@ -538,7 +552,395 @@ class OrgJournalService:
         
         # If we didn't find another heading, content goes to max_line
         return max_line
-    
+
+    def _get_date_section_bounds(
+        self,
+        file_lines: List[str],
+        entry_date: date,
+        journal_prefs: JournalPreferences,
+    ) -> Optional[Tuple[int, int, int, str]]:
+        """
+        Find the line bounds for a date's section in an already-read file.
+        Returns (header_line_idx, content_start, content_end, header_line_text) or None.
+        Content is file_lines[content_start:content_end] (body only, no header).
+        """
+        day_name = entry_date.strftime('%A')
+        date_str = entry_date.strftime('%Y-%m-%d')
+        if journal_prefs.organization_mode == JournalOrganizationMode.MONOLITHIC:
+            header_level = 3
+        elif journal_prefs.organization_mode == JournalOrganizationMode.YEARLY:
+            header_level = 2
+        else:
+            header_level = 1
+        target_header = f"{'*' * header_level} {date_str} {day_name}"
+        date_header_line = -1
+        header_line_text = ""
+        for i, line in enumerate(file_lines):
+            stripped = line.rstrip('\n').strip()
+            if stripped == target_header:
+                date_header_line = i
+                header_line_text = line.rstrip('\n')
+                break
+        if date_header_line == -1:
+            return None
+        content_start = date_header_line + 1
+        content_end = self._find_entry_end(file_lines, date_header_line, header_level, len(file_lines))
+        return (date_header_line, content_start, content_end, header_line_text)
+
+    async def _get_username_and_journal_prefs(self, user_id: str) -> Tuple[str, JournalPreferences]:
+        """Get username and journal preferences; raises if journal disabled."""
+        from services.database_manager.database_helpers import fetch_one
+        from services.org_settings_service import get_org_settings_service
+        row = await fetch_one("SELECT username FROM users WHERE user_id = $1", user_id)
+        username = row['username'] if row else user_id
+        settings_service = await get_org_settings_service()
+        org_settings = await settings_service.get_settings(user_id)
+        journal_prefs = org_settings.journal_preferences
+        if not journal_prefs.enabled:
+            raise ValueError("Journal is disabled for this user")
+        return username, journal_prefs
+
+    async def get_journal_entry(
+        self, user_id: str, date_str: str
+    ) -> Dict[str, Any]:
+        """
+        Read one date's journal entry. date_str is YYYY-MM-DD or "today".
+        Returns dict with content, date, heading, document_id, file_path, has_content, error.
+        """
+        try:
+            entry_date = await self._parse_entry_date(
+                None if date_str.strip().lower() == "today" else date_str, user_id
+            )
+            username, journal_prefs = await self._get_username_and_journal_prefs(user_id)
+            file_path = await self._determine_journal_file_path(
+                user_id, username, entry_date, journal_prefs
+            )
+            if not file_path.exists():
+                return {
+                    "success": False,
+                    "content": "",
+                    "date": entry_date.strftime("%Y-%m-%d"),
+                    "heading": "",
+                    "document_id": None,
+                    "file_path": None,
+                    "has_content": False,
+                    "error": "Journal file does not exist",
+                }
+            with open(file_path, 'r', encoding='utf-8') as f:
+                file_lines = f.readlines()
+            bounds = self._get_date_section_bounds(file_lines, entry_date, journal_prefs)
+            if not bounds:
+                return {
+                    "success": True,
+                    "content": "",
+                    "date": entry_date.strftime("%Y-%m-%d"),
+                    "heading": "",
+                    "document_id": await self._document_id_for_path(file_path, username, user_id),
+                    "file_path": str(file_path.relative_to(self.upload_dir)),
+                    "has_content": False,
+                    "error": None,
+                }
+            _, content_start, content_end, header_line_text = bounds
+            content_lines = file_lines[content_start:content_end]
+            content = ''.join(content_lines).rstrip()
+            document_id = await self._document_id_for_path(file_path, username, user_id)
+            return {
+                "success": True,
+                "content": content,
+                "date": entry_date.strftime("%Y-%m-%d"),
+                "heading": header_line_text,
+                "document_id": document_id,
+                "file_path": str(file_path.relative_to(self.upload_dir)),
+                "has_content": bool(content.strip()),
+                "error": None,
+            }
+        except ValueError as e:
+            return {
+                "success": False,
+                "content": "",
+                "date": date_str if date_str.strip().lower() != "today" else "",
+                "heading": "",
+                "document_id": None,
+                "file_path": None,
+                "has_content": False,
+                "error": str(e),
+            }
+        except Exception as e:
+            logger.exception("get_journal_entry failed")
+            return {
+                "success": False,
+                "content": "",
+                "date": "",
+                "heading": "",
+                "document_id": None,
+                "file_path": None,
+                "has_content": False,
+                "error": str(e),
+            }
+
+    async def _document_id_for_path(
+        self, file_path: Path, username: str, user_id: str
+    ) -> Optional[str]:
+        """Resolve document_id for a journal file path."""
+        try:
+            from services.folder_service import FolderService
+            folder_service = FolderService()
+            user_base_dir = self.upload_dir / "Users" / username
+            journal_dir = file_path.parent
+            folder_id = None
+            if journal_dir != user_base_dir:
+                folder_id = await folder_service.get_folder_id_by_physical_path(journal_dir, user_id)
+            doc = await folder_service.document_repository.find_by_filename_and_context(
+                file_path.name, user_id, "user", folder_id
+            )
+            return doc.document_id if doc else None
+        except Exception:
+            return None
+
+    async def update_journal_entry(
+        self, user_id: str, date_str: str, content: str, mode: str
+    ) -> Dict[str, Any]:
+        """
+        Update a single date's journal section. mode is "replace" or "append".
+        Only modifies that date's body; holds capture lock.
+        """
+        if mode not in ("replace", "append"):
+            return {"success": False, "date": date_str, "error": f"Invalid mode: {mode}"}
+        try:
+            entry_date = await self._parse_entry_date(date_str, user_id)
+            username, journal_prefs = await self._get_username_and_journal_prefs(user_id)
+            file_path = await self._determine_journal_file_path(
+                user_id, username, entry_date, journal_prefs
+            )
+            async with self._capture_lock:
+                await self._ensure_hierarchy_exists(
+                    file_path, entry_date, journal_prefs.organization_mode, journal_prefs
+                )
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    file_lines = f.readlines()
+                bounds = self._get_date_section_bounds(file_lines, entry_date, journal_prefs)
+                if not bounds:
+                    return {"success": False, "date": entry_date.strftime("%Y-%m-%d"), "error": "Date heading not found"}
+                header_line_idx, content_start, content_end, _ = bounds
+                if mode == "replace":
+                    new_body = content.rstrip()
+                    if not new_body.endswith('\n'):
+                        new_body += '\n'
+                    file_lines[content_start:content_end] = [new_body]
+                else:
+                    existing = ''.join(file_lines[content_start:content_end]).rstrip()
+                    appended = content.rstrip()
+                    combined = (existing + '\n\n' + appended).strip() + '\n' if (existing or appended) else ''
+                    file_lines[content_start:content_end] = [combined]
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    f.writelines(file_lines)
+                try:
+                    await self._touch_document_updated_at(file_path, username, user_id)
+                except Exception as touch_err:
+                    logger.debug("Could not touch document updated_at: %s", touch_err)
+            return {"success": True, "date": entry_date.strftime("%Y-%m-%d"), "error": None}
+        except ValueError as e:
+            return {"success": False, "date": date_str, "error": str(e)}
+        except Exception as e:
+            logger.exception("update_journal_entry failed")
+            return {"success": False, "date": date_str, "error": str(e)}
+
+    async def _touch_document_updated_at(
+        self, file_path: Path, username: str, user_id: str
+    ) -> None:
+        """Update document_metadata.updated_at for a journal file."""
+        from services.folder_service import FolderService
+        folder_service = FolderService()
+        user_base_dir = self.upload_dir / "Users" / username
+        journal_dir = file_path.parent
+        folder_id = None
+        if journal_dir != user_base_dir:
+            folder_id = await folder_service.get_folder_id_by_physical_path(journal_dir, user_id)
+        doc = await folder_service.document_repository.find_by_filename_and_context(
+            file_path.name, user_id, "user", folder_id
+        )
+        if doc:
+            await folder_service.document_repository.touch_updated_at(doc.document_id, user_id)
+
+    async def list_journal_entries(
+        self,
+        user_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        List journal entries in a date range with metadata (date, word_count, has_content).
+        """
+        try:
+            username, journal_prefs = await self._get_username_and_journal_prefs(user_id)
+            if start_date:
+                try:
+                    start_d = datetime.strptime(start_date, "%Y-%m-%d").date()
+                except ValueError:
+                    return {"success": False, "entries": [], "total": 0, "error": f"Invalid start_date: {start_date}"}
+            else:
+                start_d = date.today() - timedelta(days=31)
+            if end_date:
+                try:
+                    end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
+                except ValueError:
+                    return {"success": False, "entries": [], "total": 0, "error": f"Invalid end_date: {end_date}"}
+            else:
+                end_d = date.today()
+            if start_d > end_d:
+                return {"success": False, "entries": [], "total": 0, "error": "start_date must be before end_date"}
+            entries: List[Dict[str, Any]] = []
+            seen_files: Dict[Path, List[str]] = {}
+            current = start_d
+            while current <= end_d:
+                file_path = await self._determine_journal_file_path(
+                    user_id, username, current, journal_prefs
+                )
+                if not file_path.exists():
+                    current += timedelta(days=1)
+                    continue
+                if file_path not in seen_files:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        seen_files[file_path] = f.readlines()
+                file_lines = seen_files[file_path]
+                bounds = self._get_date_section_bounds(file_lines, current, journal_prefs)
+                if bounds:
+                    _, cs, ce, _ = bounds
+                    body = ''.join(file_lines[cs:ce]).strip()
+                    word_count = len(body.split()) if body else 0
+                    entries.append({
+                        "date": current.strftime("%Y-%m-%d"),
+                        "word_count": word_count,
+                        "has_content": bool(body),
+                    })
+                current += timedelta(days=1)
+            return {"success": True, "entries": entries, "total": len(entries), "error": None}
+        except ValueError as e:
+            return {"success": False, "entries": [], "total": 0, "error": str(e)}
+        except Exception as e:
+            logger.exception("list_journal_entries failed")
+            return {"success": False, "entries": [], "total": 0, "error": str(e)}
+
+    async def get_journal_entries(
+        self,
+        user_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        max_entries: int = 100,
+    ) -> Dict[str, Any]:
+        """
+        Get full content of journal entries in a date range (for review/lookback).
+        Returns list of {date, content, heading, has_content}; stops after max_entries.
+        """
+        try:
+            username, journal_prefs = await self._get_username_and_journal_prefs(user_id)
+            if start_date:
+                try:
+                    start_d = datetime.strptime(start_date, "%Y-%m-%d").date()
+                except ValueError:
+                    return {"success": False, "entries": [], "total": 0, "error": f"Invalid start_date: {start_date}"}
+            else:
+                start_d = date.today() - timedelta(days=31)
+            if end_date:
+                try:
+                    end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
+                except ValueError:
+                    return {"success": False, "entries": [], "total": 0, "error": f"Invalid end_date: {end_date}"}
+            else:
+                end_d = date.today()
+            if start_d > end_d:
+                return {"success": False, "entries": [], "total": 0, "error": "start_date must be before end_date"}
+            cap = max(1, min(max_entries, 500))
+            entries: List[Dict[str, Any]] = []
+            seen_files: Dict[Path, List[str]] = {}
+            current = start_d
+            while current <= end_d and len(entries) < cap:
+                file_path = await self._determine_journal_file_path(
+                    user_id, username, current, journal_prefs
+                )
+                if not file_path.exists():
+                    current += timedelta(days=1)
+                    continue
+                if file_path not in seen_files:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        seen_files[file_path] = f.readlines()
+                file_lines = seen_files[file_path]
+                bounds = self._get_date_section_bounds(file_lines, current, journal_prefs)
+                if bounds:
+                    _, cs, ce, header_line_text = bounds
+                    body = ''.join(file_lines[cs:ce]).rstrip()
+                    entries.append({
+                        "date": current.strftime("%Y-%m-%d"),
+                        "content": body,
+                        "heading": header_line_text,
+                        "has_content": bool(body.strip()),
+                    })
+                current += timedelta(days=1)
+            return {"success": True, "entries": entries, "total": len(entries), "error": None}
+        except ValueError as e:
+            return {"success": False, "entries": [], "total": 0, "error": str(e)}
+        except Exception as e:
+            logger.exception("get_journal_entries failed")
+            return {"success": False, "entries": [], "total": 0, "error": str(e)}
+
+    async def search_journal_entries(
+        self,
+        user_id: str,
+        query: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Search within journal entry content in a date range. Returns list of {date, excerpt}."""
+        try:
+            username, journal_prefs = await self._get_username_and_journal_prefs(user_id)
+            if start_date:
+                try:
+                    start_d = datetime.strptime(start_date, "%Y-%m-%d").date()
+                except ValueError:
+                    return {"success": False, "results": [], "count": 0, "error": f"Invalid start_date: {start_date}"}
+            else:
+                start_d = date.today() - timedelta(days=365)
+            if end_date:
+                try:
+                    end_d = datetime.strptime(end_date, "%Y-%m-%d").date()
+                except ValueError:
+                    return {"success": False, "results": [], "count": 0, "error": f"Invalid end_date: {end_date}"}
+            else:
+                end_d = date.today()
+            if start_d > end_d:
+                return {"success": False, "results": [], "count": 0, "error": "start_date must be before end_date"}
+            query_lower = query.lower()
+            results: List[Dict[str, str]] = []
+            seen_files: Dict[Path, List[str]] = {}
+            current = start_d
+            while current <= end_d:
+                file_path = await self._determine_journal_file_path(
+                    user_id, username, current, journal_prefs
+                )
+                if not file_path.exists():
+                    current += timedelta(days=1)
+                    continue
+                if file_path not in seen_files:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        seen_files[file_path] = f.readlines()
+                file_lines = seen_files[file_path]
+                bounds = self._get_date_section_bounds(file_lines, current, journal_prefs)
+                if bounds:
+                    _, cs, ce, _ = bounds
+                    body = ''.join(file_lines[cs:ce])
+                    if query_lower in body.lower():
+                        excerpt = body.strip()[:300]
+                        if len(body.strip()) > 300:
+                            excerpt += "..."
+                        results.append({"date": current.strftime("%Y-%m-%d"), "excerpt": excerpt})
+                current += timedelta(days=1)
+            return {"success": True, "results": results, "count": len(results), "error": None}
+        except ValueError as e:
+            return {"success": False, "results": [], "count": 0, "error": str(e)}
+        except Exception as e:
+            logger.exception("search_journal_entries failed")
+            return {"success": False, "results": [], "count": 0, "error": str(e)}
+
     async def _append_journal_entry(
         self,
         file_path: Path,

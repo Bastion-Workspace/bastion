@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Install system dependencies for OCR, document processing, and web crawling
+# Install system dependencies for OCR, document processing, web crawling, and PDF generation
 RUN apt-get update && apt-get install -y \
     tesseract-ocr \
     tesseract-ocr-eng \
@@ -16,6 +16,11 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     wget \
     gnupg \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    libffi-dev \
+    shared-mime-info \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -24,13 +29,6 @@ WORKDIR /app
 # Copy requirements and install Python dependencies
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Copy verification script first
-COPY backend/verify_spacy.py .
-
-# Download spaCy model with explicit verification
-RUN python -m spacy download en_core_web_lg && \
-    python verify_spacy.py
 
 # Copy shared proto files first
 COPY protos /app/protos
@@ -57,7 +55,9 @@ RUN python -m grpc_tools.protoc \
     /app/protos/data_service.proto \
     /app/protos/crawl_service.proto \
     /app/protos/image_vision.proto \
-    /app/protos/connections_service.proto
+    /app/protos/connections_service.proto \
+    /app/protos/document_service.proto \
+    /app/protos/voice_service.proto
 
 # Make startup script executable
 RUN chmod +x docker-entrypoint.sh

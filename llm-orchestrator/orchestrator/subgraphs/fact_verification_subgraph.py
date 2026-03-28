@@ -167,17 +167,14 @@ async def cross_reference_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 search_query = f'"{claim}" verification fact check'
                 search_result = await search_web_tool(query=search_query, max_results=5)
                 logger.info(f"Tool used: search_web_tool (cross-reference: {claim[:50]}...)")
-                
-                # Extract URLs
-                urls = re.findall(r'URL: (https?://[^\s]+)', search_result)
-                
-                # Crawl top 2 URLs for verification
+                search_text = search_result.get("formatted", search_result) if isinstance(search_result, dict) else search_result
+                urls = re.findall(r'URL: (https?://[^\s]+)', search_text)
                 crawled_content = ""
                 if urls:
                     top_urls = urls[:2]
                     crawl_result = await crawl_web_content_tool(urls=top_urls)
                     logger.info(f"Tool used: crawl_web_content_tool (verification crawl)")
-                    crawled_content = crawl_result
+                    crawled_content = crawl_result.get("formatted", crawl_result) if isinstance(crawl_result, dict) else crawl_result
                     
                     for url in top_urls:
                         independent_sources.append({

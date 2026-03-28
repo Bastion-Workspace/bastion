@@ -3,7 +3,7 @@ Org-Mode Settings Models
 Pydantic models for org-mode configuration and preferences
 """
 
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Literal
 from pydantic import BaseModel, Field
 from datetime import datetime
 from enum import Enum
@@ -67,7 +67,12 @@ class AgendaPreferences(BaseModel):
     show_scheduled: bool = Field(default=True, description="Show scheduled items")
     show_deadlines: bool = Field(default=True, description="Show deadline items")
     group_by_date: bool = Field(default=True, description="Group items by date")
-    
+    calendar_org_mode: Literal["include", "exclude", "only"] = Field(
+        default="include",
+        description="How to treat calendar.org: include (all org files), exclude (hide calendar.org), only (only calendar.org)",
+    )
+    show_calendar_org_toggle: bool = Field(default=True, description="Show calendar.org toggle in Agenda view")
+
     class Config:
         json_schema_extra = {
             "example": {
@@ -77,7 +82,9 @@ class AgendaPreferences(BaseModel):
                 "week_start_day": 1,
                 "show_scheduled": True,
                 "show_deadlines": True,
-                "group_by_date": True
+                "group_by_date": True,
+                "calendar_org_mode": "include",
+                "show_calendar_org_toggle": True,
             }
         }
 

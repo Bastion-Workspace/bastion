@@ -65,9 +65,9 @@ async def quick_vector_search(
 
         except asyncio.TimeoutError:
             logger.warning("Quick vector search timed out after 5 seconds - falling back to basic search")
-            from orchestrator.tools import search_documents_structured
-            search_result = await search_documents_structured(query=query, limit=limit, user_id=user_id)
-            results = search_result.get("results", [])
+            from orchestrator.tools import search_documents_tool
+            search_result = await search_documents_tool(query=query, limit=limit, user_id=user_id)
+            results = search_result.get("documents", [])
             formatted_results = []
             for doc in results:
                 formatted_results.append({
@@ -126,7 +126,7 @@ STRUCTURED OUTPUT REQUIRED - Respond with ONLY valid JSON matching this exact sc
 }}"""
 
         llm = agent._get_llm(temperature=0.3, state=state)
-        datetime_context = agent._get_datetime_context()
+        datetime_context = agent._get_datetime_context(state)
 
         shared_memory = state.get("shared_memory", {})
         handoff_context = shared_memory.get("handoff_context", {})

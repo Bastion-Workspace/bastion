@@ -2,8 +2,9 @@ grpcio==1.76.0
 grpcio-tools==1.76.0
 crawl4ai>=0.7.2
 python-dotenv==1.0.0
-pydantic==2.10.3
+pydantic==2.12.5
 playwright>=1.40.0
+playwright-stealth>=1.0.0
 httpx==0.28.1
 
 

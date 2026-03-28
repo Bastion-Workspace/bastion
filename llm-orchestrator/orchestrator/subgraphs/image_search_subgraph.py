@@ -47,7 +47,8 @@ async def detect_image_query_node(state: Dict[str, Any]) -> Dict[str, Any]:
         image_keywords = [
             "show me", "comic", "comics", "image", "images", "picture", "pictures",
             "photo", "photos", "artwork", "meme", "screenshot", "diagram", "visual", "display",
-            "map", "maps", "chart", "charts", "graph", "graphs"
+            "map", "maps", "chart", "charts", "graph", "graphs",
+            "face", "faces", "portrait", "portraits", "selfie", "selfies",
         ]
         
         is_image_query = any(keyword in query_lower for keyword in image_keywords)

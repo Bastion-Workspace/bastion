@@ -380,9 +380,41 @@ async def resolve_individual_operations_node(state: Dict[str, Any]) -> Dict[str,
                     })
                     continue
                 
+                # For replace/delete: strict slice check so removal span is exact (no clipping)
+                if op_type in ("replace_range", "delete_range") and original_text:
+                    actual_slice = (
+                        manuscript[resolved_start:resolved_end]
+                        if 0 <= resolved_start < len(manuscript) and resolved_end <= len(manuscript)
+                        else ""
+                    )
+                    if actual_slice != original_text:
+                        logger.error(
+                            f"Operation {i+1} exact_original_text_mismatch: resolved slice != original_text "
+                            f"(len actual={len(actual_slice)}, len expected={len(original_text)})"
+                        )
+                        failed_operations.append({
+                            "op_type": op_type,
+                            "original_text": original_text,
+                            "anchor_text": anchor_text,
+                            "text": resolved_text or op_dict.get("text", ""),
+                            "error": "exact_original_text_mismatch"
+                        })
+                        continue
+                
                 # Log resolution result - check if it resolved to cursor position when original_text should have been found
                 cursor_pos = selection["start"] if selection and selection.get("start", -1) >= 0 and selection.get("start") == selection.get("end") else -1
                 if resolved_start == resolved_end and resolved_start == cursor_pos and cursor_pos >= 0 and original_text:
+                    # For replace/delete we require exact match only; do not use approximate fallbacks (avoids clipping)
+                    if op_type in ("replace_range", "delete_range"):
+                        logger.warning(f"Operation {i+1} replace/delete resolved to zero-length at cursor - skipping (exact match required)")
+                        failed_operations.append({
+                            "op_type": op_type,
+                            "original_text": original_text,
+                            "anchor_text": anchor_text,
+                            "text": resolved_text or op_dict.get("text", ""),
+                            "error": "Anchor or original text not found"
+                        })
+                        continue
                     logger.warning(f"⚠️ Operation {i+1} resolved to cursor position [{resolved_start}:{resolved_end}] - original_text matching failed!")
                     # Check if original_text exists in manuscript
                     if original_text not in manuscript:

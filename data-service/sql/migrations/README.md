@@ -12,6 +12,7 @@ Use these migrations if you have an **existing database** that needs:
 - User tracking columns (002)
 - Row-Level Security policies (003)
 - Formula support (004)
+- Native SQL tables / storage_type (005)
 
 ## Migration Scripts
 
@@ -30,6 +31,10 @@ Use these migrations if you have an **existing database** that needs:
 - Adds `formula_data` JSONB column to `custom_data_rows`
 - Creates GIN index for efficient formula queries
 - Adds column documentation
+
+### 005_native_sql_tables.sql
+- Adds `storage_type` to `custom_tables` (default `'jsonb'`; `'native'` = real table in workspace schema)
+- Creates index on `storage_type`
 
 ## Running Migrations
 
@@ -52,6 +57,7 @@ docker exec -i bastion-postgres-data psql -U data_user -d data_workspace < migra
 - ✅ **002**: User tracking columns are in `01_init.sql` (columns already exist)
 - ✅ **003**: RLS policies are in `01_init.sql` (full RLS setup)
 - ✅ **004**: Formula support is in `01_init.sql` (column and index included)
+- ✅ **005**: Native SQL / storage_type is in `01_init.sql` (column and index included)
 
 **Note:** These migrations are kept for historical reference and updating existing databases. New databases created from `01_init.sql` already include all features.
 

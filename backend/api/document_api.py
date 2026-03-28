@@ -14,11 +14,12 @@ from typing import List, Optional
 from io import BytesIO
 
 import aiofiles
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, Request
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Depends, Request, Body
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from models.api_models import (
-    URLImportRequest, ImportImageRequest, QueryRequest, DocumentListResponse,
+    URLImportRequest, ImportImageRequest, QueryRequest, DocumentSearchRequest, DocumentListResponse,
     DocumentUploadResponse, DocumentStatus, DocumentFilterRequest, DocumentUpdateRequest,
     BulkCategorizeRequest, DocumentCategoriesResponse, BulkOperationResponse,
     ProcessingStatus, DocumentType, DocumentInfo, DocumentCategory, AuthenticatedUserResponse
@@ -252,6 +253,36 @@ async def upload_document(
                 logger.error(f"❌ Immediate folder assignment failed: {e}")
                 # Start background retry task
                 asyncio.create_task(assign_document_to_folder())
+        
+        # Agent folder watches: trigger custom agents when a new file is uploaded to a watched folder
+        if folder_id and result.document_id:
+            try:
+                from services.database_manager.database_helpers import fetch_all
+                from services.celery_tasks.agent_tasks import dispatch_folder_file_reaction
+                watches = await fetch_all(
+                    "SELECT agent_profile_id, user_id, file_type_filter FROM agent_folder_watches "
+                    "WHERE folder_id = $1 AND is_active = true",
+                    folder_id,
+                )
+                file_ext = (file.filename or "").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else ""
+                doc_type_str = doc_type or file_ext or ""
+                for w in watches:
+                    ft_filter = (w.get("file_type_filter") or "").strip()
+                    if ft_filter:
+                        allowed = [x.strip().lower() for x in ft_filter.split(",") if x.strip()]
+                        if allowed and file_ext not in allowed:
+                            continue
+                    dispatch_folder_file_reaction.delay(
+                        agent_profile_id=str(w["agent_profile_id"]),
+                        user_id=str(w["user_id"]),
+                        document_id=result.document_id,
+                        filename=file.filename or "",
+                        folder_id=folder_id,
+                        folder_path="",
+                        file_type=doc_type_str,
+                    )
+            except Exception as e:
+                logger.warning("Agent folder watch dispatch failed: %s", e)
         
         logger.info(f"✅ Global document uploaded successfully: {result.document_id}")
         return result
@@ -564,6 +595,36 @@ async def upload_user_document(
             except Exception as e:
                 logger.warning(f"⚠️ Failed to send WebSocket notification: {e}")
         
+        # Agent folder watches: trigger custom agents when a new file is uploaded to a watched folder
+        if folder_id and result.document_id:
+            try:
+                from services.database_manager.database_helpers import fetch_all
+                from services.celery_tasks.agent_tasks import dispatch_folder_file_reaction
+                watches = await fetch_all(
+                    "SELECT agent_profile_id, user_id, file_type_filter FROM agent_folder_watches "
+                    "WHERE folder_id = $1 AND is_active = true",
+                    folder_id,
+                )
+                file_ext = (file.filename or "").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else ""
+                doc_type_str = doc_type or file_ext or ""
+                for w in watches:
+                    ft_filter = (w.get("file_type_filter") or "").strip()
+                    if ft_filter:
+                        allowed = [x.strip().lower() for x in ft_filter.split(",") if x.strip()]
+                        if allowed and file_ext not in allowed:
+                            continue
+                    dispatch_folder_file_reaction.delay(
+                        agent_profile_id=str(w["agent_profile_id"]),
+                        user_id=str(w["user_id"]),
+                        document_id=result.document_id,
+                        filename=file.filename or "",
+                        folder_id=folder_id,
+                        folder_path="",
+                        file_type=doc_type_str,
+                    )
+            except Exception as e:
+                logger.warning("Agent folder watch dispatch failed: %s", e)
+        
         logger.info(f"✅ User document uploaded successfully: {result.document_id}")
         return result
         
@@ -575,27 +636,44 @@ async def upload_user_document(
 
 @router.post("/api/user/documents/search")
 async def search_user_and_global_documents(
-    request: QueryRequest,
+    request: DocumentSearchRequest,
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
-    """Search both user's private documents and global shared documents"""
-    document_service = await _get_document_service()
+    """Search user's documents, team documents, and global documents. Supports hybrid (vector + full-text), semantic-only, or fulltext-only."""
     try:
-        logger.info(f"🔍 User {current_user.username} searching: {request.query[:50]}...")
-        
-        # Use embedding manager's hybrid search (searches both collections)
-        results = await document_service.embedding_manager.search_similar(
-            query_text=request.query,
-            limit=getattr(request, 'limit', 10),
-            score_threshold=getattr(request, 'similarity_threshold', 0.7),
-            user_id=current_user.user_id  # This triggers hybrid search
+        from services.direct_search_service import DirectSearchService
+        search_service = DirectSearchService()
+        team_ids = None
+        try:
+            from services.team_service import TeamService
+            team_svc = TeamService()
+            await team_svc.initialize()
+            teams = await team_svc.list_user_teams(current_user.user_id)
+            team_ids = [t["team_id"] for t in teams] if teams else None
+        except Exception:
+            pass
+        limit = request.limit or request.max_results or 20
+        result = await search_service.search_documents(
+            query=request.query,
+            limit=limit,
+            search_mode=request.search_mode or "hybrid",
+            user_id=current_user.user_id,
+            team_ids=team_ids,
+            folder_id=request.folder_id,
+            file_types=request.file_types,
+            include_metadata=True,
         )
-        
-        logger.info(f"✅ Found {len(results)} results for user {current_user.username}")
-        return {"results": results, "total_results": len(results)}
-        
+        if not result.get("success"):
+            raise HTTPException(status_code=500, detail=result.get("error", "Search failed"))
+        return {
+            "results": result.get("results", []),
+            "total_results": result.get("total_results", 0),
+            "search_mode": result.get("search_mode", "hybrid"),
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"❌ User search failed: {str(e)}")
+        logger.error(f"User document search failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/user/documents/has-org")
@@ -867,8 +945,10 @@ async def clear_all_documents(
         # Step 5: Clear knowledge graph completely
         logger.info("🗑️ Clearing knowledge graph...")
         try:
-            if knowledge_graph_service:
-                await knowledge_graph_service.clear_all_data()
+            container = await get_service_container()
+            kg_service = getattr(container, "knowledge_graph_service", None)
+            if kg_service:
+                await kg_service.clear_all_data()
                 logger.info("🗑️ Cleared all knowledge graph data")
             else:
                 logger.warning("⚠️ Knowledge graph service not available")
@@ -1034,11 +1114,10 @@ async def clear_neo4j(
     """Clear all data from Neo4j knowledge graph (admin only)"""
     try:
         logger.info(f"🗑️ Admin {current_user.username} clearing Neo4j knowledge graph")
-        
+        container = await get_service_container()
+        knowledge_graph_service = getattr(container, "knowledge_graph_service", None)
         if not knowledge_graph_service:
             raise HTTPException(status_code=503, detail="Knowledge graph service not available")
-        
-        # Clear all knowledge graph data
         await knowledge_graph_service.clear_all_data()
         
         # Get stats to confirm clearing
@@ -1353,7 +1432,7 @@ async def rescan_user_files(
     try:
         from services.file_recovery_service import get_file_recovery_service
         
-        logger.info(f"🔍 ROOSEVELT: Rescanning files for user {current_user.user_id}")
+        logger.info("Rescanning files for user %s", current_user.user_id)
         
         recovery_service = await get_file_recovery_service()
         result = await recovery_service.scan_and_recover_user_files(
@@ -1848,6 +1927,114 @@ async def get_document_categories_overview():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ----- Document edit proposals (persistent) -----
+
+@router.get("/api/documents/{document_id}/pending-proposals")
+async def get_pending_proposals(
+    document_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Get pending edit proposals for a document (for DocumentViewer on open)."""
+    await check_document_access(document_id, current_user, "read")
+    from services.langgraph_tools.document_editing_tools import list_pending_proposals_for_document
+    proposals = await list_pending_proposals_for_document(document_id, current_user.user_id)
+    return proposals
+
+
+class ApplyEditProposalRequest(BaseModel):
+    proposal_id: str
+    selected_operation_indices: Optional[List[int]] = None
+
+
+@router.post("/api/documents/edit-proposals/apply")
+async def apply_edit_proposal(
+    body: ApplyEditProposalRequest = Body(...),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Apply an approved document edit proposal."""
+    from services.langgraph_tools.document_editing_tools import apply_document_edit_proposal
+    result = await apply_document_edit_proposal(
+        proposal_id=body.proposal_id,
+        selected_operation_indices=body.selected_operation_indices,
+        user_id=current_user.user_id
+    )
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message", "Apply failed"))
+    return result
+
+
+class RejectEditProposalRequest(BaseModel):
+    proposal_id: str
+
+
+@router.post("/api/documents/edit-proposals/reject")
+async def reject_edit_proposal(
+    body: RejectEditProposalRequest = Body(...),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Reject a document edit proposal (delete it)."""
+    from services.database_manager.database_helpers import execute
+    from services.langgraph_tools.document_editing_tools import get_document_edit_proposal
+    proposal = await get_document_edit_proposal(body.proposal_id, current_user.user_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    if proposal["user_id"] != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    await execute(
+        "DELETE FROM document_edit_proposals WHERE proposal_id = $1::uuid",
+        body.proposal_id,
+        rls_context={"user_id": current_user.user_id, "user_role": "user"}
+    )
+    document_id = proposal["document_id"]
+    try:
+        container = await get_service_container()
+        if container.websocket_manager:
+            await container.websocket_manager.send_document_status_update(
+                document_id=document_id,
+                status="edit_proposal_rejected",
+                user_id=current_user.user_id,
+                filename=None,
+                proposal_data={"has_pending_proposals": False}
+            )
+    except Exception as e:
+        logger.warning("Failed to send proposal rejected notification: %s", e)
+    return {"success": True, "message": "Proposal rejected"}
+
+
+@router.post("/api/documents/edit-proposals/mark-applied")
+async def mark_edit_proposal_applied(
+    body: RejectEditProposalRequest = Body(...),
+    current_user: AuthenticatedUserResponse = Depends(get_current_user)
+):
+    """Mark a document edit proposal as applied (editor already applied it). Deletes the proposal from DB so it does not reappear on refetch/save."""
+    from services.database_manager.database_helpers import execute
+    from services.langgraph_tools.document_editing_tools import get_document_edit_proposal
+    proposal = await get_document_edit_proposal(body.proposal_id, current_user.user_id)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    if proposal["user_id"] != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    await execute(
+        "DELETE FROM document_edit_proposals WHERE proposal_id = $1::uuid",
+        body.proposal_id,
+        rls_context={"user_id": current_user.user_id, "user_role": "user"}
+    )
+    document_id = proposal["document_id"]
+    try:
+        container = await get_service_container()
+        if container.websocket_manager:
+            await container.websocket_manager.send_document_status_update(
+                document_id=document_id,
+                status="edit_proposal_applied",
+                user_id=current_user.user_id,
+                filename=None,
+                proposal_data={"has_pending_proposals": False}
+            )
+    except Exception as e:
+        logger.warning("Failed to send proposal applied notification: %s", e)
+    return {"success": True, "message": "Proposal marked as applied"}
+
+
 @router.get("/api/documents/{doc_id}/content")
 async def get_document_content(
     doc_id: str,
@@ -1928,6 +2115,21 @@ async def get_document_content(
                     file_path = Path(file_path_str)
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to compute file path for DocX: {e}")
+            # Skip content loading for PPTX files - they're binary and served via /file endpoint
+            elif filename and (filename.lower().endswith('.pptx') or filename.lower().endswith('.ppt')):
+                logger.info(f"📄 API: Skipping content load for PPTX: {filename} (use /file endpoint instead)")
+                full_content = ""  # Empty content for PPTX files
+                content_source = "pptx_binary"
+                try:
+                    file_path_str = await folder_service.get_document_file_path(
+                        filename=filename,
+                        folder_id=folder_id,
+                        user_id=user_id,
+                        collection_type=collection_type
+                    )
+                    file_path = Path(file_path_str)
+                except Exception as e:
+                    logger.warning(f"⚠️ Failed to compute file path for PPTX: {e}")
             elif filename:
                 # Try new folder structure first
                 try:
@@ -2106,7 +2308,7 @@ async def exempt_document_from_vectorization(
             current_user.user_id
         )
         if success:
-            return {"status": "success", "message": "Document exempted from vectorization"}
+            return {"status": "success", "message": "Document exempted from search"}
         else:
             raise HTTPException(status_code=500, detail="Failed to exempt document")
     except Exception as e:
@@ -2163,7 +2365,7 @@ async def exempt_folder_from_vectorization(
         )
         if success:
             logger.info(f"✅ API: Folder {folder_id} exempted successfully")
-            return {"status": "success", "message": "Folder and descendants exempted from vectorization"}
+            return {"status": "success", "message": "Folder and descendants exempted from search"}
         else:
             logger.error(f"❌ API: Failed to exempt folder {folder_id} - method returned false")
             raise HTTPException(status_code=500, detail="Failed to exempt folder")
@@ -2324,6 +2526,13 @@ async def update_document_content(
         except Exception as e:
             logger.warning(f"⚠️ Failed to compare existing content for {doc_id}; proceeding with save: {e}")
 
+        # Snapshot current content before overwrite (version history)
+        try:
+            from services.document_version_service import snapshot_before_write
+            await snapshot_before_write(doc_id, current_user.user_id, "manual_save", None, None)
+        except Exception as verr:
+            logger.warning("Version snapshot before save failed (non-fatal): %s", verr)
+
         # Write content to disk
         try:
             file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2355,7 +2564,7 @@ async def update_document_content(
         if is_exempt:
             logger.info(f"🚫 Document {doc_id} is exempt from vectorization - skipping embedding and entity extraction")
             await document_service.document_repository.update_status(doc_id, ProcessingStatus.COMPLETED)
-            return {"status": "success", "message": "Content updated (exempt from vectorization)", "document_id": doc_id}
+            return {"status": "success", "message": "Content updated (exempt from search)", "document_id": doc_id}
 
         # Queue re-embedding and entity extraction in background so save returns immediately
         await document_service.document_repository.update_status(doc_id, ProcessingStatus.EMBEDDING)

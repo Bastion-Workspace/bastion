@@ -6,6 +6,7 @@ Handles document upload, processing, and management using PostgreSQL storage
 import asyncio
 import hashlib
 import logging
+import os
 import tempfile
 import time
 from datetime import datetime
@@ -208,7 +209,7 @@ class DocumentService:
             # **ROOSEVELT FAST-TRACK FOR ORG FILES!**
             # Org files process instantly (no vectorization) - wait for completion
             if doc_type == 'org':
-                logger.info(f"⚡ BULLY! Org file fast-track - processing synchronously")
+                logger.info("Org file fast-track: processing synchronously")
                 await self._process_document_async(document_id, file_path, doc_type, user_id)
                 
                 logger.info(f"📄 Org file uploaded and ready: {file.filename} ({document_id})")
@@ -478,7 +479,7 @@ class DocumentService:
         
         # Store entities in knowledge graph
         if result.entities and self.kg_service:
-            await self.kg_service.store_entities(result.entities, document_id)
+            await self.kg_service.store_entities(result.entities, document_id, result.chunks)
             logger.info(f"🔗 Stored {len(result.entities)} entities for document {document_id}")
         
         # Update final status
@@ -544,7 +545,7 @@ class DocumentService:
                     
                     # Store entities in knowledge graph
                     if text_result.entities and self.kg_service:
-                        await self.kg_service.store_entities(text_result.entities, document_id)
+                        await self.kg_service.store_entities(text_result.entities, document_id, text_result.chunks)
                         logger.info(f"🔗 Stored {len(text_result.entities)} entities for document {document_id}")
                     
                     # Update quality metrics
@@ -582,7 +583,7 @@ class DocumentService:
                     
                     # Store entities in knowledge graph
                     if result.entities and self.kg_service:
-                        await self.kg_service.store_entities(result.entities, document_id)
+                        await self.kg_service.store_entities(result.entities, document_id, result.chunks)
                         logger.info(f"🔗 Stored {len(result.entities)} entities for document {document_id}")
                     
                     # Update quality metrics
@@ -755,7 +756,7 @@ class DocumentService:
         
         # Store entities in knowledge graph
         if result.entities and self.kg_service:
-            await self.kg_service.store_entities(result.entities, document_id)
+            await self.kg_service.store_entities(result.entities, document_id, result.chunks)
             logger.info(f"🔗 Stored {len(result.entities)} entities for document {document_id}")
         
         # Update final status
@@ -1121,10 +1122,6 @@ class DocumentService:
         content = re.sub(r'\s+', ' ', content)
         content = content.strip()
         
-        # Limit content length to prevent database issues
-        if len(content) > 50000:
-            content = content[:50000] + "..."
-        
         return content
     
     async def _download_file_directly(self, url: str, file_type: str) -> Tuple[Union[bytes, str], int]:
@@ -1474,6 +1471,8 @@ class DocumentService:
             '.org': 'org',
             '.docx': 'docx',
             '.doc': 'docx',
+            '.pptx': 'pptx',
+            '.ppt': 'pptx',
             '.epub': 'epub',
             '.html': 'html',
             '.htm': 'html',
@@ -1823,16 +1822,11 @@ class DocumentService:
                 )
                 logger.info(f"Re-embedded {len(result.chunks)} chunks for document {document_id}")
             
-            # Extract and store entities
-            if self.kg_service and result.chunks:
+            # Extract and store entities (process_document already populated result.entities)
+            if self.kg_service and result.entities:
                 try:
-                    entities = await self.document_processor._extract_entities(
-                        result.text_content or "",
-                        result.chunks or []
-                    )
-                    if entities:
-                        await self.kg_service.store_entities(entities, document_id)
-                        logger.info(f"Extracted and stored {len(entities)} entities for document {document_id}")
+                    await self.kg_service.store_entities(result.entities, document_id, result.chunks)
+                    logger.info(f"Extracted and stored {len(result.entities)} entities for document {document_id}")
                 except Exception as e:
                     logger.warning(f"Failed to extract/store entities for {document_id}: {e}")
             
@@ -1995,7 +1989,7 @@ class DocumentService:
                 author=metadata.get("author"),
                 language=metadata.get("language"),
                 upload_date=datetime.utcnow(),
-                file_size=len(content.encode('utf-8')),
+                file_size=os.path.getsize(file_path) if file_path and not content and os.path.exists(file_path) else len(content.encode("utf-8")),
                 status=ProcessingStatus.PROCESSING,
                 user_id=user_id,
                 collection_type=collection_type,
@@ -2077,7 +2071,7 @@ class DocumentService:
                 try:
                     entities = await self.kg_service.extract_entities_from_text(content)
                     if entities:
-                        await self.kg_service.store_entities(entities, doc_id)
+                        await self.kg_service.store_entities(entities, doc_id, chunks)
                         logger.info(f"🔗 Stored {len(entities)} entities for document {doc_id}")
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to extract entities for {doc_id}: {e}")

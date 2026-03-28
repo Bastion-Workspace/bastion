@@ -122,21 +122,12 @@ async def get_workspace_for_database(
 async def get_workspace_for_table(
     table_id: str,
     current_user: AuthenticatedUserResponse,
-    grpc_client=None
+    grpc_client=None,
+    database_id: Optional[str] = None
 ) -> str:
     """
-    Lookup workspace_id for a table and verify user has read access
-    
-    Args:
-        table_id: Table to lookup
-        current_user: Authenticated user
-        grpc_client: Optional gRPC client (to avoid circular imports)
-        
-    Returns:
-        workspace_id: Workspace ID that contains the table
-        
-    Raises:
-        HTTPException: 404 if table not found, 403 if no access
+    Lookup workspace_id for a table and verify user has read access.
+    Pass database_id to resolve schema-only (DDL-created) tables.
     """
     if grpc_client is None:
         from services.data_workspace_grpc_client import DataWorkspaceGRPCClient
@@ -148,18 +139,18 @@ async def get_workspace_for_table(
         table = await grpc_client.get_table(
             table_id,
             user_id=current_user.user_id,
-            user_team_ids=user_team_ids
+            user_team_ids=user_team_ids,
+            database_id=database_id
         )
         
         if not table:
             raise HTTPException(status_code=404, detail="Table not found")
         
-        database_id = table.get('database_id')
-        if not database_id:
+        database_id_resolved = table.get('database_id')
+        if not database_id_resolved:
             raise HTTPException(status_code=404, detail="Table database not found")
         
-        # Get workspace via database
-        return await get_workspace_for_database(database_id, current_user, grpc_client)
+        return await get_workspace_for_database(database_id_resolved, current_user, grpc_client)
         
     except HTTPException:
         raise

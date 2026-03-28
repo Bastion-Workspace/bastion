@@ -43,6 +43,66 @@ class DocumentDiffStore {
   }
 
   /**
+   * Merge proposal diffs for a document (multi-proposal support).
+   * Replaces only ops belonging to this proposalId; preserves ops from other proposals.
+   * @param {string} documentId - Document identifier
+   * @param {Array} operations - Array of diff operations for this proposal
+   * @param {string} proposalId - Proposal ID (messageId) for these ops
+   * @param {string} contentSnapshot - Current document content (for validation)
+   */
+  mergeProposalDiff(documentId, operations, proposalId, contentSnapshot) {
+    if (!documentId || !proposalId) return;
+    const existing = this.diffs[documentId];
+    const existingOps = existing?.operations || [];
+    const filtered = existingOps.filter(op => op.messageId !== proposalId);
+    const tagged = (Array.isArray(operations) ? operations : []).map(op => ({ ...op, messageId: proposalId }));
+    const merged = [...filtered, ...tagged];
+    if (import.meta.env.DEV) {
+      for (let i = 0; i < merged.length; i++) {
+        for (let j = i + 1; j < merged.length; j++) {
+          const a = merged[i];
+          const b = merged[j];
+          if (a.messageId === b.messageId) continue;
+          const as = a.start;
+          const ae = a.end;
+          const bs = b.start;
+          const be = b.end;
+          if (as == null || ae == null || bs == null || be == null) continue;
+          if (!(ae <= bs || be <= as)) {
+            console.warn('Overlapping ops from different proposals:', a, b);
+          }
+        }
+      }
+    }
+    this.diffs[documentId] = {
+      operations: merged,
+      messageId: proposalId,
+      timestamp: Date.now(),
+      contentHash: this._hashContent(contentSnapshot || '')
+    };
+    this.saveToStorage();
+    this.notify(documentId, 'set');
+  }
+
+  /**
+   * Save a full snapshot of operations (plugin save-back). No top-level messageId.
+   * @param {string} documentId - Document identifier
+   * @param {Array} operations - Full array of operations (each op has its own messageId)
+   * @param {string} contentSnapshot - Current document content (for validation)
+   */
+  saveSnapshot(documentId, operations, contentSnapshot) {
+    if (!documentId) return;
+    this.diffs[documentId] = {
+      operations: Array.isArray(operations) ? operations : [],
+      messageId: null,
+      timestamp: Date.now(),
+      contentHash: this._hashContent(contentSnapshot || '')
+    };
+    this.saveToStorage();
+    this.notify(documentId, 'set');
+  }
+
+  /**
    * Get diffs for a document
    * @param {string} documentId - Document identifier
    * @returns {Object|null} Diff data or null if not found
@@ -67,128 +127,57 @@ class DocumentDiffStore {
   }
 
   /**
+   * Remove all diffs for a proposal (batch clear). One filter, one save, one notify.
+   * @param {string} documentId - Document identifier
+   * @param {string} proposalId - Proposal ID (messageId) to remove
+   */
+  removeProposalDiffs(documentId, proposalId) {
+    if (!documentId || !proposalId) return;
+    const docDiffs = this.diffs[documentId];
+    if (!docDiffs || !Array.isArray(docDiffs.operations)) return;
+    const before = docDiffs.operations.length;
+    docDiffs.operations = docDiffs.operations.filter(op => op.messageId !== proposalId);
+    if (docDiffs.operations.length === before) return;
+    if (docDiffs.operations.length === 0) {
+      delete this.diffs[documentId];
+    }
+    this.saveToStorage();
+    this.notify(documentId, 'remove');
+  }
+
+  /**
    * Remove a specific diff operation
    * @param {string} documentId - Document identifier
    * @param {string} operationId - Operation ID to remove
    */
   removeDiff(documentId, operationId) {
-    console.log('🔍 removeDiff called:', { documentId, operationId });
-    
     if (!documentId || !operationId) {
-      console.warn('⚠️ removeDiff: Missing documentId or operationId');
+      console.warn('DocumentDiffStore removeDiff: Missing documentId or operationId');
       return;
     }
 
     const docDiffs = this.diffs[documentId];
     if (!docDiffs || !Array.isArray(docDiffs.operations)) {
-      console.warn('⚠️ removeDiff: No diffs found for document:', documentId);
+      console.warn('DocumentDiffStore removeDiff: No diffs found for document:', documentId);
       return;
     }
 
-    console.log('🔍 removeDiff: Current operations:', docDiffs.operations.length, 
-                'Operations:', docDiffs.operations.map(op => ({
-                  operationId: op.operationId,
-                  id: op.id,
-                  start: op.start,
-                  end: op.end,
-                  fallbackId: op.start + '-' + op.end
-                })));
-
     const initialLength = docDiffs.operations.length;
     docDiffs.operations = docDiffs.operations.filter(op => {
-      // Operation ID can be in various formats
       const opId = op.operationId || op.id || op.start + '-' + op.end;
       const matches = opId === operationId || String(opId) === String(operationId);
-      console.log('🔍 Checking operation:', { opId, operationId, matches });
       return !matches;
     });
 
-    console.log('🔍 removeDiff: After filter:', docDiffs.operations.length, 'removed:', initialLength - docDiffs.operations.length);
-
     if (docDiffs.operations.length !== initialLength) {
-      // ✅ If no operations left, clear the entire document entry
       if (docDiffs.operations.length === 0) {
-        console.log('🗑️ No diffs remaining for document, clearing entry:', documentId);
         delete this.diffs[documentId];
       }
-      
       this.saveToStorage();
       this.notify(documentId, 'remove');
-      
-      console.log('✅ Removed diff, remaining count:', docDiffs.operations.length);
     } else {
-      console.warn('⚠️ removeDiff: No operations were removed! operationId not found:', operationId);
+      console.warn('DocumentDiffStore removeDiff: No operations were removed, operationId not found:', operationId);
     }
-  }
-
-  /**
-   * Validate diffs against current document content
-   * Marks diffs as stale when content hash changes significantly
-   * @param {string} documentId - Document identifier
-   * @param {string} currentContent - Current document content
-   * @returns {Object} { invalidated: Array of operation IDs, isStale: boolean }
-   */
-  validateDiffs(documentId, currentContent) {
-    if (!documentId) return { invalidated: [], isStale: false };
-
-    const docDiffs = this.diffs[documentId];
-    if (!docDiffs) return { invalidated: [], isStale: false };
-
-    const currentHash = this._hashContent(currentContent || '');
-    const storedHash = docDiffs.contentHash || '';
-    const invalidated = [];
-    let isStale = false;
-
-    // Compare hashes: if they differ, content has changed
-    if (currentHash !== storedHash) {
-      // Parse hash components to determine severity
-      const currentParts = currentHash.split('_');
-      const storedParts = storedHash.split('_');
-      
-      if (currentParts.length === storedParts.length && currentParts.length >= 2) {
-        const currentLength = parseInt(currentParts[0], 10) || 0;
-        const storedLength = parseInt(storedParts[0], 10) || 0;
-        
-        // Calculate length change percentage
-        const lengthChange = Math.abs(currentLength - storedLength);
-        const maxLength = Math.max(currentLength, storedLength, 1);
-        const changePercent = (lengthChange / maxLength) * 100;
-        
-        // Check if sample hashes match (indicates where change occurred)
-        let matchingSamples = 0;
-        for (let i = 1; i < Math.min(currentParts.length, storedParts.length); i++) {
-          if (currentParts[i] === storedParts[i]) {
-            matchingSamples++;
-          }
-        }
-        
-        // Mark as stale if:
-        // - Length changed by more than 5%
-        // - OR less than 3 out of 5 samples match (major structural change)
-        if (changePercent > 5 || matchingSamples < 3) {
-          isStale = true;
-          console.warn(`⚠️ Document content has drifted significantly:`, {
-            documentId,
-            lengthChange: `${changePercent.toFixed(1)}%`,
-            matchingSamples: `${matchingSamples}/${currentParts.length - 1}`,
-            storedLength,
-            currentLength
-          });
-        }
-      } else {
-        // Hash format changed - assume stale
-        isStale = true;
-      }
-      
-      // Update stored hash
-      docDiffs.contentHash = currentHash;
-      this.saveToStorage();
-    }
-
-    // Store stale status for UI to display
-    docDiffs.isStale = isStale;
-
-    return { invalidated, isStale };
   }
 
   /**
@@ -279,7 +268,6 @@ class DocumentDiffStore {
   subscribe(callback) {
     if (typeof callback === 'function') {
       this.listeners.add(callback);
-      console.log('📝 DocumentDiffStore: Listener subscribed, total listeners:', this.listeners.size);
     }
   }
 
@@ -289,7 +277,6 @@ class DocumentDiffStore {
    */
   unsubscribe(callback) {
     this.listeners.delete(callback);
-    console.log('📝 DocumentDiffStore: Listener unsubscribed, total listeners:', this.listeners.size);
   }
 
   /**
@@ -298,13 +285,6 @@ class DocumentDiffStore {
    * @param {string} changeType - Type of change: 'set', 'clear', 'remove', 'invalidate'
    */
   notify(documentId, changeType) {
-    console.log('📢 DocumentDiffStore: Notifying listeners', { 
-      documentId, 
-      changeType, 
-      listenerCount: this.listeners.size,
-      remainingDiffs: this.diffs[documentId]?.operations?.length || 0
-    });
-    
     this.listeners.forEach(callback => {
       try {
         callback(documentId, changeType);

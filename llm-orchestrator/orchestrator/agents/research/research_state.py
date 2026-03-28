@@ -55,6 +55,9 @@ class ResearchState(TypedDict, total=False):
     should_present_options: bool
     num_options: Optional[int]
     final_response: str
+    evaluation_result: Optional[str]
+    synthesis_attempt: int
+    evaluation_feedback: Optional[str]
     citations: List[Dict[str, Any]]
     sources_used: List[str]
     routing_recommendation: Optional[str]

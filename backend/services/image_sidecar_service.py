@@ -623,7 +623,7 @@ class ImageSidecarService:
                     }
                 )
                 
-                # Vectorize the content
+                # Vectorize the content (tag as image sidecar so document search can exclude)
                 await self.embedding_manager.embed_and_store_chunks(
                     chunks=[chunk],
                     user_id=user_id,
@@ -631,7 +631,8 @@ class ImageSidecarService:
                     document_tags=tags if tags else [],
                     document_title=title,
                     document_author=author if author else None,
-                    document_filename=json_path.name
+                    document_filename=json_path.name,
+                    is_image_sidecar=True,
                 )
                 
                 # Update document status

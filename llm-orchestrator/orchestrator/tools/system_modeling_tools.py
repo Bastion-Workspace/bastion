@@ -5,7 +5,62 @@ Technical Hyperspace Tools - gRPC client wrappers for system topology and failur
 import logging
 from typing import Dict, Any, List, Optional
 
+from pydantic import BaseModel, Field
+
+from orchestrator.utils.action_io_registry import register_action
+
 logger = logging.getLogger(__name__)
+
+
+# ── I/O models (minimal for system modeling tools) ──────────────────────────
+
+class DesignSystemComponentInputs(BaseModel):
+    """Required inputs for design_system_component_tool."""
+    component_id: str = Field(description="Unique component identifier")
+    component_type: str = Field(description="Type of component e.g. pump, valve, sensor")
+
+
+class DesignSystemComponentOutputs(BaseModel):
+    """Outputs for design_system_component_tool."""
+    success: bool = Field(description="Whether the component was added")
+    component_id: str = Field(description="Component ID")
+    message: Optional[str] = Field(default=None, description="Status message")
+    topology_json: str = Field(description="Updated topology JSON")
+    error: Optional[str] = Field(default=None, description="Error if failed")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
+
+
+class SimulateSystemFailureInputs(BaseModel):
+    """Required inputs for simulate_system_failure_tool."""
+    failed_component_ids: List[str] = Field(description="Components to fail initially")
+
+
+class SimulateSystemFailureOutputs(BaseModel):
+    """Outputs for simulate_system_failure_tool."""
+    success: bool = Field(description="Whether simulation succeeded")
+    simulation_id: str = Field(description="Simulation ID")
+    component_states: List[Dict[str, Any]] = Field(default_factory=list, description="Component states")
+    failure_paths: List[Dict[str, Any]] = Field(default_factory=list, description="Failure paths")
+    health_metrics: Dict[str, Any] = Field(default_factory=dict, description="Health metrics")
+    topology_json: str = Field(description="Topology JSON")
+    error: Optional[str] = Field(default=None, description="Error if failed")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
+
+
+class GetSystemTopologyInputs(BaseModel):
+    """Inputs for get_system_topology_tool (optional system_name)."""
+    system_name: Optional[str] = Field(default=None, description="Optional system name filter")
+
+
+class GetSystemTopologyOutputs(BaseModel):
+    """Outputs for get_system_topology_tool."""
+    success: bool = Field(description="Whether topology was retrieved")
+    topology_json: str = Field(description="Topology JSON")
+    component_count: int = Field(description="Number of components")
+    edge_count: int = Field(description="Number of edges")
+    redundancy_groups: List[str] = Field(default_factory=list, description="Redundancy group names")
+    error: Optional[str] = Field(default=None, description="Error if failed")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
 
 
 async def design_system_component_tool(
@@ -68,23 +123,26 @@ async def design_system_component_tool(
             request.redundancy_group = redundancy_group
         
         response = await client._stub.DesignSystemComponent(request)
-        
+        formatted = f"Component {response.component_id} designed successfully." if response.success else (response.error or "Failed")
         return {
             "success": response.success,
             "component_id": response.component_id,
             "message": response.message,
             "topology_json": response.topology_json,
-            "error": response.error if response.HasField("error") else None
+            "error": response.error if response.HasField("error") else None,
+            "formatted": formatted
         }
         
     except Exception as e:
         logger.error(f"Failed to design system component: {e}")
+        err = str(e)
         return {
             "success": False,
             "component_id": component_id,
-            "message": f"Failed to design component: {str(e)}",
-            "error": str(e),
-            "topology_json": "{}"
+            "message": f"Failed to design component: {err}",
+            "error": err,
+            "topology_json": "{}",
+            "formatted": f"Failed to design component: {err}"
         }
 
 
@@ -132,14 +190,16 @@ async def simulate_system_failure_tool(
         response = await client._stub.SimulateSystemFailure(request)
         
         if not response.success:
+            err = response.error if response.HasField("error") else "Unknown error"
             return {
                 "success": False,
                 "simulation_id": response.simulation_id,
-                "error": response.error if response.HasField("error") else "Unknown error",
+                "error": err,
                 "topology_json": response.topology_json,
                 "component_states": [],
                 "failure_paths": [],
-                "health_metrics": {}
+                "health_metrics": {},
+                "formatted": f"Simulation failed: {err}"
             }
         
         # Convert component states
@@ -175,25 +235,29 @@ async def simulate_system_failure_tool(
             "redundancy_groups_at_risk": list(health.redundancy_groups_at_risk)
         }
         
+        formatted = f"Simulation {response.simulation_id}: {health_metrics.get('operational_components', 0)} operational, {health_metrics.get('failed_components', 0)} failed."
         return {
             "success": True,
             "simulation_id": response.simulation_id,
             "component_states": component_states,
             "failure_paths": failure_paths,
             "health_metrics": health_metrics,
-            "topology_json": response.topology_json
+            "topology_json": response.topology_json,
+            "formatted": formatted
         }
         
     except Exception as e:
         logger.error(f"Failed to simulate system failure: {e}")
+        err = str(e)
         return {
             "success": False,
             "simulation_id": "",
-            "error": str(e),
+            "error": err,
             "topology_json": "{}",
             "component_states": [],
             "failure_paths": [],
-            "health_metrics": {}
+            "health_metrics": {},
+            "formatted": f"Simulation failed: {err}"
         }
 
 
@@ -227,23 +291,52 @@ async def get_system_topology_tool(
             request.system_name = system_name
         
         response = await client._stub.GetSystemTopology(request)
-        
+        formatted = f"Topology: {response.component_count} components, {response.edge_count} edges." if response.success else (response.error or "Failed")
         return {
             "success": response.success,
             "topology_json": response.topology_json,
             "component_count": response.component_count,
             "edge_count": response.edge_count,
             "redundancy_groups": list(response.redundancy_groups),
-            "error": response.error if response.HasField("error") else None
+            "error": response.error if response.HasField("error") else None,
+            "formatted": formatted
         }
         
     except Exception as e:
         logger.error(f"Failed to get system topology: {e}")
+        err = str(e)
         return {
             "success": False,
-            "error": str(e),
+            "error": err,
             "topology_json": "{}",
             "component_count": 0,
             "edge_count": 0,
-            "redundancy_groups": []
+            "redundancy_groups": [],
+            "formatted": f"Failed to get topology: {err}"
         }
+
+
+register_action(
+    name="design_system_component",
+    category="system_modeling",
+    description="Design/add a system component to the topology",
+    inputs_model=DesignSystemComponentInputs,
+    outputs_model=DesignSystemComponentOutputs,
+    tool_function=design_system_component_tool,
+)
+register_action(
+    name="simulate_system_failure",
+    category="system_modeling",
+    description="Simulate system failure with cascade propagation",
+    inputs_model=SimulateSystemFailureInputs,
+    outputs_model=SimulateSystemFailureOutputs,
+    tool_function=simulate_system_failure_tool,
+)
+register_action(
+    name="get_system_topology",
+    category="system_modeling",
+    description="Get system topology as JSON",
+    inputs_model=GetSystemTopologyInputs,
+    outputs_model=GetSystemTopologyOutputs,
+    tool_function=get_system_topology_tool,
+)

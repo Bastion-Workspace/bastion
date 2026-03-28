@@ -1,8 +1,8 @@
 # Agent Factory: Technical Architecture & Implementation Guide
 
 **Document Version:** 1.0
-**Last Updated:** February 14, 2026
-**Status:** Planning Phase
+**Last Updated:** February 16, 2026
+**Status:** Core implemented — runtime, schema, APIs, connector runtime, pipeline executor, tool I/O registry, plugin credentials, execution logging and detail API, schedule notifications, discovery logging, import/export. See [Current implementation status](#current-implementation-status) below.
 **Companion to:** [AGENT_FACTORY.md](./AGENT_FACTORY.md) (product design), [AGENT_FACTORY_TOOLS.md](./AGENT_FACTORY_TOOLS.md) (tool catalog), [AGENT_FACTORY_EXAMPLES.md](./AGENT_FACTORY_EXAMPLES.md) (use cases)
 
 ---
@@ -15,6 +15,7 @@ This document covers the technical implementation details for the Agent Factory 
 
 ## Table of Contents
 
+0. [Current implementation status](#current-implementation-status)
 1. [Runtime Execution Model](#1-runtime-execution-model)
 2. [Database Schema](#2-database-schema)
 3. [API Endpoint Specification](#3-api-endpoint-specification)
@@ -28,6 +29,19 @@ This document covers the technical implementation details for the Agent Factory 
 11. [Integration Points](#11-integration-points)
 12. [Modular Tool & Plugin Registry](#12-modular-tool--plugin-registry)
 13. [Migration Strategy](#13-migration-strategy)
+
+---
+
+## Current implementation status
+
+Implementation status as of February 2026 (aligned with "Agent Factory & Tool Typing: Status and Next Steps"):
+
+- **Runtime:** Custom Agent Runner (`custom_agent_runner.py`) with dynamic LangGraph workflow, HITL approval gate, pipeline executor (`pipeline_executor.py`) for tool/llm_task/approval steps, typed `{step_name.field}` resolution and coercion. Output router for document, data_workspace, notification, knowledge_graph, chat.
+- **Database:** `agent_profiles`, `agent_data_sources`, `agent_schedules`, `agent_execution_log`, `agent_discoveries`, `agent_plugin_configs`, `custom_playbooks`, `data_source_connectors` — in use. Execution log stores metadata (e.g. steps_completed, steps_total); discoveries persisted when `metadata.discoveries` is present in `LogAgentExecution`.
+- **APIs:** Full Agent Factory CRUD (profiles, playbooks, data sources, schedules, executions). Execution detail: `GET /api/agent-factory/profiles/{profile_id}/executions/{execution_id}`. Internal: `POST /api/agent-factory/internal/notify-schedule-paused` for schedule-paused WebSocket notification. Import/export: `GET/POST .../profiles/.../export`, `.../import`, same for playbooks.
+- **Tool I/O:** Action I/O Registry (`action_io_registry.py`), shared type models (`tool_type_models.py`), ~74 tools with Pydantic output models and `register_action()` (7 complete [x], 58 registered [r]; 16 internal/skipped). Pipeline executor and frontend type wiring use registry for compatible upstream/downstream fields. See `dev-notes/TOOL_IO_CONTRACT_MIGRATION.md`.
+- **Plugins:** Plugin base, loader, integrations; per-profile credentials in `agent_plugin_configs`; pipeline executor injects credentials for `category.startswith("plugin:")` actions; gRPC `GetPlugins`; frontend plugin config UI in DataSourcesSection.
+- **Scheduling:** Celery beat + `execute_scheduled_agent`; circuit breaker and concurrency control; on auto-pause, Celery calls backend internal endpoint to send WebSocket `agent_factory.schedule_paused` to user.
 
 ---
 
@@ -1336,6 +1350,29 @@ CREATE TABLE agent_journal (
     -- Structured detail: [{"action": "pull_fec_data", "result": "23 contributions",
     --   "entities_found": 12}, {"action": "cross_reference", ...}]
 
+    -- Diagnostic context (captures failure details for user-facing debugging)
+    diagnostic_context JSONB DEFAULT '{}',
+    -- {
+    --   "execution_trace": [
+    --     {"step": "pull_fec_data", "status": "success", "duration_ms": 450,
+    --      "output_key": "fec_data", "record_count": 23},
+    --     {"step": "filter_recent", "status": "error",
+    --      "error_type": "KeyError", "error_message": "contribution_receipt_date",
+    --      "input_summary": "23 records from pull_fec_data",
+    --      "connector": "fec-contributions", "http_status": null},
+    --     {"step": "notify_if_found", "status": "skipped",
+    --      "skip_reason": "dependency_failed"}
+    --   ],
+    --   "playbook_state_at_failure": {"fec_data": {"count": 23, "...": "..."}},
+    --   "connector_diagnostics": {
+    --     "fec-contributions": {"circuit_breaker": "CLOSED", "rate_limit_remaining": 947}
+    --   },
+    --   "llm_step_diagnostics": [
+    --     {"step": "synthesize", "model": "anthropic/claude-sonnet-4-20250514",
+    --      "tokens_in": 1240, "tokens_out": 890, "parse_success": true}
+    --   ]
+    -- }
+
     -- Metadata for querying
     run_context VARCHAR(50),     -- "interactive", "background", "scheduled"
     invoked_by UUID REFERENCES users(id),
@@ -1344,6 +1381,8 @@ CREATE TABLE agent_journal (
     entities_mentioned JSONB DEFAULT '[]',
     -- Entity names mentioned in this run, for search: ["Omidyar Foundation", "Koch Network"]
     steps_completed INTEGER DEFAULT 0,
+    steps_total INTEGER DEFAULT 0,
+    -- steps_completed vs steps_total shows how far the workflow got before failure
     entities_discovered INTEGER DEFAULT 0,
     outputs_produced JSONB DEFAULT '[]',
     -- [{"type": "document", "path": "Research Reports/omidyar_2026.md"},
@@ -1351,6 +1390,10 @@ CREATE TABLE agent_journal (
     task_status VARCHAR(50) DEFAULT 'complete',
     -- "complete", "error", "partial", "awaiting_approval"
     error_summary TEXT,
+    -- Human-readable one-line error summary for list views
+    -- e.g., "Step 2 failed: KeyError 'contribution_receipt_date'"
+    failed_step_name VARCHAR(255),
+    -- Which step failed (NULL if no failure)
 
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -1455,6 +1498,138 @@ CREATE POLICY watermarks_policy ON agent_monitor_watermarks
             WHERE user_id = current_setting('app.user_id')::UUID
         )
     );
+
+
+-- ============================================================
+-- SCHEMA VERSIONS (immutable output_schema history)
+-- ============================================================
+-- Tracks versioned output_schemas for connectors and playbook steps.
+-- When a schema changes, a new version is created; the old version
+-- is retained as long as playbooks reference it.
+
+CREATE TABLE connector_schema_versions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    connector_id UUID NOT NULL REFERENCES data_source_connectors(id) ON DELETE CASCADE,
+    endpoint_name VARCHAR(255) NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    -- Monotonically increasing per (connector_id, endpoint_name)
+    output_schema JSONB NOT NULL,
+    -- The immutable output_schema for this version
+    change_summary TEXT,
+    -- Human-readable summary of what changed: "Renamed contribution_receipt_date → contribution_date"
+    fields_added TEXT[] DEFAULT '{}',
+    fields_removed TEXT[] DEFAULT '{}',
+    fields_renamed JSONB DEFAULT '{}',
+    -- {"old_name": "new_name"} for tracking renames
+    is_latest BOOLEAN DEFAULT true,
+    -- Only one version per (connector_id, endpoint_name) is latest
+    reference_count INTEGER DEFAULT 0,
+    -- Number of playbook steps pinned to this version (cached, updated on playbook save)
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE (connector_id, endpoint_name, version)
+);
+
+CREATE INDEX idx_schema_versions_connector ON connector_schema_versions(connector_id, endpoint_name);
+CREATE INDEX idx_schema_versions_latest ON connector_schema_versions(connector_id, endpoint_name, is_latest)
+    WHERE is_latest = true;
+
+
+-- ============================================================
+-- CONNECTOR RATE LIMIT STATE (shared across agents)
+-- ============================================================
+-- Rate limiting is enforced at the connector instance level.
+-- Multiple agents sharing a connector share the rate limit budget.
+-- Key: (connector_id, user_id) — not agent_id.
+
+CREATE TABLE connector_rate_limit_state (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    connector_id UUID NOT NULL REFERENCES data_source_connectors(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- Rate limit is per-user per-connector (agents share)
+
+    -- Sliding window counters
+    requests_this_second INTEGER DEFAULT 0,
+    second_window_start TIMESTAMPTZ DEFAULT NOW(),
+    requests_today INTEGER DEFAULT 0,
+    day_window_start DATE DEFAULT CURRENT_DATE,
+
+    -- Circuit breaker state
+    circuit_state VARCHAR(20) DEFAULT 'CLOSED',
+    -- "CLOSED" (normal), "OPEN" (failing, reject requests), "HALF_OPEN" (testing recovery)
+    failure_count INTEGER DEFAULT 0,
+    last_failure_at TIMESTAMPTZ,
+    circuit_opened_at TIMESTAMPTZ,
+
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+
+    UNIQUE (connector_id, user_id)
+);
+
+CREATE INDEX idx_rate_limit_connector ON connector_rate_limit_state(connector_id, user_id);
+
+
+-- ============================================================
+-- AGENT-TO-AGENT MESSAGES
+-- ============================================================
+-- Tracks messages passed between custom agents. Each message is
+-- a full agent invocation with journaling. Used for handoff,
+-- request-response, and conversational loop patterns.
+
+CREATE TABLE agent_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    conversation_id UUID NOT NULL,
+    -- Groups messages into a single agent-to-agent conversation
+    -- (one conversation per handoff, request-response, or conversational loop)
+
+    sender_agent_id UUID NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    receiver_agent_id UUID NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id),
+    -- Owner of both agents (same-owner requirement enforced at app level)
+
+    -- Message content
+    message_type VARCHAR(50) NOT NULL,
+    -- "handoff", "request", "response", "conversation_turn", "user_intervention"
+    message_text TEXT NOT NULL,
+    -- The natural language message or query
+    attached_data JSONB DEFAULT '{}',
+    -- Typed data passed between agents (from upstream step outputs)
+    turn_number INTEGER DEFAULT 1,
+    -- Position in conversation (1-based)
+
+    -- Execution tracking
+    triggered_execution_id UUID REFERENCES agent_execution_log(id),
+    -- The execution that was spawned by receiving this message
+    response_to_message_id UUID REFERENCES agent_messages(id),
+    -- For response messages: which message this responds to
+
+    -- Conversation limits
+    max_turns INTEGER,
+    -- For conversational loops: hard limit on total turns
+
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX idx_agent_messages_conversation ON agent_messages(conversation_id, turn_number);
+CREATE INDEX idx_agent_messages_sender ON agent_messages(sender_agent_id, created_at DESC);
+CREATE INDEX idx_agent_messages_receiver ON agent_messages(receiver_agent_id, created_at DESC);
+CREATE INDEX idx_agent_messages_user ON agent_messages(user_id, created_at DESC);
+
+ALTER TABLE agent_messages ENABLE ROW LEVEL SECURITY;
+CREATE POLICY agent_messages_policy ON agent_messages
+    USING (user_id = current_setting('app.user_id')::UUID);
+
+
+-- Daily counter for agent-to-agent messages (prevents runaway cascades)
+CREATE TABLE agent_message_daily_counts (
+    user_id UUID NOT NULL REFERENCES users(id),
+    count_date DATE NOT NULL DEFAULT CURRENT_DATE,
+    message_count INTEGER DEFAULT 0,
+    max_daily_limit INTEGER DEFAULT 500,
+    -- Admin-configurable per user; default 500 inter-agent messages/day
+
+    PRIMARY KEY (user_id, count_date)
+);
 ```
 
 ---
@@ -1568,6 +1743,25 @@ DELETE /api/agent-factory/profiles/{id}/share/{team_id}    Unshare from team
 PUT    /api/agent-factory/profiles/{id}/share/{team_id}    Update team access level
 GET    /api/agent-factory/profiles/{id}/shares             List teams this agent is shared with
 GET    /api/agent-factory/teams/{team_id}/agents           List agents shared with this team
+```
+
+### Agent-to-Agent Endpoints
+
+```
+POST   /api/agent-factory/agent-messages                    Send message from one agent to another
+GET    /api/agent-factory/agent-messages/conversations      List active agent conversations
+GET    /api/agent-factory/agent-messages/conversations/{id} Get conversation detail with all turns
+POST   /api/agent-factory/agent-messages/conversations/{id}/halt  Stop a running conversation
+GET    /api/agent-factory/agent-messages/daily-usage        Get today's agent-to-agent message count/limit
+```
+
+### Schema Version Endpoints
+
+```
+GET    /api/agent-factory/connectors/{id}/schemas                     List schema versions for a connector endpoint
+GET    /api/agent-factory/connectors/{id}/schemas/{endpoint}/{version} Get specific schema version
+GET    /api/agent-factory/connectors/{id}/schemas/{endpoint}/diff     Diff between two versions
+POST   /api/agent-factory/connectors/{id}/schemas/{endpoint}/cleanup  Remove unreferenced old versions
 ```
 
 ### @Mention Resolution Endpoint
@@ -2142,6 +2336,7 @@ steps:
     #   transform_data        - Data transformation (filter, sort, aggregate)
     #   save_to_workspace     - Save structured data to Data Workspace table
     #   route_output          - Send data to output destinations mid-workflow
+    #   send_to_agent         - Send message/data to another custom agent (handoff or request-response)
     #   parallel              - Execute sub-steps in parallel
 
     # Action-specific fields (in addition to inputs/params)
@@ -2178,6 +2373,19 @@ steps:
     #   synthesize_report     - LLM synthesis of collected data into report
     #   llm_analyze           - LLM analysis/classification of data
     #   research_with_tools   - LLM receives tools and decides what to call
+
+    # -- Model selection (optional, llm_task only) --
+    model_preference: string    # Model identifier, e.g., "google/gemini-2.5-flash"
+    # Resolution order:
+    #   1. Step-level model_preference (this field)
+    #   2. Agent Profile model_preference
+    #   3. User's default chat model (from user settings)
+    #   4. System default model (admin-configured)
+    #
+    # The model must be in the globally available models list (admin-enabled)
+    # or in the user's configured custom model endpoints (future: user API keys).
+    # The Workflow Composer UI shows a dropdown of available models for each
+    # llm_task step, with estimated cost per invocation.
 
     # -- synthesize_report / llm_analyze --
     # inputs: wired from upstream steps (the data to analyze/synthesize)
@@ -2217,6 +2425,39 @@ steps:
     on_error: string            # "skip" (continue), "stop" (halt playbook), "retry" (retry once)
     timeout_seconds: integer    # Per-step timeout (for tool and llm_task steps)
     retry_count: integer        # Number of retries on transient errors
+
+    # ── SEND-TO-AGENT STEPS (action: send_to_agent) ────────────
+    # Part of tool step type. Sends a message to another custom agent.
+    # inputs:
+    #   target_agent: string      # @handle of the receiving agent
+    #   message: string           # Natural language message/query
+    #   data: any                 # Typed data payload (from upstream step outputs)
+    # params:
+    #   wait_for_response: boolean  # true = block until target responds (request-response)
+    #                               # false = fire-and-forget (handoff). Default: false.
+    #   timeout_minutes: integer    # For wait_for_response: max wait time (default: 60)
+    # outputs:
+    #   message_id: string        # ID of the sent message
+    #   response: object          # Target agent's response (only if wait_for_response: true)
+    #   response_status: string   # "received", "completed", "timeout", "error"
+
+# ============================================================
+# AGENT CONVERSATION (optional — multi-agent dialogue mode)
+# ============================================================
+# Defines a conversational loop between 2+ agents. Mutually exclusive
+# with steps (a playbook uses EITHER steps OR agent_conversation).
+
+agent_conversation:
+  participants:
+    - agent: string               # @handle of participating agent
+      role: string                # Role label (for conversation context)
+  seed_message: string            # Initial message to start the conversation
+  max_turns: integer              # Hard limit on total turns (default: 10, max: admin-configurable)
+  termination_condition: string   # Natural language condition for LLM to evaluate
+  output_destinations:
+    - type: string                # "chat", "channel_message", "document", "append_to_existing"
+      channel: string             # For channel_message: "telegram", "discord", "default"
+      config: {}                  # Destination-specific config
 
 # ============================================================
 # OUTPUT - How to format and route results
@@ -3519,6 +3760,15 @@ Controlled by `on_error` per step:
 - `stop`: Halt playbook, return partial results collected so far.
 - `retry`: Retry step once with same parameters. If still fails, behave as `skip`.
 
+**All failures are captured in the journal's `diagnostic_context`**, including:
+- The exact step that failed and its position in the sequence (step N of M)
+- The error type, message, and a summary of the input data that caused it
+- The `playbook_state` snapshot at the point of failure (what was collected so far)
+- Connector diagnostics (HTTP status, rate limit state, circuit breaker status)
+- For LLM steps: model used, token counts, parse success/failure, validation errors
+
+Users can query failures via the `query_journal` tool: `"@fec-tracker Why did your morning run fail?"` returns a natural language explanation built from the structured diagnostic context.
+
 ### Entity Resolution Failures
 
 - Entity extraction failure: Fall back to basic NER (spaCy) if connector-defined extraction fails
@@ -3628,6 +3878,10 @@ class ConnectorCircuitBreaker:
 | `llm-orchestrator/orchestrator/tools/team_tools.py` | `search_team_files`, `read_team_file`, `search_team_posts`, `write_team_post`, `summarize_team_thread` |
 | `llm-orchestrator/orchestrator/tools/monitor_tools.py` | `detect_new_files`, `detect_folder_changes`, `detect_new_data`, `detect_new_team_posts`, `detect_new_entities`, watermark tools |
 | `llm-orchestrator/orchestrator/utils/mention_parser.py` | Parse @handle from chat messages, resolve to agent_profile_id |
+| `llm-orchestrator/orchestrator/tools/agent_communication_tools.py` | `send_to_agent`, `start_agent_conversation`, `halt_agent_conversation` |
+| `llm-orchestrator/orchestrator/engines/agent_conversation_engine.py` | Multi-turn agent-to-agent conversation manager with turn-taking, max_turns, and observation relay |
+| `llm-orchestrator/orchestrator/utils/schema_version_manager.py` | Schema version lifecycle: create, diff, check references, cleanup unused |
+| `llm-orchestrator/orchestrator/utils/rate_limit_manager.py` | Shared rate limiting across agents using same connector instance |
 | `llm-orchestrator/orchestrator/tools/notification_tools.py` | `send_notification`, `send_channel_message`, `broadcast_to_team` |
 | `llm-orchestrator/orchestrator/tools/task_management_tools.py` | `update_todo`, `complete_todo`, `search_todos` (wrapping org-mode) |
 | `llm-orchestrator/orchestrator/tools/file_operation_tools.py` | `delete_file`, `move_file`, `copy_file` (new granular file ops) |

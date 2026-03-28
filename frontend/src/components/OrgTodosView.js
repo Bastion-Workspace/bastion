@@ -5,13 +5,10 @@ import {
   List,
   ListItem,
   ListItemButton,
-  ListItemText,
   Chip,
   CircularProgress,
   Alert,
   Divider,
-  ToggleButtonGroup,
-  ToggleButton,
   Paper,
   FormControl,
   InputLabel,
@@ -24,7 +21,13 @@ import {
   DialogTitle,
   DialogContent,
   DialogActions,
-  Collapse
+  Collapse,
+  ToggleButton,
+  ToggleButtonGroup,
+  Popover,
+  Menu,
+  ListSubheader,
+  Badge
 } from '@mui/material';
 import {
   CheckCircle,
@@ -34,23 +37,114 @@ import {
   Description,
   DriveFileMove,
   Archive,
-  DeleteSweep,
   ExpandMore,
   ChevronRight,
   UnfoldMore,
-  UnfoldLess
+  UnfoldLess,
+  Add,
+  FilterList,
+  ArrowDropDown
 } from '@mui/icons-material';
 import apiService from '../services/apiService';
+import orgService from '../services/org/OrgService';
 import OrgRefileDialog from './OrgRefileDialog';
 
 /**
- * ROOSEVELT'S ORG TODOS VIEW
- * View and manage all TODO items across org files
+ * Org TODOs view: all TODO items across org files (hierarchy, filters, inline state).
  */
+const ORG_TODOS_PREFS_KEY = 'orgTodosView.filters';
+
+/** State Select + Refile + gaps — ListItem `secondaryAction` overlays the row; reserve width so text does not run under controls. */
+const TODO_LIST_SECONDARY_RESERVE_FULL_PX = 196;
+const TODO_LIST_SECONDARY_RESERVE_REFILE_ONLY_PX = 52;
+
+/** Org keyword values unchanged; labels match sentence case in the UI */
+const TODO_STATE_OPTIONS = [
+  { value: 'TODO', label: 'Todo' },
+  { value: 'NEXT', label: 'Next' },
+  { value: 'STARTED', label: 'Started' },
+  { value: 'WAITING', label: 'Waiting' },
+  { value: 'HOLD', label: 'On hold' },
+  { value: 'DONE', label: 'Done' },
+  { value: 'CANCELED', label: 'Canceled' },
+];
+
+const todoStateDisplayLabel = (value) =>
+  TODO_STATE_OPTIONS.find((o) => o.value === value)?.label ?? value;
+
+const todoRowStateSelectSx = {
+  minWidth: 108,
+  maxWidth: 128,
+  '& .MuiSelect-select': {
+    display: 'flex',
+    alignItems: 'center',
+    py: 0.5,
+    pl: 1,
+    pr: 0.5,
+  },
+  '& .MuiSelect-icon': { fontSize: '1.125rem', right: 4 },
+};
+
+/** Row state menu: same Typography as list rows (body2), compact list */
+const todosStateRowMenuProps = {
+  MenuListProps: { dense: true },
+  PaperProps: {
+    sx: {
+      '& .MuiMenuItem-root': {
+        minHeight: 34,
+        py: 0.5,
+        px: 1.25,
+      },
+    },
+  },
+};
+
+const todosSelectMenuProps = {
+  PaperProps: {
+    sx: { '& .MuiMenuItem-root': { fontSize: '0.875rem', lineHeight: 1.43 } },
+  },
+};
+
+/** Status view tabs (server-side / client filter bucket) */
+const STATUS_VIEW_OPTIONS = [
+  { value: 'active', label: 'Active', tooltip: 'Due or overdue' },
+  { value: 'upcoming', label: 'Upcoming', tooltip: 'Scheduled ahead' },
+  { value: 'done', label: 'Done', tooltip: 'Completed items' },
+  { value: 'all', label: 'All', tooltip: 'Every TODO' },
+];
+
+const SORT_LABELS = {
+  file: 'By file',
+  state: 'By state',
+  date: 'By date',
+  priority: 'By priority',
+};
+
+const todosPopoverFieldSx = {
+  width: '100%',
+  minWidth: 260,
+  '& .MuiInputLabel-root': { fontSize: '0.875rem' },
+  '& .MuiOutlinedInput-root': { fontSize: '0.875rem' },
+  '& .MuiSelect-select': { fontSize: '0.875rem', lineHeight: 1.43 },
+};
+
+const readFilterPrefs = () => {
+  try {
+    const raw = localStorage.getItem(ORG_TODOS_PREFS_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    if (p && typeof p === 'object') return p;
+  } catch (_) {}
+  return null;
+};
+
 const OrgTodosView = ({ onOpenDocument }) => {
-  const [filterState, setFilterState] = useState('active'); // active, done, all
-  const [sortBy, setSortBy] = useState('file'); // file, state, date
-  const [tagFilter, setTagFilter] = useState(''); // tag filter
+  const prefs = readFilterPrefs();
+  const [filterState, setFilterState] = useState(prefs?.filterState ?? 'active');
+  const [sortBy, setSortBy] = useState(prefs?.sortBy ?? 'file');
+  const [tagFilter, setTagFilter] = useState(prefs?.tagFilter ?? '');
+  const [priorityFilter, setPriorityFilter] = useState(prefs?.priorityFilter ?? '');
+  const [categoryFilter, setCategoryFilter] = useState(prefs?.categoryFilter ?? '');
   const [loading, setLoading] = useState(true);
   const [todosData, setTodosData] = useState(null);
   const [error, setError] = useState(null);
@@ -59,14 +153,28 @@ const OrgTodosView = ({ onOpenDocument }) => {
   const [bulkArchiveDialogOpen, setBulkArchiveDialogOpen] = useState(false);
   const [bulkArchiveFile, setBulkArchiveFile] = useState('');
   const [bulkArchiving, setBulkArchiving] = useState(false);
+  const [filtersPopoverAnchor, setFiltersPopoverAnchor] = useState(null);
+  const [sortMenuAnchor, setSortMenuAnchor] = useState(null);
   const [collapsedSections, setCollapsedSections] = useState({});
   
-  // **BULLY!** Collapsible section state management
-  // Store expanded paths as Set of stringified paths for fast lookup
+  // Collapsible section state: expanded paths as Set of stringified keys for fast lookup
   const [expandedPaths, setExpandedPaths] = useState(new Set());
   
   // Track which files are expanded
   const [expandedFiles, setExpandedFiles] = useState(new Set());
+
+  // Persist filter/sort preferences to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(ORG_TODOS_PREFS_KEY, JSON.stringify({
+        filterState,
+        sortBy,
+        tagFilter: tagFilter || '',
+        priorityFilter: priorityFilter || '',
+        categoryFilter: categoryFilter || '',
+      }));
+    } catch (_) {}
+  }, [filterState, sortBy, tagFilter, priorityFilter, categoryFilter]);
 
   // Toggle expand/collapse for a specific path
   const togglePath = useCallback((path) => {
@@ -118,10 +226,11 @@ const OrgTodosView = ({ onOpenDocument }) => {
     return grouped;
   }, []);
 
-  // Map filter to TODO states
+  // Map filter to TODO states (API request)
   const getStatesForFilter = useCallback((filter) => {
     switch (filter) {
       case 'active':
+      case 'upcoming':
         return 'TODO,NEXT,STARTED,WAITING,HOLD';
       case 'done':
         return 'DONE,CANCELED,CANCELLED,WONTFIX,FIXED';
@@ -132,26 +241,55 @@ const OrgTodosView = ({ onOpenDocument }) => {
     }
   }, []);
 
-  // Load TODO data
+  // Parse date string (YYYY-MM-DD or YYYY-MM-DD HH:mm:ss) to date-only for comparison
+  // Extract YYYY-MM-DD from org timestamps (e.g. "<2026-10-01 Thu>", "2026-10-01 14:00", "2026-10-01")
+  const getDatePart = useCallback((str) => {
+    if (!str || typeof str !== 'string') return null;
+    const m = String(str).trim().match(/(\d{4}-\d{2}-\d{2})/);
+    return m ? m[1] : null;
+  }, []);
+
+  // True if item has at least one of scheduled/deadline in the future (after today)
+  const isScheduledInFuture = useCallback((item) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const scheduled = getDatePart(item.scheduled);
+    const deadline = getDatePart(item.deadline);
+    return (scheduled && scheduled > today) || (deadline && deadline > today);
+  }, [getDatePart]);
+
+  // True if item is "actionable now": no dates, or all dates are today or in the past
+  const isActionableNow = useCallback((item) => {
+    const today = new Date().toISOString().slice(0, 10);
+    const scheduled = getDatePart(item.scheduled);
+    const deadline = getDatePart(item.deadline);
+    const scheduledOk = !scheduled || scheduled <= today;
+    const deadlineOk = !deadline || deadline <= today;
+    return scheduledOk && deadlineOk;
+  }, [getDatePart]);
+
+  // Load TODO data (universal todo API; returns 0-based line_number for inline toggle/update)
   const loadTodos = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-
       const states = getStatesForFilter(filterState);
-      const url = states 
-        ? `/api/org/todos?states=${encodeURIComponent(states)}`
-        : '/api/org/todos';
-
-      const response = await apiService.get(url);
-
+      const response = await orgService.listTodos({
+        scope: 'all',
+        states: states ? states.split(',') : undefined,
+        limit: 500,
+      });
       if (response.success) {
-        setTodosData(response);
+        setTodosData({
+          success: true,
+          results: response.results || [],
+          count: response.count || 0,
+          files_searched: response.files_searched || 0,
+        });
       } else {
         setError(response.error || 'Failed to load TODOs');
       }
     } catch (err) {
-      console.error('❌ TODOs error:', err);
+      console.error('TODOs load error:', err);
       setError(err.message || 'Failed to load TODOs');
     } finally {
       setLoading(false);
@@ -173,6 +311,46 @@ const OrgTodosView = ({ onOpenDocument }) => {
       setExpandedFiles(new Set(filenames));
     }
   }, [todosData, sortBy, groupByFile]);
+
+  const [actionItemId, setActionItemId] = useState(null);
+
+  const handleToggleTodo = useCallback(async (item, e) => {
+    e.stopPropagation();
+    if (item.file_path == null || item.line_number == null) return;
+    setActionItemId(`${item.file_path}:${item.line_number}`);
+    try {
+      const res = await orgService.toggleTodo(item.file_path, item.line_number, item.heading);
+      if (res.success) {
+        loadTodos();
+      } else {
+        alert(res.error || 'Toggle failed');
+      }
+    } catch (err) {
+      console.error('Toggle todo error:', err);
+      alert(err.message || 'Toggle failed');
+    } finally {
+      setActionItemId(null);
+    }
+  }, [loadTodos]);
+
+  const handleStateChange = useCallback(async (item, newState, e) => {
+    e.stopPropagation();
+    if (item.file_path == null || item.line_number == null) return;
+    setActionItemId(`${item.file_path}:${item.line_number}`);
+    try {
+      const res = await orgService.updateTodo(item.file_path, item.line_number, { new_state: newState }, item.heading);
+      if (res.success) {
+        loadTodos();
+      } else {
+        alert(res.error || 'Update failed');
+      }
+    } catch (err) {
+      console.error('Update todo error:', err);
+      alert(err.message || 'Update failed');
+    } finally {
+      setActionItemId(null);
+    }
+  }, [loadTodos]);
 
   // Handle clicking a TODO item
   const handleItemClick = async (item) => {
@@ -230,11 +408,19 @@ const OrgTodosView = ({ onOpenDocument }) => {
         todo.tags && todo.tags.includes(tagFilter)
       );
     }
+    if (priorityFilter) {
+      filtered = filtered.filter(todo => todo.priority === priorityFilter);
+    }
+    if (categoryFilter) {
+      filtered = filtered.filter(todo => todo.category === categoryFilter);
+    }
     
     // Apply state filter
     const doneStates = ['DONE', 'CANCELED', 'CANCELLED', 'WONTFIX', 'FIXED'];
     if (filterState === 'active') {
-      filtered = filtered.filter(todo => !doneStates.includes(todo.todo_state));
+      filtered = filtered.filter(todo => !doneStates.includes(todo.todo_state) && isActionableNow(todo));
+    } else if (filterState === 'upcoming') {
+      filtered = filtered.filter(todo => !doneStates.includes(todo.todo_state) && isScheduledInFuture(todo));
     } else if (filterState === 'done') {
       filtered = filtered.filter(todo => doneStates.includes(todo.todo_state));
     }
@@ -255,12 +441,19 @@ const OrgTodosView = ({ onOpenDocument }) => {
           return bDate.localeCompare(aDate);
         });
         break;
+      case 'priority': {
+        const order = { A: 0, B: 1, C: 2 };
+        filtered.sort((a, b) =>
+          (order[a.priority] ?? 3) - (order[b.priority] ?? 3)
+        );
+        break;
+      }
       default:
         break;
     }
 
     return filtered;
-  }, [sortBy, filterState, tagFilter]);
+  }, [sortBy, filterState, tagFilter, priorityFilter, categoryFilter, isActionableNow, isScheduledInFuture]);
 
   // Get badge color for TODO state
   const getTodoStateColor = (state) => {
@@ -300,7 +493,7 @@ const OrgTodosView = ({ onOpenDocument }) => {
     };
   }, []);
 
-  // **BULLY!** Build hierarchical tree structure from flat TODO list with parent paths
+  // Build hierarchical tree from flat TODO list with parent paths
   const buildHierarchicalTree = useCallback((todos) => {
     /**
      * Builds a tree structure for TODOs based on their parent_path hierarchy
@@ -417,11 +610,29 @@ const OrgTodosView = ({ onOpenDocument }) => {
     return Array.from(tagSet).sort();
   }, []);
 
+  // Extract all unique categories from todos
+  const getAllCategories = useCallback((todos) => {
+    if (!todos) return [];
+    const categorySet = new Set();
+    todos.forEach(todo => {
+      if (todo.category && String(todo.category).trim()) {
+        categorySet.add(String(todo.category).trim());
+      }
+    });
+    return Array.from(categorySet).sort();
+  }, []);
+
+  const clearRefinements = useCallback(() => {
+    setTagFilter('');
+    setPriorityFilter('');
+    setCategoryFilter('');
+  }, []);
+
   // Handle bulk archive for a specific file
   const handleBulkArchive = async (filename) => {
     try {
       setBulkArchiving(true);
-      console.log('📦 ROOSEVELT: Bulk archiving DONE items from:', filename);
+      console.log('Bulk archiving DONE items from:', filename);
       
       // Construct file path (assuming OrgMode folder)
       const filePath = `OrgMode/${filename}`;
@@ -451,7 +662,7 @@ const OrgTodosView = ({ onOpenDocument }) => {
   const sortedTodos = getSortedTodos(todosData?.results || []);
   const groupedTodos = sortBy === 'file' ? groupByFile(sortedTodos) : null;
 
-  // **BULLY!** Render hierarchical tree with proper indentation and collapsibility
+  // Render hierarchical tree with indentation and collapsible sections
   const renderHierarchicalNode = useCallback((node, depth = 0, baseIndent = 0, filename = null) => {
     /**
      * Recursively render a tree node with:
@@ -527,86 +738,177 @@ const OrgTodosView = ({ onOpenDocument }) => {
         {/* For regular nodes, show when heading is expanded */}
         {((node.isOrphan && shouldShowOrphanTodos) || (!node.isOrphan && isExpanded)) && node.todos.length > 0 && (
           <List disablePadding sx={{ ml: (nodeIndent + 1) * 3 }}>
-            {node.todos.map((item, idx) => (
+            {node.todos.map((item, idx) => {
+              const hasStateSelect = item.file_path != null && item.line_number != null;
+              const secondaryReservePx = hasStateSelect
+                ? TODO_LIST_SECONDARY_RESERVE_FULL_PX
+                : TODO_LIST_SECONDARY_RESERVE_REFILE_ONLY_PX;
+              return (
               <React.Fragment key={idx}>
                 {idx > 0 && <Divider />}
                 <ListItem 
                   disablePadding
                   secondaryAction={
-                    <Tooltip title="Refile (Ctrl+Shift+M)">
-                      <IconButton 
-                        edge="end" 
-                        size="small"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setRefileItem(item);
-                          setRefileDialogOpen(true);
-                        }}
-                      >
-                        <DriveFileMove fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, flexShrink: 0, pr: 0.5 }}>
+                      {hasStateSelect && (
+                        <Select
+                          size="small"
+                          value={item.todo_state || 'TODO'}
+                          onChange={(e) => handleStateChange(item, e.target.value, e)}
+                          onClick={(e) => e.stopPropagation()}
+                          sx={todoRowStateSelectSx}
+                          MenuProps={todosStateRowMenuProps}
+                          disabled={!!actionItemId}
+                          renderValue={(v) => (
+                            <Typography variant="body2" component="span" sx={{ fontWeight: 500, lineHeight: 1.43 }}>
+                              {todoStateDisplayLabel(v)}
+                            </Typography>
+                          )}
+                        >
+                          {TODO_STATE_OPTIONS.map(({ value, label }) => (
+                            <MenuItem key={value} value={value} dense>
+                              <Typography variant="body2" component="span" sx={{ fontWeight: 400, lineHeight: 1.43 }}>
+                                {label}
+                              </Typography>
+                            </MenuItem>
+                          ))}
+                        </Select>
+                      )}
+                      <Tooltip title="Refile — move this task to another org file">
+                        <IconButton
+                          edge="end"
+                          size="small"
+                          color="primary"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRefileItem(item);
+                            setRefileDialogOpen(true);
+                          }}
+                          aria-label="Refile"
+                        >
+                          <DriveFileMove fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </Box>
                   }
                 >
-                  <ListItemButton onClick={() => handleItemClick(item)}>
-                    <Box sx={{ width: '100%' }}>
-                      <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1, mb: 0.5 }}>
-                        <Typography variant="body1" sx={{ flex: 1, fontWeight: 500 }}>
-                          {'•'.repeat(item.level)} {item.heading}
+                  <ListItemButton
+                    onClick={() => handleItemClick(item)}
+                    sx={{
+                      py: 0.75,
+                      pr: `${secondaryReservePx}px`,
+                      alignItems: 'flex-start',
+                      overflow: 'hidden'
+                    }}
+                  >
+                    <Box sx={{ width: '100%', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
+                      <Box
+                        sx={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 0.75,
+                          minWidth: 0,
+                          maxWidth: '100%',
+                          overflow: 'hidden'
+                        }}
+                      >
+                        {item.priority && (
+                          <Chip
+                            label={`#${item.priority}`}
+                            size="small"
+                            color={item.priority === 'A' ? 'error' : item.priority === 'B' ? 'warning' : 'default'}
+                            sx={{ fontWeight: 700, fontSize: '0.65rem', height: 18, minWidth: 'auto', flexShrink: 0, '& .MuiChip-label': { px: 0.5 } }}
+                          />
+                        )}
+                        <Typography
+                          variant="body2"
+                          component="span"
+                          sx={{
+                            fontWeight: 500,
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            flex: '1 1 0%',
+                            minWidth: 0,
+                            maxWidth: '100%'
+                          }}
+                        >
+                          {item.heading}
                         </Typography>
-
-                        <Chip
-                          label={item.todo_state}
-                          size="small"
-                          color={getTodoStateColor(item.todo_state)}
-                          sx={{ fontWeight: 600, fontSize: '0.7rem' }}
-                        />
-                      </Box>
-
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
                         {item.tags && item.tags.length > 0 && (
-                          <Box sx={{ display: 'flex', gap: 0.5 }}>
+                          <Box
+                            sx={{
+                              display: 'flex',
+                              gap: 0.5,
+                              flexShrink: 1,
+                              minWidth: 0,
+                              maxWidth: '42%',
+                              overflow: 'hidden',
+                              flexWrap: 'nowrap'
+                            }}
+                          >
                             {item.tags.map(tag => (
                               <Chip
                                 key={tag}
-                                icon={<LocalOffer sx={{ fontSize: 12 }} />}
                                 label={tag}
                                 size="small"
                                 color="primary"
                                 variant="outlined"
-                                sx={{ fontSize: '0.7rem', height: 20 }}
+                                sx={{
+                                  fontSize: '0.65rem',
+                                  height: 18,
+                                  flexShrink: 1,
+                                  minWidth: 0,
+                                  maxWidth: '100%',
+                                  '& .MuiChip-label': { px: 0.5, overflow: 'hidden', textOverflow: 'ellipsis' }
+                                }}
                               />
                             ))}
                           </Box>
                         )}
-
-                        {item.scheduled && (
-                          <Chip
-                            icon={<Schedule sx={{ fontSize: 12 }} />}
-                            label={`SCHED: ${item.scheduled.split(' ')[0]}`}
-                            size="small"
-                            color="info"
-                            variant="outlined"
-                            sx={{ fontSize: '0.7rem', height: 20 }}
-                          />
+                        {item.effort && (
+                          <Typography variant="caption" sx={{ color: 'text.secondary', flexShrink: 0 }}>
+                            ~{item.effort}
+                          </Typography>
                         )}
-
+                        <Box sx={{ flexGrow: 1, flexShrink: 1, minWidth: 0 }} />
+                        {item.scheduled && (
+                          <Typography variant="caption" sx={{ color: 'info.main', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                            <Schedule sx={{ fontSize: 12, verticalAlign: 'middle', mr: 0.25 }} />
+                            {item.scheduled.split(' ')[0]}
+                          </Typography>
+                        )}
                         {item.deadline && (
-                          <Chip
-                            icon={<ErrorIcon sx={{ fontSize: 12 }} />}
-                            label={`DUE: ${item.deadline.split(' ')[0]}`}
-                            size="small"
-                            color="warning"
-                            variant="outlined"
-                            sx={{ fontSize: '0.7rem', height: 20 }}
-                          />
+                          <Typography variant="caption" sx={{ color: 'warning.main', fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                            <ErrorIcon sx={{ fontSize: 12, verticalAlign: 'middle', mr: 0.25 }} />
+                            {item.deadline.split(' ')[0]}
+                          </Typography>
                         )}
                       </Box>
+                      {item.body_preview && (
+                        <Typography
+                          variant="caption"
+                          component="div"
+                          sx={{
+                            color: 'text.secondary',
+                            mt: 0.25,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                            opacity: 0.7,
+                            width: '100%',
+                            maxWidth: '100%'
+                          }}
+                        >
+                          {item.body_preview}
+                        </Typography>
+                      )}
                     </Box>
                   </ListItemButton>
                 </ListItem>
               </React.Fragment>
-            ))}
+              );
+            })}
           </List>
         )}
         
@@ -618,139 +920,358 @@ const OrgTodosView = ({ onOpenDocument }) => {
         )}
       </Box>
     );
-  }, [handleItemClick, setRefileItem, setRefileDialogOpen, getTodoStateColor, isPathExpanded, togglePath, isFileExpanded]);
+  }, [handleItemClick, handleStateChange, actionItemId, setRefileItem, setRefileDialogOpen, getTodoStateColor, isPathExpanded, togglePath, isFileExpanded]);
+
+  const refineFilterCount = [tagFilter, priorityFilter, categoryFilter].filter(Boolean).length;
 
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      {/* Header */}
-      <Box sx={{ p: 2, borderBottom: '1px solid', borderColor: 'divider', backgroundColor: 'background.paper' }}>
-        <Typography variant="h6" sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 1 }}>
+      <Box
+        sx={{
+          px: 2,
+          py: 1.5,
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+          backgroundColor: 'background.paper',
+          flexShrink: 0,
+        }}
+      >
+        <Typography variant="h6" sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
           <CheckCircle /> All TODOs
         </Typography>
+      </Box>
 
-        <Box sx={{ display: 'flex', gap: 2, mb: 1, flexWrap: 'wrap' }}>
-          {/* Filter Toggle */}
-          <ToggleButtonGroup
-            value={filterState}
-            exclusive
-            onChange={(e, newFilter) => newFilter && setFilterState(newFilter)}
-            size="small"
-          >
-            <ToggleButton value="active">Active</ToggleButton>
-            <ToggleButton value="done">Done</ToggleButton>
-            <ToggleButton value="all">All</ToggleButton>
-          </ToggleButtonGroup>
-
-          {/* Sort Select */}
-          <FormControl size="small" sx={{ minWidth: 120 }}>
-            <InputLabel>Sort By</InputLabel>
-            <Select
-              value={sortBy}
-              label="Sort By"
-              onChange={(e) => setSortBy(e.target.value)}
-            >
-              <MenuItem value="file">By File</MenuItem>
-              <MenuItem value="state">By State</MenuItem>
-              <MenuItem value="date">By Date</MenuItem>
-            </Select>
-          </FormControl>
-
-          {/* Tag Filter */}
-          <FormControl size="small" sx={{ minWidth: 140 }}>
-            <InputLabel>Filter by Tag</InputLabel>
-            <Select
-              value={tagFilter}
-              label="Filter by Tag"
-              onChange={(e) => setTagFilter(e.target.value)}
-            >
-              <MenuItem value="">All Tags</MenuItem>
-              {getAllTags(todosData?.results || []).map(tag => (
-                <MenuItem key={tag} value={tag}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <LocalOffer sx={{ fontSize: 14 }} />
-                    {tag}
-                  </Box>
-                </MenuItem>
-              ))}
-            </Select>
-          </FormControl>
-
-          {/* Expand/Collapse All Buttons - Only for hierarchical view */}
-          {sortBy === 'file' && sortedTodos.length > 0 && (
-            <Box sx={{ display: 'flex', gap: 1, ml: 'auto' }}>
-              <Tooltip title="Expand all sections">
-                <Button
-                  size="small"
-                  variant="outlined"
-                  startIcon={<UnfoldMore />}
-                  onClick={expandAll}
-                >
-                  Expand All
-                </Button>
-              </Tooltip>
-              <Tooltip title="Collapse all sections">
-                <Button
-                  size="small"
-                  variant="outlined"
-                  startIcon={<UnfoldLess />}
-                  onClick={collapseAll}
-                >
-                  Collapse All
-                </Button>
-              </Tooltip>
-            </Box>
-          )}
-
-          {/* Bulk Archive Button - Only show for DONE filter and when grouped by file */}
-          {filterState === 'done' && sortBy === 'file' && groupedTodos && Object.keys(groupedTodos).length > 0 && (
-            <Tooltip title="Archive all DONE items per file">
+      <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        <Box
+          sx={{
+            px: 2,
+            pt: 2,
+            pb: 1.5,
+            borderBottom: '1px solid',
+            borderColor: 'divider',
+            backgroundColor: 'background.paper',
+            flexShrink: 0,
+          }}
+        >
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1, alignItems: 'center', mb: 1.5 }}>
+            <Tooltip title="Opens Quick Capture (Ctrl+Shift+C). Captures to your org inbox as a TODO by default.">
               <Button
                 size="small"
-                variant="outlined"
-                color="primary"
-                startIcon={<Archive />}
+                variant="contained"
+                startIcon={<Add />}
                 onClick={() => {
-                  // Show dropdown or dialog to select which file to bulk archive
-                  const files = Object.keys(groupedTodos);
-                  if (files.length === 1) {
-                    setBulkArchiveFile(files[0]);
-                    setBulkArchiveDialogOpen(true);
-                  } else {
-                    // For multiple files, could show a menu - for now just archive first file as example
-                    setBulkArchiveFile(files[0]);
-                    setBulkArchiveDialogOpen(true);
-                  }
+                  try {
+                    window.dispatchEvent(new CustomEvent('openQuickCapture'));
+                  } catch (_) {}
                 }}
               >
-                Bulk Archive
+                New TODO
               </Button>
             </Tooltip>
-          )}
-        </Box>
+            {sortBy === 'file' && sortedTodos.length > 0 && (
+              <>
+                <Tooltip title="Expand all sections">
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<UnfoldMore />}
+                    onClick={expandAll}
+                  >
+                    Expand All
+                  </Button>
+                </Tooltip>
+                <Tooltip title="Collapse all sections">
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<UnfoldLess />}
+                    onClick={collapseAll}
+                  >
+                    Collapse All
+                  </Button>
+                </Tooltip>
+              </>
+            )}
+            {filterState === 'done' && sortBy === 'file' && groupedTodos && Object.keys(groupedTodos).length > 0 && (
+              <Tooltip title="Archive all DONE items per file">
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="primary"
+                  startIcon={<Archive />}
+                  onClick={() => {
+                    const files = Object.keys(groupedTodos);
+                    if (files.length === 1) {
+                      setBulkArchiveFile(files[0]);
+                      setBulkArchiveDialogOpen(true);
+                    } else {
+                      setBulkArchiveFile(files[0]);
+                      setBulkArchiveDialogOpen(true);
+                    }
+                  }}
+                >
+                  Bulk Archive
+                </Button>
+              </Tooltip>
+            )}
+          </Box>
 
-        {todosData && (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mt: 1 }}>
-            <Typography variant="caption" color="text.secondary">
-              {sortedTodos.length} of {todosData.count} TODO items • {todosData.files_searched} files searched
-              {tagFilter && ` • Filtered by tag: ${tagFilter}`}
-            </Typography>
-            {tagFilter && (
+          <Box
+            sx={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              alignItems: 'center',
+              gap: 1.5,
+              columnGap: 2,
+              rowGap: 1.5,
+            }}
+          >
+            <Box
+              sx={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'flex-start',
+                justifyContent: 'center',
+                minWidth: 0,
+                flex: '1 1 180px',
+                maxWidth: '100%',
+                pr: { xs: 0, sm: 1 },
+              }}
+            >
+              {todosData && !loading ? (
+                <Typography variant="body2" color="text.secondary" component="div">
+                  {sortedTodos.length} of {todosData.count} TODO items · {todosData.files_searched} files searched
+                </Typography>
+              ) : loading ? (
+                <Typography variant="body2" color="text.secondary">
+                  Updating…
+                </Typography>
+              ) : null}
+            </Box>
+
+            <ToggleButtonGroup
+              exclusive
+              value={filterState}
+              onChange={(e, next) => {
+                if (next !== null) setFilterState(next);
+              }}
+              size="small"
+              color="primary"
+              sx={{
+                flexShrink: 0,
+                '& .MuiToggleButton-root': {
+                  typography: 'body2',
+                  textTransform: 'none',
+                  px: { xs: 1, sm: 1.25 },
+                  py: 0.5,
+                },
+              }}
+            >
+              {STATUS_VIEW_OPTIONS.map((opt) => (
+                <ToggleButton key={opt.value} value={opt.value} title={opt.tooltip}>
+                  {opt.label}
+                </ToggleButton>
+              ))}
+            </ToggleButtonGroup>
+
+            <Box sx={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 1 }}>
+              <Badge badgeContent={refineFilterCount} color="primary" invisible={refineFilterCount === 0}>
+                <Button
+                  variant="outlined"
+                  size="small"
+                  startIcon={<FilterList />}
+                  onClick={(e) => setFiltersPopoverAnchor(e.currentTarget)}
+                  color={refineFilterCount > 0 ? 'primary' : 'inherit'}
+                  sx={{ textTransform: 'none', typography: 'body2' }}
+                >
+                  Filters
+                </Button>
+              </Badge>
               <Button
                 size="small"
                 variant="text"
-                color="primary"
-                onClick={() => setTagFilter('')}
-                sx={{ minWidth: 'auto', px: 1 }}
+                color="inherit"
+                endIcon={<ArrowDropDown />}
+                onClick={(e) => setSortMenuAnchor(e.currentTarget)}
+                sx={{ textTransform: 'none', typography: 'body2', fontWeight: 500 }}
               >
-                Clear Tag Filter
+                Sort: {SORT_LABELS[sortBy] ?? sortBy}
               </Button>
-            )}
+            </Box>
           </Box>
-        )}
-      </Box>
 
-      {/* Content Area */}
-      <Box sx={{ flexGrow: 1, overflow: 'auto', p: 2 }}>
+          {(tagFilter || priorityFilter || categoryFilter) && (
+            <Box
+              sx={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                gap: 0.75,
+                mt: 1.5,
+                alignItems: 'center',
+              }}
+            >
+              <Typography variant="caption" color="text.secondary" sx={{ mr: 0.25 }}>
+                Refining:
+              </Typography>
+              {tagFilter && (
+                <Chip
+                  size="small"
+                  label={`Tag: ${tagFilter}`}
+                  onDelete={() => setTagFilter('')}
+                  icon={<LocalOffer sx={{ fontSize: 16 }} />}
+                />
+              )}
+              {priorityFilter && (
+                <Chip
+                  size="small"
+                  label={`Priority ${priorityFilter}`}
+                  onDelete={() => setPriorityFilter('')}
+                />
+              )}
+              {categoryFilter && (
+                <Chip size="small" label={`Category: ${categoryFilter}`} onDelete={() => setCategoryFilter('')} />
+              )}
+              <Button size="small" variant="text" onClick={clearRefinements} sx={{ minWidth: 'auto', ml: 0.5 }}>
+                Clear all
+              </Button>
+            </Box>
+          )}
+
+          <Popover
+            open={Boolean(filtersPopoverAnchor)}
+            anchorEl={filtersPopoverAnchor}
+            onClose={() => setFiltersPopoverAnchor(null)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+            PaperProps={{ sx: { mt: 0.5, p: 0 } }}
+          >
+            <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 2, maxWidth: 320 }}>
+              <Typography variant="subtitle2" color="text.primary">
+                Refine list
+              </Typography>
+              <FormControl size="small" sx={todosPopoverFieldSx}>
+                <InputLabel id="org-todos-popover-tag-label">Tag</InputLabel>
+                <Select
+                  labelId="org-todos-popover-tag-label"
+                  value={tagFilter}
+                  label="Tag"
+                  onChange={(e) => setTagFilter(e.target.value)}
+                  MenuProps={todosSelectMenuProps}
+                >
+                  <MenuItem value="">
+                    <em>Any tag</em>
+                  </MenuItem>
+                  {getAllTags(todosData?.results || []).map((tag) => (
+                    <MenuItem key={tag} value={tag}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, fontSize: '0.875rem' }}>
+                        <LocalOffer sx={{ fontSize: 16 }} />
+                        {tag}
+                      </Box>
+                    </MenuItem>
+                  ))}
+                </Select>
+              </FormControl>
+              <FormControl size="small" sx={todosPopoverFieldSx}>
+                <InputLabel id="org-todos-popover-priority-label">Priority</InputLabel>
+                <Select
+                  labelId="org-todos-popover-priority-label"
+                  value={priorityFilter}
+                  label="Priority"
+                  onChange={(e) => setPriorityFilter(e.target.value)}
+                  MenuProps={todosSelectMenuProps}
+                >
+                  <MenuItem value="">
+                    <em>Any priority</em>
+                  </MenuItem>
+                  <MenuItem value="A">A — Critical</MenuItem>
+                  <MenuItem value="B">B — Important</MenuItem>
+                  <MenuItem value="C">C — Normal</MenuItem>
+                </Select>
+              </FormControl>
+              <Box>
+                <FormControl size="small" sx={todosPopoverFieldSx}>
+                  <InputLabel id="org-todos-popover-category-label">Category</InputLabel>
+                  <Select
+                    labelId="org-todos-popover-category-label"
+                    value={categoryFilter}
+                    label="Category"
+                    onChange={(e) => setCategoryFilter(e.target.value)}
+                    MenuProps={todosSelectMenuProps}
+                  >
+                    <MenuItem value="">
+                      <em>Any category</em>
+                    </MenuItem>
+                    {getAllCategories(todosData?.results || []).map((cat) => (
+                      <MenuItem key={cat} value={cat}>
+                        {cat}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+                <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.75 }}>
+                  From #+CATEGORY: or :CATEGORY: in org files.
+                </Typography>
+              </Box>
+              <Divider />
+              <Button size="small" variant="text" color="primary" onClick={clearRefinements} sx={{ alignSelf: 'flex-start' }}>
+                Clear refinements
+              </Button>
+            </Box>
+          </Popover>
+
+          <Menu
+            anchorEl={sortMenuAnchor}
+            open={Boolean(sortMenuAnchor)}
+            onClose={() => setSortMenuAnchor(null)}
+            MenuListProps={{ dense: true }}
+            PaperProps={{ sx: { minWidth: 200 } }}
+          >
+            <ListSubheader disableSticky sx={{ typography: 'overline', lineHeight: 2.5, color: 'text.secondary' }}>
+              Organization
+            </ListSubheader>
+            <MenuItem
+              selected={sortBy === 'file'}
+              onClick={() => {
+                setSortBy('file');
+                setSortMenuAnchor(null);
+              }}
+            >
+              {SORT_LABELS.file}
+            </MenuItem>
+            <ListSubheader disableSticky sx={{ typography: 'overline', lineHeight: 2.5, color: 'text.secondary' }}>
+              Task
+            </ListSubheader>
+            <MenuItem
+              selected={sortBy === 'state'}
+              onClick={() => {
+                setSortBy('state');
+                setSortMenuAnchor(null);
+              }}
+            >
+              {SORT_LABELS.state}
+            </MenuItem>
+            <MenuItem
+              selected={sortBy === 'date'}
+              onClick={() => {
+                setSortBy('date');
+                setSortMenuAnchor(null);
+              }}
+            >
+              {SORT_LABELS.date}
+            </MenuItem>
+            <MenuItem
+              selected={sortBy === 'priority'}
+              onClick={() => {
+                setSortBy('priority');
+                setSortMenuAnchor(null);
+              }}
+            >
+              {SORT_LABELS.priority}
+            </MenuItem>
+          </Menu>
+        </Box>
+
+        <Box sx={{ flex: 1, overflow: 'auto', minHeight: 0, p: 2 }}>
         {loading && (
           <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
             <CircularProgress />
@@ -774,14 +1295,16 @@ const OrgTodosView = ({ onOpenDocument }) => {
                 <Typography variant="body2" color="text.secondary">
                   {todosData.count === 0 ? (
                     <>
-                      {filterState === 'active' && 'No active TODOs found'}
+                      {filterState === 'active' && 'No active TODOs due or overdue'}
+                      {filterState === 'upcoming' && 'No upcoming TODOs'}
                       {filterState === 'done' && 'No completed items found'}
                       {filterState === 'all' && 'No TODO items found in your org files'}
                     </>
                   ) : (
                     <>
                       {tagFilter && `No TODOs found with tag "${tagFilter}"`}
-                      {!tagFilter && filterState === 'active' && 'No active TODOs found'}
+                      {!tagFilter && filterState === 'active' && 'No active TODOs due or overdue'}
+                      {!tagFilter && filterState === 'upcoming' && 'No upcoming TODOs'}
                       {!tagFilter && filterState === 'done' && 'No completed items found'}
                       {!tagFilter && filterState === 'all' && 'No TODO items match your filters'}
                     </>
@@ -869,68 +1392,118 @@ const OrgTodosView = ({ onOpenDocument }) => {
                         <React.Fragment key={idx}>
                           {idx > 0 && <Divider />}
                           <ListItem disablePadding>
-                            <ListItemButton onClick={() => handleItemClick(item)}>
-                              <Box sx={{ width: '100%' }}>
-                                <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1, mb: 0.5 }}>
-                                  <Typography variant="body1" sx={{ flex: 1, fontWeight: 500 }}>
-                                    {'•'.repeat(item.level)} {item.heading}
-                                  </Typography>
-
+                            <ListItemButton onClick={() => handleItemClick(item)} sx={{ py: 0.75, overflow: 'hidden' }}>
+                              <Box sx={{ width: '100%', minWidth: 0, maxWidth: '100%', overflow: 'hidden' }}>
+                                <Box
+                                  sx={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 0.75,
+                                    minWidth: 0,
+                                    maxWidth: '100%',
+                                    overflow: 'hidden'
+                                  }}
+                                >
                                   <Chip
                                     label={item.todo_state}
                                     size="small"
                                     color={getTodoStateColor(item.todo_state)}
-                                    sx={{ fontWeight: 600, fontSize: '0.7rem' }}
+                                    sx={{ fontWeight: 600, fontSize: '0.65rem', height: 18, flexShrink: 0, '& .MuiChip-label': { px: 0.5 } }}
                                   />
-                                </Box>
-
-                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
-                                  <Chip
-                                    icon={<Description fontSize="small" />}
-                                    label={item.filename}
-                                    size="small"
-                                    variant="outlined"
-                                    sx={{ fontSize: '0.7rem' }}
-                                  />
-
+                                  {item.priority && (
+                                    <Chip
+                                      label={`#${item.priority}`}
+                                      size="small"
+                                      color={item.priority === 'A' ? 'error' : item.priority === 'B' ? 'warning' : 'default'}
+                                      sx={{ fontWeight: 700, fontSize: '0.65rem', height: 18, minWidth: 'auto', flexShrink: 0, '& .MuiChip-label': { px: 0.5 } }}
+                                    />
+                                  )}
+                                  <Typography
+                                    variant="body2"
+                                    component="span"
+                                    sx={{
+                                      fontWeight: 500,
+                                      whiteSpace: 'nowrap',
+                                      overflow: 'hidden',
+                                      textOverflow: 'ellipsis',
+                                      flex: '1 1 0%',
+                                      minWidth: 0,
+                                      maxWidth: '100%'
+                                    }}
+                                  >
+                                    {item.heading}
+                                  </Typography>
                                   {item.tags && item.tags.length > 0 && (
-                                    <Box sx={{ display: 'flex', gap: 0.5 }}>
+                                    <Box
+                                      sx={{
+                                        display: 'flex',
+                                        gap: 0.5,
+                                        flexShrink: 1,
+                                        minWidth: 0,
+                                        maxWidth: '36%',
+                                        overflow: 'hidden',
+                                        flexWrap: 'nowrap'
+                                      }}
+                                    >
                                       {item.tags.map(tag => (
                                         <Chip
                                           key={tag}
-                                          icon={<LocalOffer sx={{ fontSize: 12 }} />}
                                           label={tag}
                                           size="small"
                                           color="primary"
                                           variant="outlined"
-                                          sx={{ fontSize: '0.7rem', height: 20 }}
+                                          sx={{
+                                            fontSize: '0.65rem',
+                                            height: 18,
+                                            flexShrink: 1,
+                                            minWidth: 0,
+                                            maxWidth: '100%',
+                                            '& .MuiChip-label': { px: 0.5, overflow: 'hidden', textOverflow: 'ellipsis' }
+                                          }}
                                         />
                                       ))}
                                     </Box>
                                   )}
-
-                                  {item.scheduled && (
-                                    <Chip
-                                      icon={<Schedule sx={{ fontSize: 12 }} />}
-                                      label={`SCHED: ${item.scheduled.split(' ')[0]}`}
-                                      size="small"
-                                      color="info"
-                                      variant="outlined"
-                                      sx={{ fontSize: '0.7rem', height: 20 }}
-                                    />
+                                  {item.effort && (
+                                    <Typography variant="caption" sx={{ color: 'text.secondary', flexShrink: 0 }}>
+                                      ~{item.effort}
+                                    </Typography>
                                   )}
-
+                                  <Box sx={{ flexGrow: 1, flexShrink: 1, minWidth: 0 }} />
+                                  <Typography variant="caption" sx={{ color: 'text.secondary', whiteSpace: 'nowrap', flexShrink: 0, maxWidth: '28%', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                    {item.filename}
+                                  </Typography>
+                                  {item.scheduled && (
+                                    <Typography variant="caption" sx={{ color: 'info.main', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                                      <Schedule sx={{ fontSize: 12, verticalAlign: 'middle', mr: 0.25 }} />
+                                      {item.scheduled.split(' ')[0]}
+                                    </Typography>
+                                  )}
                                   {item.deadline && (
-                                    <Chip
-                                      icon={<ErrorIcon sx={{ fontSize: 12 }} />}
-                                      label={`DUE: ${item.deadline.split(' ')[0]}`}
-                                      size="small"
-                                      color="warning"
-                                      variant="outlined"
-                                      sx={{ fontSize: '0.7rem', height: 20 }}
-                                    />
+                                    <Typography variant="caption" sx={{ color: 'warning.main', fontWeight: 600, whiteSpace: 'nowrap', flexShrink: 0 }}>
+                                      <ErrorIcon sx={{ fontSize: 12, verticalAlign: 'middle', mr: 0.25 }} />
+                                      {item.deadline.split(' ')[0]}
+                                    </Typography>
                                   )}
                                 </Box>
+                                {item.body_preview && (
+                                  <Typography
+                                    variant="caption"
+                                    component="div"
+                                    sx={{
+                                      color: 'text.secondary',
+                                      mt: 0.25,
+                                      overflow: 'hidden',
+                                      textOverflow: 'ellipsis',
+                                      whiteSpace: 'nowrap',
+                                      opacity: 0.7,
+                                      width: '100%',
+                                      maxWidth: '100%'
+                                    }}
+                                  >
+                                    {item.body_preview}
+                                  </Typography>
+                                )}
                               </Box>
                             </ListItemButton>
                           </ListItem>
@@ -943,6 +1516,7 @@ const OrgTodosView = ({ onOpenDocument }) => {
             )}
           </>
         )}
+        </Box>
       </Box>
 
       {/* Org Refile Dialog */}
@@ -952,7 +1526,7 @@ const OrgTodosView = ({ onOpenDocument }) => {
           onClose={(result) => {
             setRefileDialogOpen(false);
             if (result?.success) {
-              console.log('✅ ROOSEVELT: Refile completed, refreshing TODOs...');
+              console.log('Refile completed, refreshing TODOs');
               loadTodos(); // Refresh the TODO list
             }
           }}

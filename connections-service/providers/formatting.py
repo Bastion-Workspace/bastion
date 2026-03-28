@@ -5,6 +5,8 @@ Format LLM Markdown for messaging platforms.
   so parse_mode=HTML renders bold, italic, code, and code blocks.
 - Discord: Renders **bold**, *italic*, `code`, and ```blocks``` natively;
   no conversion needed.
+- Slack: CommonMark converted to mrkdwn (*bold*, _italic_, ~strikethrough~,
+  `code`, ```blocks```, <url|text> for links).
 """
 
 import re
@@ -55,17 +57,59 @@ def markdown_to_telegram_html(text: str) -> str:
     return out
 
 
+def markdown_to_slack_mrkdwn(text: str) -> str:
+    """
+    Convert CommonMark-style Markdown to Slack mrkdwn.
+
+    Slack mrkdwn: *bold*, _italic_, ~strikethrough~, `code`, ```blocks```,
+    and <url|text> for links. Escapes & < > so literal characters are safe.
+    """
+    if not text or not text.strip():
+        return text
+    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    out = escaped
+    # Code blocks first (may contain other syntax)
+    out = re.sub(
+        r"```[\w]*\n(.*?)```",
+        lambda m: "```" + m.group(1).strip() + "```",
+        out,
+        flags=re.DOTALL,
+    )
+    # Links: [text](url) -> <url|text>
+    out = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", lambda m: "<" + m.group(2) + "|" + m.group(1) + ">", out)
+    # Bold: **text** and __text__ -> *text*
+    out = re.sub(r"\*\*(.+?)\*\*", lambda m: "*" + m.group(1) + "*", out)
+    out = re.sub(r"__(.+?)__", lambda m: "*" + m.group(1) + "*", out)
+    # Italic: *text* (single) and _text_ -> _text_
+    out = re.sub(
+        r"(?<!\*)\*(?!\*)(.+?)\*(?!\*)",
+        lambda m: "_" + m.group(1) + "_",
+        out,
+    )
+    out = re.sub(
+        r"(?<!_)_(?!_)(.+?)_(?!_)",
+        lambda m: "_" + m.group(1) + "_",
+        out,
+    )
+    # Strikethrough: ~~text~~ -> ~text~
+    out = re.sub(r"~~(.+?)~~", lambda m: "~" + m.group(1) + "~", out)
+    return out
+
+
 def format_text_for_platform(text: str, platform: str) -> str:
     """
     Return text formatted for the given platform.
 
     - telegram: Markdown converted to Telegram HTML (for parse_mode=HTML).
     - discord: Return as-is; Discord renders **, *, ` natively.
+    - slack: Markdown converted to Slack mrkdwn.
     - other: Return as-is.
     """
     if not text:
         return text
     if platform == "telegram":
         return markdown_to_telegram_html(text)
+    if platform == "slack":
+        return markdown_to_slack_mrkdwn(text)
     return text
 

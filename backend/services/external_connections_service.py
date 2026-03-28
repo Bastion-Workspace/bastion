@@ -3,6 +3,7 @@ External Connections Service - OAuth token storage and refresh for external prov
 Handles encryption, storage, and token refresh for Microsoft, Gmail, etc.
 """
 
+import asyncio
 import base64
 import json
 import logging
@@ -10,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -71,6 +72,29 @@ class ExternalConnectionsService:
         assert self._fernet is not None
         raw = base64.b64decode(encrypted_token.encode("utf-8"))
         return self._fernet.decrypt(raw).decode("utf-8")
+
+    def _decrypt_token_safe(self, encrypted_token: str) -> Optional[str]:
+        """Decrypt a stored token; returns None if decryption fails (e.g. SECRET_KEY changed)."""
+        try:
+            return self._decrypt_token(encrypted_token)
+        except InvalidToken:
+            logger.warning(
+                "Failed to decrypt stored token (SECRET_KEY may have changed or connection was stored by another instance); connection will need to be re-authorized"
+            )
+            return None
+
+    @staticmethod
+    def _parse_provider_metadata(raw: Any) -> Dict[str, Any]:
+        """Safely parse provider_metadata from JSONB (asyncpg returns strings)."""
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+                return parsed if isinstance(parsed, dict) else {}
+            except (json.JSONDecodeError, TypeError):
+                return {}
+        return {}
 
     async def store_connection(
         self,
@@ -135,7 +159,7 @@ class ExternalConnectionsService:
             """
             SELECT id, user_id, provider, connection_type, account_identifier, display_name,
                    token_expires_at, scopes, provider_metadata, created_at, updated_at,
-                   last_sync_at, is_active, connection_status
+                   last_sync_at, is_active, connection_status, is_locked
             FROM external_connections
             WHERE id = $1 AND is_active = true
             """,
@@ -160,14 +184,20 @@ class ExternalConnectionsService:
         )
         if not row:
             return None
+        provider = row.get("provider") or ""
+        if provider in ("imap_smtp", "caldav"):
+            return self._decrypt_token_safe(row["encrypted_access_token"])
         expires_at = row["token_expires_at"]
         if expires_at is not None and expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         buffer_seconds = 300
         now_utc = datetime.now(timezone.utc)
         if expires_at and (expires_at - timedelta(seconds=buffer_seconds)) > now_utc:
-            return self._decrypt_token(row["encrypted_access_token"])
-        refreshed = await self.refresh_access_token(connection_id)
+            return self._decrypt_token_safe(row["encrypted_access_token"])
+        refreshed = await self.refresh_access_token(connection_id, rls_context=rls_context)
+        if not refreshed:
+            await asyncio.sleep(2)
+            refreshed = await self.refresh_access_token(connection_id, rls_context=rls_context)
         if not refreshed:
             return None
         row2 = await fetch_one(
@@ -175,10 +205,13 @@ class ExternalConnectionsService:
             SELECT encrypted_access_token FROM external_connections WHERE id = $1
             """,
             connection_id,
+            rls_context=rls_context,
         )
-        return self._decrypt_token(row2["encrypted_access_token"]) if row2 else None
+        return self._decrypt_token_safe(row2["encrypted_access_token"]) if row2 else None
 
-    async def refresh_access_token(self, connection_id: int) -> bool:
+    async def refresh_access_token(
+        self, connection_id: int, rls_context: Optional[Dict[str, str]] = None
+    ) -> bool:
         """Refresh access token using refresh_token. Returns True on success."""
         row = await fetch_one(
             """
@@ -187,18 +220,24 @@ class ExternalConnectionsService:
             WHERE id = $1 AND is_active = true
             """,
             connection_id,
+            rls_context=rls_context,
         )
         if not row:
             return False
         provider = row["provider"]
-        refresh_token = self._decrypt_token(row["encrypted_refresh_token"])
-        metadata = row["provider_metadata"] or {}
+        refresh_token = self._decrypt_token_safe(row["encrypted_refresh_token"])
+        if refresh_token is None:
+            return False
+        metadata = self._parse_provider_metadata(row["provider_metadata"])
         if provider == "microsoft":
             tenant = metadata.get("tenant_id") or getattr(settings, "MICROSOFT_TENANT_ID", "common")
             client_id = getattr(settings, "MICROSOFT_CLIENT_ID", "")
             client_secret = getattr(settings, "MICROSOFT_CLIENT_SECRET", "")
             if not client_id or not client_secret:
                 logger.error("Microsoft OAuth credentials not configured")
+                await self._set_connection_status(
+                    connection_id, "token_error", rls_context=rls_context
+                )
                 return False
             url = MICROSOFT_TOKEN_URL.format(tenant=tenant)
             data = {
@@ -214,14 +253,40 @@ class ExternalConnectionsService:
                     body = resp.json()
             except Exception as e:
                 logger.exception("Microsoft token refresh failed for connection_id=%s: %s", connection_id, e)
+                await self._set_connection_status(
+                    connection_id, "token_error", rls_context=rls_context
+                )
                 return False
             access_token = body.get("access_token")
             new_refresh = body.get("refresh_token") or refresh_token
             expires_in = int(body.get("expires_in", 3600))
-            await self._update_tokens(connection_id, access_token, new_refresh, expires_in)
+            await self._update_tokens(
+                connection_id, access_token, new_refresh, expires_in, rls_context=rls_context
+            )
             return True
         logger.warning("Token refresh not implemented for provider=%s", provider)
+        await self._set_connection_status(
+            connection_id, "token_error", rls_context=rls_context
+        )
         return False
+
+    async def _set_connection_status(
+        self,
+        connection_id: int,
+        status: str,
+        rls_context: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Set connection_status for a connection (e.g. 'active', 'token_error')."""
+        await execute(
+            """
+            UPDATE external_connections
+            SET connection_status = $1, updated_at = NOW()
+            WHERE id = $2
+            """,
+            status,
+            connection_id,
+            rls_context=rls_context,
+        )
 
     async def _update_tokens(
         self,
@@ -229,6 +294,7 @@ class ExternalConnectionsService:
         access_token: str,
         refresh_token: str,
         expires_in: int,
+        rls_context: Optional[Dict[str, str]] = None,
     ) -> None:
         """Update stored tokens after refresh."""
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
@@ -238,14 +304,38 @@ class ExternalConnectionsService:
             """
             UPDATE external_connections
             SET encrypted_access_token = $1, encrypted_refresh_token = $2,
-                token_expires_at = $3, updated_at = NOW()
+                token_expires_at = $3, connection_status = 'active', updated_at = NOW()
             WHERE id = $4
             """,
             enc_access,
             enc_refresh,
             expires_at,
             connection_id,
+            rls_context=rls_context,
         )
+
+    async def set_connection_lock(
+        self,
+        connection_id: int,
+        user_id: str,
+        is_locked: bool,
+        rls_context: Optional[Dict[str, str]] = None,
+    ) -> bool:
+        """Set is_locked on a connection. Returns True if a row was updated (owner only via user_id in WHERE)."""
+        ctx = rls_context or {"user_id": user_id}
+        row = await fetch_one(
+            """
+            UPDATE external_connections
+            SET is_locked = $1, updated_at = NOW()
+            WHERE id = $2 AND user_id = $3
+            RETURNING id
+            """,
+            is_locked,
+            connection_id,
+            user_id,
+            rls_context=ctx,
+        )
+        return row is not None
 
     async def revoke_connection(self, connection_id: int) -> bool:
         """Mark connection as inactive (soft revoke)."""
@@ -259,6 +349,80 @@ class ExternalConnectionsService:
         )
         logger.info("Revoked connection id=%s", connection_id)
         return True
+
+    async def store_imap_smtp_connection(
+        self,
+        user_id: str,
+        imap_host: str,
+        imap_port: int,
+        imap_ssl: bool,
+        smtp_host: str,
+        smtp_port: int,
+        smtp_tls: bool,
+        username: str,
+        imap_password: str,
+        smtp_password: str,
+        display_name: Optional[str] = None,
+    ) -> int:
+        """Store IMAP/SMTP email connection. Full config in encrypted access_token (gRPC receives decrypted JSON)."""
+        credential = {
+            "imap_host": imap_host.strip(),
+            "imap_port": int(imap_port),
+            "imap_ssl": bool(imap_ssl),
+            "smtp_host": smtp_host.strip(),
+            "smtp_port": int(smtp_port),
+            "smtp_tls": bool(smtp_tls),
+            "username": username.strip(),
+            "imap_password": imap_password,
+            "smtp_password": smtp_password,
+        }
+        credential_json = json.dumps(credential)
+        metadata = {
+            "imap_host": credential["imap_host"],
+            "imap_port": credential["imap_port"],
+            "smtp_host": credential["smtp_host"],
+            "smtp_port": credential["smtp_port"],
+            "username": credential["username"],
+        }
+        account_identifier = username.strip() or f"{imap_host}:{imap_port}"
+        return await self.store_connection(
+            user_id=user_id,
+            provider="imap_smtp",
+            connection_type="email",
+            account_identifier=account_identifier,
+            access_token=credential_json,
+            refresh_token=credential_json,
+            expires_in=365 * 24 * 3600,
+            scopes=["imap", "smtp"],
+            display_name=display_name or username.strip() or None,
+            provider_metadata=metadata,
+        )
+
+    async def store_caldav_connection(
+        self,
+        user_id: str,
+        url: str,
+        username: str,
+        password: str,
+        display_name: Optional[str] = None,
+    ) -> int:
+        """Store CalDAV calendar connection. Full config in encrypted access_token (gRPC receives decrypted JSON)."""
+        credential = {"url": url.strip(), "username": username.strip(), "password": password}
+        credential_json = json.dumps(credential)
+        metadata = {"url": url.strip(), "username": username.strip()}
+        account_identifier = username.strip() or url.strip() or "caldav"
+        return await self.store_connection(
+            user_id=user_id,
+            provider="caldav",
+            connection_type="calendar",
+            account_identifier=account_identifier,
+            access_token=credential_json,
+            refresh_token=credential_json,
+            expires_in=365 * 24 * 3600,
+            scopes=["caldav"],
+            display_name=display_name or username.strip() or None,
+            provider_metadata=metadata,
+        )
 
     async def get_user_connections(
         self,
@@ -285,7 +449,7 @@ class ExternalConnectionsService:
             f"""
             SELECT id, user_id, provider, connection_type, account_identifier, display_name,
                    token_expires_at, scopes, provider_metadata, created_at, updated_at,
-                   last_sync_at, is_active, connection_status
+                   last_sync_at, is_active, connection_status, is_locked
             FROM external_connections
             WHERE {where}
             ORDER BY provider, connection_type, account_identifier
@@ -294,6 +458,89 @@ class ExternalConnectionsService:
             rls_context=rls_context,
         )
         return [dict(r) for r in rows]
+
+    OAUTH_REFRESH_PROVIDERS = ("microsoft",)
+
+    async def refresh_all_expired_oauth_tokens(
+        self, buffer_seconds: int = 300
+    ) -> Dict[str, int]:
+        """
+        Proactively refresh all OAuth connections whose access token is expired or
+        within buffer_seconds of expiry. Covers email, calendar, and any connection
+        type for providers that support token refresh (e.g. microsoft). Used on
+        backend startup and by periodic health tasks. Default 300 (5 min); periodic
+        task uses 600 (10 min). Returns: {"refreshed": N, "failed": M}.
+        """
+        now_utc = datetime.now(timezone.utc)
+        refreshed = 0
+        failed = 0
+        try:
+            rows = await fetch_all("SELECT user_id FROM users")
+            user_ids = [r["user_id"] for r in rows] if rows else []
+        except Exception as e:
+            logger.warning("refresh_all_expired_oauth_tokens: could not list users: %s", e)
+            return {"refreshed": 0, "failed": 0}
+        for uid in user_ids:
+            try:
+                conns = await self.get_user_connections(
+                    uid,
+                    active_only=True,
+                    rls_context={"user_id": uid},
+                )
+            except Exception as e:
+                logger.warning("refresh_all_expired_oauth_tokens: get_user_connections for %s: %s", uid, e)
+                continue
+            for conn in conns:
+                if conn.get("provider") not in self.OAUTH_REFRESH_PROVIDERS:
+                    continue
+                expires_at = conn.get("token_expires_at")
+                if expires_at is not None and expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                if expires_at and (expires_at - timedelta(seconds=buffer_seconds)) > now_utc:
+                    continue
+                try:
+                    ok = await self.refresh_access_token(
+                        conn["id"], rls_context={"user_id": uid}
+                    )
+                    if ok:
+                        refreshed += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    logger.warning(
+                        "refresh_all_expired_oauth_tokens: refresh failed for connection_id=%s: %s",
+                        conn["id"],
+                        e,
+                    )
+                    failed += 1
+        if refreshed or failed:
+            logger.info(
+                "OAuth token refresh on startup: %s refreshed, %s failed",
+                refreshed,
+                failed,
+            )
+        return {"refreshed": refreshed, "failed": failed}
+
+    async def update_provider_metadata(
+        self,
+        connection_id: int,
+        metadata: Dict[str, Any],
+        rls_context: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Update the provider_metadata JSONB for a connection (merge with existing)."""
+        ctx = rls_context or {"user_id": "", "user_role": "admin"}
+        metadata_str = json.dumps(metadata)
+        await execute(
+            """
+            UPDATE external_connections
+            SET provider_metadata = $2::jsonb,
+                updated_at = NOW()
+            WHERE id = $1
+            """,
+            connection_id,
+            metadata_str,
+            rls_context=ctx,
+        )
 
     SYSTEM_EMAIL_KEY = "system_email_connection_id"
 

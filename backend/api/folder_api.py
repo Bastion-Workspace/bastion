@@ -7,7 +7,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from fastapi.responses import Response
 
 from models.api_models import (
@@ -58,6 +58,7 @@ async def download_library_zip(
 @router.get("/api/folders/tree", response_model=FolderTreeResponse)
 async def get_folder_tree(
     collection_type: str = "user",
+    shallow: bool = Query(default=True, description="If true, return only top-level folders with empty children for faster load"),
     current_user: AuthenticatedUserResponse = Depends(get_current_user)
 ):
     """Get the complete folder tree for the current user"""
@@ -65,8 +66,9 @@ async def get_folder_tree(
     try:
         logger.debug(f"📁 Getting folder tree for user: {current_user.user_id}, collection_type: {collection_type}")
         folders = await folder_service.get_folder_tree(
-            user_id=current_user.user_id, 
-            collection_type=collection_type
+            user_id=current_user.user_id,
+            collection_type=collection_type,
+            shallow=shallow
         )
         logger.debug(f"📁 Found {len(folders)} folders")
         return FolderTreeResponse(

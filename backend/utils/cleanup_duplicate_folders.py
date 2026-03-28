@@ -28,7 +28,7 @@ async def find_duplicate_folders() -> List[Dict[str, Any]]:
     try:
         from services.database_manager.database_helpers import fetch_all
         
-        logger.info("🔍 ROOSEVELT: Searching for duplicate folders...")
+        logger.info("Searching for duplicate folders")
         
         duplicates = await fetch_all("""
             SELECT 
@@ -131,7 +131,7 @@ async def cleanup_duplicate_folders():
     Finds and merges all duplicate folders
     """
     try:
-        logger.info("🏇 ROOSEVELT: Starting duplicate folder cleanup campaign!")
+        logger.info("Starting duplicate folder cleanup")
         logger.info("=" * 70)
         
         # Find all duplicates
@@ -153,7 +153,7 @@ async def cleanup_duplicate_folders():
             logger.info("")  # Blank line between groups
         
         logger.info("=" * 70)
-        logger.info(f"✅ ROOSEVELT: Cleanup complete!")
+        logger.info("Duplicate folder cleanup complete")
         logger.info(f"📊 Final Statistics:")
         logger.info(f"   - Duplicate folder groups found: {len(duplicates)}")
         logger.info(f"   - Duplicate instances merged: {total_merged}")

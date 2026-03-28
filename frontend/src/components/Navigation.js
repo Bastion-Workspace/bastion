@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef, useLayoutEffect, useCallback } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   AppBar,
@@ -34,28 +34,92 @@ import {
   MusicNote,
   HelpOutline,
   Map,
+  Home,
+  Dashboard,
+  Build,
+  Notifications,
+  NotificationsNone,
+  PushPin,
+  SportsEsports,
+  Info,
+  Tune,
 } from '@mui/icons-material';
 import { useQuery } from 'react-query';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
 import { useCapabilities } from '../contexts/CapabilitiesContext';
 import { useMessaging } from '../contexts/MessagingContext';
+import { useNotifications } from '../contexts/NotificationContext';
 import { useTeam } from '../contexts/TeamContext';
 import apiService from '../services/apiService';
 import HelpOverlay from './HelpOverlay';
+import NotificationDropdown from './NotificationDropdown';
+import AboutDialog from './AboutDialog';
 
 const Navigation = () => {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout } = useAuth();
-  const { darkMode, toggleDarkMode } = useTheme();
+  const { darkMode, toggleDarkMode, themePreference } = useTheme();
   const { isAdmin, has } = useCapabilities();
   const { toggleDrawer, totalUnreadCount } = useMessaging();
+  const { unreadCount: notificationUnreadCount } = useNotifications();
   const { pendingInvitations, unreadCounts } = useTeam();
   const [anchorEl, setAnchorEl] = useState(null);
+  const [notificationAnchorEl, setNotificationAnchorEl] = useState(null);
+  const notificationBellRef = useRef(null);
   const [logoError, setLogoError] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const appBarRef = useRef(null);
+
+  const publishNavHeight = useCallback(() => {
+    const el = appBarRef.current;
+    if (!el) return;
+    const h = Math.round(el.getBoundingClientRect().height);
+    document.documentElement.style.setProperty('--app-nav-height', `${h}px`);
+  }, []);
+
+  useLayoutEffect(() => {
+    publishNavHeight();
+    window.addEventListener('resize', publishNavHeight);
+    const el = appBarRef.current;
+    const ro =
+      typeof ResizeObserver !== 'undefined' && el
+        ? new ResizeObserver(() => publishNavHeight())
+        : null;
+    if (ro && el) ro.observe(el);
+    return () => {
+      window.removeEventListener('resize', publishNavHeight);
+      if (ro) ro.disconnect();
+    };
+  }, [publishNavHeight]);
+
+  const STORAGE_KEY = 'bastion_pinned_nav';
+  const DEFAULT_PINS = ['/documents', '/teams'];
+  const [pinnedPaths, setPinnedPaths] = useState(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      return stored ? JSON.parse(stored) : DEFAULT_PINS;
+    } catch { return DEFAULT_PINS; }
+  });
+  const togglePin = (path) => {
+    setPinnedPaths(prev => {
+      const next = prev.includes(path)
+        ? prev.filter(p => p !== path)
+        : [...prev, path];
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const { data: pendingApprovals = [] } = useQuery(
+    'agentPendingApprovals',
+    () => apiService.agentFactory.listPendingApprovals(),
+    { retry: false, refetchInterval: 60000 }
+  );
+  const pendingApprovalsCount = pendingApprovals.length || 0;
 
   // Check if user has any media source configured
   const { data: mediaSources } = useQuery(
@@ -74,12 +138,19 @@ const Navigation = () => {
   const totalTeamNotifications = (pendingInvitations?.length || 0) + totalUnreadPosts;
 
   const navItems = [
+      { label: 'Home', path: '/home', icon: <Home /> },
       { label: 'Documents', path: '/documents', icon: <Description /> },
       { label: 'Teams', path: '/teams', icon: <Group />, badge: totalTeamNotifications },
+      ...(isAdmin || has('feature.games.view') ? [{ label: 'Games', path: '/games', icon: <SportsEsports /> }] : []),
       ...(isAdmin || has('feature.news.view') ? [{ label: 'News', path: '/news', icon: <Description /> }] : []),
       ...(isAdmin || has('feature.maps.view') ? [{ label: 'Map', path: '/map', icon: <Map /> }] : []),
       ...(hasMediaConfig ? [{ label: 'Media', path: '/media', icon: <MusicNote /> }] : []),
+      { label: 'Agent Factory', path: '/agent-factory', icon: <Build /> },
+      { label: 'Operations', path: '/agent-dashboard', icon: <Dashboard />, badge: pendingApprovalsCount },
   ];
+  const pinnedItems = navItems.filter(i => pinnedPaths.includes(i.path));
+  const unpinnedItems = navItems.filter(i => !pinnedPaths.includes(i.path));
+  const unpinnedBadgeCount = unpinnedItems.reduce((sum, item) => sum + (item.badge || 0), 0);
 
   const isActive = (path) => location.pathname === path;
 
@@ -108,12 +179,13 @@ const Navigation = () => {
 
   return (
     <AppBar 
+      ref={appBarRef}
       position="static" 
       elevation={1} 
       sx={{ 
         zIndex: 1201, 
         paddingTop: 'env(safe-area-inset-top)',
-        backgroundColor: darkMode ? '#121212' : 'primary.main',
+        backgroundColor: darkMode ? 'background.default' : 'primary.main',
         '& .MuiToolbar-root': {
           minHeight: 59, // Force standard height (reduced by 5px)
         }
@@ -140,7 +212,7 @@ const Navigation = () => {
         <Box sx={{ flexGrow: 1 }} />
 
         <Box sx={{ display: { xs: 'none', md: 'flex' } }}>
-          {navItems.map((item) => (
+          {pinnedItems.map((item) => (
             <Button
               key={item.path}
               color="inherit"
@@ -174,23 +246,35 @@ const Navigation = () => {
           </IconButton>
         </Box>
 
-        {/* Theme Toggle */}
-        <Tooltip title={darkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}>
+        {/* Right cluster: notifications, messages, account — pronounced gap from pinned pages */}
+        <Box sx={{ display: 'flex', alignItems: 'center', ml: { xs: 0, md: 4 }, gap: 0.5 }}>
+        {/* Agent Notifications */}
+        <Tooltip title="Agent Notifications">
           <IconButton
+            ref={notificationBellRef}
             color="inherit"
-            onClick={toggleDarkMode}
-            sx={{ mr: 2 }}
+            onClick={(e) => setNotificationAnchorEl(e.currentTarget)}
+            size="small"
+            sx={{ mr: 0 }}
           >
-            {darkMode ? <LightMode /> : <DarkMode />}
+            <Badge badgeContent={notificationUnreadCount} color="error" max={99}>
+              {notificationUnreadCount > 0 ? <Notifications /> : <NotificationsNone />}
+            </Badge>
           </IconButton>
         </Tooltip>
+        <NotificationDropdown
+          anchorEl={notificationAnchorEl}
+          open={Boolean(notificationAnchorEl)}
+          onClose={() => setNotificationAnchorEl(null)}
+        />
 
-        {/* Messaging Toggle - BULLY! Roosevelt's Messaging Cavalry! */}
+        {/* Messaging Toggle */}
         <Tooltip title="Messages">
           <IconButton
             color="inherit"
             onClick={toggleDrawer}
-            sx={{ mr: 2 }}
+            size="small"
+            sx={{ mr: 0 }}
           >
             <Badge badgeContent={totalUnreadCount} color="error" max={99}>
               {totalUnreadCount > 0 ? <Mail /> : <MailOutline />}
@@ -199,7 +283,7 @@ const Navigation = () => {
         </Tooltip>
 
         {/* User Menu */}
-        <Box sx={{ ml: 2 }}>
+        <Box sx={{ ml: 0.5 }}>
           {user?.role === 'admin' && (
             <Chip
               label="Admin"
@@ -214,9 +298,11 @@ const Navigation = () => {
             color="inherit"
             sx={{ p: 0 }}
           >
-            <Avatar sx={{ bgcolor: 'rgba(255,255,255,0.2)' }}>
-              {getUserInitials()}
-            </Avatar>
+            <Badge badgeContent={unpinnedBadgeCount} color="error" max={99}>
+              <Avatar sx={{ bgcolor: 'rgba(255,255,255,0.2)' }}>
+                {getUserInitials()}
+              </Avatar>
+            </Badge>
           </IconButton>
           
           <Menu
@@ -224,13 +310,18 @@ const Navigation = () => {
             open={Boolean(anchorEl)}
             onClose={handleUserMenuClose}
             PaperProps={{
-              sx: { minWidth: 200 }
+              sx: {
+                minWidth: 200,
+                '& .MuiListItemIcon-root': { minWidth: 36 },
+                '& .MuiMenuItem-root': { py: 0.75 },
+                '& .MuiDivider-root': { my: 0.75 },
+              }
             }}
           >
-            <MenuItem disabled>
+            <MenuItem disabled sx={{ py: 0.75, opacity: 1 }}>
               <Box>
-                <Typography variant="subtitle2">{getUserDisplayName()}</Typography>
-                <Typography variant="body2" color="text.secondary">
+                <Typography variant="subtitle2" fontSize="0.8125rem">{getUserDisplayName()}</Typography>
+                <Typography variant="body2" color="text.secondary" fontSize="0.75rem">
                   {user?.email}
                 </Typography>
               </Box>
@@ -238,32 +329,93 @@ const Navigation = () => {
             
             <Divider />
             
+            {unpinnedItems.length > 0 && unpinnedItems.map((item) => (
+              <MenuItem
+                key={item.path}
+                onClick={() => { handleUserMenuClose(); navigate(item.path); }}
+              >
+                <ListItemIcon sx={{ minWidth: 36 }}>
+                  {item.badge > 0 ? (
+                    <Badge badgeContent={item.badge} color="error" max={99}>
+                      {item.icon}
+                    </Badge>
+                  ) : (
+                    item.icon
+                  )}
+                </ListItemIcon>
+                <ListItemText primary={item.label} primaryTypographyProps={{ fontSize: '0.875rem' }} />
+                <IconButton
+                  size="small"
+                  onClick={(e) => { e.stopPropagation(); togglePin(item.path); }}
+                  sx={{ ml: 0.5 }}
+                  aria-label="Pin to toolbar"
+                >
+                  <PushPin fontSize="small" />
+                </IconButton>
+              </MenuItem>
+            ))}
+            
+            {unpinnedItems.length > 0 && <Divider />}
+            
+            {themePreference !== 'system' && (
+              <MenuItem onClick={() => toggleDarkMode()}>
+                <ListItemIcon sx={{ minWidth: 36 }}>
+                  {darkMode ? <LightMode /> : <DarkMode />}
+                </ListItemIcon>
+                <ListItemText primary={darkMode ? 'Light mode' : 'Dark mode'} primaryTypographyProps={{ fontSize: '0.875rem' }} />
+              </MenuItem>
+            )}
+            
             <MenuItem onClick={() => { handleUserMenuClose(); navigate('/settings'); }}>
-              <Settings sx={{ mr: 1 }} />
-              Settings
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                <Settings fontSize="small" />
+              </ListItemIcon>
+              <ListItemText primary="Settings" primaryTypographyProps={{ fontSize: '0.875rem' }} />
+            </MenuItem>
+            
+            <MenuItem onClick={() => { handleUserMenuClose(); navigate('/control-panes'); }}>
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                <Tune fontSize="small" />
+              </ListItemIcon>
+              <ListItemText primary="Control Panes" primaryTypographyProps={{ fontSize: '0.875rem' }} />
             </MenuItem>
             
             {user?.role === 'admin' && (
               <MenuItem onClick={() => { handleUserMenuClose(); navigate('/settings?tab=users'); }}>
-                <PersonAdd sx={{ mr: 1 }} />
-                User Management
+                <ListItemIcon sx={{ minWidth: 36 }}>
+                  <PersonAdd fontSize="small" />
+                </ListItemIcon>
+                <ListItemText primary="User Management" primaryTypographyProps={{ fontSize: '0.875rem' }} />
               </MenuItem>
             )}
             
             <MenuItem onClick={() => { handleUserMenuClose(); setHelpOpen(true); }}>
-              <HelpOutline sx={{ mr: 1 }} />
-              Help
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                <HelpOutline fontSize="small" />
+              </ListItemIcon>
+              <ListItemText primary="Help" primaryTypographyProps={{ fontSize: '0.875rem' }} />
+            </MenuItem>
+            
+            <MenuItem onClick={() => { handleUserMenuClose(); setAboutOpen(true); }}>
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                <Info fontSize="small" />
+              </ListItemIcon>
+              <ListItemText primary="About" primaryTypographyProps={{ fontSize: '0.875rem' }} />
             </MenuItem>
             
             <Divider />
             
             <MenuItem onClick={handleLogout}>
-              <Logout sx={{ mr: 1 }} />
-              Logout
+              <ListItemIcon sx={{ minWidth: 36 }}>
+                <Logout fontSize="small" />
+              </ListItemIcon>
+              <ListItemText primary="Logout" primaryTypographyProps={{ fontSize: '0.875rem' }} />
             </MenuItem>
           </Menu>
           
           <HelpOverlay open={helpOpen} onClose={() => setHelpOpen(false)} />
+          <AboutDialog open={aboutOpen} onClose={() => setAboutOpen(false)} />
+        </Box>
         </Box>
       </Toolbar>
       {/* Mobile Drawer */}
@@ -296,6 +448,14 @@ const Navigation = () => {
         </List>
         <Divider />
         <List>
+          <ListItemButton onClick={() => { setMobileOpen(false); setNotificationAnchorEl(notificationBellRef.current); }}>
+            <ListItemIcon>
+              <Badge badgeContent={notificationUnreadCount} color="error" max={99}>
+                {notificationUnreadCount > 0 ? <Notifications /> : <NotificationsNone />}
+              </Badge>
+            </ListItemIcon>
+            <ListItemText primary="Agent Notifications" />
+          </ListItemButton>
           <ListItemButton onClick={() => { setMobileOpen(false); toggleDrawer(); }}>
             <ListItemIcon>
               <Badge badgeContent={totalUnreadCount} color="error" max={99}>
@@ -304,17 +464,27 @@ const Navigation = () => {
             </ListItemIcon>
             <ListItemText primary="Messages" />
           </ListItemButton>
-          <ListItemButton onClick={() => { setMobileOpen(false); toggleDarkMode(); }}>
-            <ListItemIcon>{darkMode ? <LightMode /> : <DarkMode />}</ListItemIcon>
-            <ListItemText primary={darkMode ? 'Light Mode' : 'Dark Mode'} />
-          </ListItemButton>
+          {themePreference !== 'system' && (
+            <ListItemButton onClick={() => { setMobileOpen(false); toggleDarkMode(); }}>
+              <ListItemIcon>{darkMode ? <LightMode /> : <DarkMode />}</ListItemIcon>
+              <ListItemText primary={darkMode ? 'Light Mode' : 'Dark Mode'} />
+            </ListItemButton>
+          )}
           <ListItemButton onClick={() => { setMobileOpen(false); navigate('/settings'); }}>
             <ListItemIcon><Settings /></ListItemIcon>
             <ListItemText primary="Settings" />
           </ListItemButton>
+          <ListItemButton onClick={() => { setMobileOpen(false); navigate('/control-panes'); }}>
+            <ListItemIcon><Tune /></ListItemIcon>
+            <ListItemText primary="Control Panes" />
+          </ListItemButton>
           <ListItemButton onClick={() => { setMobileOpen(false); setHelpOpen(true); }}>
             <ListItemIcon><HelpOutline /></ListItemIcon>
             <ListItemText primary="Help" />
+          </ListItemButton>
+          <ListItemButton onClick={() => { setMobileOpen(false); setAboutOpen(true); }}>
+            <ListItemIcon><Info /></ListItemIcon>
+            <ListItemText primary="About" />
           </ListItemButton>
           <ListItemButton onClick={() => { setMobileOpen(false); handleLogout(); }}>
             <ListItemIcon><Logout /></ListItemIcon>

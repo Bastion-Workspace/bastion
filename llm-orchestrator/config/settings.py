@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     # LLM Configuration
     OPENROUTER_API_KEY: Optional[str] = None
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_BASE_URL: str = "https://api.groq.com/openai/v1"
     DEFAULT_MODEL: str = "anthropic/claude-3.5-sonnet"
     FAST_MODEL: str = "anthropic/claude-3-haiku"
     
@@ -48,6 +50,10 @@ class Settings(BaseSettings):
     ENABLE_TOOL_CALLBACKS: bool = True
     MAX_CONCURRENT_REQUESTS: int = 10
     REQUEST_TIMEOUT_SECONDS: int = 300
+
+    # Routing: when True, EDITOR routes are excluded from eligibility so requests with
+    # an open document fall through to chat or default Agent Factory profile (for testing).
+    DISABLE_EDITOR_ENGINE_ROUTING: bool = False
     
     # Checkpointer Configuration
     CHECKPOINT_SCHEMA: str = "public"

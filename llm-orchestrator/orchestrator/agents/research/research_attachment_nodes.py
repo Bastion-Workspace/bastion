@@ -141,18 +141,21 @@ async def process_attachments_node(agent: Any, state: ResearchState) -> Dict[str
 
         from orchestrator.tools.face_analysis_tools import identify_faces_in_image
 
-        result_text = await identify_faces_in_image(
+        face_result = await identify_faces_in_image(
             attachment_path=attachment_path,
             user_id=user_id,
             confidence_threshold=0.85
         )
 
+        result_text = face_result.get("formatted", str(face_result)) if isinstance(face_result, dict) else str(face_result)
         logger.info("Face identification complete: %s", result_text[:100])
 
         result["attachment_analysis"] = {
             "type": "face_identification",
             "result": result_text,
-            "image_path": attachment_path
+            "image_path": attachment_path,
+            "identified_count": face_result.get("identified_count") if isinstance(face_result, dict) else None,
+            "identified_faces": face_result.get("identified_faces", []) if isinstance(face_result, dict) else [],
         }
 
         return result

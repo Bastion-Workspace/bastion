@@ -3,17 +3,66 @@ Document Editing Tools for Agents
 Allows agents to update document titles and frontmatter in user's documents
 """
 
+import hashlib
+import json
 import logging
 import uuid
 from typing import Dict, Any, Optional, List
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
-# In-memory storage for document edit proposals
-# TODO: Migrate to database for persistence across restarts
-_document_edit_proposals: Dict[str, Dict[str, Any]] = {}
+
+def _parse_jsonb(value: Any) -> Any:
+    """
+    Parse a JSONB column value from asyncpg.
+    asyncpg returns JSONB as a JSON string by default; convert to Python object.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse JSONB value: %s", e)
+            return None
+    return value
+
+
+def _normalize_operations(operations: Any) -> List[Dict[str, Any]]:
+    """
+    Ensure operations is a list of dicts. JSONB or upstream may return a list
+    containing strings (e.g. JSON-stringified ops); parse and filter to dicts only.
+    Also handles asyncpg returning the whole column as a JSON string.
+    """
+    if not operations:
+        return []
+    # asyncpg returns JSONB columns as strings; parse to list first
+    if isinstance(operations, str):
+        try:
+            operations = json.loads(operations)
+        except json.JSONDecodeError as e:
+            logger.warning("Failed to parse operations JSONB string: %s", e)
+            return []
+    if not isinstance(operations, list):
+        return []
+    result = []
+    for i, op in enumerate(operations):
+        if isinstance(op, dict):
+            result.append(op)
+        elif isinstance(op, str):
+            try:
+                parsed = json.loads(op)
+                if isinstance(parsed, dict):
+                    result.append(parsed)
+                else:
+                    logger.warning("Proposal operation[%s] parsed to non-dict: %s", i, type(parsed))
+            except json.JSONDecodeError as e:
+                logger.warning("Proposal operation[%s] invalid JSON: %s", i, e)
+        else:
+            logger.warning("Proposal operation[%s] unexpected type: %s", i, type(op))
+    return result
 
 
 async def update_document_metadata_tool(
@@ -162,6 +211,13 @@ async def update_document_metadata_tool(
                             frontmatter['title'] = title
                         new_frontmatter_block = build_frontmatter(frontmatter)
                         new_content = new_frontmatter_block + "\n" + current_content
+                    
+                    # Snapshot current content before overwrite (version history)
+                    try:
+                        from services.document_version_service import snapshot_before_write
+                        await snapshot_before_write(document_id, user_id, "metadata_update", None, None)
+                    except Exception as verr:
+                        logger.warning("Version snapshot before write failed (non-fatal): %s", verr)
                     
                     # Write updated content
                     file_path.write_text(new_content, encoding='utf-8')
@@ -374,6 +430,13 @@ async def update_document_content_tool(
                 new_content = content_to_replace
             logger.info(f"Replacing entire content ({len(current_content)} chars) with new content ({len(content_to_replace)} chars)")
         
+        # Snapshot current content before overwrite (version history)
+        try:
+            from services.document_version_service import snapshot_before_write
+            await snapshot_before_write(document_id, user_id, "agent_edit", None, None)
+        except Exception as verr:
+            logger.warning("Version snapshot before write failed (non-fatal): %s", verr)
+        
         # Write updated content to file
         file_path.write_text(new_content, encoding='utf-8')
         logger.info(f"✅ Updated file content: {file_path} ({len(new_content)} chars)")
@@ -531,29 +594,35 @@ async def propose_document_edit_tool(
                 "message": "content_edit field is required when edit_type='content'"
             }
         
-        # Generate proposal ID
+        # Get current document content for content_hash and staleness detection
+        folder_service = container.folder_service
+        file_path = await folder_service.get_document_file_path(
+            filename=doc_info.filename,
+            folder_id=getattr(doc_info, 'folder_id', None),
+            user_id=doc_user_id,
+            collection_type=doc_collection_type
+        )
+        current_content = ""
+        if file_path and file_path.exists():
+            current_content = file_path.read_text(encoding='utf-8')
+        content_hash = hashlib.sha256(current_content.encode()).hexdigest()
+        expires_at = datetime.now(timezone.utc) + timedelta(days=7)
         proposal_id = str(uuid.uuid4())
-        
-        # Store proposal
-        proposal = {
-            "proposal_id": proposal_id,
-            "document_id": document_id,
-            "edit_type": edit_type,
-            "operations": operations or [],
-            "content_edit": content_edit,
-            "agent_name": agent_name,
-            "summary": summary,
-            "requires_preview": requires_preview,
-            "user_id": user_id,
-            "created_at": datetime.now().isoformat(),
-            "applied": False
-        }
-        
-        _document_edit_proposals[proposal_id] = proposal
-        
-        logger.info(f"✅ Document edit proposal created: {proposal_id} for document {document_id}")
-        
-        # Send WebSocket notification for real-time suggestion display
+        operations_json = json.dumps(operations) if operations else '[]'
+        content_edit_json = json.dumps(content_edit) if content_edit else None
+        from services.database_manager.database_helpers import execute, fetch_value
+        rls = {"user_id": user_id, "user_role": "user"}
+        await execute(
+            """
+            INSERT INTO document_edit_proposals
+            (proposal_id, document_id, user_id, edit_type, operations, content_edit, agent_name, summary, requires_preview, content_hash, expires_at)
+            VALUES ($1::uuid, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8, $9, $10, $11)
+            """,
+            proposal_id, document_id, user_id, edit_type, operations_json, content_edit_json,
+            agent_name, summary or "", requires_preview, content_hash, expires_at,
+            rls_context=rls
+        )
+        logger.info(f"Document edit proposal created: {proposal_id} for document {document_id}")
         try:
             if container.websocket_manager:
                 await container.websocket_manager.send_document_status_update(
@@ -567,17 +636,17 @@ async def propose_document_edit_tool(
                         "operations": operations or [],
                         "content_edit": content_edit,
                         "agent_name": agent_name,
-                        "summary": summary
+                        "summary": summary,
+                        "has_pending_proposals": True,
                     }
                 )
         except Exception as e:
-            logger.warning(f"⚠️ Failed to send edit proposal notification: {e}")
-        
+            logger.warning(f"Failed to send edit proposal notification: {e}")
         return {
             "success": True,
             "proposal_id": proposal_id,
             "document_id": document_id,
-            "message": f"Document edit proposal created successfully"
+            "message": "Document edit proposal created successfully"
         }
         
     except Exception as e:
@@ -733,12 +802,19 @@ async def apply_operations_directly(
                         if line_end == -1:
                             line_end = len(new_content)
                         insert_pos = line_end + 1
-                        new_content = new_content[:insert_pos] + text + "\n" + new_content[insert_pos:]
+                        new_content = new_content[:insert_pos] + text + new_content[insert_pos:]
                     else:
                         logger.warning(f"⚠️ Anchor text not found for insert_after_heading: {anchor_text}")
                 else:
                     # Fallback to end
-                    new_content = new_content + "\n" + text
+                    new_content = new_content + text
+        
+        # Snapshot current content before overwrite (version history)
+        try:
+            from services.document_version_service import snapshot_before_write
+            await snapshot_before_write(document_id, user_id, "direct_ops", None, operations)
+        except Exception as verr:
+            logger.warning("Version snapshot before write failed (non-fatal): %s", verr)
         
         # Write updated content to file
         file_path.write_text(new_content, encoding='utf-8')
@@ -833,32 +909,28 @@ async def apply_document_edit_proposal(
         Dict with success, document_id, applied_count, and message
     """
     try:
-        logger.info(f"📝 Applying document edit proposal: {proposal_id}")
-        
-        # Get proposal
-        proposal = _document_edit_proposals.get(proposal_id)
-        if not proposal:
+        logger.info(f"Applying document edit proposal: {proposal_id}")
+        from services.database_manager.database_helpers import fetch_one, execute
+        rls = {"user_id": user_id, "user_role": "user"}
+        row = await fetch_one(
+            "SELECT document_id, user_id, edit_type, operations, content_edit, content_hash FROM document_edit_proposals WHERE proposal_id = $1::uuid",
+            proposal_id,
+            rls_context=rls
+        )
+        if not row:
             return {
                 "success": False,
                 "error": "Proposal not found",
                 "message": f"Proposal {proposal_id} not found"
             }
-        
-        # Security check
-        if proposal["user_id"] != user_id:
-            return {
-                "success": False,
-                "error": "Access denied",
-                "message": f"Proposal belongs to different user"
-            }
-        
-        if proposal["applied"]:
-            return {
-                "success": False,
-                "error": "Proposal already applied",
-                "message": f"Proposal {proposal_id} has already been applied"
-            }
-        
+        proposal = {
+            "document_id": row["document_id"],
+            "user_id": row["user_id"],
+            "edit_type": row["edit_type"],
+            "operations": _normalize_operations(row["operations"] if row["operations"] is not None else []),
+            "content_edit": _parse_jsonb(row["content_edit"]),
+            "content_hash": row.get("content_hash"),
+        }
         document_id = proposal["document_id"]
         edit_type = proposal["edit_type"]
         applied_count = 0
@@ -938,178 +1010,83 @@ async def apply_document_edit_proposal(
         frontmatter, body = parse_frontmatter(current_content)
         has_frontmatter = bool(frontmatter)
         
+        is_partial_proposal_update = False
+        remaining_raw: List[Dict[str, Any]] = []
+
         if edit_type == "operations":
-            # Import resolver for re-resolution after each operation
-            from utils.editor_operations_resolver import resolve_operation
-            
-            # Helper to calculate frontmatter end index
-            def get_frontmatter_end(content: str) -> int:
-                """Calculate the end index of frontmatter in content."""
-                import re
-                m = re.match(r'^(---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n)', content)
-                if m:
-                    return m.end()
-                return 0
-            
-            # Apply selected operations
-            operations = proposal["operations"]
+            from utils.editor_operations_resolver import resolve_operations
+            resolved_ops = resolve_operations(current_content, proposal["operations"])
+            raw_ops = _normalize_operations(proposal["operations"])
+            n = min(len(raw_ops), len(resolved_ops))
+            if len(raw_ops) != len(resolved_ops):
+                logger.warning(
+                    "Raw/resolved operations length mismatch (%s vs %s); applying using min length %s",
+                    len(raw_ops),
+                    len(resolved_ops),
+                    n,
+                )
+
+            indexed_candidates = []
             if selected_operation_indices is None:
-                # Apply all operations
-                selected_ops = operations
+                for i in range(n):
+                    op = resolved_ops[i]
+                    if op.get("confidence", 0) > 0 and op.get("start", -1) >= 0:
+                        indexed_candidates.append((i, op))
             else:
-                # Apply only selected operations
-                selected_ops = [ops[i] for i in selected_operation_indices if 0 <= i < len(operations)]
-            
-            # Sort operations by start position (highest first to keep offsets stable)
-            selected_ops = sorted(selected_ops, key=lambda op: op.get("start", 0), reverse=True)
-            
-            new_content = current_content
-            applied_ops = []
-            skipped_ops = []
-            
-            # Process operations one at a time, re-resolving after each
-            remaining_ops = selected_ops.copy()
-            
-            while remaining_ops:
-                op = remaining_ops.pop(0)
-                op_type = op.get("op_type", "replace_range")
-                original_start = op.get("start", 0)
-                original_end = op.get("end", original_start)
-                text = op.get("text", "")
-                original_text = op.get("original_text", "")
-                anchor_text = op.get("anchor_text", "")
-                
-                # FIX 1: Validate operation before applying
-                if op_type in ("replace_range", "delete_range") and original_text:
-                    # Check if the text at the resolved position matches original_text
-                    if original_start < len(new_content) and original_end <= len(new_content):
-                        actual_text = new_content[original_start:original_end]
-                        if actual_text != original_text:
-                            logger.error(f"❌ Operation validation failed: original_text mismatch")
-                            logger.error(f"   Operation: {op_type} at [{original_start}:{original_end}]")
-                            logger.error(f"   Expected length: {len(original_text)}, Actual length: {len(actual_text)}")
-                            logger.error(f"   Expected preview: {repr(original_text[:100])}")
-                            logger.error(f"   Actual preview: {repr(actual_text[:100])}")
-                            
-                            # Try to re-resolve this operation with current content
-                            logger.info(f"   🔄 Attempting to re-resolve operation with current content...")
-                            frontmatter_end = get_frontmatter_end(new_content)
-                            try:
-                                resolved_start, resolved_end, resolved_text, resolved_confidence = resolve_operation(
-                                    new_content,
-                                    op,
-                                    frontmatter_end=frontmatter_end,
-                                    require_anchors=False
-                                )
-                                
-                                if resolved_start >= 0 and resolved_end > resolved_start:
-                                    # Re-resolution succeeded - update operation
-                                    logger.info(f"   ✅ Re-resolution succeeded: [{resolved_start}:{resolved_end}] confidence={resolved_confidence:.2f}")
-                                    op["start"] = resolved_start
-                                    op["end"] = resolved_end
-                                    op["text"] = resolved_text
-                                    op["confidence"] = resolved_confidence
-                                    
-                                    # Validate the re-resolved position
-                                    actual_text = new_content[resolved_start:resolved_end]
-                                    if actual_text != original_text:
-                                        logger.error(f"   ❌ Re-resolved position validation failed - original_text mismatch")
-                                        logger.error(f"      Expected: {repr(original_text[:100])}")
-                                        logger.error(f"      Actual: {repr(actual_text[:100])}")
-                                        logger.error(f"      Skipping operation to prevent document corruption")
-                                        skipped_ops.append(op)
-                                        continue
-                                else:
-                                    logger.error(f"   ❌ Re-resolution failed - skipping operation")
-                                    skipped_ops.append(op)
-                                    continue
-                            except Exception as e:
-                                logger.error(f"   ❌ Re-resolution error: {e} - skipping operation")
-                                skipped_ops.append(op)
-                                continue
-                    else:
-                        logger.error(f"❌ Operation validation failed: position out of bounds")
-                        logger.error(f"   Operation: {op_type} at [{original_start}:{original_end}], content length: {len(new_content)}")
-                        skipped_ops.append(op)
+                seen = set()
+                for i in selected_operation_indices:
+                    if not isinstance(i, int) or i in seen:
                         continue
-                
-                # Apply the operation
+                    seen.add(i)
+                    if (
+                        0 <= i < n
+                        and resolved_ops[i].get("confidence", 0) > 0
+                        and resolved_ops[i].get("start", -1) >= 0
+                    ):
+                        indexed_candidates.append((i, resolved_ops[i]))
+            indexed_candidates.sort(key=lambda x: x[1].get("start", 0), reverse=True)
+
+            new_content = current_content
+            applied_raw_indices = set()
+            skipped_ops: List[Dict[str, Any]] = []
+            for raw_idx, op in indexed_candidates:
+                op_type = op.get("op_type", "replace_range")
+                start = op.get("start", 0)
+                end = op.get("end", start)
+                text = op.get("text", "")
                 try:
-                    start = op.get("start", 0)
-                    end = op.get("end", start)
-                    
                     if op_type == "delete_range":
-                        if start < len(new_content) and end <= len(new_content):
+                        if 0 <= start < end <= len(new_content):
                             new_content = new_content[:start] + new_content[end:]
-                            applied_ops.append(op)
+                            applied_raw_indices.add(raw_idx)
                         else:
-                            logger.error(f"❌ Delete operation out of bounds: [{start}:{end}], content length: {len(new_content)}")
                             skipped_ops.append(op)
                     elif op_type == "replace_range":
-                        if start < len(new_content) and end <= len(new_content):
+                        if 0 <= start < end <= len(new_content):
                             new_content = new_content[:start] + text + new_content[end:]
-                            applied_ops.append(op)
+                            applied_raw_indices.add(raw_idx)
                         else:
-                            logger.error(f"❌ Replace operation out of bounds: [{start}:{end}], content length: {len(new_content)}")
                             skipped_ops.append(op)
-                    elif op_type == "insert_after_heading":
-                        # For insert_after_heading, we need to find the anchor and insert after it
-                        if anchor_text:
-                            anchor_pos = new_content.find(anchor_text)
-                            if anchor_pos != -1:
-                                # Find end of line after anchor
-                                line_end = new_content.find("\n", anchor_pos + len(anchor_text))
-                                if line_end == -1:
-                                    line_end = len(new_content)
-                                insert_pos = line_end + 1
-                                new_content = new_content[:insert_pos] + text + "\n" + new_content[insert_pos:]
-                                applied_ops.append(op)
-                            else:
-                                logger.warning(f"⚠️ Anchor text not found for insert_after_heading: {anchor_text[:50]}")
-                                skipped_ops.append(op)
+                    elif op_type in ("insert_after_heading", "insert_after"):
+                        if 0 <= start <= len(new_content):
+                            new_content = new_content[:start] + text + new_content[start:]
+                            applied_raw_indices.add(raw_idx)
                         else:
-                            # Fallback to end
-                            new_content = new_content + "\n" + text
-                            applied_ops.append(op)
+                            skipped_ops.append(op)
+                    else:
+                        skipped_ops.append(op)
                 except Exception as e:
-                    logger.error(f"❌ Error applying operation: {e}")
-                    logger.error(f"   Operation: {op_type} at [{op.get('start', 0)}:{op.get('end', 0)}]")
+                    logger.error("Error applying operation: %s", e)
                     skipped_ops.append(op)
-                    continue
-                
-                # FIX 2: Re-resolve remaining operations after content change
-                if remaining_ops:
-                    logger.info(f"🔄 Re-resolving {len(remaining_ops)} remaining operation(s) after content change...")
-                    frontmatter_end = get_frontmatter_end(new_content)
-                    
-                    for remaining_op in remaining_ops:
-                        # Only re-resolve if operation has original_text or anchor_text
-                        if remaining_op.get("original_text") or remaining_op.get("anchor_text"):
-                            try:
-                                resolved_start, resolved_end, resolved_text, resolved_confidence = resolve_operation(
-                                    new_content,
-                                    remaining_op,
-                                    frontmatter_end=frontmatter_end,
-                                    require_anchors=False
-                                )
-                                
-                                if resolved_start >= 0 and resolved_end >= resolved_start:
-                                    # Update operation with new positions
-                                    remaining_op["start"] = resolved_start
-                                    remaining_op["end"] = resolved_end
-                                    remaining_op["text"] = resolved_text
-                                    remaining_op["confidence"] = resolved_confidence
-                                    logger.debug(f"   ✅ Re-resolved operation: [{resolved_start}:{resolved_end}] confidence={resolved_confidence:.2f}")
-                                else:
-                                    logger.warning(f"   ⚠️ Re-resolution failed for operation - will use original positions")
-                            except Exception as e:
-                                logger.warning(f"   ⚠️ Re-resolution error for operation: {e} - will use original positions")
-            
-            applied_count = len(applied_ops)
+            applied_count = len(applied_raw_indices)
             if skipped_ops:
-                logger.warning(f"⚠️ Skipped {len(skipped_ops)} operation(s) due to validation failures")
-                applied_count = len(applied_ops)
-            
+                logger.warning("Skipped %s operation(s) due to validation failures", len(skipped_ops))
+
+            remaining_raw = [raw_ops[i] for i in range(len(raw_ops)) if i not in applied_raw_indices]
+            is_partial_proposal_update = bool(
+                selected_operation_indices is not None and len(remaining_raw) > 0
+            )
+
         elif edit_type == "content":
             # Apply content edit
             content_edit = proposal["content_edit"]
@@ -1136,6 +1113,13 @@ async def apply_document_edit_proposal(
             
             applied_count = 1
         
+        # Snapshot current content before overwrite (version history)
+        try:
+            from services.document_version_service import snapshot_before_write
+            await snapshot_before_write(document_id, proposal["user_id"], "proposal_apply", proposal.get("summary"), proposal.get("operations"))
+        except Exception as verr:
+            logger.warning("Version snapshot before write failed (non-fatal): %s", verr)
+        
         # Write updated content to file
         file_path.write_text(new_content, encoding='utf-8')
         logger.info(f"✅ Applied edit proposal: {file_path} ({len(new_content)} chars)")
@@ -1145,43 +1129,84 @@ async def apply_document_edit_proposal(
             document_id,
             len(new_content.encode('utf-8'))
         )
+
+        has_pending_proposals = bool(is_partial_proposal_update)
+        if is_partial_proposal_update:
+            # asyncpg jsonb bind expects a JSON string, not a raw Python list
+            await execute(
+                "UPDATE document_edit_proposals SET operations = $1::jsonb WHERE proposal_id = $2::uuid",
+                json.dumps(remaining_raw),
+                proposal_id,
+                rls_context=rls,
+            )
+        else:
+            await execute(
+                "DELETE FROM document_edit_proposals WHERE proposal_id = $1::uuid",
+                proposal_id,
+                rls_context=rls,
+            )
+
+        try:
+            if container.websocket_manager:
+                await container.websocket_manager.send_document_status_update(
+                    document_id=document_id,
+                    status="completed",
+                    user_id=user_id,
+                    filename=None,
+                    proposal_data={"has_pending_proposals": has_pending_proposals},
+                )
+        except Exception as e:
+            logger.warning("Failed to send proposal applied notification: %s", e)
+
+        # Check if document is exempt from vectorization BEFORE processing
+        is_exempt = await document_service.document_repository.is_document_exempt(document_id, user_id)
+        if is_exempt:
+            logger.info(f"🚫 Document {document_id} is exempt from vectorization - skipping embedding and KG extraction")
+            await document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
+            await document_service._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+            return {
+                "success": True,
+                "document_id": document_id,
+                "applied_count": applied_count,
+                "message": f"Document edit proposal applied successfully ({applied_count} edit(s)) - exempt from vectorization"
+            }
         
-        # Re-embed the document
-        await document_service.document_repository.update_status(document_id, ProcessingStatus.EMBEDDING)
-        await document_service.embedding_manager.delete_document_chunks(document_id)
-        
-        if document_service.kg_service:
+        # Run vectorization in background so API returns quickly; frontend can refresh content immediately
+        async def _reembed_after_apply() -> None:
             try:
-                await document_service.kg_service.delete_document_entities(document_id)
-                logger.info(f"🗑️ Deleted old knowledge graph entities for {document_id}")
+                await document_service.document_repository.update_status(document_id, ProcessingStatus.EMBEDDING)
+                await document_service.embedding_manager.delete_document_chunks(document_id)
+                if document_service.kg_service:
+                    try:
+                        await document_service.kg_service.delete_document_entities(document_id)
+                        logger.info("🗑️ Deleted old knowledge graph entities for %s", document_id)
+                    except Exception as e:
+                        logger.warning("⚠️ Failed to delete old KG entities for %s: %s", document_id, e)
+                metadata = {
+                    "title": getattr(doc_info, "title", ""),
+                    "tags": getattr(doc_info, "tags", []),
+                    "category": getattr(doc_info, "category", ""),
+                }
+                chunks = await document_service.document_processor.process_text_content(
+                    new_content, document_id, metadata
+                )
+                if chunks:
+                    await document_service.embedding_manager.embed_and_store_chunks(chunks, document_id)
+                    logger.info("✅ Re-embedded %s chunks for document %s", len(chunks), document_id)
+                await document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
+                await document_service._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
             except Exception as e:
-                logger.warning(f"⚠️ Failed to delete old KG entities for {document_id}: {e}")
+                logger.error("❌ Background re-embed after apply failed: %s", e)
+                import traceback
+                logger.error("%s", traceback.format_exc())
+                try:
+                    await document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
+                    await document_service._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
+                except Exception as e2:
+                    logger.warning("Failed to set status after re-embed error: %s", e2)
         
-        # Re-process content into chunks
-        metadata = {
-            "title": getattr(doc_info, 'title', ''),
-            "tags": getattr(doc_info, 'tags', []),
-            "category": getattr(doc_info, 'category', '')
-        }
-        
-        chunks = await document_service.document_processor.process_text_content(
-            new_content, document_id, metadata
-        )
-        
-        # Store chunks in vector database
-        if chunks:
-            await document_service.embedding_manager.embed_and_store_chunks(chunks, document_id)
-            logger.info(f"✅ Re-embedded {len(chunks)} chunks for document {document_id}")
-        
-        # Update status to completed
-        await document_service.document_repository.update_status(document_id, ProcessingStatus.COMPLETED)
-        
-        # Emit WebSocket notification for UI refresh (so open editor tabs update automatically)
-        await document_service._emit_document_status_update(document_id, ProcessingStatus.COMPLETED.value, user_id)
-        
-        # Mark proposal as applied
-        proposal["applied"] = True
-        proposal["applied_at"] = datetime.now().isoformat()
+        import asyncio
+        asyncio.create_task(_reembed_after_apply())
         
         return {
             "success": True,
@@ -1201,15 +1226,131 @@ async def apply_document_edit_proposal(
         }
 
 
-def get_document_edit_proposal(proposal_id: str) -> Optional[Dict[str, Any]]:
+def _row_to_proposal_dict(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert a DB row to proposal dict for API/WebSocket. Parses JSONB columns (asyncpg returns strings)."""
+    return {
+        "proposal_id": str(row["proposal_id"]),
+        "document_id": row["document_id"],
+        "user_id": row["user_id"],
+        "edit_type": row["edit_type"],
+        "operations": _normalize_operations(row["operations"] if row["operations"] is not None else []),
+        "content_edit": _parse_jsonb(row["content_edit"]),
+        "agent_name": row["agent_name"],
+        "summary": row["summary"],
+        "requires_preview": row["requires_preview"],
+        "content_hash": row.get("content_hash"),
+        "expires_at": row["expires_at"].isoformat() if row.get("expires_at") else None,
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+    }
+
+
+async def _get_document_content_for_resolution(document_id: str, user_id: str) -> Optional[str]:
+    """Load current document content for JIT resolution. Returns None if document not found."""
+    from services.service_container import get_service_container
+    container = await get_service_container()
+    document_service = container.document_service
+    folder_service = container.folder_service
+    doc_info = await document_service.get_document(document_id)
+    if not doc_info:
+        return None
+    file_path = await folder_service.get_document_file_path(
+        filename=doc_info.filename,
+        folder_id=getattr(doc_info, 'folder_id', None),
+        user_id=user_id,
+        collection_type=getattr(doc_info, 'collection_type', 'user')
+    )
+    if not file_path or not file_path.exists():
+        return None
+    return file_path.read_text(encoding='utf-8')
+
+
+def _dedup_cross_proposal_ops(proposals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Get a document edit proposal by ID (for frontend/API access)
-    
-    Args:
-        proposal_id: Proposal ID
-    
-    Returns:
-        Proposal dict or None if not found
+    Remove ops from older proposals whose resolved range overlaps a newer proposal's op.
+
+    Proposals should be sorted by created_at ascending. When two ops from different
+    proposals resolve to overlapping character ranges, the newer proposal's op wins
+    and the older one is dropped from the API response. No DB mutation.
     """
-    return _document_edit_proposals.get(proposal_id)
+    if len(proposals) < 2:
+        return proposals
+
+    # All resolved ranges with proposal timestamp (ISO string from API dict).
+    claimed: List[tuple] = []
+    for p in reversed(proposals):
+        p_ts = p.get("created_at") or ""
+        for op in p.get("operations") or []:
+            s, e = op.get("start", -1), op.get("end", -1)
+            if s >= 0 and e > s:
+                claimed.append((s, e, p_ts))
+
+    for p in proposals:
+        p_ts = p.get("created_at") or ""
+        kept: List[Dict[str, Any]] = []
+        for op in p.get("operations") or []:
+            s, e = op.get("start", -1), op.get("end", -1)
+            if s < 0:
+                kept.append(op)
+                continue
+            superseded = False
+            for cs, ce, claim_ts in claimed:
+                if claim_ts != p_ts and claim_ts > p_ts:
+                    if not (e <= cs or s >= ce):
+                        superseded = True
+                        break
+            if not superseded:
+                kept.append(op)
+        p["operations"] = kept
+
+    return [
+        p
+        for p in proposals
+        if p.get("edit_type") != "operations" or len(p.get("operations") or []) > 0
+    ]
+
+
+async def list_pending_proposals_for_document(document_id: str, user_id: str = "system") -> List[Dict[str, Any]]:
+    """List pending proposals for a document. Operations are resolved JIT against current content."""
+    from services.database_manager.database_helpers import fetch_all
+    from utils.editor_operations_resolver import resolve_operations
+    rows = await fetch_all(
+        "SELECT proposal_id, document_id, user_id, edit_type, operations, content_edit, agent_name, summary, requires_preview, content_hash, expires_at, created_at FROM document_edit_proposals WHERE document_id = $1 AND (expires_at IS NULL OR expires_at > NOW()) ORDER BY created_at ASC",
+        document_id,
+        rls_context={"user_id": user_id, "user_role": "user"}
+    )
+    proposals = [_row_to_proposal_dict(row) for row in (rows or [])]
+    if not proposals:
+        return proposals
+    current_content = await _get_document_content_for_resolution(document_id, user_id)
+    if current_content is None:
+        return proposals
+    for p in proposals:
+        if p.get("edit_type") == "operations" and p.get("operations"):
+            resolved = resolve_operations(current_content, p["operations"])
+            filtered = []
+            for i, op in enumerate(resolved):
+                if op.get("confidence", 0) > 0 and op.get("start", -1) >= 0:
+                    op = dict(op)
+                    op["proposal_operation_index"] = i
+                    filtered.append(op)
+            p["operations"] = filtered
+
+    proposals = _dedup_cross_proposal_ops(proposals)
+    return proposals
+
+
+async def get_document_edit_proposal(proposal_id: str, user_id: str = "system") -> Optional[Dict[str, Any]]:
+    """
+    Get a document edit proposal by ID (for frontend/API access).
+    Requires user_id for RLS.
+    """
+    from services.database_manager.database_helpers import fetch_one
+    row = await fetch_one(
+        "SELECT proposal_id, document_id, user_id, edit_type, operations, content_edit, agent_name, summary, requires_preview, content_hash, expires_at, created_at FROM document_edit_proposals WHERE proposal_id = $1::uuid",
+        proposal_id,
+        rls_context={"user_id": user_id, "user_role": "user"}
+    )
+    if not row:
+        return None
+    return _row_to_proposal_dict(row)
 

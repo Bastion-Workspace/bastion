@@ -1,7 +1,8 @@
 """
-gRPC Service Implementation - Connections Service (email, calendar, etc.)
+gRPC Service Implementation - Connections Service (email, messaging, data source connectors).
 """
 
+import json
 import logging
 import sys
 from typing import Any, Dict, List
@@ -9,12 +10,40 @@ from typing import Any, Dict, List
 sys.path.insert(0, "/app")
 
 from connections_service_pb2 import (
+    CalendarEvent,
+    CalendarEventAttendee,
+    CalendarInfo,
+    Contact,
+    ContactEmailAddress,
+    ContactPhoneNumber,
+    CreateCalendarEventRequest,
+    CreateCalendarEventResponse,
+    CreateContactRequest,
+    CreateContactResponse,
+    CreateDraftRequest,
+    CreateDraftResponse,
+    DeleteCalendarEventRequest,
+    DeleteCalendarEventResponse,
+    DeleteContactRequest,
+    DeleteContactResponse,
     DeleteEmailRequest,
     DeleteEmailResponse,
     EmailMessage,
     EmailFolder,
+    ExecuteConnectorEndpointRequest,
+    ExecuteConnectorEndpointResponse,
+    ProbeApiEndpointRequest,
+    ProbeApiEndpointResponse,
     GetBotStatusRequest,
     GetBotStatusResponse,
+    GetCalendarEventByIdRequest,
+    GetCalendarEventByIdResponse,
+    GetCalendarEventsRequest,
+    GetCalendarEventsResponse,
+    GetContactByIdRequest,
+    GetContactByIdResponse,
+    GetContactsRequest,
+    GetContactsResponse,
     GetEmailByIdRequest,
     GetEmailByIdResponse,
     GetEmailStatisticsRequest,
@@ -27,6 +56,8 @@ from connections_service_pb2 import (
     GetFoldersResponse,
     HealthCheckRequest,
     HealthCheckResponse,
+    ListCalendarsRequest,
+    ListCalendarsResponse,
     MoveEmailRequest,
     MoveEmailResponse,
     RegisterBotRequest,
@@ -37,19 +68,36 @@ from connections_service_pb2 import (
     SearchEmailsResponse,
     SendEmailRequest,
     SendEmailResponse,
+    SendOutboundMessageRequest,
+    SendOutboundMessageResponse,
     SyncFolderRequest,
     SyncFolderResponse,
     UnregisterBotRequest,
     UnregisterBotResponse,
+    UpdateCalendarEventRequest,
+    UpdateCalendarEventResponse,
+    UpdateContactRequest,
+    UpdateContactResponse,
     UpdateEmailRequest,
     UpdateEmailResponse,
 )
 from connections_service_pb2_grpc import ConnectionsServiceServicer
 from config.settings import settings
+from service.connector_executor import (
+    execute_connector as connector_execute_connector,
+    probe_api_endpoint as connector_probe_api_endpoint,
+)
 from service.provider_router import get_provider
 
 logger = logging.getLogger(__name__)
 
+
+def _body_looks_like_html(body: str) -> bool:
+    """Treat body as HTML if it looks like a document (DOCTYPE or <html)."""
+    if not body or not body.strip():
+        return False
+    stripped = body.strip().lower()
+    return stripped.startswith("<!doctype") or stripped.startswith("<html")
 
 def _dict_to_email_message(d: Dict[str, Any]) -> EmailMessage:
     return EmailMessage(
@@ -76,6 +124,68 @@ def _dict_to_folder(d: Dict[str, Any]) -> EmailFolder:
         parent_id=d.get("parent_id", ""),
         unread_count=d.get("unread_count", 0),
         total_count=d.get("total_count", 0),
+    )
+
+
+def _dict_to_calendar_info(d: Dict[str, Any]) -> CalendarInfo:
+    return CalendarInfo(
+        id=d.get("id", ""),
+        name=d.get("name", ""),
+        color=d.get("color", ""),
+        is_default=d.get("is_default", False),
+        can_edit=d.get("can_edit", True),
+    )
+
+
+def _dict_to_calendar_event(d: Dict[str, Any]) -> CalendarEvent:
+    attendees = []
+    for a in d.get("attendees") or []:
+        attendees.append(
+            CalendarEventAttendee(
+                email=a.get("email", ""),
+                name=a.get("name", ""),
+                response_status=a.get("response_status", "none"),
+            )
+        )
+    return CalendarEvent(
+        id=d.get("id", ""),
+        subject=d.get("subject", ""),
+        start_datetime=d.get("start_datetime", ""),
+        end_datetime=d.get("end_datetime", ""),
+        location=d.get("location", ""),
+        body_preview=d.get("body_preview", ""),
+        body_content=d.get("body_content", ""),
+        organizer_email=d.get("organizer_email", ""),
+        organizer_name=d.get("organizer_name", ""),
+        attendees=attendees,
+        is_all_day=d.get("is_all_day", False),
+        recurrence=d.get("recurrence", ""),
+        calendar_id=d.get("calendar_id", ""),
+        web_link=d.get("web_link", ""),
+    )
+
+
+def _dict_to_contact(d: Dict[str, Any]) -> Contact:
+    emails = [
+        ContactEmailAddress(address=e.get("address", ""), name=e.get("name", ""))
+        for e in d.get("email_addresses") or []
+    ]
+    phones = [
+        ContactPhoneNumber(number=p.get("number", ""), type=p.get("type", ""))
+        for p in d.get("phone_numbers") or []
+    ]
+    return Contact(
+        id=d.get("id", ""),
+        display_name=d.get("display_name", ""),
+        given_name=d.get("given_name", ""),
+        surname=d.get("surname", ""),
+        email_addresses=emails,
+        phone_numbers=phones,
+        company_name=d.get("company_name", ""),
+        job_title=d.get("job_title", ""),
+        birthday=d.get("birthday", ""),
+        notes=d.get("notes", ""),
+        folder_id=d.get("folder_id", ""),
     )
 
 
@@ -167,16 +277,39 @@ class ConnectionsServiceImplementation(ConnectionsServiceServicer):
         provider = get_provider(request.provider or "microsoft")
         if not provider:
             return SendEmailResponse(success=False, error="Unknown provider")
+        body = request.body or ""
+        body_is_html = request.body_is_html or _body_looks_like_html(body)
         result = await provider.send_email(
             request.access_token,
             to_recipients=list(request.to_recipients),
             subject=request.subject or "",
-            body=request.body or "",
+            body=body,
             cc_recipients=list(request.cc_recipients) if request.cc_recipients else None,
             bcc_recipients=list(request.bcc_recipients) if request.bcc_recipients else None,
-            body_is_html=request.body_is_html,
+            body_is_html=body_is_html,
         )
         return SendEmailResponse(
+            success=result.get("success", False),
+            message_id=result.get("message_id", ""),
+            error=result.get("error") or None,
+        )
+
+    async def CreateDraft(self, request: CreateDraftRequest, context) -> CreateDraftResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return CreateDraftResponse(success=False, error="Unknown provider")
+        body = request.body or ""
+        body_is_html = request.body_is_html or _body_looks_like_html(body)
+        result = await provider.create_draft(
+            request.access_token,
+            to_recipients=list(request.to_recipients),
+            subject=request.subject or "",
+            body=body,
+            cc_recipients=list(request.cc_recipients) if request.cc_recipients else None,
+            bcc_recipients=list(request.bcc_recipients) if request.bcc_recipients else None,
+            body_is_html=body_is_html,
+        )
+        return CreateDraftResponse(
             success=result.get("success", False),
             message_id=result.get("message_id", ""),
             error=result.get("error") or None,
@@ -188,12 +321,14 @@ class ConnectionsServiceImplementation(ConnectionsServiceServicer):
         provider = get_provider(request.provider or "microsoft")
         if not provider:
             return ReplyToEmailResponse(success=False, error="Unknown provider")
+        body = request.body or ""
+        body_is_html = request.body_is_html or _body_looks_like_html(body)
         result = await provider.reply_to_email(
             request.access_token,
             request.message_id,
-            request.body or "",
+            body,
             reply_all=request.reply_all,
-            body_is_html=request.body_is_html,
+            body_is_html=body_is_html,
         )
         return ReplyToEmailResponse(
             success=result.get("success", False),
@@ -294,6 +429,237 @@ class ConnectionsServiceImplementation(ConnectionsServiceServicer):
             error=result.get("error") or None,
         )
 
+    async def ListCalendars(
+        self, request: ListCalendarsRequest, context
+    ) -> ListCalendarsResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return ListCalendarsResponse(calendars=[], error="Unknown provider")
+        result = await provider.list_calendars(request.access_token)
+        calendars = [_dict_to_calendar_info(c) for c in result.get("calendars", [])]
+        return ListCalendarsResponse(
+            calendars=calendars,
+            error=result.get("error") or None,
+        )
+
+    async def GetCalendarEvents(
+        self, request: GetCalendarEventsRequest, context
+    ) -> GetCalendarEventsResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return GetCalendarEventsResponse(events=[], total_count=0, error="Unknown provider")
+        result = await provider.get_calendar_events(
+            request.access_token,
+            calendar_id=request.calendar_id or "",
+            start_datetime=request.start_datetime or "",
+            end_datetime=request.end_datetime or "",
+            top=request.top or 50,
+        )
+        events = [_dict_to_calendar_event(e) for e in result.get("events", [])]
+        return GetCalendarEventsResponse(
+            events=events,
+            total_count=result.get("total_count", 0),
+            error=result.get("error") or None,
+        )
+
+    async def GetCalendarEventById(
+        self, request: GetCalendarEventByIdRequest, context
+    ) -> GetCalendarEventByIdResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return GetCalendarEventByIdResponse(error="Unknown provider")
+        result = await provider.get_event_by_id(request.access_token, request.event_id)
+        ev = result.get("event")
+        return GetCalendarEventByIdResponse(
+            event=_dict_to_calendar_event(ev) if ev else None,
+            error=result.get("error") or None,
+        )
+
+    async def CreateCalendarEvent(
+        self, request: CreateCalendarEventRequest, context
+    ) -> CreateCalendarEventResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return CreateCalendarEventResponse(success=False, error="Unknown provider")
+        result = await provider.create_event(
+            request.access_token,
+            subject=request.subject or "",
+            start_datetime=request.start_datetime or "",
+            end_datetime=request.end_datetime or "",
+            location=request.location or "",
+            body=request.body or "",
+            body_is_html=request.body_is_html,
+            attendee_emails=list(request.attendee_emails) if request.attendee_emails else None,
+            is_all_day=request.is_all_day,
+            calendar_id=request.calendar_id or "",
+        )
+        return CreateCalendarEventResponse(
+            success=result.get("success", False),
+            event_id=result.get("event_id", ""),
+            error=result.get("error") or None,
+        )
+
+    async def UpdateCalendarEvent(
+        self, request: UpdateCalendarEventRequest, context
+    ) -> UpdateCalendarEventResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return UpdateCalendarEventResponse(success=False, error="Unknown provider")
+        subject = request.subject if request.subject else None
+        start_dt = request.start_datetime if request.start_datetime else None
+        end_dt = request.end_datetime if request.end_datetime else None
+        location = request.location if request.location else None
+        body = request.body if request.body else None
+        attendee_emails = list(request.attendee_emails) if request.attendee_emails else None
+        is_all_day = request.is_all_day if request.HasField("is_all_day") else None
+        result = await provider.update_event(
+            request.access_token,
+            request.event_id,
+            subject=subject,
+            start_datetime=start_dt,
+            end_datetime=end_dt,
+            location=location,
+            body=body,
+            body_is_html=request.body_is_html,
+            attendee_emails=attendee_emails,
+            is_all_day=is_all_day,
+        )
+        return UpdateCalendarEventResponse(
+            success=result.get("success", False),
+            error=result.get("error") or None,
+        )
+
+    async def DeleteCalendarEvent(
+        self, request: DeleteCalendarEventRequest, context
+    ) -> DeleteCalendarEventResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return DeleteCalendarEventResponse(success=False, error="Unknown provider")
+        result = await provider.delete_event(request.access_token, request.event_id)
+        return DeleteCalendarEventResponse(
+            success=result.get("success", False),
+            error=result.get("error") or None,
+        )
+
+    async def GetContacts(
+        self, request: GetContactsRequest, context
+    ) -> GetContactsResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return GetContactsResponse(contacts=[], total_count=0, error="Unknown provider")
+        result = await provider.get_contacts(
+            request.access_token,
+            folder_id=request.folder_id or "",
+            top=request.top or 100,
+        )
+        contacts = [_dict_to_contact(c) for c in result.get("contacts", [])]
+        return GetContactsResponse(
+            contacts=contacts,
+            total_count=result.get("total_count", 0),
+            error=result.get("error") or None,
+        )
+
+    async def GetContactById(
+        self, request: GetContactByIdRequest, context
+    ) -> GetContactByIdResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return GetContactByIdResponse(error="Unknown provider")
+        result = await provider.get_contact_by_id(
+            request.access_token, request.contact_id
+        )
+        contact = result.get("contact")
+        return GetContactByIdResponse(
+            contact=_dict_to_contact(contact) if contact else None,
+            error=result.get("error") or None,
+        )
+
+    async def CreateContact(
+        self, request: CreateContactRequest, context
+    ) -> CreateContactResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return CreateContactResponse(success=False, error="Unknown provider")
+        email_addresses = [
+            {"address": e.address, "name": e.name}
+            for e in (request.email_addresses or [])
+        ]
+        phone_numbers = [
+            {"number": p.number, "type": p.type}
+            for p in (request.phone_numbers or [])
+        ]
+        result = await provider.create_contact(
+            request.access_token,
+            display_name=request.display_name or "",
+            given_name=request.given_name or "",
+            surname=request.surname or "",
+            email_addresses=email_addresses if email_addresses else None,
+            phone_numbers=phone_numbers if phone_numbers else None,
+            company_name=request.company_name or "",
+            job_title=request.job_title or "",
+            birthday=request.birthday or "",
+            notes=request.notes or "",
+            folder_id=request.folder_id or "",
+        )
+        return CreateContactResponse(
+            success=result.get("success", False),
+            contact_id=result.get("contact_id", ""),
+            error=result.get("error") or None,
+        )
+
+    async def UpdateContact(
+        self, request: UpdateContactRequest, context
+    ) -> UpdateContactResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return UpdateContactResponse(success=False, error="Unknown provider")
+        display_name = request.display_name if request.display_name else None
+        given_name = request.given_name if request.given_name else None
+        surname = request.surname if request.surname else None
+        company_name = request.company_name if request.company_name else None
+        job_title = request.job_title if request.job_title else None
+        birthday = request.birthday if request.birthday else None
+        notes = request.notes if request.notes else None
+        email_addresses = [
+            {"address": e.address, "name": e.name}
+            for e in (request.email_addresses or [])
+        ] or None
+        phone_numbers = [
+            {"number": p.number, "type": p.type}
+            for p in (request.phone_numbers or [])
+        ] or None
+        result = await provider.update_contact(
+            request.access_token,
+            request.contact_id,
+            display_name=display_name,
+            given_name=given_name,
+            surname=surname,
+            email_addresses=email_addresses,
+            phone_numbers=phone_numbers,
+            company_name=company_name,
+            job_title=job_title,
+            birthday=birthday,
+            notes=notes,
+        )
+        return UpdateContactResponse(
+            success=result.get("success", False),
+            error=result.get("error") or None,
+        )
+
+    async def DeleteContact(
+        self, request: DeleteContactRequest, context
+    ) -> DeleteContactResponse:
+        provider = get_provider(request.provider or "microsoft")
+        if not provider:
+            return DeleteContactResponse(success=False, error="Unknown provider")
+        result = await provider.delete_contact(
+            request.access_token, request.contact_id
+        )
+        return DeleteContactResponse(
+            success=result.get("success", False),
+            error=result.get("error") or None,
+        )
+
     async def RegisterBot(self, request: RegisterBotRequest, context) -> RegisterBotResponse:
         if not self._listener_manager:
             return RegisterBotResponse(success=False, error="Listener manager not configured")
@@ -330,3 +696,136 @@ class ConnectionsServiceImplementation(ConnectionsServiceServicer):
             bot_username=result.get("bot_username", ""),
             error=result.get("error") or None,
         )
+
+    async def SendOutboundMessage(
+        self, request: SendOutboundMessageRequest, context
+    ) -> SendOutboundMessageResponse:
+        if not self._listener_manager:
+            return SendOutboundMessageResponse(
+                success=False, error="Listener manager not configured"
+            )
+        result = await self._listener_manager.send_outbound(
+            user_id=request.user_id or "",
+            provider=request.provider or "",
+            connection_id=request.connection_id or "",
+            message=request.message or "",
+            format=request.format or "markdown",
+            recipient_chat_id=getattr(request, "recipient_chat_id", None) or "",
+        )
+        return SendOutboundMessageResponse(
+            success=result.get("success", False),
+            message_id=result.get("message_id", ""),
+            channel=result.get("channel", ""),
+            error=result.get("error") or None,
+        )
+
+    async def ExecuteConnectorEndpoint(
+        self, request: ExecuteConnectorEndpointRequest, context
+    ) -> ExecuteConnectorEndpointResponse:
+        """Execute a data source connector endpoint; definition and credentials from backend via gRPC."""
+        try:
+            definition = {}
+            if request.definition_json:
+                definition = json.loads(request.definition_json)
+            credentials = {}
+            if request.credentials_json:
+                credentials = json.loads(request.credentials_json)
+            params = {}
+            if request.params_json:
+                params = json.loads(request.params_json)
+            oauth_token = request.oauth_token or None
+            if oauth_token == "":
+                oauth_token = None
+            result = await connector_execute_connector(
+                definition=definition,
+                credentials=credentials,
+                endpoint_id=request.endpoint_id or "",
+                params=params,
+                max_pages=request.max_pages if request.max_pages > 0 else 5,
+                oauth_token=oauth_token,
+                raw_response=request.raw_response,
+            )
+            records_json = json.dumps(result.get("records", []))
+            raw_response_json = ""
+            if result.get("raw_response") is not None:
+                raw_response_json = json.dumps(result["raw_response"])
+            return ExecuteConnectorEndpointResponse(
+                success=not result.get("error"),
+                records_json=records_json,
+                count=result.get("count", 0),
+                formatted=result.get("formatted", ""),
+                raw_response_json=raw_response_json,
+                error=result.get("error") or None,
+            )
+        except json.JSONDecodeError as e:
+            logger.exception("ExecuteConnectorEndpoint JSON decode failed: %s", e)
+            return ExecuteConnectorEndpointResponse(
+                success=False,
+                records_json="[]",
+                count=0,
+                formatted="",
+                raw_response_json="",
+                error=str(e),
+            )
+        except Exception as e:
+            logger.exception("ExecuteConnectorEndpoint failed: %s", e)
+            return ExecuteConnectorEndpointResponse(
+                success=False,
+                records_json="[]",
+                count=0,
+                formatted="",
+                raw_response_json="",
+                error=str(e),
+            )
+
+    async def ProbeApiEndpoint(
+        self, request: ProbeApiEndpointRequest, context
+    ) -> ProbeApiEndpointResponse:
+        """Raw HTTP request for API discovery (no connector definition)."""
+        try:
+            headers = {}
+            if request.headers_json:
+                try:
+                    headers = json.loads(request.headers_json)
+                except json.JSONDecodeError:
+                    return ProbeApiEndpointResponse(
+                        success=False, error="Invalid headers_json"
+                    )
+            body = None
+            if request.body_json:
+                try:
+                    body = json.loads(request.body_json)
+                except json.JSONDecodeError:
+                    return ProbeApiEndpointResponse(
+                        success=False, error="Invalid body_json"
+                    )
+            params = None
+            if request.params_json:
+                try:
+                    params = json.loads(request.params_json)
+                except json.JSONDecodeError:
+                    return ProbeApiEndpointResponse(
+                        success=False, error="Invalid params_json"
+                    )
+            result = await connector_probe_api_endpoint(
+                url=request.url or "",
+                method=request.method or "GET",
+                headers=headers,
+                body=body,
+                params=params,
+            )
+            if not result.get("success"):
+                return ProbeApiEndpointResponse(
+                    success=False,
+                    error=result.get("error", "Probe failed"),
+                )
+            return ProbeApiEndpointResponse(
+                success=True,
+                status_code=result.get("status_code", 0),
+                response_headers_json=json.dumps(result.get("response_headers", {})),
+                response_body=result.get("response_body", ""),
+                content_type=result.get("content_type", ""),
+            )
+        except Exception as e:
+            logger.exception("ProbeApiEndpoint failed: %s", e)
+            return ProbeApiEndpointResponse(success=False, error=str(e))

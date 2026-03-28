@@ -426,7 +426,8 @@ class ProposalGenerationAgent(BaseAgent):
                 if pr_outline_doc_id:
                     try:
                         from orchestrator.tools.document_tools import get_document_content_tool
-                        pr_outline_content = await get_document_content_tool(pr_outline_doc_id, state.get("user_id", "system"))
+                        _r = await get_document_content_tool(pr_outline_doc_id, state.get("user_id", "system"))
+                        pr_outline_content = _r.get("content", _r) if isinstance(_r, dict) else _r
                         logger.info("Loaded pr-outline document from storage")
                     except Exception as e:
                         logger.warning(f"Failed to load pr-outline document: {e}")
@@ -507,11 +508,14 @@ class ProposalGenerationAgent(BaseAgent):
                             company_knowledge_id = outline_frontmatter.get("company_knowledge_id") or outline_frontmatter.get("company_knowledge")
                             
                             if pr_req_doc_id:
-                                pr_req_content = await get_document_content_tool(pr_req_doc_id, state.get("user_id", "system"))
+                                _r = await get_document_content_tool(pr_req_doc_id, state.get("user_id", "system"))
+                                pr_req_content = _r.get("content", _r) if isinstance(_r, dict) else _r
                             if pr_style_doc_id:
-                                pr_style_content = await get_document_content_tool(pr_style_doc_id, state.get("user_id", "system"))
+                                _r = await get_document_content_tool(pr_style_doc_id, state.get("user_id", "system"))
+                                pr_style_content = _r.get("content", _r) if isinstance(_r, dict) else _r
                             if company_knowledge_id:
-                                company_knowledge = await get_document_content_tool(company_knowledge_id, state.get("user_id", "system"))
+                                _r = await get_document_content_tool(company_knowledge_id, state.get("user_id", "system"))
+                                company_knowledge = _r.get("content", _r) if isinstance(_r, dict) else _r
                             
                             logger.info("Loaded references directly from pr-outline frontmatter (fallback)")
                         except Exception as fallback_error:

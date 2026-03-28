@@ -86,7 +86,8 @@ async def retrieve_full_documents_node(state: Dict[str, Any]) -> Dict[str, Any]:
                     pass
                 
                 # Retrieve full content
-                content = await get_document_content_tool(doc_id, user_id)
+                _r = await get_document_content_tool(doc_id, user_id)
+                content = _r.get("content", _r) if isinstance(_r, dict) else _r
                 
                 # Check for errors
                 if content.startswith("Document not found:") or content.startswith("Error getting document content:"):

@@ -81,8 +81,8 @@ class OrgSettingsService:
                 
                 if row:
                     # Parse settings from JSON
-                    logger.info(f"🔍 ROOSEVELT: Raw settings_json type: {type(row['settings_json'])}")
-                    logger.info(f"🔍 ROOSEVELT: Raw settings_json content: {row['settings_json']}")
+                    logger.info("Raw settings_json type: %s", type(row["settings_json"]))
+                    logger.info("Raw settings_json content: %s", row["settings_json"])
                     
                     # Handle both dict and string JSON
                     if isinstance(row['settings_json'], dict):
@@ -95,11 +95,11 @@ class OrgSettingsService:
                     settings_dict['created_at'] = row['created_at']
                     settings_dict['updated_at'] = row['updated_at']
                     
-                    logger.info(f"✅ ROOSEVELT: Loaded settings for user {user_id}")
+                    logger.info("Loaded org settings for user %s", user_id)
                     return OrgModeSettings(**settings_dict)
                 else:
                     # Return default settings
-                    logger.info(f"📝 ROOSEVELT: No settings found for user {user_id}, using defaults")
+                    logger.info("No org settings found for user %s, using defaults", user_id)
                     return self._get_default_settings(user_id)
         
         except Exception as e:
@@ -181,7 +181,7 @@ class OrgSettingsService:
                         updated_at = $4
                 """, user_id, settings_json, current_settings.created_at, current_settings.updated_at)
             
-            logger.info(f"✅ ROOSEVELT: Saved org settings for user {user_id}")
+            logger.info("Saved org settings for user %s", user_id)
             return current_settings
         
         except Exception as e:
@@ -200,7 +200,7 @@ class OrgSettingsService:
                     user_id
                 )
             
-            logger.info(f"✅ ROOSEVELT: Deleted org settings for user {user_id}")
+            logger.info("Deleted org settings for user %s", user_id)
             return True
         
         except Exception as e:
@@ -258,7 +258,7 @@ async def get_org_settings_service():
     
     if _org_settings_service is None:
         _org_settings_service = OrgSettingsService()
-        logger.info("✅ ROOSEVELT: Org Settings Service initialized!")
+        logger.info("Org Settings Service initialized")
     
     return _org_settings_service
 

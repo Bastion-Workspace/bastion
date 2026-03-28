@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-const API_BASE_URL = process.env.REACT_APP_API_URL || '';
+const API_BASE_URL = import.meta.env.VITE_API_URL || '';
 
 class DataWorkspaceService {
   constructor() {
@@ -116,10 +116,15 @@ class DataWorkspaceService {
     return response.data;
   }
 
-  async getTableData(tableId, offset = 0, limit = 100) {
-    const response = await this.api.get(`/tables/${tableId}/data`, {
-      params: { offset, limit },
-    });
+  async updateTable(tableId, data) {
+    const response = await this.api.put(`/tables/${tableId}`, data);
+    return response.data;
+  }
+
+  async getTableData(tableId, offset = 0, limit = 100, databaseId = null) {
+    const params = { offset, limit };
+    if (databaseId) params.database_id = databaseId;
+    const response = await this.api.get(`/tables/${tableId}/data`, { params });
     return response.data;
   }
 
@@ -170,6 +175,13 @@ class DataWorkspaceService {
 
   async listSharedWorkspaces() {
     const response = await this.api.get('/workspaces/shared');
+    return response.data;
+  }
+
+  async executeSql(workspaceId, { query, limit = 1000, params = null }) {
+    const body = { query, limit };
+    if (params && params.length) body.params = params;
+    const response = await this.api.post(`/workspaces/${workspaceId}/query/sql`, body);
     return response.data;
   }
 }

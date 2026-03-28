@@ -31,7 +31,7 @@ from typing import Dict, Any, List, Optional
 
 from langgraph.graph import StateGraph, END
 
-from orchestrator.tools import search_web_tool, crawl_web_content_tool, search_web_structured
+from orchestrator.tools import search_web_tool, crawl_web_content_tool, search_web_tool
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +50,8 @@ async def web_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
         
         # Track tool usage
         previous_tools = shared_memory.get("previous_tools_used", [])
-        if "search_web_structured" not in previous_tools:
-            previous_tools.append("search_web_structured")
+        if "search_web_tool" not in previous_tools:
+            previous_tools.append("search_web_tool")
             shared_memory["previous_tools_used"] = previous_tools
             state["shared_memory"] = shared_memory
         
@@ -59,7 +59,7 @@ async def web_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
         if queries and len(queries) > 1:
             logger.info(f"Web search: Parallel search with {len(queries)} queries")
             search_tasks = [
-                search_web_structured(query=q, max_results=max_results) 
+                search_web_tool(query=q, max_results=max_results) 
                 for q in queries[:3]  # Limit to top 3 queries
             ]
             search_results = await asyncio.gather(*search_tasks, return_exceptions=True)
@@ -87,9 +87,10 @@ async def web_search_node(state: Dict[str, Any]) -> Dict[str, Any]:
             # Single query search
             search_query = queries[0] if queries and len(queries) == 1 else query
             logger.info(f"Web search: {search_query[:100]}")
-            structured_results = await search_web_structured(query=search_query, max_results=max_results)
+            raw = await search_web_tool(query=search_query, max_results=max_results)
+            structured_results = raw.get("results", []) if isinstance(raw, dict) else (raw or [])
         
-        logger.info("Tool used: search_web_structured (web search)")
+        logger.info("Tool used: search_web_tool (web search)")
         
         # Format for display (backward compatibility)
         formatted_results = []

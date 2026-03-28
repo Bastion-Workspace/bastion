@@ -10,19 +10,11 @@ from datetime import datetime
 
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from pydantic import BaseModel, Field
 from .base_agent import BaseAgent, TaskStatus
 from orchestrator.models.agent_response_contract import AgentResponse
+from orchestrator.middleware.message_preprocessor import MessagePreprocessor
 
 logger = logging.getLogger(__name__)
-
-
-class HandoffDecision(BaseModel):
-    """Structured output for LLM-based handoff-to-research decision"""
-    should_handoff_to_research: bool = Field(
-        description="True only if this is a new factual/research question that requires external research and cannot be answered from local context. False for comments, thanks, acknowledgments, or follow-ups that do not ask for new external information."
-    )
-    reason: Optional[str] = Field(default=None, description="Brief reason for the decision")
 
 
 class ChatState(TypedDict):
@@ -36,17 +28,15 @@ class ChatState(TypedDict):
     llm_messages: List[Any]
     needs_calculations: bool
     calculation_result: Optional[Dict[str, Any]]
-    local_data_results: Optional[str]  # Vector search results for local data queries
-    image_search_results: Optional[str]  # Base64-encoded images from image search
-    image_result_count: int  # Count of images returned
-    extracted_images: List[str]  # List of base64 image markdown strings to append
-    attached_image_analysis: Optional[Dict[str, Any]]  # Analysis results for attached images
+    local_data_results: Optional[str]
+    image_search_results: Optional[str]
+    image_result_count: int
+    extracted_images: List[str]
+    attached_image_analysis: Optional[Dict[str, Any]]
     response: Dict[str, Any]
     task_status: str
     error: str
-    shared_memory: Dict[str, Any]  # For storing primary_agent_selected and continuity data
-    should_handoff_to_research: Optional[bool]  # Set by LLM handoff decision node
-    handoff_response: Optional[Dict[str, Any]]  # Research result when handoff was taken
+    shared_memory: Dict[str, Any]
 
 
 class ChatAgent(BaseAgent):
@@ -60,73 +50,51 @@ class ChatAgent(BaseAgent):
         """Build LangGraph workflow for chat agent"""
         workflow = StateGraph(ChatState)
         
-        # Add nodes
         workflow.add_node("prepare_context", self._prepare_context_node)
         workflow.add_node("process_attached_images", self._process_attached_images_node)
         workflow.add_node("fast_time_response", self._fast_time_response_node)
         workflow.add_node("check_local_data", self._check_local_data_node)
         workflow.add_node("detect_calculations", self._detect_calculations_node)
         workflow.add_node("perform_calculations", self._perform_calculations_node)
-        workflow.add_node("call_research_agent", self._call_research_agent_node)
         workflow.add_node("generate_response", self._generate_response_node)
         
-        # Entry point
         workflow.set_entry_point("prepare_context")
         
-        # Route from prepare_context: check for attached images, then fast path or normal flow
         workflow.add_conditional_edges(
             "prepare_context",
             self._route_from_prepare_context,
             {
                 "process_images": "process_attached_images",
                 "fast_time": "fast_time_response",
-                "normal": "check_local_data"  # Run local retrieval (incl. image/object search) before handoff decision
+                "normal": "check_local_data",
             }
         )
         
-        # After processing images, route based on intent
         workflow.add_conditional_edges(
             "process_attached_images",
             self._route_from_image_processing,
             {
-                "image_search": "check_local_data",  # Check local data before generating response
-                "image_generation": "generate_response",  # Will trigger image generation
-                "normal": "check_local_data"
+                "image_search": "check_local_data",
+                "image_generation": "generate_response",
+                "normal": "check_local_data",
             }
         )
         
-        # Fast time response goes directly to END
         workflow.add_edge("fast_time_response", END)
-        
-        # After checking local data, always go to detect_calculations (handoff decided by LLM later)
         workflow.add_edge("check_local_data", "detect_calculations")
         
-        # Route based on whether calculations are needed
         workflow.add_conditional_edges(
             "detect_calculations",
             self._route_from_calculation_detection,
             {
                 "calculate": "perform_calculations",
-                "respond": "generate_response"
+                "respond": "generate_response",
             }
         )
         
-        # After calculations, go to generate_response (handoff decided inside that node)
         workflow.add_edge("perform_calculations", "generate_response")
+        workflow.add_edge("generate_response", END)
         
-        # After generate_response: if it requested handoff, call Research; else END
-        workflow.add_conditional_edges(
-            "generate_response",
-            self._route_from_generate_response,
-            {
-                "call_research": "call_research_agent",
-                "end": END
-            }
-        )
-        
-        workflow.add_edge("call_research_agent", END)
-        
-        # Compile with checkpointer for state persistence
         return workflow.compile(checkpointer=checkpointer)
     
     def _route_from_prepare_context(self, state: ChatState) -> str:
@@ -338,15 +306,28 @@ class ChatAgent(BaseAgent):
     
     def _build_chat_prompt(self, persona: Optional[Dict[str, Any]] = None, metadata: Optional[Dict[str, Any]] = None) -> str:
         """Build system prompt for chat agent"""
+        team_context_prefix = ""
+        if metadata and metadata.get("team_chat_context"):
+            team_context_prefix = (
+                "TEAM CONTEXT (the user asked about this team; use this to answer):\n\n"
+                + (metadata.get("team_chat_context") or "").strip()
+                + "\n\n---\n\n"
+            )
         ai_name = persona.get("ai_name", "Alex") if persona else "Alex"
         persona_style = persona.get("persona_style", "professional") if persona else "professional"
         
         # Extract user context from metadata
         preferred_name = metadata.get("user_preferred_name", "") if metadata else ""
         user_context = metadata.get("user_ai_context", "") if metadata else ""
+        user_memory = metadata.get("user_memory", "") if metadata else ""
+        user_facts = metadata.get("user_facts", "") if metadata else ""
+        user_episodes = metadata.get("user_episodes", "") if metadata else ""
         
-        # Build style instruction based on persona_style
-        style_instruction = self._get_style_instruction(persona_style)
+        # Build style instruction: use custom style_instruction from DB persona when present
+        custom_prefs = (persona or {}).get("custom_preferences") or {}
+        style_instruction = custom_prefs.get("style_instruction") or (persona or {}).get("style_instruction")
+        if not style_instruction:
+            style_instruction = self._get_style_instruction(persona_style)
         
         # Build user context sections
         user_context_sections = []
@@ -354,10 +335,17 @@ class ChatAgent(BaseAgent):
             user_context_sections.append(f"USER PREFERENCE:\nThe user prefers to be addressed as: {preferred_name.strip()}")
         if user_context and user_context.strip():
             user_context_sections.append(f"USER CONTEXT:\n{user_context.strip()}")
+        if user_memory and user_memory.strip():
+            user_context_sections.append(user_memory.strip())
+        else:
+            if user_facts and user_facts.strip():
+                user_context_sections.append(f"USER FACTS:\n{user_facts.strip()}")
+            if user_episodes and user_episodes.strip():
+                user_context_sections.append(user_episodes.strip())
         
         user_context_text = "\n\n".join(user_context_sections) + "\n\n" if user_context_sections else ""
         
-        base_prompt = f"""You are {ai_name}, a conversational AI assistant. Your role is to have natural conversations while providing accurate, useful information.
+        base_prompt = f"""{team_context_prefix}You are {ai_name}, a conversational AI assistant. Your role is to have natural conversations while providing accurate, useful information.
 
 {style_instruction}
 
@@ -393,8 +381,10 @@ WHAT YOU HANDLE:
 - Technical discussions using your training knowledge
 - Mathematical calculations (the system will automatically calculate for you)
 
-WHAT YOU DON'T HANDLE (hand off instead of suggesting):
-- Questions requiring search of the user's local documents or files: do NOT suggest they "use the research agent". Set handoff_to_research to TRUE so we call the Research agent for them (Research does local + web). Only answer from context when we already have strong local results and the user asked a simple follow-up.
+WHAT YOU DON'T HANDLE (signal cannot_answer instead of suggesting):
+- Questions requiring search of the user's local documents or files
+- Questions needing external web research, citations, or factual verification you can't answer from context
+For these, set cannot_answer to true. The system will automatically route to the right specialist. Do NOT suggest the user "use the research agent" — signal cannot_answer and let the system handle it.
 
 VISUALIZATION TOOL:
 You have access to a chart generation tool that can create visual representations of data.
@@ -416,41 +406,39 @@ PROJECT GUIDANCE:
 - If user asks about project-specific work (e.g., "add a component to our system") without a project open:
   * Guide them to create a project first using the same instructions
 
-HANDOFF TO RESEARCH:
-- Set handoff_to_research to TRUE when: (1) the user asks for EXTERNAL research (web, citations) you cannot answer from context, OR (2) the user explicitly asks to research or search their documents (e.g. "research and see if we have X", "see if we have any X", "find any X in my documents"). We will then call the Research agent (it does local + web). Do NOT reply with "use the research agent" — hand off instead.
-- Set handoff_to_research to FALSE for: comments, thanks, acknowledgments, casual conversation, or when you already have strong local results and are giving a direct answer. Do NOT hand off for "find my photos" / "show me my pictures" (local image browse only).
-
 STRUCTURED OUTPUT REQUIREMENT:
 You MUST respond with valid JSON matching this schema:
 {{
-    "message": "Your conversational response (empty or brief if handoff_to_research is true)",
+    "message": "Your conversational response",
     "task_status": "complete",
-    "handoff_to_research": false
+    "cannot_answer": false
 }}
 
-When handoff_to_research is true, leave message empty or a brief placeholder; we will call Research and replace it.
+Set cannot_answer to true ONLY when: (1) the user asks for external research, web citations, or factual information you cannot answer from your training data or provided context, OR (2) the user explicitly asks to search their documents (e.g. "see if we have X", "find any X in my documents").
+Set cannot_answer to false for: greetings, comments, thanks, acknowledgments, casual conversation, general knowledge, creative brainstorming, opinions, or anything you CAN answer.
+When cannot_answer is true, still provide a brief message if possible (e.g. "Let me look that up for you.").
 
 EXAMPLES:
 
-Simple acknowledgment (no handoff):
+Simple acknowledgment:
 {{
     "message": "You're welcome! Let me know if you need anything else.",
     "task_status": "complete",
-    "handoff_to_research": false
+    "cannot_answer": false
 }}
 
-Detailed response (no handoff):
+Detailed response:
 {{
     "message": "Here's what I think about that topic...",
     "task_status": "complete",
-    "handoff_to_research": false
+    "cannot_answer": false
 }}
 
-Needs external research (hand off):
+Needs specialist help:
 {{
-    "message": "",
+    "message": "Let me look into that for you.",
     "task_status": "complete",
-    "handoff_to_research": true
+    "cannot_answer": true
 }}
 
 CONVERSATION CONTEXT:
@@ -462,201 +450,6 @@ IMAGES:
 **IMPORTANT**: When images are found, you will see a note saying "X images found and will be included". ONLY describe or mention those EXACT X images in your response text. If 2 images are included, mention only 2 items. If 3 images are included, mention all 3. Never mention more images than will be displayed. Just write your conversational reply - images will appear automatically below your message."""
 
         return base_prompt
-    
-    def _route_from_generate_response(self, state: ChatState) -> str:
-        """Route based on main response LLM handoff decision: call Research or END"""
-        if state.get("should_handoff_to_research") is True:
-            logger.info("💬 HANDOFF: Main response LLM requested handoff to research_agent")
-            return "call_research"
-        return "end"
-    
-    async def _assess_handoff_need_node(self, state: ChatState) -> Dict[str, Any]:
-        """LLM-based assessment: should Chat hand off to Research for this query?"""
-        try:
-            query = state.get("query", "")
-            local_data_results = state.get("local_data_results") or ""
-            messages = state.get("messages", [])
-            shared_memory = state.get("shared_memory", {})
-            
-            # Build context for LLM: query, local data summary, last turn
-            local_summary = "none"
-            if local_data_results and str(local_data_results).strip():
-                local_summary = str(local_data_results)[:500] + ("..." if len(str(local_data_results)) > 500 else "")
-            
-            last_turn = ""
-            for m in reversed(messages[-4:]):
-                if hasattr(m, "content") and getattr(m, "type", None) != "human":
-                    role = getattr(m, "type", "") or (getattr(m, "name", "") and "human" or "assistant")
-                    if role == "human":
-                        last_turn = f"User: {m.content[:200]}" + ("..." if len(str(m.content)) > 200 else "") + "\n" + last_turn
-                    else:
-                        last_turn = f"Assistant: {str(m.content)[:200]}..." + "\n" + last_turn
-                elif hasattr(m, "content"):
-                    last_turn = str(m.content)[:300] + "\n" + last_turn
-            if not last_turn:
-                last_turn = "(no prior messages)"
-            
-            # Do NOT hand off when user is asking for their own photos/images (local search, not web research)
-            # BUT: Allow handoff if user explicitly requests research/search
-            image_search_results = state.get("image_search_results") or ""
-            has_local_images = bool(image_search_results and str(image_search_results).strip())
-            
-            # Detect explicit research requests (these override local-only detection)
-            query_lower_handoff = query.lower()
-            research_keywords = ["research", "search for", "look up", "find out", "investigate"]
-            explicit_research_request = any(kw in query_lower_handoff for kw in research_keywords)
-            
-            # Detect local-only photo queries (only if NOT an explicit research request)
-            find_my_photos_patterns = [
-                "find me photos", "find me some photos", "show me photos", "show me pictures", "get me photos",
-                "my photos", "my pictures", "my images"
-            ]
-            is_find_my_photos = (
-                not explicit_research_request and
-                any(p in query_lower_handoff for p in find_my_photos_patterns)
-            )
-
-            prompt = f"""You are deciding whether the Chat agent should hand off to the Research agent (external web search and citations).
-
-CURRENT USER QUERY: {query}
-
-LOCAL DATA AVAILABLE (from user's documents): {local_summary}
-
-RECENT CONVERSATION (last turn): {last_turn}
-
-RULES:
-- Set should_handoff_to_research to TRUE only if: the user is asking a NEW factual or research question that requires EXTERNAL information (web, citations) and you cannot answer it from the local data above.
-- Set should_handoff_to_research to FALSE for: comments, thanks, acknowledgments ("ok", "thanks", "that's helpful"), or follow-ups that do NOT ask for new external research (e.g. "what about X?" when X is a clarification, not a new research question).
-- Set should_handoff_to_research to FALSE for: queries asking to find the user's OWN photos or images (e.g. "find me photos with X", "photos with X in them", "my photos of X", "show me pictures with Y"). Those are LOCAL photo search; the system already checked local data — do NOT hand off to Research for web search.
-- Do NOT hand off for casual conversation or when local data already answers the question.
-
-Return valid JSON only: {{ "should_handoff_to_research": true or false, "reason": "brief reason or null" }}"""
-            
-            llm = self._get_llm(temperature=0.0, state=state)
-            try:
-                structured_llm = llm.with_structured_output(HandoffDecision)
-                decision = await structured_llm.ainvoke([HumanMessage(content=prompt)])
-            except Exception:
-                response = await llm.ainvoke([HumanMessage(content=prompt)])
-                content = response.content if hasattr(response, "content") else str(response)
-                parsed = self._parse_json_response(content) or {}
-                decision = HandoffDecision(
-                    should_handoff_to_research=bool(parsed.get("should_handoff_to_research", False)),
-                    reason=parsed.get("reason")
-                )
-            
-            should_handoff = decision.should_handoff_to_research
-            # Override: never hand off for "find my photos" queries (local search) or when we already have local image results
-            # BUT: Explicit research requests always allow handoff
-            if explicit_research_request and should_handoff:
-                logger.info("💬 HANDOFF ALLOWED: Explicit research request detected — allowing handoff to Research")
-            elif has_local_images:
-                should_handoff = False
-                logger.info("💬 HANDOFF OVERRIDE: Local image results present — not handing off to Research")
-            elif is_find_my_photos:
-                should_handoff = False
-                logger.info("💬 HANDOFF OVERRIDE: Query is find-my-photos (local search) — not handing off to Research")
-            else:
-                logger.info(f"💬 HANDOFF DECISION: should_handoff_to_research={should_handoff}, reason={decision.reason}")
-
-            return {
-                "should_handoff_to_research": should_handoff,
-                "shared_memory": shared_memory,
-                "metadata": state.get("metadata", {}),
-                "user_id": state.get("user_id", "system"),
-                "messages": messages,
-                "query": query,
-                "local_data_results": state.get("local_data_results"),
-                "image_search_results": state.get("image_search_results"),
-                "image_result_count": state.get("image_result_count", 0),
-                "calculation_result": state.get("calculation_result"),
-                "persona": state.get("persona"),
-                "system_prompt": state.get("system_prompt"),
-                "llm_messages": state.get("llm_messages"),
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Handoff assessment failed: {e}")
-            return {
-                "should_handoff_to_research": False,
-                "shared_memory": state.get("shared_memory", {}),
-                "metadata": state.get("metadata", {}),
-                "user_id": state.get("user_id", "system"),
-                "messages": state.get("messages", []),
-                "query": state.get("query", ""),
-                "local_data_results": state.get("local_data_results"),
-                "image_search_results": state.get("image_search_results"),
-                "image_result_count": state.get("image_result_count", 0),
-            }
-    
-    async def _call_research_agent_node(self, state: ChatState) -> Dict[str, Any]:
-        """Call Research agent and return its response. Same as being routed to Research: Research runs (local + web if permitted)."""
-        try:
-            shared_memory = state.get("shared_memory", {})
-            from orchestrator.agents import get_full_research_agent
-
-            research_agent = get_full_research_agent()
-            query = state.get("query", "")
-            metadata = state.get("metadata", {})
-            messages = state.get("messages", [])
-
-            # Pass full shared_memory so Research sees web_search_permission and behaves like direct routing
-            handoff_shared_memory = {
-                "user_chat_model": metadata.get("user_chat_model"),
-                "handoff_context": {
-                    "source_agent": "chat_agent",
-                    "handoff_type": "quick_lookup",
-                    "conversation_context": "User asked a question Chat could not answer from local context; Research is providing cited answer.",
-                },
-            }
-            research_shared_memory = {**shared_memory, **handoff_shared_memory}
-            research_metadata = {
-                "user_id": state.get("user_id"),
-                "conversation_id": metadata.get("conversation_id"),
-                "persona": metadata.get("persona"),
-                "user_chat_model": metadata.get("user_chat_model"),
-                "shared_memory": research_shared_memory,
-            }
-
-            logger.info(f"💬 HANDOFF: Calling research_agent for: {query[:80]}... (same as direct Research routing)")
-            research_result = await research_agent.process(
-                query=query,
-                metadata=research_metadata,
-                messages=messages,
-            )
-            
-            shared_memory["primary_agent_selected"] = "research_agent"
-            shared_memory["last_agent"] = "research_agent"
-            
-            return {
-                "response": research_result if isinstance(research_result, dict) else research_result.dict(exclude_none=True) if hasattr(research_result, "dict") else {"response": str(research_result), "agent_type": "research_agent", "task_status": "complete", "timestamp": datetime.now().isoformat()},
-                "handoff_response": research_result if isinstance(research_result, dict) else research_result.dict(exclude_none=True) if hasattr(research_result, "dict") else None,
-                "shared_memory": shared_memory,
-                "metadata": state.get("metadata", {}),
-                "user_id": state.get("user_id", "system"),
-                "messages": state.get("messages", []),
-                "query": state.get("query", ""),
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Research handoff failed: {e}")
-            shared_memory = state.get("shared_memory", {})
-            error_response = AgentResponse(
-                response=f"Research handoff failed: {str(e)}. You can try asking: \"Do some research and [your query]\".",
-                task_status="error",
-                agent_type="chat_agent",
-                timestamp=datetime.now().isoformat(),
-                error=str(e),
-            )
-            return {
-                "response": error_response.dict(exclude_none=True),
-                "handoff_response": None,
-                "shared_memory": shared_memory,
-                "metadata": state.get("metadata", {}),
-                "user_id": state.get("user_id", "system"),
-                "messages": state.get("messages", []),
-                "query": state.get("query", ""),
-            }
     
     async def _check_local_data_node(self, state: ChatState) -> Dict[str, Any]:
         """Check local documents for relevant information using intelligent retrieval subgraph"""
@@ -770,11 +563,14 @@ Return valid JSON only: {{ "should_handoff_to_research": true or false, "reason"
             
             # Build messages for LLM using standardized helper
             messages_list = state.get("messages", [])
-            llm_messages = self._build_conversational_agent_messages(
+            context_window = int(metadata.get("context_window_size", 20))
+            llm_messages = MessagePreprocessor.build_conversational_messages(
                 system_prompt=system_prompt,
                 user_prompt=state["query"],
                 messages_list=messages_list,
-                look_back_limit=10
+                look_back_limit=context_window,
+                datetime_context=self._get_datetime_context(state),
+                sanitize_ai_responses=False,
             )
             
             return {
@@ -1161,38 +957,36 @@ Return ONLY valid JSON:
             response = await llm.ainvoke(llm_messages)
             processing_time = (datetime.now() - start_time).total_seconds()
             
-            # Parse structured response (message + optional handoff_to_research)
             response_content = response.content if hasattr(response, 'content') else str(response)
             structured_response = self._parse_json_response(response_content) or {}
             final_message = structured_response.get("message", response_content)
-            handoff_to_research = bool(structured_response.get("handoff_to_research", False))
+            cannot_answer = bool(structured_response.get("cannot_answer", False))
 
-            # Overrides: never hand off for local-only cases; force handoff for explicit research/document-lookup phrasing
             query_lower = (state.get("query") or "").lower()
+            is_trivial = self._is_simple_conversational_query(
+                state.get("query", ""), query_lower, state.get("messages", [])
+            )
             has_local_images = bool(state.get("image_search_results") and str(state.get("image_search_results", "")).strip())
             find_my_photos = any(p in query_lower for p in ["find me photos", "find me some photos", "show me photos", "my photos", "my pictures", "my images"])
-            explicit_research = any(kw in query_lower for kw in ["research", "search for", "look up", "find out", "investigate"])
-            document_lookup_phrases = ["research and ", "see if we have", "check if we have", "do we have any", "find any "]
-            explicit_document_lookup = any(p in query_lower for p in document_lookup_phrases)
-            if explicit_document_lookup and not find_my_photos:
-                handoff_to_research = True
-                logger.info("💬 HANDOFF: Explicit document-lookup phrasing — forcing handoff to Research (do not suggest user switch)")
-            elif explicit_research and handoff_to_research:
-                logger.info("💬 HANDOFF: Explicit research request — allowing handoff to Research")
-            elif has_local_images:
-                handoff_to_research = False
-                logger.info("💬 HANDOFF OVERRIDE: Local image results present — not handing off")
-            elif find_my_photos and not explicit_research:
-                handoff_to_research = False
-                logger.info("💬 HANDOFF OVERRIDE: Find-my-photos (local search) — not handing off")
-            elif handoff_to_research:
-                logger.info("💬 HANDOFF: Main response LLM requested handoff to Research")
 
-            if handoff_to_research:
-                shared_memory = state.get("shared_memory", {})
+            if is_trivial:
+                cannot_answer = False
+            elif has_local_images or (find_my_photos and not any(kw in query_lower for kw in ["research", "search for", "look up", "find out", "investigate"])):
+                cannot_answer = False
+            elif cannot_answer:
+                logger.info("💬 REJECT: Chat cannot answer — returning rejected for orchestrator re-routing")
+
+            if cannot_answer:
+                rejected_response = AgentResponse(
+                    response=final_message or "Let me find the right specialist for that.",
+                    task_status="rejected",
+                    agent_type="chat_agent",
+                    timestamp=datetime.now().isoformat(),
+                )
                 return {
-                    "should_handoff_to_research": True,
-                    "shared_memory": shared_memory,
+                    "response": rejected_response.dict(exclude_none=True),
+                    "task_status": "rejected",
+                    "shared_memory": state.get("shared_memory", {}),
                     "metadata": state.get("metadata", {}),
                     "user_id": state.get("user_id", "system"),
                     "messages": state.get("messages", []),
@@ -1315,8 +1109,9 @@ Return ONLY valid JSON:
             new_messages = self._prepare_messages_with_query(messages, query)
             
             # Load and merge checkpointed messages to preserve conversation history
+            context_window = int(metadata.get("context_window_size", 20))
             conversation_messages = await self._load_and_merge_checkpoint_messages(
-                workflow, config, new_messages
+                workflow, config, new_messages, look_back_limit=context_window
             )
             
             # Load shared_memory from checkpoint if available
@@ -1344,11 +1139,9 @@ Return ONLY valid JSON:
                 "calculation_result": None,
                 "local_data_results": None,
                 "response": {},
-                "task_status": "complete",  # Initialize with valid enum value
+                "task_status": "complete",
                 "error": "",
                 "shared_memory": shared_memory_merged,
-                "should_handoff_to_research": None,
-                "handoff_response": None,
             }
             
             # Run LangGraph workflow with checkpointing
@@ -1361,23 +1154,10 @@ Return ONLY valid JSON:
             task_status = result_state.get("task_status", "complete")
             result_shared_memory = result_state.get("shared_memory", {})
             
-            # Handoff path: Research was called; return Research response with continuity so last_agent = research_agent
-            is_handoff = (
-                isinstance(response, dict)
-                and response.get("agent_type") == "research_agent"
-            ) or result_state.get("handoff_response") is not None
-            if is_handoff and isinstance(response, dict) and response.get("agent_type") == "research_agent":
-                logger.info(f"📤 CHAT PROCESS: Returning Research handoff response (continuity: research_agent)")
-                return {
-                    **response,
-                    "shared_memory": {
-                        **result_shared_memory,
-                        "primary_agent_selected": "research_agent",
-                        "last_agent": "research_agent",
-                    },
-                }
-            
-            # Normalize task_status to valid enum value
+            if task_status == "rejected":
+                logger.info("📤 CHAT PROCESS: Returning rejection — orchestrator will re-route")
+                return response if isinstance(response, dict) else {"task_status": "rejected", "response": str(response)}
+
             if task_status not in ["complete", "incomplete", "permission_required", "error"]:
                 logger.warning(f"⚠️ CHAT PROCESS: Invalid task_status '{task_status}', normalizing to 'complete'")
                 task_status = "complete"

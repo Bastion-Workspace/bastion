@@ -3,12 +3,12 @@ Chat Attachment Cleanup Tasks
 Scheduled tasks for cleaning up old chat attachments
 """
 
-import asyncio
 import logging
 from datetime import datetime
 from typing import Dict, Any
 
 from services.celery_app import celery_app, TaskStatus
+from services.celery_tasks.async_runner import run_async
 
 logger = logging.getLogger(__name__)
 
@@ -23,20 +23,13 @@ def cleanup_old_chat_attachments_task(self, days: int = 7) -> Dict[str, Any]:
     try:
         logger.info(f"🧹 CHAT ATTACHMENT TASK: Starting cleanup of attachments older than {days} days")
 
-        # Create new event loop for this task
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            async def _cleanup():
-                from services.chat_attachment_service import chat_attachment_service
-                await chat_attachment_service.initialize()
-                deleted_count = await chat_attachment_service.cleanup_old_attachments(days=days)
-                return deleted_count
-            
-            deleted_count = loop.run_until_complete(_cleanup())
-        finally:
-            loop.close()
+        async def _cleanup():
+            from services.chat_attachment_service import chat_attachment_service
+            await chat_attachment_service.initialize()
+            deleted_count = await chat_attachment_service.cleanup_old_attachments(days=days)
+            return deleted_count
+
+        deleted_count = run_async(_cleanup())
 
         logger.info(f"✅ CHAT ATTACHMENT TASK: Cleaned up {deleted_count} old attachment files")
         return {

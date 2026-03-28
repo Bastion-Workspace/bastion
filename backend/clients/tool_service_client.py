@@ -5,9 +5,10 @@ Provides client interface to the Tool Service for weather and other tool operati
 """
 
 import grpc
+import json
 import logging
 import os
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 from config import get_settings
 from protos import tool_service_pb2, tool_service_pb2_grpc
@@ -269,6 +270,47 @@ class ToolServiceClient:
                 "identified_count": 0,
                 "error": str(e)
             }
+
+    async def discover_mcp_server(
+        self,
+        server_id: int,
+        user_id: str,
+    ) -> Dict[str, Any]:
+        """
+        Run MCP tools/list via tools-service (same environment as agent MCP execution).
+        """
+        try:
+            await self.initialize()
+            request = tool_service_pb2.DiscoverMcpServerRequest(
+                server_id=int(server_id),
+                user_id=user_id or "system",
+            )
+            response = await self.stub.DiscoverMcpServer(request)
+            if not response.success:
+                err = (response.error or "").strip() or "Discovery failed"
+                return {"success": False, "tools": [], "error": err}
+            raw = response.tools_json or "[]"
+            try:
+                tools = json.loads(raw)
+            except json.JSONDecodeError:
+                return {
+                    "success": False,
+                    "tools": [],
+                    "error": "Invalid tools_json from tools-service",
+                }
+            if not isinstance(tools, list):
+                tools = []
+            return {"success": True, "tools": tools, "error": ""}
+        except grpc.RpcError as e:
+            logger.error("discover_mcp_server gRPC failed: %s - %s", e.code(), e.details())
+            return {
+                "success": False,
+                "tools": [],
+                "error": f"Tools service unavailable: {e.details() or e.code()}",
+            }
+        except Exception as e:
+            logger.error("discover_mcp_server failed: %s", e)
+            return {"success": False, "tools": [], "error": str(e)}
 
 
 # Global client instance

@@ -13,30 +13,32 @@ logger = logging.getLogger(__name__)
 
 async def create_user_file(
     filename: str,
-    content: str,
+    content: str = "",
     folder_id: Optional[str] = None,
     folder_path: Optional[str] = None,
     title: Optional[str] = None,
     tags: Optional[list] = None,
     category: Optional[str] = None,
-    user_id: str = "system"
+    user_id: str = "system",
+    content_bytes: Optional[bytes] = None,
 ) -> Dict[str, Any]:
     """
-    Create a file in the user's My Documents section
-    
+    Create a file in the user's My Documents section.
+
     **SECURITY**: Only creates files in user's collection (collection_type='user')
-    Agents cannot create files in global collection
-    
+    Agents cannot create files in global collection.
+
     Args:
-        filename: Name of the file to create (e.g., "sensor_spec.md", "circuit_diagram.txt")
-        content: File content as string
+        filename: Name of the file to create (e.g., "sensor_spec.md", "report.pdf")
+        content: File content as string (omit when content_bytes is set)
         folder_id: Optional folder ID to place file in (must be user's folder)
         folder_path: Optional folder path (e.g., "Projects/Electronics") - will create if needed
         title: Optional document title (defaults to filename)
         tags: Optional list of tags for the document
         category: Optional category for the document
         user_id: User ID (required - must match the user making the request)
-    
+        content_bytes: Optional binary content (e.g. PDF, CSV). When set, content is ignored.
+
     Returns:
         Dict with document_id, filename, folder_id, and status
     """
@@ -107,7 +109,9 @@ async def create_user_file(
             doc_type = DocumentType.ORG
         elif filename.lower().endswith('.html') or filename.lower().endswith('.htm'):
             doc_type = DocumentType.HTML
-        
+        elif filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.webp')):
+            doc_type = DocumentType.IMAGE
+
         # Map category
         doc_category = DocumentCategory.OTHER
         if category:
@@ -116,9 +120,10 @@ async def create_user_file(
             except ValueError:
                 doc_category = DocumentCategory.OTHER
         
-        # Create file placement request
+        # Create file placement request (support binary via content_bytes)
         request = FilePlacementRequest(
-            content=content,
+            content=content if content_bytes is None else "",
+            content_bytes=content_bytes,
             title=title or filename,
             filename=filename,
             source_type=SourceType.AGENT_CREATED,

@@ -49,3 +49,14 @@ async def set_user_setting(user_id: str, key: str, value: str, data_type: str = 
         return False
 
 
+async def delete_user_setting(user_id: str, key: str) -> bool:
+    try:
+        await execute(
+            "DELETE FROM user_settings WHERE user_id = $1 AND key = $2",
+            user_id,
+            key,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Failed to delete user setting {key} for {user_id}: {e}")
+        return False

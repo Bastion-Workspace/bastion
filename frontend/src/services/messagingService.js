@@ -328,7 +328,7 @@ class MessagingService {
       const ws = new WebSocket(wsUrl);
       
       ws.onopen = () => {
-        console.log(`💬 BULLY! Connected to room ${roomId}`);
+        console.log(`Connected to room ${roomId}`);
         this.wsConnections.set(roomId, ws);
         
         // Start heartbeat

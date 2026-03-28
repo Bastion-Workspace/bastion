@@ -30,6 +30,8 @@ from orchestrator.utils.fiction_utilities import (
     extract_story_overview,
     extract_book_map,
     extract_pacing_block,
+    extract_beats_list,
+    extract_scene_groups,
 )
 from orchestrator.utils.anchor_correction import (
     auto_correct_operation_anchor,
@@ -181,16 +183,16 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                     break
         
         if prev_chapter_text:
-            section_header = f"=== MANUSCRIPT TEXT: {prev_chapter_label.upper()} (PREVIOUS - READ ONLY, FOR CONTINUITY AND ANCHORS) ===\n"
+            section_header = f"=== MANUSCRIPT TEXT: {prev_chapter_label.upper()} (PREVIOUS - CONDITIONALLY EDITABLE IF DIRECTLY RELEVANT TO CURRENT CHAPTER) ===\n"
             context_parts.append(section_header)
-            context_parts.append("⚠️ READ ONLY - DO NOT EDIT THIS CHAPTER ⚠️\n")
-            context_parts.append("This chapter is provided for context and continuity reference ONLY.\n")
-            context_parts.append("**EDITING RESTRICTIONS:**\n")
-            context_parts.append("- **YOU MUST NOT EDIT, MODIFY, OR CHANGE ANY TEXT IN THIS CHAPTER.**\n")
+            context_parts.append("⚠️ CONDITIONALLY EDITABLE - EDIT ONLY WHEN DIRECTLY RELEVANT TO CURRENT CHAPTER ⚠️\n")
+            context_parts.append("This chapter is provided for context and continuity reference.\n")
+            context_parts.append("**EDITING POLICY:**\n")
+            context_parts.append("- You may edit this chapter **only if** the change is directly required by or a direct consequence of your changes in the current chapter (e.g., a bridging sentence that overlaps the chapter boundary, or a continuity error that your current edit creates).\n")
+            context_parts.append("- When in doubt, prefer reporting issues in your 'summary' rather than fixing them here.\n")
             context_parts.append("- You may use text from this chapter as 'anchor_text' for operations in other chapters.\n")
             context_parts.append("- **ANALYSIS ALLOWED**: You CAN and SHOULD analyze this chapter and report any issues you find to the user.\n")
-            context_parts.append("- If you spot inconsistencies, errors, or problems in this READ ONLY chapter, mention them in your 'summary' field.\n")
-            context_parts.append("- **DO NOT create operations to fix issues in this chapter** - only report them to the user.\n\n")
+            context_parts.append("- If you spot inconsistencies, errors, or problems that are NOT directly tied to your current chapter edit, mention them in your 'summary' field; do not create operations for them.\n\n")
             
             # For new chapter generation, emphasize continuity assessment
             if is_fresh_request:
@@ -235,16 +237,16 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         })
         
         if next_chapter_text:
-            section_header = f"=== MANUSCRIPT TEXT: {next_chapter_label.upper()} (NEXT - READ ONLY, FOR CONTEXT ONLY, USE FOR ANCHORS IF NEEDED) ===\n"
+            section_header = f"=== MANUSCRIPT TEXT: {next_chapter_label.upper()} (NEXT - CONDITIONALLY EDITABLE IF DIRECTLY RELEVANT TO CURRENT CHAPTER) ===\n"
             context_parts.append(section_header)
-            context_parts.append("⚠️ READ ONLY - DO NOT EDIT THIS CHAPTER ⚠️\n")
-            context_parts.append("This chapter is provided for context and transition awareness ONLY.\n")
-            context_parts.append("**EDITING RESTRICTIONS:**\n")
-            context_parts.append("- **YOU MUST NOT EDIT, MODIFY, OR CHANGE ANY TEXT IN THIS CHAPTER.**\n")
+            context_parts.append("⚠️ CONDITIONALLY EDITABLE - EDIT ONLY WHEN DIRECTLY RELEVANT TO CURRENT CHAPTER ⚠️\n")
+            context_parts.append("This chapter is provided for context and transition awareness.\n")
+            context_parts.append("**EDITING POLICY:**\n")
+            context_parts.append("- You may edit this chapter **only if** the change is directly required by or a direct consequence of your changes in the current chapter (e.g., a bridging sentence that overlaps the chapter boundary, or a continuity error that your current edit creates).\n")
+            context_parts.append("- When in doubt, prefer reporting issues in your 'summary' rather than fixing them here.\n")
             context_parts.append("- You may use text from this chapter as 'anchor_text' for operations in other chapters.\n")
             context_parts.append("- **ANALYSIS ALLOWED**: You CAN and SHOULD analyze this chapter and report any issues you find to the user.\n")
-            context_parts.append("- If you spot inconsistencies, errors, or problems in this READ ONLY chapter, mention them in your 'summary' field.\n")
-            context_parts.append("- **DO NOT create operations to fix issues in this chapter** - only report them to the user.\n\n")
+            context_parts.append("- If you spot inconsistencies, errors, or problems that are NOT directly tied to your current chapter edit, mention them in your 'summary' field; do not create operations for them.\n\n")
             context_parts.append(f"{next_chapter_text}\n\n")
             context_structure["sections"].append({
                 "type": "manuscript_next_chapter",
@@ -290,15 +292,15 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         context_parts.append("All text ABOVE this line is MANUSCRIPT TEXT (use for anchors and text matching)\n")
         context_parts.append("All text BELOW this line is REFERENCE DOCUMENTS (use for story context, NOT for text matching)\n\n")
         context_parts.append("**CHAPTER EDITING RESTRICTIONS:**\n")
-        context_parts.append(f"✅ **ONLY EDIT**: Chapter {target_chapter_number if target_chapter_number else 'CURRENT'} (marked as 'CURRENT - EDITABLE')\n")
-        context_parts.append("❌ **READ ONLY**: PREVIOUS, NEXT, and REFERENCE chapters (marked as 'READ ONLY') - DO NOT EDIT THESE!\n")
-        context_parts.append("⚠️ **CRITICAL**: If PREVIOUS, NEXT, or REFERENCE chapters are shown above, they are for context reference ONLY.\n")
+        context_parts.append(f"✅ **PRIMARY EDIT TARGET**: Chapter {target_chapter_number if target_chapter_number else 'CURRENT'} (marked as 'CURRENT - EDITABLE')\n")
+        context_parts.append("⚠️ **PREVIOUS and NEXT chapters**: Conditionally editable ONLY if the change is directly caused by your current chapter edits (e.g., bridging text or continuity fixes). REFERENCE chapters remain fully read-only.\n")
+        context_parts.append("❌ **READ ONLY**: REFERENCE chapters (mentioned in query but not current/adjacent) - DO NOT EDIT THESE.\n")
         context_parts.append("   - You may use their text as 'anchor_text' for operations in the current chapter.\n")
-        context_parts.append("   - You MUST NOT create operations that modify READ ONLY chapters.\n")
-        context_parts.append("   - **BUT**: You CAN and SHOULD analyze READ ONLY chapters and report issues to the user in your 'summary'.\n\n")
+        context_parts.append("   - You MUST NOT create operations that modify REFERENCE chapters.\n")
+        context_parts.append("   - You CAN and SHOULD analyze all chapters and report issues to the user in your 'summary'.\n\n")
         context_parts.append("**REMINDER**: If you need to use 'original_text' or 'anchor_text' in your operations:\n")
         context_parts.append("✅ Copy from MANUSCRIPT TEXT sections above (marked with chapter numbers)\n")
-        context_parts.append("✅ **ONLY use text from the CURRENT/EDITABLE chapter** for 'original_text' in your operations\n")
+        context_parts.append("✅ Use 'original_text' from the chapter you are editing (current chapter, or PREVIOUS/NEXT only when the edit is directly relevant to the current chapter)\n")
         context_parts.append("❌ DO NOT copy from OUTLINE, STORY OVERVIEW, or CHARACTER PROFILES below\n")
         context_parts.append("❌ Reference documents below do NOT exist in the manuscript file!\n\n")
         
@@ -452,11 +454,12 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
                 context_parts.append(f"  - '### Status' (if present): State of tracked items at chapter beginning\n")
                 context_parts.append(f"  - '### Pacing' (if present): Emotional/tonal transition guidance\n")
                 context_parts.append(f"  - '### Summary': High-level overview of the chapter's narrative arc\n")
-                context_parts.append(f"  - '### Beats': The events that occur in this chapter\n")
-                context_parts.append(f"  These are story INGREDIENTS — raw material for you to craft into scenes.\n")
-                context_parts.append(f"  Combine, reorder, interleave, or restructure beats into cohesive scenes.\n")
-                context_parts.append(f"  Not every beat needs its own scene or paragraph. Let the Style Guide's\n")
-                context_parts.append(f"  pacing determine how much space each moment gets.\n\n")
+                context_parts.append(f"  - '### Beats': Events that occur in this chapter, plus optional guidance for crafting the prose (visuals, atmosphere, staging, internal thoughts, perception shifts)\n")
+                context_parts.append(f"  Beats may include WHAT happens, HOW it looks/feels (e.g. lighting, mood, sensory tone), and key internal moments (realizations, shifts in perception) when the outline specifies them. Use that guidance when writing.\n")
+                context_parts.append(f"  **BEAT SYNTHESIS (CRITICAL):** A beat is a STORY EVENT, not a paragraph unit.\n")
+                context_parts.append(f"  ANTI-PATTERN: One beat = one paragraph. If your draft has the same number of paragraphs as beats, you have produced a formatted outline, not fiction.\n")
+                context_parts.append(f"  RULE: Group 2-5 related beats into a single scene/paragraph cluster. A chapter with 8 beats should produce ~3-5 prose paragraphs, not 8.\n")
+                context_parts.append(f"  If a SCENE STRUCTURE PLAN is provided below, use that grouping; otherwise combine, reorder, or interleave beats into cohesive scenes.\n\n")
                 
                 # Extract and emphasize pacing guidance if present
                 current_pacing = extract_pacing_block(outline_current_chapter_text)
@@ -749,6 +752,137 @@ async def build_generation_context_node(state: Dict[str, Any]) -> Dict[str, Any]
         }
 
 
+async def plan_scene_structure_node(state: Dict[str, Any], llm_factory) -> Dict[str, Any]:
+    """
+    Optionally add a scene structure plan so the generator groups beats into scenes/paragraphs.
+    Only runs when the chapter has 4+ beats. Uses explicit ### Scenes from outline when present,
+    otherwise a small LLM call to group beats. Appends plan to generation_context_parts.
+    """
+    try:
+        outline_current = state.get("outline_current_chapter_text") or ""
+        parts = list(state.get("generation_context_parts", []))
+        beats = extract_beats_list(outline_current)
+
+        if len(beats) < 4:
+            logger.debug("Scene planning skipped: fewer than 4 beats")
+            return _plan_scene_preserve_state(state, parts)
+
+        # Prefer explicit ### Scenes block from outline
+        scene_groups = extract_scene_groups(outline_current)
+        if scene_groups:
+            plan_block = _format_explicit_scene_plan(beats, scene_groups)
+            if plan_block:
+                parts.append(plan_block)
+                logger.debug("Scene plan added from outline ### Scenes block")
+            return _plan_scene_preserve_state(state, parts)
+
+        # Automatic planning via small LLM call
+        plan_block = await _call_scene_planning_llm(state, llm_factory, beats)
+        if plan_block:
+            parts.append(plan_block)
+            logger.debug("Scene plan added from automatic LLM grouping")
+        return _plan_scene_preserve_state(state, parts)
+
+    except Exception as e:
+        logger.warning("Scene planning failed, continuing without plan: %s", e)
+        return _plan_scene_preserve_state(state, list(state.get("generation_context_parts", [])))
+
+
+def _format_explicit_scene_plan(beats: List[str], scene_groups: List[Dict[str, Any]]) -> str:
+    """Format author-defined ### Scenes into the SCENE STRUCTURE PLAN block."""
+    lines = [
+        "\n=== SCENE STRUCTURE PLAN (from outline) ===\n",
+        "Use this grouping when writing. Combine the listed beats into a single scene/paragraph cluster.\n",
+    ]
+    for i, sg in enumerate(scene_groups, 1):
+        name = sg.get("scene_name", f"Scene {i}")
+        indices = sg.get("beat_indices", [])
+        hint = sg.get("prose_hint", "")
+        beat_previews = [
+            (beats[j - 1][:60] + ("..." if len(beats[j - 1]) > 60 else ""))
+            for j in indices
+            if 1 <= j <= len(beats)
+        ]
+        lines.append(f"Scene: {name} — Beats {indices}: {' | '.join(beat_previews)}")
+        if hint:
+            lines.append(f"  Prose goal: {hint}")
+        lines.append("")
+    lines.append("=== END SCENE STRUCTURE PLAN ===\n\n")
+    return "\n".join(lines)
+
+
+async def _call_scene_planning_llm(state: Dict[str, Any], llm_factory, beats: List[str]) -> Optional[str]:
+    """Call LLM to group beats into scenes; return formatted plan block or None."""
+    try:
+        beats_text = "\n".join(f"{i}. {b}" for i, b in enumerate(beats, 1))
+        prompt = (
+            "Group these story beats into 2–5 scenes. Each scene should combine 2–5 related beats. "
+            "Output only a JSON array, no other text. Each element: {\"scene_name\": \"short name\", "
+            "\"beat_indices\": [1-based indices], \"prose_goal\": \"one line\", \"combined_in_one_paragraph\": true/false}. "
+            "beat_indices must be 1-based and reference the beat numbers below.\n\nBeats:\n" + beats_text
+        )
+        llm = llm_factory(temperature=0.2, state=state)
+        from langchain_core.messages import HumanMessage
+        response = await llm.ainvoke([HumanMessage(content=prompt)])
+        raw = response.content if hasattr(response, "content") else str(response)
+        raw = _unwrap_json_response(raw)
+        arr = json.loads(raw) if isinstance(raw, str) else raw
+        if not isinstance(arr, list) or not arr:
+            return None
+        lines = [
+            "\n=== SCENE STRUCTURE PLAN ===\n",
+            "Use this grouping when writing. Combine the listed beats per scene; combined_in_one_paragraph=true means one prose paragraph.\n",
+        ]
+        for i, item in enumerate(arr[:10], 1):
+            name = item.get("scene_name", f"Scene {i}")
+            indices = item.get("beat_indices", [])
+            goal = item.get("prose_goal", "")
+            one_para = item.get("combined_in_one_paragraph", True)
+            lines.append(f"Scene: {name} — Beats {indices} (one_paragraph={one_para})")
+            if goal:
+                lines.append(f"  Prose goal: {goal}")
+            lines.append("")
+        lines.append("=== END SCENE STRUCTURE PLAN ===\n\n")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.debug("Scene planning LLM call failed: %s", e)
+        return None
+
+
+def _plan_scene_preserve_state(state: Dict[str, Any], generation_context_parts: List[str]) -> Dict[str, Any]:
+    """Return state update with generation_context_parts and all keys needed by downstream nodes."""
+    return {
+        "generation_context_parts": generation_context_parts,
+        "metadata": state.get("metadata", {}),
+        "user_id": state.get("user_id", "system"),
+        "shared_memory": state.get("shared_memory", {}),
+        "messages": state.get("messages", []),
+        "query": state.get("query", ""),
+        "system_prompt": state.get("system_prompt", ""),
+        "datetime_context": state.get("datetime_context", ""),
+        "manuscript": state.get("manuscript", ""),
+        "filename": state.get("filename", ""),
+        "frontmatter": state.get("frontmatter", {}),
+        "current_chapter_text": state.get("current_chapter_text", ""),
+        "current_chapter_number": state.get("current_chapter_number"),
+        "chapter_ranges": state.get("chapter_ranges", []),
+        "current_request": state.get("current_request", ""),
+        "selection_start": state.get("selection_start", -1),
+        "selection_end": state.get("selection_end", -1),
+        "cursor_offset": state.get("cursor_offset", -1),
+        "requested_chapter_number": state.get("requested_chapter_number"),
+        "explicit_primary_chapter": state.get("explicit_primary_chapter"),
+        "outline_body": state.get("outline_body"),
+        "outline_current_chapter_text": state.get("outline_current_chapter_text"),
+        "target_chapter_number": state.get("target_chapter_number"),
+        "prev_chapter_number": state.get("prev_chapter_number"),
+        "prev_chapter_last_line": state.get("prev_chapter_last_line"),
+        "reference_chapter_numbers": state.get("reference_chapter_numbers", []),
+        "reference_chapter_texts": state.get("reference_chapter_texts", {}),
+        "paragraph_map": state.get("paragraph_map", []),
+    }
+
+
 async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
     """Build generation prompt: construct system prompt and user message"""
     try:
@@ -1003,26 +1137,23 @@ async def build_generation_prompt_node(state: Dict[str, Any]) -> Dict[str, Any]:
                 is_existing_chapter = current_chapter_text.strip() != ""
                 
                 if is_existing_chapter:
-                    # User explicitly mentioned an existing chapter - CRITICAL: ONLY edit that chapter!
+                    # User explicitly mentioned an existing chapter - primary edit target is that chapter.
                     chapter_clarification = (
                         f"\n{'='*80}\n"
                         f"⚠️ CRITICAL: USER EXPLICITLY MENTIONED CHAPTER {target_chapter_number} ⚠️\n"
                         f"{'='*80}\n"
-                        f"**YOU MUST ONLY EDIT CHAPTER {target_chapter_number}**\n\n"
+                        f"**PRIMARY EDIT TARGET: CHAPTER {target_chapter_number}**\n\n"
                         f"**MANDATORY RESTRICTIONS:**\n"
-                        f"1. **ONLY search for text in the 'MANUSCRIPT TEXT: CHAPTER {target_chapter_number} (CURRENT - EDITABLE)' section above**\n"
-                        f"2. **PREVIOUS and NEXT chapters are MARKED AS READ ONLY** - they are for context reference ONLY!\n"
-                        f"3. **DO NOT edit Chapter {target_chapter_number - 1 if target_chapter_number > 1 else 'previous'} or Chapter {target_chapter_number + 1}** - they are READ ONLY!\n"
-                        f"4. **If you find similar text in PREVIOUS or NEXT chapters, IGNORE IT for editing** - only edit Chapter {target_chapter_number}!\n"
-                        f"5. **Your 'original_text' MUST come from Chapter {target_chapter_number} ONLY**\n"
-                        f"6. **Any operations you create MUST target Chapter {target_chapter_number} text only**\n"
-                        f"7. **ANALYSIS ALLOWED**: You CAN analyze READ ONLY chapters and report issues in your 'summary' field\n"
-                        f"8. **DO NOT create operations for READ ONLY chapters** - only report issues, don't fix them\n\n"
+                        f"1. **PRIMARY**: Search for and edit text in the 'MANUSCRIPT TEXT: CHAPTER {target_chapter_number} (CURRENT - EDITABLE)' section above.\n"
+                        f"2. **PREVIOUS and NEXT chapters** are conditionally editable: you may edit them ONLY if the change is directly required by or a direct consequence of your edits in Chapter {target_chapter_number} (e.g., bridging text or continuity at the chapter boundary). When in doubt, do not edit adjacent chapters.\n"
+                        f"3. **Default**: Prefer editing only Chapter {target_chapter_number}; only add operations in Chapter {target_chapter_number - 1 if target_chapter_number > 1 else 'previous'} or Chapter {target_chapter_number + 1} when clearly necessitated by your current chapter edit.\n"
+                        f"4. **If you find similar text in PREVIOUS or NEXT chapters**: Edit it only if fixing it is directly tied to the current chapter change; otherwise mention issues in your 'summary'.\n"
+                        f"5. **Your 'original_text'** should come from the chapter you are editing (current, or adjacent when the edit is directly relevant).\n"
+                        f"6. **Operations**: Most operations should target Chapter {target_chapter_number}; adjacent chapter operations are allowed only when directly necessitated by the current chapter edit.\n"
+                        f"7. **ANALYSIS**: You CAN and SHOULD analyze all chapters and report issues in your 'summary' field.\n"
+                        f"8. **REFERENCE chapters** (mentioned in query but not current/adjacent) remain fully read-only - report issues only, no operations.\n\n"
                         f"**WHY THIS MATTERS:**\n"
-                        f"The user specifically said 'In Chapter {target_chapter_number}...' - they want changes in THAT chapter, not others.\n"
-                        f"PREVIOUS and NEXT chapters are provided for continuity context but are READ ONLY - do not modify them.\n"
-                        f"However, if you spot problems in READ ONLY chapters, you SHOULD mention them to the user in your summary.\n"
-                        f"Even if similar text exists in other chapters, you must ONLY edit Chapter {target_chapter_number}.\n"
+                        f"The user said 'In Chapter {target_chapter_number}...' - that chapter is your primary target. PREVIOUS and NEXT are for context and may be edited only when a fix is directly caused by or required for your current chapter edit.\n"
                         f"{'='*80}\n\n"
                     )
                 else:
@@ -2439,8 +2570,13 @@ def build_generation_subgraph(checkpointer, llm_factory, get_datetime_context):
     
     # Add nodes
     workflow.add_node("build_context", build_generation_context_node)
+
+    async def plan_scene_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
+        return await plan_scene_structure_node(state, llm_factory)
+
+    workflow.add_node("plan_scene_structure", plan_scene_wrapper)
     workflow.add_node("build_prompt", build_generation_prompt_node)
-    
+
     # LLM call node needs llm_factory - create wrapper
     async def call_llm_wrapper(state: Dict[str, Any]) -> Dict[str, Any]:
         return await call_generation_llm_node(state, llm_factory)
@@ -2458,9 +2594,10 @@ def build_generation_subgraph(checkpointer, llm_factory, get_datetime_context):
     
     # Set entry point
     workflow.set_entry_point("build_context")
-    
-    # Define edges
-    workflow.add_edge("build_context", "build_prompt")
+
+    # Define edges: context -> scene plan (groups beats) -> prompt -> llm -> ...
+    workflow.add_edge("build_context", "plan_scene_structure")
+    workflow.add_edge("plan_scene_structure", "build_prompt")
     workflow.add_edge("build_prompt", "call_llm")
     workflow.add_edge("call_llm", "validate_output")
     

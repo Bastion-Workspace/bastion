@@ -12,8 +12,8 @@ from typing import Dict, Any, List
 from langchain_core.messages import SystemMessage, HumanMessage
 from orchestrator.models.query_classification_models import QueryPlan
 from orchestrator.models.agent_response_contract import AgentResponse, TaskStatus
-from orchestrator.tools.document_tools import search_documents_structured, get_document_content_tool
-from orchestrator.tools.web_tools import search_web_structured
+from orchestrator.tools.document_tools import search_documents_tool, get_document_content_tool
+from orchestrator.tools.web_tools import search_web_tool
 from orchestrator.agents.base_agent import BaseAgent
 
 logger = logging.getLogger(__name__)
@@ -39,16 +39,16 @@ async def execute_factual_query(
     user_id = state.get("user_id", "system")
 
     try:
-        local_result = await search_documents_structured(
+        local_result = await search_documents_tool(
             query=query,
             limit=5,
             user_id=user_id,
         )
     except Exception as e:
         logger.warning(f"Factual path: local search failed: {e}")
-        local_result = {"results": [], "total_count": 0}
+        local_result = {"documents": [], "count": 0}
 
-    results = local_result.get("results") or []
+    results = local_result.get("documents") or []
     if _has_substantial_factual_content(results):
         logger.info("Factual path: found local reference content, synthesizing from local")
         try:
@@ -61,7 +61,8 @@ async def execute_factual_query(
                 if len(preview) > 500:
                     content_parts.append(f"**{doc.get('title', 'Untitled')}**\n{preview[:3000]}")
                 else:
-                    raw = await get_document_content_tool(document_id=doc_id, user_id=user_id)
+                    raw_result = await get_document_content_tool(document_id=doc_id, user_id=user_id)
+                    raw = raw_result.get("content", raw_result) if isinstance(raw_result, dict) else raw_result
                     if raw and not raw.startswith("Error"):
                         content_parts.append(f"**{doc.get('title', 'Untitled')}**\n{raw[:3000]}")
             if not content_parts:
@@ -86,7 +87,8 @@ async def execute_factual_query(
 
     logger.info("Factual path: no sufficient local reference content, searching web")
     try:
-        web_results = await search_web_structured(query=query, max_results=8)
+        web_result_data = await search_web_tool(query=query, max_results=8)
+        web_results = web_result_data.get("results", []) if isinstance(web_result_data, dict) else (web_result_data or [])
     except Exception as e:
         logger.warning(f"Factual path: web search failed: {e}")
         return AgentResponse(
@@ -103,8 +105,13 @@ async def execute_factual_query(
     context = "\n\n".join(formatted)
     base_agent = BaseAgent("factual_query")
     llm = base_agent._get_llm(temperature=0.3, state=state)
+    datetime_context = base_agent._get_datetime_context(state)
     response = await llm.ainvoke([
-        SystemMessage(content="Answer the user's question using the provided web search results. Be concise, factual, and cite sources where relevant."),
+        SystemMessage(content=(
+            "Answer the user's question using the provided web search results. Be concise, factual, and cite sources where relevant. "
+            "The user's current date (in the next message) is for grounding only — use it to interpret 'today' and 'current'; it is NOT from the search results."
+        )),
+        SystemMessage(content=datetime_context),
         HumanMessage(content=f"Question: {query}\n\nSearch results:\n{context}\n\nAnswer:"),
     ])
     text = response.content if hasattr(response, "content") else str(response)

@@ -1150,7 +1150,31 @@ async def create_post(
         except Exception as ws_error:
             # Don't fail post creation if WebSocket notification fails
             logger.error(f"⚠️ Failed to broadcast post creation: {ws_error}", exc_info=True)
-        
+
+        # Dispatch agent reactions for agents watching this team (event-driven)
+        try:
+            from services.database_manager.database_helpers import fetch_all
+            from services.celery_tasks.agent_tasks import dispatch_team_post_reaction
+            watches = await fetch_all(
+                "SELECT agent_profile_id, respond_as FROM agent_line_watches "
+                "WHERE line_id = $1 AND trigger_on_new_post = true",
+                team_id,
+            )
+            post_dict = post if isinstance(post, dict) else dict(post) if post else {}
+            post_id_val = post_dict.get("post_id", "")
+            for watch in watches or []:
+                dispatch_team_post_reaction.delay(
+                    agent_profile_id=str(watch["agent_profile_id"]),
+                    team_id=team_id,
+                    post_id=post_id_val,
+                    post_content=request.content or "",
+                    post_author_id=current_user.user_id,
+                    user_id=current_user.user_id,
+                    respond_as=watch.get("respond_as") or "comment",
+                )
+        except Exception as agent_err:
+            logger.warning("Failed to dispatch agent reactions for team post: %s", agent_err)
+
         return TeamPostResponse(**post)
     
     except PermissionError as e:

@@ -1,21 +1,124 @@
 import { createTheme } from '@mui/material/styles';
 
-export const createAppTheme = (darkMode) => {
+/**
+ * Accent palettes: primary (and optional secondary) per mode.
+ * Used by createAppTheme(darkMode, accentId).
+ */
+export const ACCENT_PALETTES = {
+  blue: {
+    light: {
+      primary: { main: '#1976d2', light: '#42a5f5', dark: '#1565c0', contrastText: '#fff' },
+      secondary: { main: '#dc004e', light: '#ff5983', dark: '#9a0036', contrastText: '#fff' },
+    },
+    dark: {
+      primary: { main: '#90caf9', light: '#e3f2fd', dark: '#42a5f5', contrastText: '#000' },
+      secondary: { main: '#f48fb1', light: '#fce4ec', dark: '#c2185b', contrastText: '#000' },
+    },
+  },
+  teal: {
+    light: {
+      primary: { main: '#00897b', light: '#4db6ac', dark: '#00695c', contrastText: '#fff' },
+      secondary: { main: '#dc004e', light: '#ff5983', dark: '#9a0036', contrastText: '#fff' },
+    },
+    dark: {
+      primary: { main: '#80cbc4', light: '#b2dfdb', dark: '#4db6ac', contrastText: '#000' },
+      secondary: { main: '#f48fb1', light: '#fce4ec', dark: '#c2185b', contrastText: '#000' },
+    },
+  },
+  green: {
+    light: {
+      primary: { main: '#43a047', light: '#66bb6a', dark: '#2e7d32', contrastText: '#fff' },
+      secondary: { main: '#dc004e', light: '#ff5983', dark: '#9a0036', contrastText: '#fff' },
+    },
+    dark: {
+      primary: { main: '#81c784', light: '#a5d6a7', dark: '#66bb6a', contrastText: '#000' },
+      secondary: { main: '#f48fb1', light: '#fce4ec', dark: '#c2185b', contrastText: '#000' },
+    },
+  },
+  purple: {
+    light: {
+      primary: { main: '#7b1fa2', light: '#9c27b0', dark: '#6a1b9a', contrastText: '#fff' },
+      secondary: { main: '#dc004e', light: '#ff5983', dark: '#9a0036', contrastText: '#fff' },
+    },
+    dark: {
+      primary: { main: '#ce93d8', light: '#e1bee7', dark: '#ba68c8', contrastText: '#000' },
+      secondary: { main: '#f48fb1', light: '#fce4ec', dark: '#c2185b', contrastText: '#000' },
+    },
+  },
+  orange: {
+    light: {
+      primary: { main: '#e65100', light: '#ff9800', dark: '#bf360c', contrastText: '#fff' },
+      secondary: { main: '#dc004e', light: '#ff5983', dark: '#9a0036', contrastText: '#fff' },
+    },
+    dark: {
+      primary: { main: '#ffb74d', light: '#ffcc80', dark: '#ffa726', contrastText: '#000' },
+      secondary: { main: '#f48fb1', light: '#fce4ec', dark: '#c2185b', contrastText: '#000' },
+    },
+  },
+  indigo: {
+    light: {
+      primary: { main: '#3949ab', light: '#5c6bc0', dark: '#283593', contrastText: '#fff' },
+      secondary: { main: '#dc004e', light: '#ff5983', dark: '#9a0036', contrastText: '#fff' },
+    },
+    dark: {
+      primary: { main: '#9fa8da', light: '#c5cae9', dark: '#7986cb', contrastText: '#000' },
+      secondary: { main: '#f48fb1', light: '#fce4ec', dark: '#c2185b', contrastText: '#000' },
+    },
+  },
+  rose: {
+    light: {
+      primary: { main: '#d81b60', light: '#ec407a', dark: '#ad1457', contrastText: '#fff' },
+      secondary: { main: '#7b1fa2', light: '#9c27b0', dark: '#6a1b9a', contrastText: '#fff' },
+    },
+    dark: {
+      primary: { main: '#f48fb1', light: '#f8bbd0', dark: '#ec407a', contrastText: '#000' },
+      secondary: { main: '#ce93d8', light: '#e1bee7', dark: '#ba68c8', contrastText: '#000' },
+    },
+  },
+  cyan: {
+    light: {
+      primary: { main: '#00838f', light: '#26c6da', dark: '#006064', contrastText: '#fff' },
+      secondary: { main: '#00796b', light: '#26a69a', dark: '#004d40', contrastText: '#fff' },
+    },
+    dark: {
+      primary: { main: '#80deea', light: '#b2ebf2', dark: '#4dd0e1', contrastText: '#000' },
+      secondary: { main: '#80cbc4', light: '#b2dfdb', dark: '#4db6ac', contrastText: '#000' },
+    },
+  },
+  amber: {
+    light: {
+      primary: { main: '#ff8f00', light: '#ffb300', dark: '#ff6f00', contrastText: '#fff' },
+      secondary: { main: '#6d4c41', light: '#8d6e63', dark: '#5d4037', contrastText: '#fff' },
+    },
+    dark: {
+      primary: { main: '#ffd54f', light: '#ffe082', dark: '#ffca28', contrastText: '#000' },
+      secondary: { main: '#bcaaa4', light: '#d7ccc8', dark: '#a1887f', contrastText: '#000' },
+    },
+  },
+  red: {
+    light: {
+      primary: { main: '#c62828', light: '#ef5350', dark: '#b71c1c', contrastText: '#fff' },
+      secondary: { main: '#ad1457', light: '#d81b60', dark: '#880e4f', contrastText: '#fff' },
+    },
+    dark: {
+      primary: { main: '#ef9a9a', light: '#ffcdd2', dark: '#e57373', contrastText: '#000' },
+      secondary: { main: '#f48fb1', light: '#f8bbd0', dark: '#ec407a', contrastText: '#000' },
+    },
+  },
+};
+
+const getAccentPalette = (darkMode, accentId) => {
+  const palettes = ACCENT_PALETTES[accentId] || ACCENT_PALETTES.blue;
+  return darkMode ? palettes.dark : palettes.light;
+};
+
+export const createAppTheme = (darkMode, accentId = 'blue') => {
+  const accent = getAccentPalette(darkMode, accentId);
   return createTheme({
     palette: {
       mode: darkMode ? 'dark' : 'light',
-      primary: {
-        main: darkMode ? '#90caf9' : '#1976d2',
-        light: darkMode ? '#e3f2fd' : '#42a5f5',
-        dark: darkMode ? '#42a5f5' : '#1565c0',
-        contrastText: darkMode ? '#000' : '#fff',
-      },
-      secondary: {
-        main: darkMode ? '#f48fb1' : '#dc004e',
-        light: darkMode ? '#fce4ec' : '#ff5983',
-        dark: darkMode ? '#c2185b' : '#9a0036',
-        contrastText: darkMode ? '#000' : '#fff',
-      },
+      primary: accent.primary,
+      secondary: accent.secondary,
       background: {
         default: darkMode ? '#121212' : '#f5f5f5',
         paper: darkMode ? '#1e1e1e' : '#ffffff',
@@ -124,13 +227,13 @@ export const createAppTheme = (darkMode) => {
       },
       MuiAppBar: {
         styleOverrides: {
-          root: {
-            backgroundColor: darkMode ? '#1e1e1e' : '#1976d2',
+          root: ({ theme }) => ({
+            backgroundColor: darkMode ? '#1e1e1e' : theme.palette.primary.main,
             color: darkMode ? '#ffffff' : '#ffffff',
-            boxShadow: darkMode 
+            boxShadow: darkMode
               ? '0px 2px 4px -1px rgba(0,0,0,0.2), 0px 4px 5px 0px rgba(0,0,0,0.14), 0px 1px 10px 0px rgba(0,0,0,0.12)'
               : '0px 2px 4px -1px rgba(0,0,0,0.2), 0px 4px 5px 0px rgba(0,0,0,0.14), 0px 1px 10px 0px rgba(0,0,0,0.12)',
-          },
+          }),
         },
       },
       MuiCard: {
@@ -168,7 +271,7 @@ export const createAppTheme = (darkMode) => {
       },
       MuiTextField: {
         styleOverrides: {
-          root: {
+          root: ({ theme }) => ({
             '& .MuiOutlinedInput-root': {
               backgroundColor: darkMode ? '#2d2d2d' : '#ffffff',
               '& fieldset': {
@@ -178,10 +281,10 @@ export const createAppTheme = (darkMode) => {
                 borderColor: darkMode ? '#616161' : '#bdbdbd',
               },
               '&.Mui-focused fieldset': {
-                borderColor: darkMode ? '#90caf9' : '#1976d2',
+                borderColor: theme.palette.primary.main,
               },
             },
-          },
+          }),
         },
       },
       MuiInputBase: {

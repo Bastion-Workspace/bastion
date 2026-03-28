@@ -13,6 +13,14 @@ from functools import wraps
 
 logger = logging.getLogger(__name__)
 
+# Transient failures only; avoids double-applying side effects on ValueError etc.
+TRANSIENT_EXCEPTIONS = (
+    ConnectionError,
+    TimeoutError,
+    asyncio.TimeoutError,
+    OSError,
+)
+
 
 class ToolRetryNode:
     """
@@ -34,8 +42,8 @@ class ToolRetryNode:
     
     def __init__(
         self,
-        max_retries: int = 3,
-        initial_delay: float = 1.0,
+        max_retries: int = 2,
+        initial_delay: float = 0.5,
         max_delay: float = 10.0,
         retryable_exceptions: Optional[tuple] = None
     ):
@@ -46,12 +54,12 @@ class ToolRetryNode:
             max_retries: Maximum number of retry attempts
             initial_delay: Initial delay in seconds before first retry
             max_delay: Maximum delay in seconds (caps exponential backoff)
-            retryable_exceptions: Tuple of exception types to retry (default: all)
+            retryable_exceptions: Tuple of exception types to retry (default: TRANSIENT_EXCEPTIONS)
         """
         self.max_retries = max_retries
         self.initial_delay = initial_delay
         self.max_delay = max_delay
-        self.retryable_exceptions = retryable_exceptions or (Exception,)
+        self.retryable_exceptions = retryable_exceptions or TRANSIENT_EXCEPTIONS
     
     def _is_retryable(self, exception: Exception) -> bool:
         """Check if exception is retryable"""
@@ -137,7 +145,7 @@ class ToolRetryNode:
         return wrapped
 
 
-def create_retry_wrapper(max_retries: int = 3) -> ToolRetryNode:
+def create_retry_wrapper(max_retries: int = 2) -> ToolRetryNode:
     """Convenience function to create retry wrapper"""
     return ToolRetryNode(max_retries=max_retries)
 

@@ -5,6 +5,7 @@ Parses and searches org-mode files with full-text and metadata support
 
 import logging
 import re
+from collections import Counter
 from typing import List, Dict, Any, Optional, Set
 from pathlib import Path
 from datetime import datetime
@@ -20,6 +21,63 @@ class OrgSearchService:
     
     def __init__(self):
         self.upload_dir = Path(settings.UPLOAD_DIR)
+
+    @staticmethod
+    def _heading_matches_tags(
+        heading_tags: Optional[List[str]],
+        filter_tags: Optional[List[str]],
+        tags_match: str,
+    ) -> bool:
+        """Return True if heading tags satisfy filter (any or all), case-insensitive."""
+        if not filter_tags:
+            return True
+        ft = [t.strip().lower() for t in filter_tags if t and str(t).strip()]
+        if not ft:
+            return True
+        ht = {str(t).lower() for t in (heading_tags or []) if t}
+        if tags_match == "all":
+            return all(f in ht for f in ft)
+        return any(f in ht for f in ft)
+
+    async def list_org_tags(
+        self,
+        user_id: str,
+        include_archives: bool = False,
+    ) -> Dict[str, Any]:
+        """Aggregate org headline tags across the user's .org files (count = headings per tag)."""
+        try:
+            org_files = await self._find_user_org_files(user_id, include_archives=include_archives)
+            counter: Counter = Counter()
+            for file_path in org_files:
+                try:
+                    content = file_path.read_text(encoding="utf-8")
+                except Exception as e:
+                    logger.warning("list_org_tags: skip %s: %s", file_path, e)
+                    continue
+                headings = self._parse_org_headings(content)
+                for heading in headings:
+                    for tag in heading.get("tags") or []:
+                        if tag:
+                            counter[str(tag)] += 1
+            tags_sorted = sorted(
+                [{"tag": t, "count": c} for t, c in counter.items()],
+                key=lambda x: (-x["count"], x["tag"].lower()),
+            )
+            return {
+                "success": True,
+                "tags": tags_sorted,
+                "files_scanned": len(org_files),
+                "total_distinct_tags": len(counter),
+            }
+        except Exception as e:
+            logger.error("list_org_tags failed: %s", e)
+            return {
+                "success": False,
+                "error": str(e),
+                "tags": [],
+                "files_scanned": 0,
+                "total_distinct_tags": 0,
+            }
     
     async def search_org_files(
         self,
@@ -29,7 +87,8 @@ class OrgSearchService:
         todo_states: Optional[List[str]] = None,
         include_content: bool = True,
         limit: int = 100,
-        include_archives: bool = False
+        include_archives: bool = False,
+        tags_match: str = "any",
     ) -> Dict[str, Any]:
         """
         Search across all org files for a user
@@ -42,6 +101,7 @@ class OrgSearchService:
             include_content: Include content in results or just headings
             limit: Maximum number of results
             include_archives: Include _archive.org files (default: False)
+            tags_match: When filtering by tags, "any" (OR) or "all" (AND)
         
         Returns:
             Dict with search results and metadata
@@ -62,7 +122,7 @@ class OrgSearchService:
                     "files_searched": 0
                 }
             
-            logger.info(f"🔍 ROOSEVELT: Searching {len(org_files)} org files for '{query}'")
+            logger.debug("Searching %d org files for '%s'", len(org_files), query)
             
             # Search each file and add document_ids
             all_results = []
@@ -72,7 +132,8 @@ class OrgSearchService:
                     query=query,
                     tags=tags,
                     todo_states=todo_states,
-                    include_content=include_content
+                    include_content=include_content,
+                    tags_match=tags_match,
                 )
                 
                 # Add document_id to each result
@@ -101,7 +162,8 @@ class OrgSearchService:
                 "files_searched": len(org_files),
                 "filters": {
                     "tags": tags,
-                    "todo_states": todo_states
+                    "todo_states": todo_states,
+                    "tags_match": tags_match,
                 }
             }
             
@@ -119,7 +181,7 @@ class OrgSearchService:
         """
         Get mapping of filename -> document_id from database
         
-        **BULLY!** Fetch document IDs once instead of repeated lookups!
+        Fetches document IDs once instead of repeated lookups.
         """
         try:
             from services.database_manager.database_helpers import fetch_all
@@ -135,7 +197,7 @@ class OrgSearchService:
             # Build map: title -> document_id
             doc_map = {row['title']: row['document_id'] for row in rows}
             
-            logger.info(f"📋 Built document_id map for {len(doc_map)} org files")
+            logger.debug("Built document_id map for %d org files", len(doc_map))
             return doc_map
             
         except Exception as e:
@@ -146,7 +208,7 @@ class OrgSearchService:
         """
         Find all .org files for a user by recursively searching their entire directory tree.
         
-        **BULLY!** We search everywhere the user might keep org files!
+        Searches the user directory tree for org files.
         
         Args:
             user_id: User ID
@@ -166,13 +228,18 @@ class OrgSearchService:
             user_base_dir = self.upload_dir / "Users" / username
             
             if user_base_dir.exists():
-                logger.info(f"📂 Recursively searching all of {user_base_dir}")
+                logger.debug("Recursively searching all of %s", user_base_dir)
                 
                 # Find all .org files under user's directory
                 all_org_files = list(user_base_dir.rglob("*.org"))
                 
                 # Filter out empty files and apply any exclusions
                 for org_file in all_org_files:
+                    # Skip files inside .versions directories (historical snapshots)
+                    if "/.versions/" in str(org_file) or "\\.versions\\" in str(org_file):
+                        logger.debug(f"⏭️  Skipping .versions file: {org_file}")
+                        continue
+                    
                     # Skip empty files
                     if org_file.stat().st_size == 0:
                         logger.debug(f"⏭️  Skipping empty file: {org_file}")
@@ -183,14 +250,14 @@ class OrgSearchService:
                         logger.debug(f"⏭️  Skipping system/backup file: {org_file}")
                         continue
                     
-                    # **ROOSEVELT ARCHIVE FILTER!** Skip archive files unless explicitly requested
+                    # Skip archive files unless explicitly requested
                     if not include_archives and org_file.name.endswith('_archive.org'):
                         logger.debug(f"⏭️  Skipping archive file: {org_file.name}")
                         continue
                     
                     org_files.append(org_file)
                 
-                logger.info(f"✅ Found {len(org_files)} org files in user directory")
+                logger.debug("Found %d org files in user directory", len(org_files))
             else:
                 logger.warning(f"⚠️  User directory does not exist: {user_base_dir}")
             
@@ -206,14 +273,12 @@ class OrgSearchService:
                     # Only include if it has content (non-empty)
                     if legacy_org.stat().st_size > 0:
                         org_files.append(legacy_org)
-                        logger.info(f"📂 Including legacy org file: {legacy_org.name}")
+                        logger.debug("Including legacy org file: %s", legacy_org.name)
             
             # Sort for consistent ordering
             org_files.sort(key=lambda f: str(f))
             
-            logger.info(f"📊 TOTAL: {len(org_files)} org files found for user {username}")
-            if org_files:
-                logger.info(f"📂 Org files: {[f.relative_to(self.upload_dir) for f in org_files]}")
+            logger.debug("Total %d org files found for user %s", len(org_files), username)
             
             return org_files
             
@@ -229,7 +294,8 @@ class OrgSearchService:
         query: str,
         tags: Optional[List[str]],
         todo_states: Optional[List[str]],
-        include_content: bool
+        include_content: bool,
+        tags_match: str = "any",
     ) -> List[Dict[str, Any]]:
         """Search a single org file and return matching headings"""
         try:
@@ -237,12 +303,7 @@ class OrgSearchService:
             
             # Parse org file structure
             headings = self._parse_org_headings(content)
-            logger.info(f"📋 Parsed {len(headings)} headings from {file_path.name}")
-            
-            # Log TODO states found
-            todo_headings = [h for h in headings if h.get('todo_state')]
-            if todo_headings:
-                logger.info(f"✅ Found {len(todo_headings)} headings with TODO states: {[h.get('todo_state') for h in todo_headings]}")
+            logger.debug("Parsed %d headings from %s", len(headings), file_path.name)
             
             # Filter and search
             results = []
@@ -250,8 +311,8 @@ class OrgSearchService:
             
             for heading in headings:
                 # Apply filters
-                if tags and not any(tag in heading.get('tags', []) for tag in tags):
-                    logger.debug(f"🔍 Filtered out '{heading['heading']}' - tag mismatch")
+                if tags and not self._heading_matches_tags(heading.get("tags"), tags, tags_match):
+                    logger.debug("Filtered out '%s' - tag mismatch", heading.get("heading", ""))
                     continue
                 
                 if todo_states and heading.get('todo_state') not in todo_states:
@@ -286,7 +347,7 @@ class OrgSearchService:
                     heading_match
                 )
                 
-                results.append({
+                result_item = {
                     "filename": file_path.name,
                     "file_path": str(file_path),
                     "heading": heading['heading'],
@@ -303,10 +364,16 @@ class OrgSearchService:
                     "deadline": heading.get('deadline'),
                     "active_timestamps": heading.get('active_timestamps', []),
                     "parent_path": heading.get('parent_path', []),
-                    "parent_levels": heading.get('parent_levels', [])
-                })
+                    "parent_levels": heading.get('parent_levels', []),
+                    "priority": heading.get('priority'),
+                    "effort": heading.get('effort'),
+                    "category": heading.get('category'),
+                }
+                if include_content:
+                    result_item["body"] = heading.get('content', '') or ''
+                results.append(result_item)
             
-            logger.info(f"📊 Returning {len(results)} results from {file_path.name}")
+            logger.debug("Returning %d results from %s", len(results), file_path.name)
             return results
             
         except Exception as e:
@@ -317,31 +384,32 @@ class OrgSearchService:
         """
         Parse org file into structured headings using orgparse library
         
-        **BULLY!** Using the professional parser, not regex hanky-panky!
+        Uses orgparse library for reliable parsing.
         """
         headings = []
         
         try:
             # Parse with orgparse
             root = orgparse.loads(content)
-            
-            logger.info(f"📋 ROOSEVELT: Parsed org file with orgparse")
-            logger.info(f"🔍 DEBUG: Root type: {type(root)}, has children: {hasattr(root, 'children')}")
-            
-            # Recursively traverse the tree to get ALL nodes
-            # **BULLY!** Track parent hierarchy for proper TODO organization!
-            def traverse(node, depth=0, parent_path=None, parent_levels=None):
+            file_category = None
+            kw = getattr(root, 'keywords', None)
+            if isinstance(kw, dict):
+                file_category = kw.get('CATEGORY')
+            elif hasattr(root, 'get_keyword') and callable(getattr(root, 'get_keyword')):
+                file_category = root.get_keyword('CATEGORY')
+
+            # Recursively traverse the tree to get ALL nodes with parent hierarchy tracking
+            def traverse(node, depth=0, parent_path=None, parent_levels=None, file_category=file_category):
                 """Recursively traverse orgparse tree with parent hierarchy tracking"""
                 if parent_path is None:
                     parent_path = []
                 if parent_levels is None:
                     parent_levels = []
                 
-                logger.info(f"{'  ' * depth}🔍 Visiting node: level={node.level}, heading='{node.heading[:30] if node.heading else 'ROOT'}'")
+                logger.debug("Visiting node: level=%s, heading='%s'", node.level, (node.heading[:30] if node.heading else "ROOT"))
                 
                 # Process this node if it's not the root (root has no heading)
                 if node.heading:
-                    logger.info(f"{'  ' * depth}✅ Processing heading: '{node.heading[:50]}'")
                     # Extract heading text (without TODO state or tags)
                     heading_text = node.heading
                     
@@ -354,6 +422,18 @@ class OrgSearchService:
                     # Get properties
                     properties = dict(node.properties) if node.properties else {}
                     
+                    # Priority: [#A], [#B], [#C] on the headline
+                    priority = getattr(node, 'priority', None)
+                    if not priority:
+                        m = re.search(r'\[#([ABC])\]', heading_text or '')
+                        priority = m.group(1) if m else None
+                    
+                    # Effort: :EFFORT: property in the PROPERTIES drawer
+                    effort = properties.get('EFFORT') or properties.get('Effort') or None
+                    
+                    # Category: per-heading :CATEGORY: property, else file-level #+CATEGORY:
+                    category = properties.get('CATEGORY') or properties.get('Category') or file_category or None
+                    
                     # Get scheduled and deadline from SCHEDULED: and DEADLINE: keywords
                     scheduled = None
                     deadline = None
@@ -363,6 +443,10 @@ class OrgSearchService:
                     
                     if node.deadline:
                         deadline = str(node.deadline)
+                    
+                    closed = None
+                    if getattr(node, 'closed', None):
+                        closed = str(node.closed)
                     
                     # Get body content
                     content_text = node.body if node.body else ''
@@ -386,8 +470,12 @@ class OrgSearchService:
                         'line_number': line_number,
                         'content': content_text,
                         'properties': properties,
+                        'priority': priority,
+                        'effort': effort,
+                        'category': category,
                         'scheduled': scheduled,
                         'deadline': deadline,
+                        'closed': closed,  # When item was marked DONE (for "completed in last week" etc.)
                         'active_timestamps': active_timestamps,  # Calendar appointments
                         'parent_path': list(parent_path),  # Copy to avoid mutation
                         'parent_levels': list(parent_levels)  # Copy to avoid mutation
@@ -398,8 +486,6 @@ class OrgSearchService:
                 
                 # Recursively process children with updated parent path
                 if hasattr(node, 'children'):
-                    logger.info(f"{'  ' * depth}🌳 Node has {len(node.children)} children")
-                    
                     # Build new parent path for children
                     if node.heading:
                         new_parent_path = parent_path + [node.heading]
@@ -408,23 +494,10 @@ class OrgSearchService:
                         new_parent_path = parent_path
                         new_parent_levels = parent_levels
                     
-                    for i, child in enumerate(node.children):
-                        logger.info(f"{'  ' * depth}  Traversing child {i+1}/{len(node.children)}")
-                        traverse(child, depth + 1, new_parent_path, new_parent_levels)
-                else:
-                    logger.info(f"{'  ' * depth}❌ Node has NO children attribute")
+                    for child in node.children:
+                        traverse(child, depth + 1, new_parent_path, new_parent_levels, file_category)
             
-            # Start traversal from root
-            logger.info(f"🚀 Starting tree traversal from root...")
             traverse(root)
-            logger.info(f"🏁 Tree traversal complete!")
-            
-            logger.info(f"✅ ROOSEVELT: Found {len(headings)} headings with orgparse!")
-            
-            # Log TODO states found
-            todo_headings = [h for h in headings if h.get('todo_state')]
-            if todo_headings:
-                logger.info(f"✅ Found {len(todo_headings)} headings with TODO states: {[h.get('todo_state') for h in todo_headings]}")
             
             return headings
             
@@ -443,8 +516,6 @@ class OrgSearchService:
         - <2025-10-08 Wed 19:00-19:05>  (with time range)
         - <2025-10-23 Thu>  (date only)
         - <2025-10-15 Wed>  (with newline after)
-        
-        **BULLY!** Finding calendar appointments the org-mode way!
         """
         if not content:
             return []
@@ -499,7 +570,7 @@ class OrgSearchService:
         """
         Find all org files that link to the target file.
         
-        **BULLY!** Discover knowledge connections!
+        Finds files that link to the target filename.
         
         Args:
             user_id: User ID to search files for
@@ -515,7 +586,7 @@ class OrgSearchService:
             if not org_files:
                 return []
             
-            logger.info(f"🔗 ROOSEVELT: Searching for backlinks to '{target_filename}' across {len(org_files)} files")
+            logger.debug("Searching for backlinks to '%s' across %d files", target_filename, len(org_files))
             
             # Extract just the filename without path for matching
             target_name = Path(target_filename).name
@@ -575,13 +646,13 @@ class OrgSearchService:
                             'links': found_links
                         })
                         
-                        logger.info(f"✅ Found {link_count} link(s) in {file_path.name}")
+                        logger.debug("Found %d link(s) in %s", link_count, file_path.name)
                 
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to check file {file_path}: {e}")
                     continue
             
-            logger.info(f"🔗 Found {len(backlinks)} file(s) with backlinks to '{target_filename}'")
+            logger.debug("Found %d file(s) with backlinks to '%s'", len(backlinks), target_filename)
             return backlinks
             
         except Exception as e:

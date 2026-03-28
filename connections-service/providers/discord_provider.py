@@ -209,7 +209,9 @@ class DiscordProvider(BaseMessagingProvider):
         except Exception as e:
             logger.debug("Discord send_typing_indicator failed: %s", e)
 
-    async def get_bot_info(self, bot_token: str) -> Dict[str, Any]:
+    async def get_bot_info(
+        self, bot_token: str, config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(

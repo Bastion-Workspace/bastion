@@ -24,7 +24,8 @@ class SourceType(str, Enum):
 
 class FilePlacementRequest(BaseModel):
     """Request for file placement"""
-    content: str = Field(..., description="File content")
+    content: str = Field(default="", description="File content (text). Omit when content_bytes is set.")
+    content_bytes: Optional[bytes] = Field(None, description="Binary file content (e.g. PDF, CSV). When set, content is ignored.")
     title: str = Field(..., description="File title")
     filename: Optional[str] = Field(None, description="Filename (auto-generated if not provided)")
     source_type: SourceType = Field(..., description="Source type")

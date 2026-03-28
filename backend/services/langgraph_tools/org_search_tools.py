@@ -21,7 +21,7 @@ def _get_org_search_service() -> OrgSearchService:
     
     if _org_search_service is None:
         _org_search_service = OrgSearchService()
-        logger.info("🗂️ BULLY! Org Search Service initialized for agents!")
+        logger.info("Org Search Service initialized for agents")
     
     return _org_search_service
 
@@ -35,7 +35,10 @@ async def search_org_files(
     user_id: str = None
 ) -> str:
     """
-    Search across all user's org-mode files with full-text and metadata support
+    Search across all user's org-mode files with full-text and metadata support.
+
+    DEPRECATED (todo listing): For listing TODOs prefer OrgTodoService.list_todos / list_todos_tool (universal todo API).
+    This function remains for general org search; todo-specific listing should use the universal todo service.
     
     **BULLY!** Search TODOs, projects, notes, and journal entries in org files!
     
@@ -137,7 +140,9 @@ async def list_org_todos(
     limit: int = 50
 ) -> str:
     """
-    List all TODO items from user's org files
+    List all TODO items from user's org files.
+
+    DEPRECATED: Prefer OrgTodoService.list_todos (REST/gRPC) or list_todos_tool in orchestrator (universal todo API).
     
     **By George!** Quick way to see all tasks across org files!
     
@@ -151,7 +156,7 @@ async def list_org_todos(
         Formatted list of TODO items with status, tags, and scheduling
     """
     if not todo_states:
-        todo_states = ["TODO", "NEXT", "WAITING"]
+        todo_states = ["TODO", "NEXT", "STARTED", "WAITING", "HOLD"]
     
     return await search_org_files(
         query="",  # Empty query = match all

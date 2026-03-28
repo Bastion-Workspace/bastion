@@ -10,6 +10,11 @@ import {
   Tooltip,
   Typography,
   Chip,
+  Popper,
+  Paper,
+  List,
+  ListItemButton,
+  ListItemText,
 } from '@mui/material';
 import {
   Send,
@@ -17,12 +22,17 @@ import {
   Stop,
   Mic,
   AttachFile,
+  SmartToy,
+  AutoMode,
+  Groups,
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { useChatSidebar } from '../../contexts/ChatSidebarContext';
-import { useModel } from '../../contexts/ModelContext';
 import { useTheme } from '../../contexts/ThemeContext';
+import { ACCENT_PALETTES } from '../../theme/themeConfig';
 import apiService from '../../services/apiService';
+import { getSelectableChatModels } from '../../utils/chatSelectableModels';
+import agentFactoryService from '../../services/agentFactoryService';
 import ConversationService from '../../services/conversation/ConversationService';
 
 const ChatInputArea = () => {
@@ -38,9 +48,14 @@ const ChatInputArea = () => {
     cancelCurrentJob,
     replyToMessage,
     setReplyToMessage,
+    selectedModel,
+    setSelectedModel,
   } = useChatSidebar();
-  const { selectedModel, setSelectedModel } = useModel();
-  const { darkMode } = useTheme();
+  const { darkMode, accentId } = useTheme();
+  const accentPalette = ACCENT_PALETTES[accentId] || ACCENT_PALETTES.blue;
+  const accentTone = darkMode ? accentPalette.dark : accentPalette.light;
+  const sendButtonMain = accentTone?.primary?.main || '#1976d2';
+  const sendButtonDark = accentTone?.primary?.dark || sendButtonMain;
 
   const textFieldRef = useRef(null);
   // Use local input state to avoid global context updates on each keystroke
@@ -61,6 +76,36 @@ const ChatInputArea = () => {
   // File attachment state
   const [selectedFiles, setSelectedFiles] = useState([]);
   const fileInputRef = useRef(null);
+
+  // @mention autocomplete for Agent Factory
+  const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
+  const { data: agentHandles = [] } = useQuery(
+    ['agentHandles'],
+    () => agentFactoryService.fetchAgentHandles(),
+    { staleTime: 60000 }
+  );
+  const allMentionOptions = [
+    { handle: 'auto', name: 'Auto-route (clear agent lock)', isAuto: true },
+    ...agentHandles,
+  ];
+  const lastAt = (inputValue || '').lastIndexOf('@');
+  const afterAt = lastAt >= 0 ? (inputValue || '').slice(lastAt + 1) : '';
+  const mentionOpen = lastAt >= 0 && !afterAt.includes(' ');
+  const mentionFilter = (afterAt.split(/\s/)[0] || '').toLowerCase();
+  const filteredHandles = mentionFilter
+    ? allMentionOptions.filter(
+        (h) =>
+          (h.handle || '').toLowerCase().startsWith(mentionFilter) ||
+          (h.name || '').toLowerCase().includes(mentionFilter)
+      )
+    : allMentionOptions;
+  const clampedMentionIndex = Math.min(
+    Math.max(0, selectedMentionIndex),
+    Math.max(0, filteredHandles.length - 1)
+  );
+  useEffect(() => {
+    if (mentionOpen) setSelectedMentionIndex(0);
+  }, [mentionFilter, mentionOpen]);
 
   // Model selection mutation to notify backend
   const selectModelMutation = useMutation(
@@ -101,16 +146,11 @@ const ChatInputArea = () => {
     setInputValue(query || '');
   }, [query]);
 
-  // Chat dropdown excludes image generation model (that one is for image creation only)
-  const chatModels = (enabledModelsData?.enabled_models || []).filter(
-    (m) => m !== (enabledModelsData?.image_generation_model || '')
-  );
+  const chatModels = getSelectableChatModels(enabledModelsData);
 
-  // Set default model when data loads; use chat models only (exclude image gen model)
+  // Set default model when data loads (catalog-verified list excludes orphans and image-gen model)
   useEffect(() => {
-    const list = (enabledModelsData?.enabled_models || []).filter(
-      (m) => m !== (enabledModelsData?.image_generation_model || '')
-    );
+    const list = getSelectableChatModels(enabledModelsData);
     if (list.length === 0) return;
     const validSelection = list.includes(selectedModel);
     if (!selectedModel || !validSelection) {
@@ -207,6 +247,31 @@ const ChatInputArea = () => {
     fileInputRef.current?.click();
   };
 
+  const insertMention = (handle) => {
+    const before = (inputValue || '').slice(0, lastAt);
+    setInputValue(before + '@' + handle + ' ');
+  };
+
+  const handleKeyDown = (e) => {
+    if (mentionOpen && filteredHandles.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSelectedMentionIndex((i) => Math.min(i + 1, filteredHandles.length - 1));
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelectedMentionIndex((i) => Math.max(i - 1, 0));
+        return;
+      }
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        insertMention(filteredHandles[clampedMentionIndex].handle);
+        return;
+      }
+    }
+  };
+
   const handleKeyPress = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -227,6 +292,23 @@ const ChatInputArea = () => {
 
   const getModelInfo = (modelId) => {
     return availableModelsData?.models?.find(m => m.id === modelId);
+  };
+
+  const getModelSourceTag = (modelInfo) => {
+    if (!modelInfo?.source) return null;
+    const sourceLabel = modelInfo.source === 'admin' ? 'Admin' : 'My providers';
+    const provider = (modelInfo.provider_type || '').replace(/-/g, ' ');
+    return provider ? `${sourceLabel} · ${provider}` : sourceLabel;
+  };
+
+  // One-line caption for model: show provider only when it adds info (e.g. vendor "Anthropic" vs provider_type "openrouter"), else just source tag.
+  const getModelCaption = (modelInfo) => {
+    const sourceTag = getModelSourceTag(modelInfo);
+    if (!modelInfo?.provider) return sourceTag || null;
+    const providerTypeFormatted = (modelInfo.provider_type || '').replace(/-/g, ' ');
+    const providerDisplay = modelInfo.provider.trim();
+    if (providerDisplay.toLowerCase() === providerTypeFormatted.toLowerCase()) return sourceTag || null;
+    return sourceTag ? `${modelInfo.provider} · ${sourceTag}` : modelInfo.provider;
   };
 
   // Format cost for display (per 1M tokens by default)
@@ -400,21 +482,27 @@ const ChatInputArea = () => {
                 return (
                   <MenuItem key={modelId} value={modelId}>
                     <Box display="flex" alignItems="center" justifyContent="space-between" width="100%" sx={{ gap: 1 }}>
-                      <Typography 
-                        variant="body2" 
-                        sx={{ 
-                          fontWeight: isSelected ? 'bold' : 'normal',
-                          flex: 1,
-                          textAlign: 'left'
-                        }}
-                      >
-                        {modelInfo?.name || modelId}
-                      </Typography>
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <Typography
+                          variant="body2"
+                          sx={{
+                            fontWeight: isSelected ? 'bold' : 'normal',
+                            textAlign: 'left'
+                          }}
+                        >
+                          {modelInfo?.name || modelId}
+                        </Typography>
+                        {getModelCaption(modelInfo) && (
+                          <Typography variant="caption" color="text.secondary" display="block">
+                            {getModelCaption(modelInfo)}
+                          </Typography>
+                        )}
+                      </Box>
                       {pricingInfo && (
-                        <Typography 
-                          variant="caption" 
+                        <Typography
+                          variant="caption"
                           color="text.secondary"
-                          sx={{ textAlign: 'right', whiteSpace: 'nowrap' }}
+                          sx={{ whiteSpace: 'nowrap', ml: 1 }}
                         >
                           {pricingInfo}
                         </Typography>
@@ -489,7 +577,7 @@ const ChatInputArea = () => {
         multiple
         style={{ display: 'none' }}
         onChange={handleFileSelect}
-        accept="image/*,application/pdf,text/*,audio/*"
+        accept="image/*,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation,text/*,audio/*"
       />
 
       {/* Input Area */}
@@ -515,8 +603,9 @@ const ChatInputArea = () => {
           maxRows={4}
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
+          onKeyDown={handleKeyDown}
           onKeyPress={handleKeyPress}
-          placeholder="Type your message..."
+          placeholder="Type your message... Use @ to mention an agent"
           variant="outlined"
           size="small"
           fullWidth
@@ -527,6 +616,40 @@ const ChatInputArea = () => {
             },
           }}
         />
+        <Popper
+          open={mentionOpen && filteredHandles.length > 0}
+          anchorEl={textFieldRef.current}
+          placement="top-start"
+          style={{ zIndex: 1300 }}
+        >
+          <Paper elevation={2} sx={{ maxHeight: 220, overflow: 'auto', minWidth: 220 }}>
+            <List dense>
+              {filteredHandles.slice(0, 8).map((h, i) => (
+                <ListItemButton
+                  key={h.isAuto ? 'auto' : (h.id || h.handle)}
+                  selected={i === clampedMentionIndex}
+                  onClick={() => insertMention(h.handle)}
+                >
+                  {h.isAuto ? (
+                    <AutoMode sx={{ mr: 1, fontSize: 18, color: 'text.secondary' }} />
+                  ) : h.type === 'team' || h.type === 'line' ? (
+                    <Groups sx={{ mr: 1, fontSize: 18, color: 'text.secondary' }} />
+                  ) : (
+                    <SmartToy sx={{ mr: 1, fontSize: 18, color: 'text.secondary' }} />
+                  )}
+                  <ListItemText
+                    primary={'@' + h.handle}
+                    secondary={
+                      h.type === 'team' || h.type === 'line'
+                        ? (h.name ? `${h.name} (line)` : '(line)')
+                        : (h.name || '')
+                    }
+                  />
+                </ListItemButton>
+              ))}
+            </List>
+          </Paper>
+        </Popper>
         
         <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
           <Tooltip title={isRecording ? 'Stop recording' : 'Record voice'}>
@@ -571,10 +694,13 @@ const ChatInputArea = () => {
                 color="primary"
                 size="small"
                 sx={{ 
-                  backgroundColor: 'primary.main',
+                  backgroundColor: sendButtonMain,
                   color: 'white',
+                  border: 'none',
+                  boxShadow: 'none',
                   '&:hover': {
-                    backgroundColor: 'primary.dark',
+                    backgroundColor: sendButtonDark,
+                    boxShadow: 'none',
                   },
                   '&:disabled': {
                     backgroundColor: 'action.disabledBackground',
@@ -595,12 +721,6 @@ const ChatInputArea = () => {
         </Typography>
       )}
 
-      {/* Character count */}
-      {inputValue && (
-        <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
-          {inputValue.length} characters
-        </Typography>
-      )}
     </Box>
   );
 };

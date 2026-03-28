@@ -1,38 +1,33 @@
-import { useEffect, useState } from 'react';
 import { useTheme } from '../contexts/ThemeContext';
 
+/**
+ * Theme helpers; preference and system state live in ThemeContext.
+ */
 export const useThemeMode = () => {
-  const { darkMode, toggleDarkMode, setDarkMode } = useTheme();
-  const [systemPrefersDark, setSystemPrefersDark] = useState(false);
+  const {
+    darkMode,
+    toggleDarkMode,
+    setDarkMode,
+    themePreference,
+    setThemePreference,
+    systemPrefersDark,
+  } = useTheme();
 
-  // Detect system preference
-  useEffect(() => {
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    setSystemPrefersDark(mediaQuery.matches);
-
-    const handleChange = (e) => {
-      setSystemPrefersDark(e.matches);
-    };
-
-    mediaQuery.addEventListener('change', handleChange);
-    return () => mediaQuery.removeEventListener('change', handleChange);
-  }, []);
-
-  // Sync with system preference
   const syncWithSystem = () => {
-    setDarkMode(systemPrefersDark);
+    setThemePreference('system');
   };
 
-  // Check if current theme matches system preference
-  const isSystemTheme = darkMode === systemPrefersDark;
+  const isSystemTheme = themePreference === 'system';
 
   return {
     darkMode,
     toggleDarkMode,
     setDarkMode,
+    themePreference,
+    setThemePreference,
     systemPrefersDark,
     syncWithSystem,
     isSystemTheme,
-    themeMode: darkMode ? 'dark' : 'light'
+    themeMode: darkMode ? 'dark' : 'light',
   };
-}; 
+};

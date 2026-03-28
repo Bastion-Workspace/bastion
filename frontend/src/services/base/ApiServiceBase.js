@@ -1,5 +1,5 @@
 // Base API Service for frontend-backend communication
-const API_BASE = process.env.REACT_APP_API_URL || '';
+const API_BASE = import.meta.env.VITE_API_URL || '';
 
 class ApiServiceBase {
   constructor() {
@@ -120,7 +120,7 @@ class ApiServiceBase {
     const fullURL = `${this.baseURL}${url}`;
     
     // Only log in development mode to reduce console noise
-    const isDev = process.env.NODE_ENV === 'development';
+    const isDev = import.meta.env.DEV;
     if (isDev) {
       console.log('🌐 API Request:', {
         url: fullURL,
@@ -178,9 +178,12 @@ class ApiServiceBase {
                 }
                 throw error;
               }
-              
+              if (config.rawResponse) return retryResponse;
+              if (retryResponse.status === 204 || retryResponse.status === 205) {
+                return null;
+              }
               const result = await retryResponse.json();
-              if (process.env.NODE_ENV === 'development') {
+              if (import.meta.env.DEV) {
                 console.log('🌐 API Success after refresh:', result);
               }
               return result;
@@ -203,18 +206,24 @@ class ApiServiceBase {
       const error = new Error(`HTTP error! status: ${response.status}`);
       try {
         const errorData = await response.json();
-        error.response = { data: errorData };
+        error.response = { status: response.status, data: errorData };
         console.error('🌐 API Error:', errorData);
       } catch (e) {
-        error.response = { data: { detail: response.statusText } };
+        error.response = { status: response.status, data: { detail: response.statusText } };
         console.error('🌐 API Error (no JSON):', response.statusText);
       }
       throw error;
     }
 
+    if (config.rawResponse) {
+      return response;
+    }
+    if (response.status === 204 || response.status === 205) {
+      return null;
+    }
     const result = await response.json();
     // Only log in development mode to reduce console noise
-    if (process.env.NODE_ENV === 'development') {
+    if (import.meta.env.DEV) {
       console.log('🌐 API Success:', result);
     }
     return result;
@@ -222,6 +231,10 @@ class ApiServiceBase {
 
   get = async (url, options = {}) => {
     return this.request(url, { method: 'GET', ...options });
+  }
+
+  getRaw = async (url, options = {}) => {
+    return this.request(url, { method: 'GET', rawResponse: true, ...options });
   }
 
   post = async (url, data, options = {}) => {

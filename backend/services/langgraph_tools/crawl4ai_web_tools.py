@@ -7,11 +7,37 @@ import logging
 import asyncio
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-from urllib.parse import urlparse, quote_plus
+from urllib.parse import urlparse, quote_plus, urlencode, parse_qs, urlunparse
 
 from clients.crawl_service_client import get_crawl_service_client
 
 logger = logging.getLogger(__name__)
+
+
+def _set_url_param(base_url: str, param: str, value: int) -> str:
+    """Set or replace a query parameter on a URL. Uses urllib.parse."""
+    parsed = urlparse(base_url)
+    query_dict = parse_qs(parsed.query, keep_blank_values=True)
+    query_dict[param] = [str(value)]
+    new_query = urlencode(query_dict, doseq=True)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
+
+
+def _extract_next_link(html: str, css_selector: str, base_url: str) -> Optional[str]:
+    """Extract the href of the first element matching the CSS selector. Resolves relative URLs."""
+    if not html or not css_selector or not base_url:
+        return None
+    try:
+        from bs4 import BeautifulSoup
+        from urllib.parse import urljoin
+        soup = BeautifulSoup(html, "html.parser")
+        el = soup.select_one(css_selector)
+        if el is None or not el.get("href"):
+            return None
+        return urljoin(base_url, el["href"].strip())
+    except Exception as e:
+        logger.debug(f"Could not extract next link with selector {css_selector}: {e}")
+        return None
 
 
 class Crawl4AIWebTools:
@@ -93,7 +119,8 @@ class Crawl4AIWebTools:
         chunking_strategy: str = "NlpSentenceChunking",
         css_selector: Optional[str] = None,
         word_count_threshold: int = 10,
-        user_id: str = None
+        user_id: str = None,
+        max_urls: int = 5
     ) -> Dict[str, Any]:
         """Extract full content from web URLs using Crawl4AI Service via gRPC
         
@@ -101,12 +128,11 @@ class Crawl4AIWebTools:
         since we have our own LLM infrastructure (OpenRouter, etc.) for processing content.
         """
         try:
-            logger.info(f"🕷️ Crawling {len(urls)} URLs with Crawl4AI (markdown extraction)")
+            logger.info(f"🕷️ Crawling {len(urls)} URLs with Crawl4AI (markdown extraction, max_urls={max_urls})")
             
             crawl_client = await self._get_crawl_client()
             
-            # Limit to 5 URLs to prevent abuse
-            urls_to_crawl = urls[:5]
+            urls_to_crawl = urls[:max_urls] if max_urls > 0 else urls[:5]
             
             # Always use markdown extraction - we don't configure Crawl4AI with LLM
             # Our LLM processing happens separately in the research agent
@@ -180,7 +206,7 @@ class Crawl4AIWebTools:
                         "success": True,
                         "metadata": full_metadata,
                         "content_blocks": content_blocks,
-                        "full_content": content[:50000],  # Limit content size
+                        "full_content": content,
                         "html": result.get("html", ""),  # Include HTML content
                         "links": result.get("links", [])[:20],
                         "images": result.get("images", [])[:10],
@@ -215,6 +241,57 @@ class Crawl4AIWebTools:
                 "urls_crawled": 0,
                 "successful_crawls": 0
             }
+
+    async def crawl_with_pagination(
+        self,
+        url: str,
+        max_pages: int = 10,
+        pagination_param: Optional[str] = None,
+        start_page: int = 0,
+        next_page_css_selector: Optional[str] = None,
+        css_selector: Optional[str] = None,
+        user_id: str = None
+    ) -> Dict[str, Any]:
+        """Crawl multiple pages by following pagination (param-based or next-link selector)."""
+        all_results = []
+        current_url = url
+        current_page = start_page
+
+        for page_idx in range(max_pages):
+            if pagination_param:
+                current_url = _set_url_param(url, pagination_param, current_page)
+
+            page_result = await self.crawl_web_content(
+                urls=[current_url],
+                css_selector=css_selector,
+                user_id=user_id
+            )
+
+            page_results = [r for r in page_result.get("results", []) if r.get("success")]
+            if not page_results:
+                break
+            all_results.extend(page_results)
+
+            if pagination_param:
+                current_page += 1
+            elif next_page_css_selector:
+                html = page_results[0].get("html", "")
+                next_url = _extract_next_link(html, next_page_css_selector, current_url)
+                if not next_url or next_url == current_url:
+                    break
+                current_url = next_url
+            else:
+                break
+
+        successful = [r for r in all_results if r.get("success")]
+        return {
+            "success": True,
+            "results": all_results,
+            "urls_crawled": len(all_results),
+            "successful_crawls": len(successful),
+            "total_content_length": sum(len(r.get("full_content", "")) for r in successful),
+            "total_citations": sum(len(r.get("citations", [])) for r in all_results)
+        }
 
     async def crawl_site(
         self,
@@ -405,7 +482,7 @@ class Crawl4AIWebTools:
                                 "domain": seed_host,
                                 "crawl_timestamp": datetime.now().isoformat(),
                             },
-                            "full_content": (main_text or "")[:50000],
+                            "full_content": (main_text or ""),
                             "content_blocks": [],
                             "links": page_links[:20],
                             "relevance_score": relevance_score,
@@ -593,18 +670,45 @@ async def crawl_web_content(
     chunking_strategy: str = "NlpSentenceChunking",
     css_selector: Optional[str] = None,
     word_count_threshold: int = 10,
-    user_id: str = None
+    user_id: str = None,
+    paginate: bool = False,
+    max_pages: int = 10,
+    pagination_param: Optional[str] = None,
+    start_page: int = 0,
+    next_page_css_selector: Optional[str] = None,
+    max_urls: int = 5
 ) -> Dict[str, Any]:
     """
-    Module-level wrapper for crawl_web_content tool
-    
+    Module-level wrapper for crawl_web_content tool.
+
     Accepts either single URL or multiple URLs for backward compatibility.
-    
+    When paginate=True, follows pagination (param-based or next-link selector).
+
     Note: Always uses markdown extraction. We don't configure Crawl4AI with an LLM
     since we have our own LLM infrastructure for processing content.
     """
     instance = await get_crawl4ai_instance()
-    
+
+    if paginate:
+        if not url and not urls:
+            return {
+                "success": False,
+                "error": "Must provide 'url' (or single 'urls' entry) when paginate=True",
+                "results": [],
+                "urls_crawled": 0,
+                "successful_crawls": 0
+            }
+        seed_url = url if url else (urls[0] if urls else "")
+        return await instance.crawl_with_pagination(
+            url=seed_url,
+            max_pages=max_pages,
+            pagination_param=pagination_param,
+            start_page=start_page,
+            next_page_css_selector=next_page_css_selector,
+            css_selector=css_selector,
+            user_id=user_id
+        )
+
     # Handle both single URL and multiple URLs
     if url and not urls:
         urls_list = [url]
@@ -620,14 +724,15 @@ async def crawl_web_content(
             "urls_crawled": 0,
             "successful_crawls": 0
         }
-    
+
     return await instance.crawl_web_content(
         urls=urls_list,
         extraction_strategy=extraction_strategy,
         chunking_strategy=chunking_strategy,
         css_selector=css_selector,
         word_count_threshold=word_count_threshold,
-        user_id=user_id
+        user_id=user_id,
+        max_urls=max_urls
     )
 
 async def crawl_site(

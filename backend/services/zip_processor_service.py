@@ -67,8 +67,9 @@ class ZipProcessorService:
         # Supported file types for extraction
         self.supported_extensions = {
             '.pdf': 'pdf',
-            '.txt': 'txt', 
+            '.txt': 'txt',
             '.docx': 'docx',
+            '.pptx': 'pptx',
             '.html': 'html',
             '.htm': 'html',
             '.eml': 'eml',

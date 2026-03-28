@@ -135,136 +135,90 @@ class OrgArchiveService:
         self,
         user_id: str,
         source_file: str,
-        archive_location: Optional[str] = None
+        archive_location: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
-        Archive all DONE items from a file
-        
-        **BULLY!** Clean house! Move all completed tasks to the archive!
-        
-        Args:
-            user_id: User ID
-            source_file: Source file path
-            archive_location: Optional custom archive location
-        
-        Returns:
-            Dict with count of archived items
+        Archive all closed items (DONE/CANCELED/CANCELLED and user-configured done states) from a file.
+        Full entries (heading + subtree + properties) are moved.
         """
         try:
-            logger.info(f"📦 BULK ARCHIVE: User {user_id} archiving all DONE from {source_file}")
-            
-            # Get user's org directory
+            logger.info("Bulk archive from %s", source_file)
+
             from services.folder_service import FolderService
             folder_service = FolderService()
-            
-            # Resolve source file path
+
             source_path = await self._resolve_file_path(user_id, source_file, folder_service)
             if not source_path.exists():
                 raise FileNotFoundError(f"Source file not found: {source_file}")
-            
-            # Read source file
+
             with open(source_path, 'r', encoding='utf-8') as f:
                 source_lines = f.readlines()
-            
-            # Find all DONE entries
-            done_entries = self._find_done_entries(source_lines)
-            
+
+            from services.org_todo_service import _resolve_done_states
+            done_states = await _resolve_done_states(user_id)
+            done_entries = self._find_done_entries(source_lines, done_states)
+
             if not done_entries:
                 return {
                     "success": True,
                     "archived_count": 0,
                     "message": "No DONE items to archive"
                 }
-            
-            logger.info(f"📦 Found {len(done_entries)} DONE entries to archive")
-            
-            # Determine archive file path
+
+            logger.info("Found %s entries to archive", len(done_entries))
+
             if archive_location:
-                # Resolve relative to source file's directory if it's a relative path
                 archive_path = await self._resolve_file_path(user_id, archive_location, folder_service, base_path=source_path)
             else:
-                # Check user's settings for default archive location
                 archive_path = await self._get_archive_path(user_id, source_file, source_path)
-            
-            # Ensure archive directory exists
+
             archive_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Read or create archive file
+
             if archive_path.exists():
                 with open(archive_path, 'r', encoding='utf-8') as f:
                     archive_content = f.read()
             else:
                 archive_content = f"# Archive of {source_path.name}\n\n"
-                logger.info(f"📦 Creating new archive file: {archive_path}")
-            
-            # Archive each entry (in reverse order to maintain line numbers)
+                logger.info("Creating new archive file: %s", archive_path)
+
             archived_headings = []
             for entry_info in reversed(done_entries):
                 entry_lines = entry_info['lines']
                 archived_entry = self._add_archive_metadata(entry_lines, source_file)
-                
+
                 if not archive_content.endswith('\n\n'):
                     archive_content += '\n' if archive_content.endswith('\n') else '\n\n'
                 archive_content += archived_entry
-                
+
                 archived_headings.append(entry_info['heading'])
-            
-            # Write archive file
+
             with open(archive_path, 'w', encoding='utf-8') as f:
                 f.write(archive_content)
-            
-            logger.info(f"✅ {len(done_entries)} entries appended to archive")
-            
-            # Remove all DONE entries from source (in reverse order)
+
+            logger.info("%s entries appended to archive", len(done_entries))
+
             new_source_lines = source_lines.copy()
             for entry_info in reversed(done_entries):
                 new_source_lines = (
                     new_source_lines[:entry_info['start_line']] +
                     new_source_lines[entry_info['end_line']:]
                 )
-            
+
             with open(source_path, 'w', encoding='utf-8') as f:
                 f.writelines(new_source_lines)
-            
-            logger.info(f"✅ {len(done_entries)} entries removed from source")
-            
+
+            logger.info("%s entries removed from source", len(done_entries))
+
             return {
                 "success": True,
                 "archived_count": len(done_entries),
                 "archived_headings": archived_headings,
                 "archive_file": str(archive_path.relative_to(source_path.parent.parent))
             }
-            
+
         except Exception as e:
-            logger.error(f"❌ Bulk archive failed: {e}", exc_info=True)
+            logger.error("Bulk archive failed: %s", e, exc_info=True)
             raise
-    
-    def _parse_file_archive_directive(self, content: str) -> Optional[str]:
-        """
-        Parse #+ARCHIVE: directive from org file header
-        
-        Format: #+ARCHIVE: path/to/archive.org:: or #+ARCHIVE: path/to/archive.org::* Heading
-        
-        Returns the archive location string (without the :: and heading part)
-        """
-        if not content:
-            return None
-        
-        lines = content.split('\n')
-        # Look for #+ARCHIVE: in the header (before first heading)
-        for line in lines:
-            # Stop at first heading
-            if re.match(r'^\*+\s+', line):
-                break
-            
-            # Match #+ARCHIVE: directive
-            match = re.match(r'^#\+ARCHIVE:\s+(.+?)(?:::|$)', line, re.IGNORECASE)
-            if match:
-                archive_location = match.group(1).strip()
-                logger.info(f"📦 Found file-level #+ARCHIVE: directive: {archive_location}")
-                return archive_location
-        
-        return None
     
     async def _get_archive_path(
         self,
@@ -279,14 +233,15 @@ class OrgArchiveService:
         - %s = source filename without extension
         - %s_archive = source filename with _archive suffix
         """
-        # Priority 1: Check file-level #+ARCHIVE: directive
+        # Priority 1: Check file-level #+ARCHIVE: directive (shared parser)
         try:
             if source_path.exists():
-                with open(source_path, 'r', encoding='utf-8') as f:
+                from utils.org_header_parser import parse_org_file_header
+                with open(source_path, "r", encoding="utf-8-sig") as f:
                     file_content = f.read()
-                
-                file_archive = self._parse_file_archive_directive(file_content)
-                if file_archive:
+                header = parse_org_file_header(file_content)
+                if header.archive:
+                    file_archive = header.archive
                     # Replace format specifiers
                     source_stem = source_path.stem
                     archive_location = file_archive.replace('%s', source_stem)
@@ -429,20 +384,23 @@ class OrgArchiveService:
             'end_line': end_idx
         }
     
-    def _find_done_entries(self, lines: List[str]) -> List[Dict[str, Any]]:
-        """Find all entries with DONE state"""
+    def _find_done_entries(
+        self, lines: List[str], done_states: Optional[set] = None
+    ) -> List[Dict[str, Any]]:
+        """Find all entries with a done state (DONE, CANCELED, or user-configured)."""
+        if done_states is None:
+            done_states = {"DONE", "CANCELED", "CANCELLED"}
+        pattern = "|".join(re.escape(s) for s in done_states)
+        done_re = re.compile(rf"^(\*+)\s+({pattern})\s+(.*)", re.IGNORECASE)
         done_entries = []
-        
         for idx, line in enumerate(lines):
-            # Match heading with DONE state
-            match = re.match(r'^(\*+)\s+(DONE|CANCELED|CANCELLED)\s+(.*)', line, re.IGNORECASE)
+            match = done_re.match(line)
             if match:
                 entry_info = self._extract_entry(lines, idx + 1)  # Convert to 1-based
                 if entry_info:
                     done_entries.append(entry_info)
-        
         return done_entries
-    
+
     def _add_archive_metadata(self, entry_lines: List[str], source_file: str) -> str:
         """Add ARCHIVE_TIME property to entry"""
         lines = entry_lines.copy()

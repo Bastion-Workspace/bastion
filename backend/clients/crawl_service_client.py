@@ -31,6 +31,7 @@ class CrawlServiceClient:
         self.service_url = f"{self.service_host}:{self.service_port}"
         self.channel: Optional[grpc.aio.Channel] = None
         self.stub: Optional[crawl_service_pb2_grpc.CrawlServiceStub] = None
+        self.browser_stub: Optional[crawl_service_pb2_grpc.BrowserSessionServiceStub] = None
         self._initialized = False
     
     async def initialize(self):
@@ -49,6 +50,7 @@ class CrawlServiceClient:
             ]
             self.channel = grpc.aio.insecure_channel(self.service_url, options=options)
             self.stub = crawl_service_pb2_grpc.CrawlServiceStub(self.channel)
+            self.browser_stub = crawl_service_pb2_grpc.BrowserSessionServiceStub(self.channel)
             
             # Test connection
             health_request = crawl_service_pb2.HealthCheckRequest()
@@ -355,6 +357,186 @@ class CrawlServiceClient:
         except Exception as e:
             logger.error(f"❌ Error checking health: {e}")
             raise
+
+    async def browser_create_session(
+        self,
+        timeout_seconds: Optional[int] = 30,
+        user_agent: Optional[str] = None,
+        storage_state_json: Optional[str] = None,
+    ) -> Optional[str]:
+        """Create a Playwright browser session. Returns session_id or None. Optionally restore from storage_state_json."""
+        if not self._initialized:
+            await self.initialize()
+        if not self.browser_stub:
+            return None
+        try:
+            request = crawl_service_pb2.BrowserSessionConfig(
+                timeout_seconds=timeout_seconds or 30,
+                user_agent=user_agent or "",
+            )
+            if storage_state_json:
+                request.storage_state_json = storage_state_json
+            response = await self.browser_stub.CreateSession(request, timeout=30.0)
+            return response.session_id if response.session_id else None
+        except grpc.RpcError as e:
+            logger.error(f"Browser CreateSession failed: {e.code()}: {e.details()}")
+            raise
+
+    async def browser_save_session_state(self, session_id: str) -> Optional[str]:
+        """Serialize session cookies/localStorage to JSON. Returns state JSON string or None."""
+        if not self._initialized or not self.browser_stub:
+            return None
+        try:
+            request = crawl_service_pb2.BrowserSessionRef(session_id=session_id)
+            response = await self.browser_stub.SaveSessionState(request, timeout=30.0)
+            if response.success and response.state_json:
+                return response.state_json
+            return None
+        except grpc.RpcError as e:
+            logger.error(f"Browser SaveSessionState failed: {e.code()}: {e.details()}")
+            return None
+
+    async def browser_inspect_page(self, session_id: str) -> Dict[str, Any]:
+        """Get page structure (accessibility tree + interactive elements with selectors). Returns {success, page_structure, error}."""
+        if not self._initialized or not self.browser_stub:
+            return {"success": False, "error": "Browser service not available"}
+        try:
+            request = crawl_service_pb2.BrowserSessionRef(session_id=session_id)
+            response = await self.browser_stub.InspectPage(request, timeout=30.0)
+            return {
+                "success": response.success,
+                "page_structure": response.page_structure if response.page_structure else None,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error(f"Browser InspectPage failed: {e.code()}: {e.details()}")
+            return {"success": False, "error": str(e.details())}
+
+    async def browser_execute_action(
+        self,
+        session_id: str,
+        action: str,
+        selector: Optional[str] = None,
+        value: Optional[str] = None,
+        url: Optional[str] = None,
+        wait_selector: Optional[str] = None,
+        wait_timeout_seconds: Optional[int] = None,
+        direction: Optional[str] = None,
+        amount_pixels: Optional[int] = None,
+        click_x: Optional[int] = None,
+        click_y: Optional[int] = None,
+        key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Execute a single browser action. Returns {success, error?, extracted_content?, screenshot_png?}."""
+        if not self._initialized or not self.browser_stub:
+            return {"success": False, "error": "Browser service not available"}
+        try:
+            if action == "navigate" and url:
+                req = crawl_service_pb2.BrowserActionRequest(
+                    session_id=session_id,
+                    navigate=crawl_service_pb2.NavigateAction(url=url),
+                )
+            elif action == "click":
+                if click_x is not None and click_y is not None:
+                    req = crawl_service_pb2.BrowserActionRequest(
+                        session_id=session_id,
+                        click=crawl_service_pb2.ClickAction(click_x=click_x, click_y=click_y),
+                    )
+                elif selector:
+                    req = crawl_service_pb2.BrowserActionRequest(
+                        session_id=session_id,
+                        click=crawl_service_pb2.ClickAction(selector=selector),
+                    )
+                else:
+                    return {"success": False, "error": "Click requires selector or click_x/click_y"}
+            elif action == "fill" and selector and value is not None:
+                req = crawl_service_pb2.BrowserActionRequest(
+                    session_id=session_id,
+                    fill=crawl_service_pb2.FillAction(selector=selector, value=value),
+                )
+            elif action == "wait":
+                req = crawl_service_pb2.BrowserActionRequest(
+                    session_id=session_id,
+                    wait=crawl_service_pb2.WaitAction(
+                        selector=wait_selector or "",
+                        timeout_seconds=wait_timeout_seconds or 5,
+                    ),
+                )
+            elif action == "extract":
+                req = crawl_service_pb2.BrowserActionRequest(
+                    session_id=session_id,
+                    extract=crawl_service_pb2.ExtractAction(selector=selector or ""),
+                )
+            elif action == "screenshot":
+                req = crawl_service_pb2.BrowserActionRequest(
+                    session_id=session_id,
+                    screenshot=crawl_service_pb2.ScreenshotAction(),
+                )
+            elif action == "scroll":
+                req = crawl_service_pb2.BrowserActionRequest(
+                    session_id=session_id,
+                    scroll=crawl_service_pb2.ScrollAction(
+                        direction=direction or "down",
+                        amount_pixels=amount_pixels if amount_pixels is not None and amount_pixels > 0 else 800,
+                    ),
+                )
+            elif action == "keypress":
+                req = crawl_service_pb2.BrowserActionRequest(
+                    session_id=session_id,
+                    keypress=crawl_service_pb2.KeypressAction(key=key or "Enter"),
+                )
+            else:
+                return {"success": False, "error": f"Unknown or incomplete action: {action}"}
+            response = await self.browser_stub.ExecuteAction(req, timeout=60.0)
+            out = {"success": response.success, "error": response.error if response.error else None}
+            if response.extracted_content:
+                out["extracted_content"] = response.extracted_content
+            if response.screenshot_png:
+                out["screenshot_png"] = bytes(response.screenshot_png)
+            return out
+        except grpc.RpcError as e:
+            logger.error(f"Browser ExecuteAction failed: {e.code()}: {e.details()}")
+            return {"success": False, "error": str(e.details())}
+
+    async def browser_download_file(
+        self,
+        session_id: str,
+        trigger_selector: str,
+        fallback_url: Optional[str] = None,
+        timeout_seconds: Optional[int] = 30,
+    ) -> Dict[str, Any]:
+        """Trigger a file download and return {success, file_content, filename, mime_type, file_size_bytes, error}."""
+        if not self._initialized or not self.browser_stub:
+            return {"success": False, "error": "Browser service not available"}
+        try:
+            request = crawl_service_pb2.BrowserDownloadRequest(
+                session_id=session_id,
+                trigger_selector=trigger_selector,
+                fallback_url=fallback_url or "",
+                timeout_seconds=timeout_seconds or 30,
+            )
+            response = await self.browser_stub.DownloadFile(request, timeout=120.0)
+            return {
+                "success": response.success,
+                "file_content": bytes(response.file_content) if response.file_content else b"",
+                "filename": response.filename or "download",
+                "mime_type": response.mime_type or "application/octet-stream",
+                "file_size_bytes": response.file_size_bytes or 0,
+                "error": response.error if response.error else None,
+            }
+        except grpc.RpcError as e:
+            logger.error(f"Browser DownloadFile failed: {e.code()}: {e.details()}")
+            return {"success": False, "error": str(e.details())}
+
+    async def browser_destroy_session(self, session_id: str) -> None:
+        """Destroy a browser session."""
+        if not self.browser_stub:
+            return
+        try:
+            request = crawl_service_pb2.BrowserSessionRef(session_id=session_id)
+            await self.browser_stub.DestroySession(request, timeout=10.0)
+        except grpc.RpcError as e:
+            logger.warning(f"Browser DestroySession failed: {e.details()}")
 
 
 # Singleton instance

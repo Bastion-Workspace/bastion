@@ -5,7 +5,7 @@ Pydantic models for RSS feeds, articles, and subscriptions
 
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field, validator, HttpUrl
+from pydantic import BaseModel, Field, validator
 import hashlib
 
 
@@ -53,6 +53,8 @@ class RSSArticle(BaseModel):
     published_date: Optional[datetime] = Field(None, description="Publication date from RSS feed")
     is_processed: bool = Field(default=False, description="Whether the full article has been downloaded and processed")
     is_read: bool = Field(default=False, description="Whether the user has marked this article as read")
+    is_starred: bool = Field(default=False, description="Whether the user starred/saved the article")
+    greader_id: Optional[int] = Field(None, description="Integer id for Google Reader API clients")
     content_hash: Optional[str] = Field(None, description="Hash of content for duplicate detection")
     user_id: Optional[str] = Field(None, description="User ID for user-specific articles, NULL for global articles")
     created_at: Optional[datetime] = Field(None, description="Creation timestamp")
@@ -88,6 +90,10 @@ class RSSFeedCreate(BaseModel):
     tags: List[str] = Field(default=[], description="Tags for the feed")
     check_interval: int = Field(default=3600, description="Interval in seconds between feed checks")
     user_id: Optional[str] = Field(None, description="User ID for user-specific feeds")
+    is_active: Optional[bool] = Field(
+        default=None,
+        description="When set on update, changes whether the feed is polled (global feeds: admin only)",
+    )
 
     @validator('feed_url')
     def validate_feed_url(cls, v):
@@ -100,8 +106,12 @@ class RSSFeedCreate(BaseModel):
 class RSSArticleImport(BaseModel):
     """Model for importing RSS articles"""
     article_id: str = Field(..., description="Article ID to import")
-    collection_name: Optional[str] = Field(None, description="Target collection name")
+    collection_name: Optional[str] = Field(None, description="Target collection name (legacy, unused by placement)")
     user_id: str = Field(..., description="User ID importing the article")
+    target_folder_id: Optional[str] = Field(
+        None,
+        description="Optional My Documents folder ID; overrides default Web Sources placement for this import",
+    )
 
 
 class RSSFeedPollResult(BaseModel):

@@ -171,7 +171,8 @@ message UpsertVectorsResponse {
 message VectorFilter {
   string field = 1;
   string value = 2;
-  string operator = 3;  // "equals", "contains", "in" (for arrays)
+  string operator = 3;  // "equals", "not_equals", "contains", "in", "any_of"
+  repeated string values = 4;  // For "any_of": match field against any of these values
 }
 
 message SearchVectorsRequest {

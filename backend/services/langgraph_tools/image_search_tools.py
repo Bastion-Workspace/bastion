@@ -68,7 +68,7 @@ class ImageSearchTools:
                 "type": "function",
                 "function": {
                     "name": "search_images",
-                    "description": "Search for images with metadata by content, type, date, or author. Returns markdown-formatted results with image URLs.",
+                    "description": "Search for images, comics, photos, artwork, faces, portraits, and visual content with metadata. Use instead of search_local for any visual/image query. Returns markdown-formatted results with image URLs that can be displayed in chat.",
                     "parameters": {
                         "type": "object",
                         "properties": {

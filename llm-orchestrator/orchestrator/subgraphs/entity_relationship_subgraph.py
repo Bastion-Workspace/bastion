@@ -216,7 +216,7 @@ async def retrieve_documents_node(state: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(content, Exception):
                 logger.warning(f"Failed to retrieve doc {doc_id}: {content}")
                 continue
-            
+            content = content.get("content", content) if isinstance(content, dict) else content
             if content and not content.startswith("Error"):
                 documents.append({
                     "document_id": doc_id,

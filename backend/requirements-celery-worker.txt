@@ -1,15 +1,18 @@
 # Celery Worker - Minimal Requirements
-# Based on actual imports in celery_tasks (orchestrator_tasks, agent_tasks, rss_tasks, entertainment_sync_tasks)
+# Based on actual imports in celery_tasks (agent_tasks, rss_tasks, etc.)
 
 # Core Celery
 celery==5.5.3
 redis==6.4.0
 
+# Cron expression parsing (scheduled_agent_tasks)
+croniter==3.0.0
+
 # FastAPI (required for service container: WebSocketManager, ParallelDocumentService use it)
 fastapi==0.115.6
 # kombu is installed automatically by celery (celery 5.5.3 requires kombu>=5.5.2,<5.6)
 
-# PostgreSQL database (for RSS tasks, entertainment sync, state persistence)
+# PostgreSQL database (for RSS tasks, state persistence)
 psycopg2-binary==2.9.10
 asyncpg==0.30.0
 sqlalchemy==2.0.36
@@ -18,10 +21,14 @@ sqlalchemy==2.0.36
 grpcio==1.76.0
 grpcio-tools==1.76.0
 
-# HTTP clients (RSS polling, entertainment sync, content fetching)
+# HTTP clients (RSS polling, content fetching)
 httpx==0.28.1
 aiohttp>=3.11.11
 aiofiles==24.1.0
+
+# PDF text extraction (service container → ParallelDocumentService → document_processor)
+PyPDF2==3.0.1
+pypdf==5.8.0
 
 # RSS processing
 feedparser==6.0.11
@@ -37,14 +44,14 @@ langchain==0.3.27
 langchain-community==0.3.27
 
 # LangGraph for agentic architecture (RSS background agent)
-langgraph==0.6.3
-langgraph-checkpoint-postgres>=2.0.0
+langgraph>=1.0.0,<2.0.0
+langgraph-checkpoint-postgres>=3.0.0
 
 # LLM APIs (for embeddings and agent calls)
 openai==1.99.1
 
 # Configuration and logging
-pydantic==2.10.3
+pydantic==2.12.5
 pydantic-settings==2.6.1
 python-dotenv==1.0.1
 structlog==24.4.0
@@ -56,7 +63,7 @@ PyJWT==2.9.0
 passlib[bcrypt]==1.7.4
 bcrypt==3.2.2
 
-# Knowledge graph (entertainment sync tasks)
+# Knowledge graph
 neo4j==5.15.0
 
 # Vector database client (for embeddings)

@@ -17,13 +17,21 @@ const RSSNavigation = ({ onFeedClick, onAddFeed }) => {
 
     useEffect(() => {
         loadFeeds();
-        
+
+        const onUnreadUpdated = () => {
+            refreshUnreadCounts();
+        };
+        window.addEventListener('rss-unread-counts-updated', onUnreadUpdated);
+
         // Set up periodic refresh of unread counts
         const interval = setInterval(() => {
             refreshUnreadCounts();
         }, 30000); // Refresh every 30 seconds
-        
-        return () => clearInterval(interval);
+
+        return () => {
+            clearInterval(interval);
+            window.removeEventListener('rss-unread-counts-updated', onUnreadUpdated);
+        };
     }, []);
 
     const loadFeeds = async () => {

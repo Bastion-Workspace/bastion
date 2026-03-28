@@ -5,9 +5,34 @@ HVAC/BTU, electrical, construction, and general engineering formulas
 
 import logging
 import math
-from typing import Dict, Any, Callable, List
+from typing import Dict, Any, Callable, List, Optional
+
+from pydantic import BaseModel, Field
+
+from orchestrator.utils.action_io_registry import register_action
 
 logger = logging.getLogger(__name__)
+
+
+# ── I/O models for evaluate_formula_tool ────────────────────────────────────
+
+class EvaluateFormulaInputs(BaseModel):
+    """Required inputs for evaluate_formula_tool."""
+    formula_name: str = Field(description="Name of formula e.g. btu_hvac, ohms_law_voltage")
+    inputs: Dict[str, Any] = Field(description="Dictionary of input values for the formula")
+
+
+class EvaluateFormulaOutputs(BaseModel):
+    """Typed outputs for evaluate_formula_tool."""
+    result: Optional[float] = Field(default=None, description="Computed result")
+    unit: Optional[str] = Field(default=None, description="Output unit")
+    formula_used: str = Field(description="Formula name that was evaluated")
+    formula_description: Optional[str] = Field(default=None, description="Formula description")
+    steps: List[str] = Field(default_factory=list, description="Calculation steps")
+    inputs_used: Optional[Dict[str, Any]] = Field(default=None, description="Inputs used")
+    success: bool = Field(description="Whether evaluation succeeded")
+    error: Optional[str] = Field(default=None, description="Error message if failed")
+    formatted: str = Field(description="Human-readable summary for LLM/chat")
 
 
 def _calculate_manual_j_heat_loss(inputs: Dict[str, Any]) -> float:
@@ -705,13 +730,15 @@ async def evaluate_formula_tool(
         logger.info(f"Evaluating formula: {formula_name} with inputs: {inputs}")
         
         if formula_name not in FORMULA_LIBRARY:
+            err = f"Formula '{formula_name}' not found in library"
             return {
                 "result": None,
                 "unit": None,
                 "formula_used": formula_name,
                 "steps": [],
                 "success": False,
-                "error": f"Formula '{formula_name}' not found in library"
+                "error": err,
+                "formatted": err
             }
         
         formula_def = FORMULA_LIBRARY[formula_name]
@@ -720,13 +747,15 @@ async def evaluate_formula_tool(
         required_inputs = formula_def.get("required_inputs", [])
         missing_inputs = [inp for inp in required_inputs if inp not in inputs]
         if missing_inputs:
+            err = f"Missing required inputs: {', '.join(missing_inputs)}"
             return {
                 "result": None,
                 "unit": None,
                 "formula_used": formula_name,
                 "steps": [],
                 "success": False,
-                "error": f"Missing required inputs: {', '.join(missing_inputs)}"
+                "error": err,
+                "formatted": err
             }
         
         # Validate that no unknown parameters are passed
@@ -737,13 +766,15 @@ async def evaluate_formula_tool(
         unknown_params = provided_params - allowed_params
         if unknown_params:
             logger.warning(f"⚠️ Unknown parameters passed to {formula_name}: {unknown_params}")
+            err = f"Unknown parameters: {', '.join(unknown_params)}. Valid parameters are: {', '.join(sorted(allowed_params))}"
             return {
                 "result": None,
                 "unit": None,
                 "formula_used": formula_name,
                 "steps": [],
                 "success": False,
-                "error": f"Unknown parameters: {', '.join(unknown_params)}. Valid parameters are: {', '.join(sorted(allowed_params))}"
+                "error": err,
+                "formatted": err
             }
         
         # Fill in optional inputs with defaults
@@ -757,22 +788,26 @@ async def evaluate_formula_tool(
         if validation_func:
             try:
                 if not validation_func(inputs):
+                    err = f"Input validation failed for formula '{formula_name}'"
                     return {
                         "result": None,
                         "unit": None,
                         "formula_used": formula_name,
                         "steps": [],
                         "success": False,
-                        "error": f"Input validation failed for formula '{formula_name}'"
+                        "error": err,
+                        "formatted": err
                     }
             except Exception as e:
+                err = f"Validation error: {str(e)}"
                 return {
                     "result": None,
                     "unit": None,
                     "formula_used": formula_name,
                     "steps": [],
                     "success": False,
-                    "error": f"Validation error: {str(e)}"
+                    "error": err,
+                    "formatted": err
                 }
         
         # Evaluate formula
@@ -794,7 +829,7 @@ async def evaluate_formula_tool(
         output_unit = formula_def.get("output_unit", "")
         
         logger.info(f"Formula evaluation result: {result} {output_unit}")
-        
+        formatted = f"Formula {formula_name}: result = {float(result)} {output_unit}"
         return {
             "result": float(result),
             "unit": output_unit,
@@ -803,26 +838,48 @@ async def evaluate_formula_tool(
             "steps": steps,
             "inputs_used": inputs,
             "success": True,
-            "error": None
+            "error": None,
+            "formatted": formatted
         }
         
     except ZeroDivisionError:
+        err = "Division by zero in formula calculation"
         return {
             "result": None,
             "unit": None,
             "formula_used": formula_name,
             "steps": [],
             "success": False,
-            "error": "Division by zero in formula calculation"
+            "error": err,
+            "formatted": err
         }
     except Exception as e:
         logger.error(f"Formula evaluation failed: {e}")
+        err = str(e)
         return {
             "result": None,
             "unit": None,
             "formula_used": formula_name,
             "steps": [],
             "success": False,
-            "error": str(e)
+            "error": err,
+            "formatted": f"Formula evaluation failed: {err}"
         }
+
+
+register_action(
+    name="evaluate_formula",
+    category="math",
+    description=(
+        "Evaluate a pre-defined formula by name. "
+        "Available formulas — HVAC: btu_hvac, manual_j_heat_loss; "
+        "Electrical: ohms_law_voltage, ohms_law_current, ohms_law_resistance, "
+        "power_dissipation, voltage_divider, capacitor_impedance; "
+        "Construction: area_rectangle, volume_rectangular, material_quantity. "
+        "Call list_available_formulas for full parameter details of any formula."
+    ),
+    inputs_model=EvaluateFormulaInputs,
+    outputs_model=EvaluateFormulaOutputs,
+    tool_function=evaluate_formula_tool,
+)
 

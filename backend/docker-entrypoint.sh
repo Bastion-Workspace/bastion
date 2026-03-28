@@ -70,10 +70,6 @@ asyncio.run(ensure_database_ready())
 # Database initialization is now handled by the consolidated 01_init.sql file
 echo "✅ Database initialization completed by PostgreSQL container"
 
-# Verify spaCy installation
-echo "🔍 Verifying spaCy installation..."
-python verify_spacy.py || echo "⚠️  spaCy verification failed, but continuing..."
-
 # Start the optimized application
 echo "🚀 Starting FastAPI application with optimized configuration..."
 echo "🔧 Using service container architecture for efficient resource usage"

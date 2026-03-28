@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Box,
   IconButton,
@@ -6,7 +6,6 @@ import {
   Paper,
   Divider,
   Tooltip,
-  ResizeHandle,
   CircularProgress,
 } from '@mui/material';
 import {
@@ -14,8 +13,6 @@ import {
   ChevronRight,
   History,
   Close,
-  DragIndicator,
-  Add,
   FileDownload,
   Fullscreen,
   FullscreenExit,
@@ -28,6 +25,7 @@ import ChatInputArea from './chat/ChatInputArea';
 import { useEditor } from '../contexts/EditorContext';
 import { useTheme } from '../contexts/ThemeContext';
 import FloatingHistoryWindow from './FloatingHistoryWindow';
+import SplitResizeHandle from './common/SplitResizeHandle';
 import { useChatSidebar } from '../contexts/ChatSidebarContext';
 import { useQuery, useQueryClient } from 'react-query';
 import apiService from '../services/apiService';
@@ -46,6 +44,7 @@ const ChatSidebar = () => {
     currentConversationId,
     selectConversation,
     createNewConversation,
+    messages,
   } = useChatSidebar();
   const { editorState } = useEditor();
   const { darkMode } = useTheme();
@@ -55,10 +54,20 @@ const ChatSidebar = () => {
     handleEditorPreferenceChange
   } = useChatSidebar();
 
+  const currentDocumentId = editorState?.documentId ?? null;
+  const hasPendingEditsForCurrentFile = useMemo(() => {
+    if (!currentDocumentId) return false;
+    return messages.some(
+      (m) =>
+        Array.isArray(m.editor_operations) &&
+        m.editor_operations.length > 0 &&
+        (m.editor_document_id === currentDocumentId || m.editor_document_id == null)
+    );
+  }, [messages, currentDocumentId]);
+
   const [historyWindowOpen, setHistoryWindowOpen] = useState(false);
   const [tempWidth, setTempWidth] = useState(sidebarWidth); // Local state for resize
   const sidebarRef = useRef(null);
-  const resizeHandleRef = useRef(null);
   
   // Use refs to store stable references to avoid stale closures
   const isResizingRef = useRef(false);
@@ -202,6 +211,17 @@ const ChatSidebar = () => {
     }
   }, []); // No dependencies needed since width is already updated in real-time
 
+  useEffect(() => {
+    if (isResizing) {
+      document.body.style.cursor = 'ew-resize';
+      document.body.style.userSelect = 'none';
+      return () => {
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+      };
+    }
+  }, [isResizing]);
+
   // Safety mechanism: if resize state gets stuck, force cleanup after 5 seconds
   useEffect(() => {
     if (isResizing) {
@@ -304,6 +324,7 @@ const ChatSidebar = () => {
     <Box
       ref={sidebarRef}
       sx={{
+        position: 'relative',
         display: 'flex',
         flexDirection: 'column',
         height: '100%',
@@ -313,17 +334,22 @@ const ChatSidebar = () => {
       }}
     >
       {/* Header */}
-      <Box sx={{ 
-        py: 0.75,
-        px: 1.5,
-        height: 44,
-        borderBottom: '1px solid', 
-        borderColor: 'divider',
-        backgroundColor: 'background.paper',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between'
-      }}>
+      <Box
+        sx={{
+          flexShrink: 0,
+          boxSizing: 'border-box',
+          minHeight: 44,
+          height: 44,
+          px: 2,
+          py: 0,
+          borderBottom: '1px solid',
+          borderColor: 'divider',
+          backgroundColor: 'background.paper',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}
+      >
         <Tooltip title={conversationTitle} placement="bottom">
           {isEditingTitle ? (
             <input
@@ -333,7 +359,7 @@ const ChatSidebar = () => {
               onBlur={() => commitTitleUpdate(tempTitle)}
               onKeyDown={handleTitleKeyDown}
               style={{
-                fontSize: '0.95rem',
+                fontSize: '0.875rem',
                 fontWeight: 500,
                 maxWidth: isFullWidth ? 'calc(100vw - 200px)' : sidebarWidth - 120,
                 border: '1px solid var(--mui-palette-divider)',
@@ -344,9 +370,10 @@ const ChatSidebar = () => {
             />
           ) : (
             <Typography 
-              variant="subtitle1" 
+              variant="subtitle2" 
               onClick={handleStartEditTitle}
               sx={{ 
+                fontSize: '0.875rem',
                 fontWeight: 500,
                 maxWidth: isFullWidth ? 'calc(100vw - 200px)' : sidebarWidth - 120, // Leave space for buttons
                 overflow: 'hidden',
@@ -368,33 +395,30 @@ const ChatSidebar = () => {
         
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.25 }}>
           {editorOpen && (
-            <Tooltip title={editorPreference === 'prefer' ? 'Prefer Editor (on)' : 'Prefer Editor (off)'}>
+            <Tooltip
+              title={
+                hasPendingEditsForCurrentFile
+                  ? 'Pending edits for this file (saved in conversation)'
+                  : editorPreference === 'prefer'
+                    ? 'Prefer Editor (on)'
+                    : 'Prefer Editor (off)'
+              }
+            >
               <IconButton
                 onClick={() => handleEditorPreferenceChange(editorPreference === 'prefer' ? 'ignore' : 'prefer')}
                 size="small"
-                color={editorPreference === 'prefer' ? 'primary' : 'default'}
-                sx={{ 
-                  width: 32, 
+                color={editorPreference === 'prefer' || hasPendingEditsForCurrentFile ? 'primary' : 'default'}
+                sx={{
+                  width: 32,
                   height: 32,
-                  '& .MuiSvgIcon-root': { fontSize: '1.1rem' }
+                  '& .MuiSvgIcon-root': { fontSize: '1.1rem' },
                 }}
               >
                 {editorPreference === 'prefer' ? <ToggleOn /> : <ToggleOff />}
               </IconButton>
             </Tooltip>
           )}
-          <Tooltip title="New Chat">
-            <IconButton 
-              onClick={handleNewChat}
-              size="small"
-              color="primary"
-              sx={{ width: 32, height: 32 }}
-            >
-              <Add />
-            </IconButton>
-          </Tooltip>
-          
-          <Tooltip title="Chat History">
+          <Tooltip title="Chats">
             <IconButton 
               onClick={() => setHistoryWindowOpen(!historyWindowOpen)}
               size="small"
@@ -447,48 +471,12 @@ const ChatSidebar = () => {
         <ChatInputArea />
       </Box>
 
-      {/* Resize Handle - Only show when not in full-width mode */}
       {!isFullWidth && (
-        <Box
-          ref={resizeHandleRef}
+        <SplitResizeHandle
+          edge="leading"
+          isResizing={isResizing}
           onMouseDown={handleResizeStart}
-          sx={{
-            position: 'absolute',
-            left: 0,
-            top: 0,
-            bottom: 0,
-            width: '8px',
-            cursor: 'col-resize',
-            backgroundColor: 'transparent',
-            zIndex: 1000, // Ensure handle is above other elements
-            userSelect: 'none', // Prevent text selection during drag
-            '&:hover': {
-              backgroundColor: 'primary.main',
-              opacity: 0.2,
-            },
-            '&:active': {
-              backgroundColor: 'primary.main',
-              opacity: 0.4,
-            },
-            '&::before': {
-              content: '""',
-              position: 'absolute',
-              left: '50%',
-              top: '50%',
-              transform: 'translate(-50%, -50%)',
-              width: '3px',
-              height: '60px',
-              backgroundColor: 'primary.main',
-              opacity: 0.4,
-              borderRadius: '2px',
-            },
-            '&:hover::before': {
-              opacity: 0.8,
-            },
-            // Add a subtle border to make the handle more visible
-            borderLeft: '1px solid',
-            borderColor: 'divider',
-          }}
+          sx={{ zIndex: 1000 }}
         />
       )}
 

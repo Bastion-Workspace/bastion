@@ -89,6 +89,63 @@ CREATE INDEX IF NOT EXISTS idx_user_settings_user_id ON user_settings(user_id);
 CREATE INDEX IF NOT EXISTS idx_user_settings_key ON user_settings(key);
 CREATE INDEX IF NOT EXISTS idx_user_settings_user_key ON user_settings(user_id, key);
 
+-- Create user_facts table for per-user AI context facts
+CREATE TABLE IF NOT EXISTS user_facts (
+    id         SERIAL PRIMARY KEY,
+    user_id    VARCHAR(255) NOT NULL,
+    fact_key   VARCHAR(255) NOT NULL,
+    value      TEXT NOT NULL,
+    category   VARCHAR(100) DEFAULT 'general',
+    source     VARCHAR(50) DEFAULT 'user_manual',
+    confidence FLOAT DEFAULT 1.0,
+    expires_at TIMESTAMP WITH TIME ZONE,
+    embedding  FLOAT[],
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(user_id, fact_key)
+);
+CREATE INDEX IF NOT EXISTS idx_user_facts_user_id ON user_facts(user_id);
+
+-- Episodic memory: conversation-derived events for next-gen "remember what we worked on?"
+CREATE TABLE IF NOT EXISTS user_episodes (
+    id              SERIAL PRIMARY KEY,
+    user_id         VARCHAR(255) NOT NULL,
+    conversation_id VARCHAR(255),
+    summary         TEXT NOT NULL,
+    episode_type    VARCHAR(50) DEFAULT 'general',
+    agent_used      VARCHAR(255),
+    tools_used      JSONB DEFAULT '[]'::jsonb,
+    key_topics      JSONB DEFAULT '[]'::jsonb,
+    outcome         VARCHAR(50) DEFAULT 'completed',
+    embedding       FLOAT[],
+    is_aged         BOOLEAN NOT NULL DEFAULT FALSE, -- True when older than 48h; deprioritized in retrieval
+    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_user_episodes_user_id ON user_episodes(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_episodes_created_at ON user_episodes(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_user_episodes_conversation_id ON user_episodes(conversation_id);
+
+-- Fact change history and pending review for contradiction detection
+CREATE TABLE IF NOT EXISTS user_fact_history (
+    id             SERIAL PRIMARY KEY,
+    user_id        VARCHAR(255) NOT NULL,
+    fact_key       VARCHAR(255) NOT NULL,
+    old_value      TEXT NOT NULL,
+    new_value      TEXT NOT NULL,
+    old_source     VARCHAR(50),
+    new_source     VARCHAR(50),
+    old_confidence FLOAT,
+    new_confidence FLOAT,
+    resolution     VARCHAR(50) DEFAULT 'auto_replaced',
+    resolved_at    TIMESTAMPTZ,
+    created_at     TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_user_fact_history_user_id ON user_fact_history(user_id);
+CREATE INDEX IF NOT EXISTS idx_user_fact_history_fact_key ON user_fact_history(user_id, fact_key);
+CREATE INDEX IF NOT EXISTS idx_user_fact_history_resolution ON user_fact_history(resolution);
+CREATE INDEX IF NOT EXISTS idx_user_fact_history_created_at ON user_fact_history(created_at DESC);
+
+
 -- Create indexes for better query performance
 CREATE INDEX IF NOT EXISTS idx_document_metadata_document_id ON document_metadata(document_id);
 CREATE INDEX IF NOT EXISTS idx_document_metadata_file_hash ON document_metadata(file_hash);
@@ -143,6 +200,26 @@ COMMENT ON COLUMN document_metadata.is_zip_container IS 'Whether this document i
 COMMENT ON COLUMN document_metadata.original_zip_path IS 'Original path within ZIP file for extracted files';
 COMMENT ON COLUMN document_metadata.folder_id IS 'ID of folder containing this document (NULL for root documents)';
 
+-- Full-text search: store document chunks for PostgreSQL GIN search (user isolation via RLS)
+CREATE TABLE IF NOT EXISTS document_chunks (
+    id              SERIAL PRIMARY KEY,
+    chunk_id        VARCHAR(255) UNIQUE NOT NULL,
+    document_id     VARCHAR(255) NOT NULL REFERENCES document_metadata(document_id) ON DELETE CASCADE,
+    content         TEXT NOT NULL,
+    chunk_index     INTEGER NOT NULL DEFAULT 0,
+    user_id         VARCHAR(255),
+    collection_type VARCHAR(50) DEFAULT 'user',
+    team_id         UUID,
+    is_image_sidecar BOOLEAN DEFAULT FALSE,
+    created_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    content_tsv     TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED
+);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_content_tsv ON document_chunks USING GIN(content_tsv);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_document_id ON document_chunks(document_id);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_user_id ON document_chunks(user_id);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_collection_type ON document_chunks(collection_type);
+CREATE INDEX IF NOT EXISTS idx_document_chunks_team_id ON document_chunks(team_id) WHERE team_id IS NOT NULL;
+
 -- Create settings table for application configuration
 CREATE TABLE IF NOT EXISTS settings (
     id SERIAL PRIMARY KEY,
@@ -165,6 +242,7 @@ CREATE INDEX IF NOT EXISTS idx_settings_category ON settings(category);
 
 -- Document metadata permissions
 GRANT SELECT, INSERT, UPDATE, DELETE ON document_metadata TO bastion_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON document_chunks TO bastion_user;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO bastion_user;
 
 -- Settings permissions (read-only for most operations)
@@ -497,6 +575,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     manual_order INTEGER DEFAULT NULL, -- Manual ordering support
     order_locked BOOLEAN DEFAULT FALSE, -- Lock manual order
     message_sequence INTEGER DEFAULT 0, -- Auto-incrementing sequence counter for message ordering
+    needs_session_summary BOOLEAN NOT NULL DEFAULT FALSE, -- Dirty flag for post-session combined facts+episode analysis
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
@@ -1117,11 +1196,17 @@ CREATE TABLE IF NOT EXISTS rss_articles (
     published_date TIMESTAMP,
     is_processed BOOLEAN DEFAULT FALSE,
     is_read BOOLEAN DEFAULT FALSE,
+    is_starred BOOLEAN DEFAULT FALSE,
+    greader_id BIGSERIAL,
     content_hash VARCHAR(64),  -- For duplicate detection
     user_id VARCHAR(255),
     created_at TIMESTAMP DEFAULT NOW(),
     updated_at TIMESTAMP DEFAULT NOW()
 );
+
+-- Add lat/lng to rss_articles for future geocoding (Phase 4 map stack)
+ALTER TABLE rss_articles ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION;
+ALTER TABLE rss_articles ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION;
 
 -- Create RSS feed subscriptions table for user-feed relationships
 CREATE TABLE IF NOT EXISTS rss_feed_subscriptions (
@@ -1143,6 +1228,8 @@ CREATE INDEX IF NOT EXISTS idx_rss_articles_feed_id ON rss_articles(feed_id);
 CREATE INDEX IF NOT EXISTS idx_rss_articles_user_id ON rss_articles(user_id);
 CREATE INDEX IF NOT EXISTS idx_rss_articles_published_date ON rss_articles(published_date);
 CREATE INDEX IF NOT EXISTS idx_rss_articles_is_read ON rss_articles(is_read);
+CREATE INDEX IF NOT EXISTS idx_rss_articles_is_starred ON rss_articles(is_starred);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rss_articles_greader_id ON rss_articles(greader_id);
 CREATE INDEX IF NOT EXISTS idx_rss_articles_content_hash ON rss_articles(content_hash);
 CREATE INDEX IF NOT EXISTS idx_rss_articles_full_content ON rss_articles USING GIN(to_tsvector('english', full_content)) WHERE full_content IS NOT NULL;
 
@@ -1175,6 +1262,8 @@ COMMENT ON COLUMN rss_articles.link IS 'URL to the full article';
 COMMENT ON COLUMN rss_articles.published_date IS 'Publication date from RSS feed';
 COMMENT ON COLUMN rss_articles.is_processed IS 'Whether the full article has been downloaded and processed';
 COMMENT ON COLUMN rss_articles.is_read IS 'Whether the user has marked this article as read';
+COMMENT ON COLUMN rss_articles.is_starred IS 'Whether the user starred/saved the article';
+COMMENT ON COLUMN rss_articles.greader_id IS 'Monotonic id for Google Reader API clients';
 COMMENT ON COLUMN rss_articles.content_hash IS 'Hash of content for duplicate detection';
 COMMENT ON COLUMN rss_articles.user_id IS 'User ID for user-specific articles, NULL for global articles';
 
@@ -1187,6 +1276,7 @@ COMMENT ON COLUMN rss_feed_subscriptions.is_active IS 'Whether the subscription 
 -- Grant permissions on RSS feeds table
 GRANT ALL PRIVILEGES ON rss_feeds TO bastion_user;
 GRANT ALL PRIVILEGES ON rss_articles TO bastion_user;
+GRANT ALL PRIVILEGES ON SEQUENCE rss_articles_greader_id_seq TO bastion_user;
 GRANT ALL PRIVILEGES ON rss_feed_subscriptions TO bastion_user;
 
 -- ============================================================================
@@ -2489,6 +2579,68 @@ CREATE POLICY document_metadata_insert_policy ON document_metadata
         ))
     );
 
+-- Row-Level Security policies for document_chunks (mirror document_metadata access)
+ALTER TABLE document_chunks ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS document_chunks_select_policy ON document_chunks;
+DROP POLICY IF EXISTS document_chunks_update_policy ON document_chunks;
+DROP POLICY IF EXISTS document_chunks_delete_policy ON document_chunks;
+DROP POLICY IF EXISTS document_chunks_insert_policy ON document_chunks;
+
+CREATE POLICY document_chunks_select_policy ON document_chunks
+    FOR SELECT USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR collection_type = 'global'
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+        ))
+        OR (user_id IS NOT NULL AND team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    );
+
+CREATE POLICY document_chunks_update_policy ON document_chunks
+    FOR UPDATE
+    USING (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+            AND role = 'admin'
+        ))
+        OR (team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    )
+    WITH CHECK (
+        user_id = current_setting('app.current_user_id', true)::varchar
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+            AND role = 'admin'
+        ))
+        OR (team_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    );
+
+CREATE POLICY document_chunks_delete_policy ON document_chunks
+    FOR DELETE USING (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+            AND role = 'admin'
+        ))
+        OR (user_id IS NULL AND current_setting('app.current_user_role', true) = 'admin')
+    );
+
+CREATE POLICY document_chunks_insert_policy ON document_chunks
+    FOR INSERT WITH CHECK (
+        current_setting('app.current_user_role', true) = 'admin'
+        OR user_id = current_setting('app.current_user_id', true)::varchar
+        OR collection_type = 'global'
+        OR (team_id IS NOT NULL AND team_id IN (
+            SELECT team_id FROM team_members
+            WHERE user_id = current_setting('app.current_user_id', true)::varchar
+        ))
+    );
+
 -- Row-Level Security policies for teams
 ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
 ALTER TABLE team_members ENABLE ROW LEVEL SECURITY;
@@ -3192,62 +3344,6 @@ WITH CHECK (user_id = current_setting('app.current_user_id', true));
 CREATE POLICY music_metadata_delete_policy ON music_cache_metadata
 FOR DELETE
 USING (user_id = current_setting('app.current_user_id', true));
-
--- ========================================
--- ENTERTAINMENT SYNC TABLES
--- Sonarr/Radarr API integration for entertainment content
--- ========================================
-
--- Configuration for user's Radarr/Sonarr connections
-CREATE TABLE IF NOT EXISTS entertainment_sync_config (
-    config_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-    source_type VARCHAR(50) NOT NULL, -- 'radarr' or 'sonarr'
-    api_url VARCHAR(512) NOT NULL,
-    api_key TEXT NOT NULL, -- Encrypted API key
-    enabled BOOLEAN DEFAULT true,
-    sync_frequency_minutes INTEGER DEFAULT 60, -- Default hourly
-    last_sync_at TIMESTAMP WITH TIME ZONE,
-    last_sync_status VARCHAR(50), -- 'success', 'failed', 'running'
-    items_synced INTEGER DEFAULT 0,
-    sync_error TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(user_id, source_type, api_url)
-);
-
--- Track individual synced items for change detection
-CREATE TABLE IF NOT EXISTS entertainment_sync_items (
-    item_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    config_id UUID NOT NULL REFERENCES entertainment_sync_config(config_id) ON DELETE CASCADE,
-    external_id VARCHAR(255) NOT NULL, -- Radarr/Sonarr item ID
-    external_type VARCHAR(50) NOT NULL, -- 'movie', 'series', 'episode'
-    title VARCHAR(512) NOT NULL,
-    tmdb_id INTEGER, -- TMDB reference
-    tvdb_id INTEGER, -- TVDB reference
-    season_number INTEGER, -- For episodes
-    episode_number INTEGER, -- For episodes
-    parent_series_id VARCHAR(255), -- Link episode to series
-    metadata_hash VARCHAR(64), -- Hash of metadata to detect changes
-    last_synced_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    vector_document_id VARCHAR(255), -- Track generated pseudo-document ID
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(config_id, external_id, external_type)
-);
-
--- Create indexes for entertainment sync tables
-CREATE INDEX IF NOT EXISTS idx_sync_config_user ON entertainment_sync_config(user_id);
-CREATE INDEX IF NOT EXISTS idx_sync_config_enabled ON entertainment_sync_config(enabled);
-CREATE INDEX IF NOT EXISTS idx_sync_config_source_type ON entertainment_sync_config(source_type);
-CREATE INDEX IF NOT EXISTS idx_sync_items_config ON entertainment_sync_items(config_id);
-CREATE INDEX IF NOT EXISTS idx_sync_items_external ON entertainment_sync_items(external_id);
-CREATE INDEX IF NOT EXISTS idx_sync_items_type ON entertainment_sync_items(external_type);
-CREATE INDEX IF NOT EXISTS idx_sync_items_vector_doc ON entertainment_sync_items(vector_document_id);
-CREATE INDEX IF NOT EXISTS idx_sync_items_parent_series ON entertainment_sync_items(parent_series_id);
-
--- Add comments for entertainment sync tables
-COMMENT ON TABLE entertainment_sync_config IS 'User configurations for Radarr/Sonarr API sync';
-COMMENT ON TABLE entertainment_sync_items IS 'Tracked items synced from Radarr/Sonarr for change detection';
 
 -- ========================================
 -- USER LOCATIONS TABLE
@@ -3999,6 +4095,553 @@ CREATE POLICY document_links_insert_policy ON document_links
             WHERE user_id = current_setting('app.current_user_id', true)::varchar
         ))
     );
+
+-- ========================================
+-- AGENT FACTORY (Phase 0)
+-- Agent profiles, data source bindings, skills, playbooks, execution log, discoveries
+-- Also in migrations/042_add_agent_factory_tables.sql for existing DBs.
+-- ========================================
+
+-- DATA SOURCE CONNECTORS (Template Definitions) - must exist before agent_data_sources
+CREATE TABLE IF NOT EXISTS data_source_connectors (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) REFERENCES users(user_id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    connector_type VARCHAR(50) NOT NULL,
+    version VARCHAR(20) DEFAULT '1.0',
+    definition JSONB NOT NULL,
+    is_template BOOLEAN DEFAULT false,
+    requires_auth BOOLEAN DEFAULT false,
+    auth_fields JSONB DEFAULT '[]',
+    icon VARCHAR(50),
+    category VARCHAR(100),
+    tags TEXT[] DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_connectors_user ON data_source_connectors(user_id);
+CREATE INDEX IF NOT EXISTS idx_connectors_type ON data_source_connectors(connector_type);
+CREATE INDEX IF NOT EXISTS idx_connectors_template ON data_source_connectors(is_template);
+CREATE INDEX IF NOT EXISTS idx_connectors_category ON data_source_connectors(category);
+
+-- PERSONAS (built-in and custom; referenced by agent_profiles and user default)
+CREATE TABLE IF NOT EXISTS personas (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) REFERENCES users(user_id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    ai_name VARCHAR(100),
+    style_instruction TEXT,
+    political_bias VARCHAR(50) DEFAULT 'neutral',
+    description TEXT,
+    is_builtin BOOLEAN DEFAULT false,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_personas_user ON personas(user_id);
+CREATE INDEX IF NOT EXISTS idx_personas_builtin ON personas(is_builtin) WHERE is_builtin = true;
+
+-- AGENT PROFILES
+CREATE TABLE IF NOT EXISTS agent_profiles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    handle VARCHAR(100),
+    description TEXT,
+    is_active BOOLEAN DEFAULT true,
+    model_preference VARCHAR(255),
+    model_source VARCHAR(50),
+    model_provider_type VARCHAR(50),
+    max_research_rounds INTEGER DEFAULT 3,
+    system_prompt_additions TEXT,
+    knowledge_config JSONB DEFAULT '{}',
+    default_playbook_id UUID,
+    default_run_context VARCHAR(50) DEFAULT 'interactive',
+    default_approval_policy VARCHAR(50) DEFAULT 'require',
+    journal_config JSONB DEFAULT '{"auto_journal": true, "detail_level": "summary", "retention_days": 90}',
+    team_config JSONB DEFAULT '{}',
+    watch_config JSONB DEFAULT '{}',
+    chat_history_enabled BOOLEAN DEFAULT false,
+    chat_history_lookback INTEGER DEFAULT 10,
+    summary_threshold_tokens INTEGER NOT NULL DEFAULT 5000,
+    summary_keep_messages INTEGER NOT NULL DEFAULT 10,
+    persona_mode VARCHAR(50) DEFAULT 'none',
+    persona_id UUID REFERENCES personas(id) ON DELETE SET NULL,
+    include_user_context BOOLEAN DEFAULT false,
+    include_datetime_context BOOLEAN DEFAULT true,
+    include_user_facts BOOLEAN DEFAULT false,
+    include_facts_categories JSONB DEFAULT '[]'::jsonb,
+    auto_routable BOOLEAN DEFAULT false,
+    chat_visible BOOLEAN DEFAULT true,
+    category VARCHAR(100),
+    data_workspace_config JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (user_id, handle)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_profiles_user ON agent_profiles(user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_profiles_active ON agent_profiles(user_id, is_active);
+CREATE INDEX IF NOT EXISTS idx_agent_profiles_handle ON agent_profiles(user_id, handle);
+CREATE INDEX IF NOT EXISTS idx_agent_profiles_persona_id ON agent_profiles(persona_id);
+
+-- AGENT DATA SOURCE BINDINGS
+CREATE TABLE IF NOT EXISTS agent_data_sources (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_profile_id UUID NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    connector_id UUID NOT NULL REFERENCES data_source_connectors(id),
+    credentials_encrypted JSONB,
+    config_overrides JSONB DEFAULT '{}',
+    permissions JSONB DEFAULT '{}',
+    is_enabled BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_sources_profile ON agent_data_sources(agent_profile_id);
+
+-- USER CONTROL PANES (status bar custom controls wired to data connectors)
+CREATE TABLE IF NOT EXISTS user_control_panes (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    icon VARCHAR(100) NOT NULL DEFAULT 'Tune',
+    connector_id UUID NOT NULL REFERENCES data_source_connectors(id) ON DELETE CASCADE,
+    credentials_encrypted JSONB DEFAULT '{}',
+    connection_id BIGINT,
+    controls JSONB NOT NULL DEFAULT '[]',
+    is_visible BOOLEAN DEFAULT true,
+    sort_order INTEGER DEFAULT 0,
+    refresh_interval INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_control_panes_user ON user_control_panes(user_id);
+CREATE INDEX IF NOT EXISTS idx_control_panes_visible ON user_control_panes(user_id, is_visible);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'user_control_panes' AND column_name = 'refresh_interval') THEN
+    ALTER TABLE user_control_panes ADD COLUMN refresh_interval INTEGER NOT NULL DEFAULT 0;
+  END IF;
+END $$;
+
+-- DEVICE TOKENS (Bastion Local Proxy daemon authentication)
+-- Also in migrations/078_add_device_tokens.sql for existing DBs.
+CREATE TABLE IF NOT EXISTS device_tokens (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL,
+    device_name TEXT NOT NULL,
+    last_connected_at TIMESTAMPTZ,
+    last_ip TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    revoked_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_device_tokens_user_id ON device_tokens(user_id);
+CREATE INDEX IF NOT EXISTS idx_device_tokens_token_hash ON device_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_device_tokens_revoked ON device_tokens(revoked_at) WHERE revoked_at IS NULL;
+
+-- AGENT SERVICE BINDINGS (profile -> external connections for email/messaging scoped tools)
+CREATE TABLE IF NOT EXISTS agent_service_bindings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_profile_id UUID NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    connection_id BIGINT NOT NULL REFERENCES external_connections(id) ON DELETE CASCADE,
+    service_type VARCHAR(50) NOT NULL,
+    is_enabled BOOLEAN DEFAULT true,
+    config JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(agent_profile_id, connection_id)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_service_bindings_profile ON agent_service_bindings(agent_profile_id);
+CREATE INDEX IF NOT EXISTS idx_agent_service_bindings_connection ON agent_service_bindings(connection_id);
+CREATE INDEX IF NOT EXISTS idx_agent_service_bindings_service_type ON agent_service_bindings(agent_profile_id, service_type);
+
+-- MCP SERVERS (user-configured Model Context Protocol servers for Agent Factory external tools)
+CREATE TABLE IF NOT EXISTS mcp_servers (
+    id BIGSERIAL PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    transport VARCHAR(32) NOT NULL,
+    url TEXT,
+    command TEXT,
+    args JSONB DEFAULT '[]'::jsonb,
+    env JSONB DEFAULT '{}'::jsonb,
+    headers JSONB DEFAULT '{}'::jsonb,
+    is_active BOOLEAN DEFAULT true,
+    discovered_tools JSONB DEFAULT '[]'::jsonb,
+    last_discovery_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (user_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_mcp_servers_user_id ON mcp_servers(user_id);
+CREATE INDEX IF NOT EXISTS idx_mcp_servers_active ON mcp_servers(user_id, is_active) WHERE is_active = true;
+
+-- AGENT PLUGIN CONFIGS (per-profile plugin credentials for Zone 4 integrations)
+CREATE TABLE IF NOT EXISTS agent_plugin_configs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_profile_id UUID NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    plugin_name VARCHAR(100) NOT NULL,
+    credentials_encrypted JSONB,
+    is_enabled BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (agent_profile_id, plugin_name)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_plugin_configs_profile ON agent_plugin_configs(agent_profile_id);
+CREATE INDEX IF NOT EXISTS idx_agent_plugin_configs_plugin ON agent_plugin_configs(plugin_name);
+
+-- CUSTOM PLAYBOOKS
+CREATE TABLE IF NOT EXISTS custom_playbooks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) REFERENCES users(user_id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    version VARCHAR(20) DEFAULT '1.0',
+    definition JSONB NOT NULL,
+    triggers JSONB DEFAULT '[]',
+    is_template BOOLEAN DEFAULT false,
+    category VARCHAR(100),
+    tags TEXT[] DEFAULT '{}',
+    required_connectors TEXT[] DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_playbooks_user ON custom_playbooks(user_id);
+CREATE INDEX IF NOT EXISTS idx_playbooks_triggers ON custom_playbooks USING GIN (triggers);
+
+ALTER TABLE agent_profiles
+    ADD CONSTRAINT agent_profiles_default_playbook_id_fkey
+    FOREIGN KEY (default_playbook_id) REFERENCES custom_playbooks(id) ON DELETE SET NULL;
+
+-- AGENT FACTORY SIDEBAR CATEGORIES (user-defined folders per section)
+CREATE TABLE IF NOT EXISTS agent_factory_sidebar_categories (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    section VARCHAR(50) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (user_id, section, name)
+);
+CREATE INDEX IF NOT EXISTS idx_sidebar_categories_user_section ON agent_factory_sidebar_categories(user_id, section);
+
+-- EXECUTION TRACKING
+CREATE TABLE IF NOT EXISTS agent_execution_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_profile_id UUID REFERENCES agent_profiles(id) ON DELETE SET NULL,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id),
+    query TEXT NOT NULL,
+    strategy VARCHAR(50),
+    playbook_id UUID REFERENCES custom_playbooks(id) ON DELETE SET NULL,
+    started_at TIMESTAMPTZ DEFAULT NOW(),
+    completed_at TIMESTAMPTZ,
+    duration_ms INTEGER,
+    status VARCHAR(50) DEFAULT 'running',
+    connectors_called JSONB DEFAULT '[]',
+    entities_discovered INTEGER DEFAULT 0,
+    relationships_discovered INTEGER DEFAULT 0,
+    output_destinations JSONB DEFAULT '[]',
+    error_details TEXT,
+    metadata JSONB DEFAULT '{}',
+    tokens_input INTEGER DEFAULT 0,
+    tokens_output INTEGER DEFAULT 0,
+    cost_usd NUMERIC(12, 6) DEFAULT 0,
+    model_used VARCHAR(255)
+);
+CREATE INDEX IF NOT EXISTS idx_execution_log_profile ON agent_execution_log(agent_profile_id);
+CREATE INDEX IF NOT EXISTS idx_execution_log_user ON agent_execution_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_execution_log_time ON agent_execution_log(started_at DESC);
+
+-- DISCOVERY LOG (Entities/Relationships Found Per Execution)
+CREATE TABLE IF NOT EXISTS agent_discoveries (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    execution_id UUID NOT NULL REFERENCES agent_execution_log(id) ON DELETE CASCADE,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id),
+    discovery_type VARCHAR(50) NOT NULL,
+    entity_name VARCHAR(500),
+    entity_type VARCHAR(50),
+    entity_neo4j_id VARCHAR(255),
+    relationship_type VARCHAR(100),
+    related_entity_name VARCHAR(500),
+    source_connector VARCHAR(255),
+    source_endpoint VARCHAR(255),
+    confidence REAL,
+    details JSONB DEFAULT '{}',
+    discovered_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_discoveries_execution ON agent_discoveries(execution_id);
+CREATE INDEX IF NOT EXISTS idx_discoveries_user ON agent_discoveries(user_id);
+CREATE INDEX IF NOT EXISTS idx_discoveries_entity ON agent_discoveries(entity_name);
+CREATE INDEX IF NOT EXISTS idx_discoveries_type ON agent_discoveries(discovery_type);
+CREATE INDEX IF NOT EXISTS idx_discoveries_time ON agent_discoveries(discovered_at DESC);
+
+-- ========================================
+-- AGENT SCHEDULES (Phase 5 Scheduler)
+-- Also in migrations/043_add_agent_schedules.sql for existing DBs.
+-- ========================================
+
+CREATE TABLE IF NOT EXISTS agent_schedules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_profile_id UUID NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    schedule_type VARCHAR(50) NOT NULL CHECK (schedule_type IN ('cron', 'interval')),
+    cron_expression VARCHAR(100),
+    interval_seconds INTEGER,
+    timezone VARCHAR(100) DEFAULT 'UTC',
+    is_active BOOLEAN DEFAULT true,
+    next_run_at TIMESTAMPTZ,
+    last_run_at TIMESTAMPTZ,
+    last_status VARCHAR(50),
+    run_count INTEGER DEFAULT 0,
+    consecutive_failures INTEGER DEFAULT 0,
+    max_consecutive_failures INTEGER DEFAULT 5,
+    timeout_seconds INTEGER DEFAULT 300,
+    input_context JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_schedules_due ON agent_schedules(next_run_at) WHERE is_active = true;
+CREATE INDEX IF NOT EXISTS idx_schedules_user ON agent_schedules(user_id);
+CREATE INDEX IF NOT EXISTS idx_schedules_profile ON agent_schedules(agent_profile_id);
+
+-- Extend agent_execution_log with trigger_type and schedule_id (idempotent)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'agent_execution_log' AND column_name = 'trigger_type'
+    ) THEN
+        ALTER TABLE agent_execution_log ADD COLUMN trigger_type VARCHAR(50) DEFAULT 'manual';
+    END IF;
+END $$;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'agent_execution_log' AND column_name = 'schedule_id'
+    ) THEN
+        ALTER TABLE agent_execution_log ADD COLUMN schedule_id UUID REFERENCES agent_schedules(id) ON DELETE SET NULL;
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_execution_trigger ON agent_execution_log(trigger_type);
+CREATE INDEX IF NOT EXISTS idx_execution_running ON agent_execution_log(agent_profile_id, status) WHERE status = 'running';
+
+-- AGENT BUDGETS (per-agent monthly limit and spend, migration 083)
+CREATE TABLE IF NOT EXISTS agent_budgets (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_profile_id UUID NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    monthly_limit_usd NUMERIC(12, 2),
+    current_period_start DATE NOT NULL,
+    current_period_spend_usd NUMERIC(12, 6) DEFAULT 0,
+    warning_threshold_pct INTEGER DEFAULT 80,
+    enforce_hard_limit BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(agent_profile_id)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_budgets_profile ON agent_budgets(agent_profile_id);
+CREATE INDEX IF NOT EXISTS idx_agent_budgets_user ON agent_budgets(user_id);
+
+-- APPROVAL QUEUE (background approval for scheduled agents, migration 084)
+CREATE TABLE IF NOT EXISTS agent_approval_queue (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    agent_profile_id UUID REFERENCES agent_profiles(id) ON DELETE SET NULL,
+    execution_id UUID REFERENCES agent_execution_log(id) ON DELETE CASCADE,
+    step_name VARCHAR(255) NOT NULL,
+    prompt TEXT NOT NULL,
+    preview_data JSONB DEFAULT '{}',
+    governance_type VARCHAR(50) DEFAULT 'playbook_step',
+    status VARCHAR(50) DEFAULT 'pending',
+    thread_id VARCHAR(500),
+    checkpoint_ns VARCHAR(255),
+    playbook_config JSONB,
+    timeout_at TIMESTAMPTZ,
+    responded_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_approval_queue_user ON agent_approval_queue(user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_approval_queue_status ON agent_approval_queue(status) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_agent_approval_queue_created ON agent_approval_queue(created_at DESC);
+
+-- AGENT MEMORY (persistent key-value/log memory per agent, migration 085)
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'agent_profiles' AND column_name = 'include_agent_memory'
+    ) THEN
+        ALTER TABLE agent_profiles ADD COLUMN include_agent_memory BOOLEAN NOT NULL DEFAULT false;
+    END IF;
+END $$;
+CREATE TABLE IF NOT EXISTS agent_memory (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    agent_profile_id UUID NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    memory_key VARCHAR(500) NOT NULL,
+    memory_value JSONB NOT NULL,
+    memory_type VARCHAR(50) DEFAULT 'kv',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    expires_at TIMESTAMPTZ,
+    UNIQUE(agent_profile_id, memory_key)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_profile ON agent_memory(agent_profile_id);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_user ON agent_memory(user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_key_prefix ON agent_memory(agent_profile_id, memory_key);
+CREATE INDEX IF NOT EXISTS idx_agent_memory_expires ON agent_memory(expires_at) WHERE expires_at IS NOT NULL;
+
+-- AGENT LINES (autonomous line container and org chart, migration 086; renamed from agent_teams in 101)
+CREATE TABLE IF NOT EXISTS agent_lines (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(255) NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    mission_statement TEXT,
+    status VARCHAR(50) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'paused', 'archived')),
+    heartbeat_config JSONB DEFAULT '{}',
+    governance_policy JSONB DEFAULT '{}',
+    next_beat_at TIMESTAMPTZ,
+    last_beat_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_lines_user ON agent_lines(user_id);
+CREATE INDEX IF NOT EXISTS idx_agent_lines_status ON agent_lines(status);
+
+CREATE TABLE IF NOT EXISTS agent_line_memberships (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    line_id UUID NOT NULL REFERENCES agent_lines(id) ON DELETE CASCADE,
+    agent_profile_id UUID NOT NULL REFERENCES agent_profiles(id) ON DELETE CASCADE,
+    role VARCHAR(100) NOT NULL DEFAULT 'worker',
+    reports_to UUID REFERENCES agent_line_memberships(id) ON DELETE SET NULL,
+    hire_approved BOOLEAN DEFAULT false,
+    hire_approved_at TIMESTAMPTZ,
+    joined_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(line_id, agent_profile_id)
+);
+CREATE INDEX IF NOT EXISTS idx_agent_line_memberships_line ON agent_line_memberships(line_id);
+CREATE INDEX IF NOT EXISTS idx_agent_line_memberships_profile ON agent_line_memberships(agent_profile_id);
+CREATE INDEX IF NOT EXISTS idx_agent_line_memberships_reports_to ON agent_line_memberships(reports_to);
+
+-- AGENT MESSAGES (inter-agent timeline, migration 087)
+CREATE TABLE IF NOT EXISTS agent_messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    line_id UUID NOT NULL REFERENCES agent_lines(id) ON DELETE CASCADE,
+    from_agent_id UUID REFERENCES agent_profiles(id) ON DELETE SET NULL,
+    to_agent_id UUID REFERENCES agent_profiles(id) ON DELETE SET NULL,
+    message_type VARCHAR(50) NOT NULL DEFAULT 'report',
+    content TEXT NOT NULL DEFAULT '',
+    metadata JSONB DEFAULT '{}',
+    parent_message_id UUID REFERENCES agent_messages(id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_line_created ON agent_messages(line_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_from_agent ON agent_messages(from_agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_to_agent ON agent_messages(to_agent_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_agent_messages_parent ON agent_messages(parent_message_id) WHERE parent_message_id IS NOT NULL;
+
+-- AGENT LINE GOALS (goal hierarchy, migration 088; renamed from agent_team_goals in 101)
+CREATE TABLE IF NOT EXISTS agent_line_goals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    line_id UUID NOT NULL REFERENCES agent_lines(id) ON DELETE CASCADE,
+    parent_goal_id UUID REFERENCES agent_line_goals(id) ON DELETE CASCADE,
+    title VARCHAR(500) NOT NULL,
+    description TEXT,
+    status VARCHAR(50) NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'blocked', 'cancelled')),
+    assigned_agent_id UUID REFERENCES agent_profiles(id) ON DELETE SET NULL,
+    priority INTEGER DEFAULT 0,
+    progress_pct INTEGER DEFAULT 0 CHECK (progress_pct >= 0 AND progress_pct <= 100),
+    due_date DATE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_line_goals_line ON agent_line_goals(line_id);
+CREATE INDEX IF NOT EXISTS idx_agent_line_goals_parent ON agent_line_goals(line_id, parent_goal_id);
+CREATE INDEX IF NOT EXISTS idx_agent_line_goals_assigned ON agent_line_goals(assigned_agent_id);
+
+-- Agent tasks (tickets) for lines (Phase 4, migration 089)
+CREATE TABLE IF NOT EXISTS agent_tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    line_id UUID NOT NULL REFERENCES agent_lines(id) ON DELETE CASCADE,
+    title VARCHAR(500) NOT NULL,
+    description TEXT,
+    status VARCHAR(50) NOT NULL DEFAULT 'backlog'
+        CHECK (status IN ('backlog', 'assigned', 'in_progress', 'review', 'done', 'cancelled')),
+    assigned_agent_id UUID REFERENCES agent_profiles(id) ON DELETE SET NULL,
+    created_by_agent_id UUID REFERENCES agent_profiles(id) ON DELETE SET NULL,
+    goal_id UUID REFERENCES agent_line_goals(id) ON DELETE SET NULL,
+    priority INTEGER DEFAULT 0,
+    thread_id UUID REFERENCES agent_messages(id) ON DELETE SET NULL,
+    execution_id UUID REFERENCES agent_execution_log(id) ON DELETE SET NULL,
+    metadata JSONB DEFAULT '{}',
+    due_date DATE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_line_status ON agent_tasks(line_id, status);
+CREATE INDEX IF NOT EXISTS idx_agent_tasks_assigned_status ON agent_tasks(assigned_agent_id, status);
+
+-- EXECUTION STEP TRACE (per-step trace, added via migration 062+063)
+CREATE TABLE IF NOT EXISTS agent_execution_steps (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    execution_id UUID NOT NULL REFERENCES agent_execution_log(id) ON DELETE CASCADE,
+    step_index INTEGER NOT NULL,
+    step_name VARCHAR(255) NOT NULL,
+    step_type VARCHAR(50) NOT NULL,
+    action_name VARCHAR(255),
+    status VARCHAR(50) NOT NULL,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    duration_ms INTEGER,
+    inputs_json JSONB DEFAULT '{}',
+    outputs_json JSONB DEFAULT '{}',
+    error_details TEXT,
+    tool_call_trace JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_execution_steps_execution_id
+    ON agent_execution_steps(execution_id);
+
+-- PLAYBOOK VERSION HISTORY (snapshots on update, added via migration 062)
+CREATE TABLE IF NOT EXISTS playbook_versions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    playbook_id UUID NOT NULL REFERENCES custom_playbooks(id) ON DELETE CASCADE,
+    version_number INTEGER NOT NULL,
+    label VARCHAR(255),
+    definition JSONB NOT NULL,
+    description TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    created_by VARCHAR(255)
+);
+CREATE INDEX IF NOT EXISTS idx_playbook_versions_playbook_id
+    ON playbook_versions(playbook_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_playbook_versions_unique
+    ON playbook_versions(playbook_id, version_number);
+
+-- DOCUMENT VERSION HISTORY (Phase 1: snapshots, rollback, diff, added via migration 069)
+CREATE TABLE IF NOT EXISTS document_versions (
+    version_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id     VARCHAR(255) NOT NULL
+                    REFERENCES document_metadata(document_id) ON DELETE CASCADE,
+    version_number  INTEGER NOT NULL,
+    content_hash    VARCHAR(64) NOT NULL,
+    file_size       BIGINT NOT NULL,
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    created_by      VARCHAR(255),
+    change_source   VARCHAR(50) NOT NULL,
+    change_summary  TEXT,
+    parent_version  UUID REFERENCES document_versions(version_id),
+    operations_json JSONB,
+    storage_path    TEXT NOT NULL,
+    is_current      BOOLEAN DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS idx_document_versions_document
+    ON document_versions(document_id, version_number DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_document_versions_unique
+    ON document_versions(document_id, version_number);
+CREATE INDEX IF NOT EXISTS idx_document_versions_current
+    ON document_versions(document_id) WHERE is_current = TRUE;
 
 -- ========================================
 -- DATABASE INITIALIZATION COMPLETE

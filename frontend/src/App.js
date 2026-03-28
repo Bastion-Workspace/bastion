@@ -1,19 +1,23 @@
 import React, { useState, useEffect } from 'react';
-import { Routes, Route, useLocation, Navigate } from 'react-router-dom';
+import { Routes, Route, useLocation, Navigate, useParams } from 'react-router-dom';
 import { Container, Box, IconButton, Tooltip, SwipeableDrawer } from '@mui/material';
-import { ChevronLeft } from '@mui/icons-material';
+import { ChevronRight } from '@mui/icons-material';
 import { motion } from 'framer-motion';
 import { QueryClient, QueryClientProvider } from 'react-query';
 import NewsPage from './components/NewsPage';
 import NewsDetailPage from './components/NewsDetailPage';
 import { AuthProvider } from './contexts/AuthContext';
+import { VoiceAvailabilityProvider } from './contexts/VoiceAvailabilityContext';
 import { CapabilitiesProvider } from './contexts/CapabilitiesContext';
 import { EditorProvider } from './contexts/EditorContext';
 import { ModelProvider } from './contexts/ModelContext';
 import { ChatSidebarProvider, useChatSidebar } from './contexts/ChatSidebarContext';
 import { MessagingProvider } from './contexts/MessagingContext';
+import { NotificationProvider } from './contexts/NotificationContext';
+import { TeamExecutionProvider } from './contexts/TeamExecutionContext';
 import { TeamProvider } from './contexts/TeamContext';
 import { MusicProvider } from './contexts/MediaContext';
+import { ControlPaneProvider } from './contexts/ControlPaneContext';
 import { ImageLightboxProvider } from './components/common/ImageLightbox';
 import { LearningProvider } from './contexts/LearningContext';
 import LearningQuizOverlay from './components/LearningQuizOverlay';
@@ -23,18 +27,27 @@ import ChatSidebar from './components/ChatSidebar';
 import MessagingDrawer from './components/messaging/MessagingDrawer';
 import LoginPage from './components/LoginPage';
 import ProtectedRoute from './components/ProtectedRoute';
-import HomePage from './components/HomePage';
+import HomeDashboardPage from './components/HomeDashboardPage';
 import DocumentsPage from './components/DocumentsPage';
 import ChatPage from './components/ChatPage';
 import SettingsPage from './components/SettingsPage';
+import ControlPanesPage from './components/ControlPanesPage';
 import TeamsPage from './components/teams/TeamsPage';
 import TeamDetailPage from './components/teams/TeamDetailPage';
 import OrgQuickCapture from './components/OrgQuickCapture';
+import JournalDayModal from './components/JournalDayModal';
 import StatusBar from './components/StatusBar';
 import MediaPage from './components/MediaPage';
 import MapPage from './components/maps/MapPage';
-
+import AgentFactoryPage from './components/AgentFactoryPage';
+import AgentDashboardPage from './components/AgentDashboardPage';
+import GamesPage from './components/games/GamesPage';
 import PDFTextLayerEditor from './components/PDFTextLayerEditor';
+
+function LegacyAgentLineRedirect() {
+  const { lineId } = useParams();
+  return <Navigate to={`/agent-factory/line/${lineId}`} replace />;
+}
 
 // Create a client
 const queryClient = new QueryClient({
@@ -51,11 +64,14 @@ const MainContent = () => {
   const location = useLocation();
   const isDocumentsRoute = location.pathname.startsWith('/documents');
   const isMediaRoute = location.pathname.startsWith('/media') || location.pathname.startsWith('/music');
+  const isAgentFactoryRoute = location.pathname.startsWith('/agent-factory');
+  const isFullWidthRoute = isDocumentsRoute || isMediaRoute || isAgentFactoryRoute;
   const { isCollapsed, sidebarWidth, isFullWidth, isResizing, toggleSidebar } = useChatSidebar();
   const isMobile = /Mobi|Android/i.test(navigator.userAgent);
   
-  // Quick Capture state and hotkey listener
+  // Quick Capture and Journal state and hotkey listeners
   const [captureOpen, setCaptureOpen] = useState(false);
+  const [journalOpen, setJournalOpen] = useState(false);
   
   // Clear editor context cache when navigating away from Documents so Chat (or other
   // pages) don't send stale document context. On /documents we do not clear; tab switches
@@ -71,53 +87,69 @@ const MainContent = () => {
   }, [isDocumentsRoute]);
   
   useEffect(() => {
-    // Global hotkey listener for Ctrl+Shift+C
     const handleKeyDown = (e) => {
-      // Ctrl+Shift+C (or Cmd+Shift+C on Mac)
       if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'C') {
         e.preventDefault();
         setCaptureOpen(true);
       }
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'J') {
+        e.preventDefault();
+        setJournalOpen(true);
+      }
     };
-    
     window.addEventListener('keydown', handleKeyDown);
-    
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-    };
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  useEffect(() => {
+    const openFromUi = () => setCaptureOpen(true);
+    window.addEventListener('openQuickCapture', openFromUi);
+    return () => window.removeEventListener('openQuickCapture', openFromUi);
   }, []);
 
   return (
     <Box sx={{ 
       display: 'flex', 
-      height: { xs: 'calc(var(--appvh, 100vh) - 59px - 32px)', md: 'calc(100dvh - 59px - 32px)' },
+      height: { xs: 'calc(var(--appvh, 100vh) - var(--app-nav-height, 59px) - 32px)', md: 'calc(100dvh - var(--app-nav-height, 59px) - 32px)' },
       position: 'relative',
       paddingBottom: 'env(safe-area-inset-bottom)',
       width: '100%',
-      maxWidth: '100vw',
+      maxWidth: '100%',
       overflow: 'hidden'
     }}>
       {/* Main Content Area - Responsive to chat sidebar */}
       <Box sx={{ 
         flexGrow: 1, 
-        overflow: 'hidden',
+        // Do not use overflow:hidden here: it can prevent the MuiContainer scrollbar from receiving
+        // drag/hit-testing in some browsers (nested under framer-motion). Outer shell still clips.
+        overflow: 'visible',
         transition: isResizing ? 'none' : 'margin-right 0.3s ease-in-out',
         marginRight: isCollapsed ? 0 : (isFullWidth ? '100vw' : `${sidebarWidth}px`),
+        // When chat is open, inset so the fixed sidebar strip does not overlap the scrollbar.
+        // When chat closed: 10px clears the outer overflow:hidden edge so scrollbar hover/drag stay reliable.
+        // Chat panel is margin-reserved; no extra gutter so the seam aligns with the split handle.
+        pr: isMobile ? 0 : (!isCollapsed ? 0 : '10px'),
         minWidth: 0, // Allow content to shrink below its natural size
         display: 'flex',
         flexDirection: 'column',
         width: '100%',
-        maxWidth: { xs: '100vw', md: 'none' }
+        maxWidth: { xs: '100%', md: 'none' }
       }}>
         <Container 
-          maxWidth={isDocumentsRoute || isMediaRoute ? false : 'xl'} 
-          disableGutters={isDocumentsRoute || isMediaRoute} 
+          maxWidth={isFullWidthRoute ? false : 'xl'} 
+          disableGutters={isFullWidthRoute} 
           sx={{ 
-            mt: isDocumentsRoute || isMediaRoute ? 0 : 4, 
-            mb: isDocumentsRoute || isMediaRoute ? 0 : 4, 
-            px: isDocumentsRoute || isMediaRoute ? 0 : undefined,
+            mt: isFullWidthRoute ? 0 : 4, 
+            mb: isFullWidthRoute ? 0 : 4, 
+            px: isFullWidthRoute ? 0 : undefined,
             flex: 1,
-            overflow: isDocumentsRoute || isMediaRoute ? 'hidden' : 'auto',
+            // Full-width routes: scroll here (single root) — nested overflow:auto inside framer-motion
+            // caused native scrollbars to not receive pointer events in some browsers.
+            ...(isFullWidthRoute
+              ? { overflowY: 'auto', overflowX: 'hidden' }
+              : { overflow: 'auto' }),
+            // Avoid scrollbar-gutter: stable here — on Chromium/WebKit it can desync native
+            // scrollbar hit-testing from the painted thumb vs custom ::-webkit-scrollbar styles.
             display: 'flex',
             flexDirection: 'column',
             minHeight: 0,
@@ -131,6 +163,8 @@ const MainContent = () => {
           >
             <Routes>
               <Route path="/" element={<Navigate to="/documents" replace />} />
+              <Route path="/home" element={<HomeDashboardPage />} />
+              <Route path="/home/:dashboardId" element={<HomeDashboardPage />} />
               <Route path="/documents" element={<DocumentsPage />} />
               <Route path="/news" element={<NewsPage />} />
               <Route path="/news/:newsId" element={<NewsDetailPage />} />
@@ -140,6 +174,8 @@ const MainContent = () => {
               <Route path="/teams/:teamId" element={<TeamDetailPage />} />
               <Route path="/pdf-text-editor/:documentId" element={<PDFTextLayerEditor />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/control-panes" element={<ControlPanesPage />} />
+              <Route path="/contacts" element={<Navigate to="/documents" replace />} />
               <Route path="/media" element={<MediaPage />} />
               <Route path="/music" element={<MediaPage />} />
               <Route path="/map" element={
@@ -147,6 +183,19 @@ const MainContent = () => {
                   <MapPage />
                 </ProtectedRoute>
               } />
+              <Route path="/games" element={<GamesPage />} />
+              <Route path="/games/:gameId" element={<GamesPage />} />
+              <Route path="/agent-dashboard" element={<AgentDashboardPage />} />
+              <Route path="/agent-factory" element={<AgentFactoryPage />} />
+              <Route path="/agent-factory/lines" element={<Navigate to="/agent-factory" replace />} />
+              <Route path="/agent-factory/lines/new" element={<Navigate to="/agent-factory" replace />} />
+              <Route path="/agent-factory/lines/:lineId/*" element={<LegacyAgentLineRedirect />} />
+              <Route path="/agent-factory/line/:id" element={<AgentFactoryPage />} />
+              <Route path="/agent-factory/agent/:id" element={<AgentFactoryPage />} />
+              <Route path="/agent-factory/playbook/:id" element={<AgentFactoryPage />} />
+              <Route path="/agent-factory/skill/:skillId" element={<AgentFactoryPage />} />
+              <Route path="/agent-factory/datasource/:id" element={<AgentFactoryPage />} />
+              <Route path="/agent-factory/:id" element={<AgentFactoryPage />} />
             </Routes>
           </motion.div>
         </Container>
@@ -158,8 +207,8 @@ const MainContent = () => {
         <Box sx={{
           position: 'fixed',
           right: 0,
-          top: '61px',
-          height: { xs: 'calc(var(--appvh, 100vh) - 61px - 32px)', md: 'calc(100dvh - 61px - 32px)' },
+          top: 'var(--app-nav-height, 59px)',
+          height: { xs: 'calc(var(--appvh, 100vh) - var(--app-nav-height, 59px) - 32px)', md: 'calc(100dvh - var(--app-nav-height, 59px) - 32px)' },
           width: isCollapsed ? 0 : (isFullWidth ? '100vw' : `${sidebarWidth}px`),
           backgroundColor: 'background.paper',
           borderLeft: '1px solid',
@@ -188,35 +237,39 @@ const MainContent = () => {
         <ChatSidebar />
       </SwipeableDrawer>
 
-      {/* Collapsed Chat Sidebar Toggle Button */}
+      {/* Collapsed chat: main pr (10px) + scrollbar (~8px) + safe area */}
       {isCollapsed && (
-        <Box sx={{
-          position: 'fixed',
-          right: 0,
-          top: '50%',
-          transform: 'translateY(-50%)',
-          zIndex: 1300,
-          width: 'auto',
-          height: 'auto',
-          backgroundColor: 'transparent',
-          display: 'block'
-        }}>
+        <Box
+          sx={{
+            position: 'fixed',
+            top: '50%',
+            transform: 'translateY(-50%)',
+            right: {
+              xs: 'max(12px, calc(8px + env(safe-area-inset-right, 0px)))',
+              md: 'calc(22px + env(safe-area-inset-right, 0px))',
+            },
+            zIndex: 1300,
+            pointerEvents: 'none',
+          }}
+        >
           <Tooltip title="Open Chat">
             <IconButton
+              size="small"
               onClick={toggleSidebar}
+              aria-label="Open chat"
               sx={{
+                pointerEvents: 'auto',
                 backgroundColor: 'background.paper',
                 border: '1px solid',
                 borderColor: 'divider',
-                borderRight: 'none',
-                borderRadius: '8px 0 0 8px',
-                boxShadow: '-2px 0 8px rgba(0,0,0,0.1)',
+                borderRadius: 1,
+                boxShadow: 1,
                 '&:hover': {
                   backgroundColor: 'action.hover',
                 },
               }}
             >
-              <ChevronLeft />
+              <ChevronRight fontSize="small" />
             </IconButton>
           </Tooltip>
         </Box>
@@ -227,6 +280,11 @@ const MainContent = () => {
         open={captureOpen} 
         onClose={() => setCaptureOpen(false)} 
       />
+      {/* Journal for the day - Ctrl+Shift+J */}
+      <JournalDayModal 
+        open={journalOpen} 
+        onClose={() => setJournalOpen(false)} 
+      />
     </Box>
   );
 };
@@ -235,12 +293,16 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <AuthProvider>
+        <VoiceAvailabilityProvider>
         <CapabilitiesProvider>
         <ModelProvider>
         <ChatSidebarProvider>
+          <NotificationProvider>
+          <TeamExecutionProvider>
           <MessagingProvider>
           <TeamProvider>
           <MusicProvider>
+          <ControlPaneProvider>
           <EditorProvider>
           <ImageLightboxProvider>
           <LearningProvider>
@@ -265,12 +327,16 @@ function App() {
           </LearningProvider>
           </ImageLightboxProvider>
           </EditorProvider>
+          </ControlPaneProvider>
           </MusicProvider>
           </TeamProvider>
           </MessagingProvider>
+          </TeamExecutionProvider>
+          </NotificationProvider>
         </ChatSidebarProvider>
         </ModelProvider>
         </CapabilitiesProvider>
+        </VoiceAvailabilityProvider>
       </AuthProvider>
     </QueryClientProvider>
   );

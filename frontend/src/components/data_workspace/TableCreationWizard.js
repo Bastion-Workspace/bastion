@@ -61,6 +61,7 @@ const TableCreationWizard = ({ open, onClose, databaseId, onTableCreated }) => {
           is_primary_key: col.isPrimaryKey,
           default_value: col.defaultValue || null,
           color: col.color || null,
+          description: col.description || null,
           format: null
         }))
       };

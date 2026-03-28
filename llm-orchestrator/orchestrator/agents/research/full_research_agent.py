@@ -29,6 +29,7 @@ from orchestrator.agents.research.research_routing import (
     route_from_gap_analysis_check,
     route_from_quick_answer,
     route_from_synthesis,
+    route_from_evaluation,
 )
 from orchestrator.agents.research.research_skill_config import get_research_skill_config
 
@@ -132,6 +133,7 @@ class FullResearchAgent(BaseAgent):
         workflow.add_node("round2_parallel", self._round2_parallel_node)
         workflow.add_node("detect_query_type", self._detect_query_type_node)
         workflow.add_node("final_synthesis", self._final_synthesis_node)
+        workflow.add_node("evaluate_response", self._evaluate_response_node)
         
         # Entry point - attachment detection first
         workflow.set_entry_point("detect_attachments")
@@ -220,13 +222,15 @@ class FullResearchAgent(BaseAgent):
         # Add post-processing node (for formatting and/or visualization)
         workflow.add_node("post_process", self._post_process_results_node)
         
-        # After synthesis, check if post-processing is needed
+        # After synthesis, evaluate response quality then route
+        workflow.add_edge("final_synthesis", "evaluate_response")
         workflow.add_conditional_edges(
-            "final_synthesis",
-            lambda s: route_from_synthesis(s),
+            "evaluate_response",
+            lambda s: route_from_evaluation(s),
             {
+                "re_synthesize": "final_synthesis",
                 "post_process": "post_process",
-                "complete": END
+                "complete": END,
             }
         )
         
@@ -295,6 +299,10 @@ class FullResearchAgent(BaseAgent):
     async def _final_synthesis_node(self, state: ResearchState) -> Dict[str, Any]:
         from .research_synthesis_nodes import final_synthesis_node
         return await final_synthesis_node(self, state)
+
+    async def _evaluate_response_node(self, state: ResearchState) -> Dict[str, Any]:
+        from .research_synthesis_nodes import evaluate_response_node
+        return await evaluate_response_node(self, state)
 
     async def _post_process_results_node(self, state: ResearchState) -> Dict[str, Any]:
         from .research_synthesis_nodes import post_process_results_node

@@ -55,7 +55,8 @@ class ElectronicsContentNodes:
             if electronics_document_id:
                 # Explicit document ID provided
                 from orchestrator.tools.document_tools import get_document_content_tool
-                primary_content = await get_document_content_tool(electronics_document_id, user_id)
+                primary_content_result = await get_document_content_tool(electronics_document_id, user_id)
+                primary_content = primary_content_result.get("content", primary_content_result) if isinstance(primary_content_result, dict) else primary_content_result
                 if not primary_content.startswith("Error"):
                     primary_doc = {
                         "document_id": electronics_document_id,
@@ -553,7 +554,8 @@ Correct routing:
                                                         seen_sections.add(section_key)
                                                         
                                                         # Get full section content
-                                                        content = await get_document_content_tool(doc_id, user_id)
+                                                        content_result = await get_document_content_tool(doc_id, user_id)
+                                                        content = content_result.get("content", content_result) if isinstance(content_result, dict) else content_result
                                                         if not content.startswith("Error") and section_start < len(content) and section_end <= len(content):
                                                             section_content = content[section_start:section_end]
                                                             

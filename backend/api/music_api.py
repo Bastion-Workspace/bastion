@@ -31,8 +31,9 @@ router = APIRouter(tags=["Music"])
 
 
 def _get_content_type_from_url(url: str) -> str:
-    """Determine Content-Type from URL extension"""
-    url_lower = url.lower()
+    """Determine Content-Type from URL extension. Strips query string and fragment first."""
+    path = url.split("?")[0].split("#")[0]
+    url_lower = path.lower()
     if url_lower.endswith('.mp3'):
         return 'audio/mpeg'
     elif url_lower.endswith('.flac'):
@@ -380,9 +381,11 @@ async def stream_proxy(
         
         # Get service_type from query parameter if provided
         service_type = request.query_params.get("service_type")
-        
+        # parent_id (e.g. podcast library item id) required for AudioBookShelf episode streaming
+        parent_id = request.query_params.get("parent_id") or None
+
         # Get the stream URL from media server
-        stream_url = await music_service.get_stream_url(user_id, track_id, service_type)
+        stream_url = await music_service.get_stream_url(user_id, track_id, service_type, parent_id=parent_id)
         
         if not stream_url:
             raise HTTPException(status_code=404, detail="Track not found or stream URL generation failed")
@@ -438,80 +441,59 @@ async def stream_proxy(
                 final_stream_url = clean_url
                 logger.debug(f"Cleaned stream URL: {final_stream_url[:200]}...")
         
-        # Validate the stream URL before creating StreamingResponse
-        # Make a HEAD request to check if resource exists and is accessible
+        # Open upstream stream first so we can mirror status and partial-content headers.
+        # Returning 206 without Content-Range/Content-Length (as we did when keying only off the
+        # client's Range header) breaks HTML5 media elements with format/network errors.
+        logger.debug(
+            "Streaming from URL: %s... (headers: %s)",
+            final_stream_url[:200],
+            list(final_request_headers.keys()),
+        )
+        client = httpx.AsyncClient(timeout=300.0, follow_redirects=True)
         try:
-            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                # Use HEAD request to validate without downloading content
-                head_response = await client.head(final_stream_url, headers=final_request_headers)
-                if head_response.status_code >= 400:
-                    # Try to get error details
-                    error_text = f"HTTP {head_response.status_code} error"
-                    try:
-                        if head_response.text:
-                            error_text = head_response.text[:500]
-                    except Exception:
-                        pass
-                    logger.error(f"Stream validation failed: {head_response.status_code} - {error_text}")
-                    raise HTTPException(status_code=head_response.status_code, detail=f"Failed to access audio stream: {error_text}")
-        except HTTPException:
-            raise
+            upstream = await client.send(
+                client.build_request("GET", final_stream_url, headers=final_request_headers),
+                stream=True,
+            )
         except Exception as e:
-            # If HEAD fails, try GET with limited content to validate
+            await client.aclose()
+            logger.error(f"Upstream stream request failed: {e}", exc_info=True)
+            raise HTTPException(status_code=502, detail="Could not reach media server") from e
+
+        if upstream.status_code >= 400:
             try:
-                async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-                    get_response = await client.get(final_stream_url, headers=final_request_headers)
-                    if get_response.status_code >= 400:
-                        error_text = f"HTTP {get_response.status_code} error"
-                        try:
-                            if get_response.text:
-                                error_text = get_response.text[:500]
-                        except Exception:
-                            pass
-                        logger.error(f"Stream validation failed: {get_response.status_code} - {error_text}")
-                        raise HTTPException(status_code=get_response.status_code, detail=f"Failed to access audio stream: {error_text}")
-            except HTTPException:
-                raise
-            except Exception as validation_error:
-                logger.error(f"Stream validation error: {validation_error}")
-                raise HTTPException(status_code=500, detail=f"Failed to validate stream URL: {str(validation_error)}")
-        
+                await upstream.aread()
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+            logger.error(f"Upstream stream rejected: HTTP {upstream.status_code}")
+            raise HTTPException(status_code=502, detail="Media server refused stream")
+
+        out_headers = dict(response_headers_dict)
+        uct = upstream.headers.get("content-type")
+        if uct:
+            out_headers["Content-Type"] = uct.split(";")[0].strip()
+        cr = upstream.headers.get("content-range")
+        if cr:
+            out_headers["Content-Range"] = cr
+        cl = upstream.headers.get("content-length")
+        if cl:
+            out_headers["Content-Length"] = cl
+
         async def stream_audio() -> AsyncIterator[bytes]:
-            """Stream audio data from music server"""
             try:
-                logger.debug(f"Streaming from URL: {final_stream_url[:200]}... (headers: {list(final_request_headers.keys())})")
-                
-                async with httpx.AsyncClient(timeout=300.0, follow_redirects=True) as client:
-                    async with client.stream("GET", final_stream_url, headers=final_request_headers) as response:
-                        # Log response status for debugging
-                        logger.debug(f"Stream response status: {response.status_code}, content-type: {response.headers.get('content-type', 'unknown')}")
-                        
-                        # Status should be OK since we validated, but check anyway
-                        if response.status_code >= 400:
-                            logger.error(f"Unexpected error during streaming: {response.status_code}")
-                            return
-                        
-                        # Stream chunks
-                        chunk_count = 0
-                        async for chunk in response.aiter_bytes():
-                            chunk_count += 1
-                            if chunk_count <= 3:  # Log first few chunks for debugging
-                                logger.debug(f"Stream chunk {chunk_count}: {len(chunk)} bytes")
-                            yield chunk
-                            
+                async for chunk in upstream.aiter_bytes():
+                    yield chunk
             except Exception as e:
                 logger.error(f"Error during audio streaming: {e}", exc_info=True)
-                # Can't raise HTTPException in generator - just stop yielding
-                return
-        
-        # Determine status code (206 for Range requests, 200 otherwise)
-        status_code = 206 if range_header else 200
-        
+            finally:
+                await upstream.aclose()
+                await client.aclose()
+
         return StreamingResponse(
             stream_audio(),
-            status_code=status_code,
-            media_type=content_type,
-            headers=response_headers_dict
+            status_code=upstream.status_code,
+            headers=out_headers,
         )
         
     except HTTPException:

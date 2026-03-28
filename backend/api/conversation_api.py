@@ -631,58 +631,52 @@ async def _cleanup_conversation_images(conversation_id: str, user_id: str):
             logger.info(f"📭 No messages found for conversation {conversation_id}")
             return
         
-        # Extract image URLs from message content
-        image_urls = set()
-        image_pattern = re.compile(r'/static/images/(gen_[a-f0-9]+\.(?:png|jpg|jpeg|webp))')
-        
+        # Extract generated image basenames from message content (/api/images/ or /static/images/)
+        filenames_seen = set()
+        image_pattern = re.compile(
+            r'(?:/static/images/|/api/images/)(gen_[a-fA-F0-9]+\.(?:png|jpg|jpeg|webp))',
+            re.IGNORECASE,
+        )
+
         for message in messages:
             content = message.get('content', '') or ''
             if isinstance(content, str):
-                matches = image_pattern.findall(content)
-                for filename in matches:
-                    image_urls.add(f"/static/images/{filename}")
-        
-        if not image_urls:
+                for fn in image_pattern.findall(content):
+                    filenames_seen.add(fn.lower())
+
+        if not filenames_seen:
             logger.info(f"📭 No generated images found in conversation {conversation_id}")
             return
-        
-        logger.info(f"🖼️ Found {len(image_urls)} unique image(s) in conversation")
-        
-        # Check which images have been imported into document library
-        # An imported image would have a document with doc_type='image' and file_path matching
+
+        logger.info(f"🖼️ Found {len(filenames_seen)} unique generated image(s) in conversation")
+
+        # Skip deletion when a document record exists for this filename (imported or auto-promoted)
         images_path = Path(f"{settings.UPLOAD_DIR}/web_sources/images")
-        imported_images = set()
-        
-        for image_url in image_urls:
-            # Extract filename from URL
-            filename = image_url.replace('/static/images/', '')
-            
-            # Check if this image has been imported as a document
-            # We check by looking for documents with this filename
+        imported_filenames = set()
+
+        for filename in filenames_seen:
             imported_docs = await fetch_all(
                 """
-                SELECT document_id, filename 
-                FROM document_metadata 
-                WHERE user_id = $1 
+                SELECT document_id, filename
+                FROM document_metadata
+                WHERE user_id = $1
                 AND doc_type = 'image'
-                AND filename = $2
+                AND LOWER(filename) = $2
                 """,
-                user_id, filename
+                user_id,
+                filename,
             )
-            
+
             if imported_docs:
-                logger.info(f"✅ Image {filename} has been imported - skipping deletion")
-                imported_images.add(image_url)
+                logger.info(f"✅ Image {filename} has a document record - skipping deletion")
+                imported_filenames.add(filename)
             else:
-                logger.info(f"🗑️ Image {filename} not imported - will be deleted")
-        
-        # Delete only non-imported images
+                logger.info(f"🗑️ Image {filename} has no document record - will be deleted")
+
         deleted_count = 0
-        for image_url in image_urls:
-            if image_url in imported_images:
-                continue  # Skip imported images
-            
-            filename = image_url.replace('/static/images/', '')
+        for filename in filenames_seen:
+            if filename in imported_filenames:
+                continue
             image_file_path = images_path / filename
             
             # Also check subdirectories (some images may be in document_id subdirectories)
@@ -762,6 +756,18 @@ async def create_conversation(request: CreateConversationRequest, current_user: 
         )
         
         logger.info(f"✅ Conversation created: {conversation_summary['conversation_id']}")
+        try:
+            from services.celery_tasks.session_analysis_task import (
+                _enqueue_pending_summaries_for_user_except,
+            )
+
+            await _enqueue_pending_summaries_for_user_except(
+                current_user.user_id,
+                exclude_conversation_id=conversation_summary["conversation_id"],
+                limit=10,
+            )
+        except Exception as pending_err:
+            logger.warning("Failed to enqueue pending session summaries: %s", pending_err)
         return ConversationResponse(conversation=conversation_detail)
         
     except Exception as e:
@@ -851,6 +857,11 @@ async def get_conversation_messages(
                         # Add editor_operations and manuscript_edit as top-level fields if present
                         if editor_operations:
                             message_obj["editor_operations"] = editor_operations
+                            if isinstance(metadata_json, dict):
+                                if metadata_json.get("editor_document_id") is not None:
+                                    message_obj["editor_document_id"] = metadata_json["editor_document_id"]
+                                if metadata_json.get("editor_filename") is not None:
+                                    message_obj["editor_filename"] = metadata_json["editor_filename"]
                         if manuscript_edit:
                             message_obj["manuscript_edit"] = manuscript_edit
                         
@@ -1073,6 +1084,29 @@ async def add_message_to_conversation(conversation_id: str, request: CreateMessa
         except Exception as collab_error:
             logger.debug(f"Collaboration notification failed (non-fatal): {collab_error}")
         
+        # Agent conversation watches: trigger custom agents on human messages (AI conversations)
+        if request.message_type.value == "user":
+            try:
+                from services.database_manager.database_helpers import fetch_all
+                from services.celery_tasks.agent_tasks import dispatch_conversation_reaction
+                watches = await fetch_all(
+                    "SELECT agent_profile_id FROM agent_conversation_watches "
+                    "WHERE user_id = $1 AND watch_type = 'ai_conversations' AND is_active = true",
+                    current_user.user_id,
+                )
+                for w in watches:
+                    dispatch_conversation_reaction.delay(
+                        agent_profile_id=str(w["agent_profile_id"]),
+                        user_id=current_user.user_id,
+                        message_content=request.content or "",
+                        message_sender=current_user.user_id,
+                        watch_type="ai_conversations",
+                        conversation_id=conversation_id,
+                        room_id=None,
+                    )
+            except Exception as watch_err:
+                logger.warning("Agent conversation watch dispatch failed: %s", watch_err)
+        
         return MessageResponse(message=message)
         
     except Exception as e:
@@ -1130,6 +1164,43 @@ async def delete_conversation(conversation_id: str, current_user: AuthenticatedU
     conversation_service = await _get_conversation_service()
     try:
         logger.info(f"💬 Deleting conversation: {conversation_id} for user: {current_user.user_id}")
+        
+        # Post-session memory before delete: pass transcript so analysis survives row removal
+        try:
+            from services.celery_tasks.session_analysis_task import post_session_analysis_task
+
+            msgs_result = await conversation_service.get_conversation_messages(
+                conversation_id,
+                current_user.user_id,
+                most_recent=True,
+                limit=40,
+            )
+            messages = msgs_result.get("messages", [])
+            lines = []
+            for m in messages:
+                role = m.get("message_type") or ""
+                content = (m.get("content") or "").strip()
+                if not content:
+                    continue
+                prefix = (
+                    "USER"
+                    if role == "user"
+                    else "ASSISTANT"
+                    if role == "assistant"
+                    else role.upper()
+                )
+                lines.append(f"{prefix}: {content[:4000]}")
+            transcript = "\n\n".join(lines)
+            has_assistant = any(m.get("message_type") == "assistant" for m in messages)
+            if has_assistant and len(transcript) >= 80:
+                post_session_analysis_task.delay(
+                    user_id=current_user.user_id,
+                    conversation_id=conversation_id,
+                    force=True,
+                    transcript=transcript,
+                )
+        except Exception as mem_err:
+            logger.warning("Failed to enqueue on-delete session analysis: %s", mem_err)
         
         # Step 0: Clean up generated images before deletion
         await _cleanup_conversation_images(conversation_id, current_user.user_id)

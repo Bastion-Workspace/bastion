@@ -1,43 +1,215 @@
 ---
-alwaysApply: false
-description: Where LangGraph tools live — local (orchestrator) vs external (Tools Service)
-globs: llm-orchestrator/**/*.py,backend/services/grpc_tool_service.py,tools-service/**/*
+alwaysApply: true
+description: Where tools live — placement by data boundary and domain. Local (orchestrator) vs Tools Service vs Connections Service vs Plugins.
 ---
 
-# LangGraph Tool Placement: Local vs Tools Service
+# Tool Placement: Where Does This Tool Live?
 
-LangGraph tools are split by **data boundary**: in-memory/string-only stays in LLM Orchestrator; anything external is implemented in the Tools Service and called via gRPC.
+Every tool in the system belongs in **exactly one** of four placement zones, determined by what data or services the tool touches. When creating or modifying a tool, use this decision tree.
 
-## Local to LLM Orchestrator (in-memory / strings only)
+## The Four Zones
 
-**Keep in [llm-orchestrator/orchestrator/tools/](mdc:llm-orchestrator/orchestrator/tools/) and do not call Tools Service.**
+### Zone 1: LLM Orchestrator (Local — in-memory / strings only)
 
-- **Pure computation**: Math, formulas, unit conversions, expression evaluation (e.g. [math_formulas.py](mdc:llm-orchestrator/orchestrator/tools/math_formulas.py), [unit_conversions.py](mdc:llm-orchestrator/orchestrator/tools/unit_conversions.py)).
-- **String/structured parsing**: Parsing, formatting, or transforming strings or in-memory structures (e.g. [image_query_analyzer.py](mdc:llm-orchestrator/orchestrator/tools/image_query_analyzer.py) when it only uses the LLM for parsing).
-- **No external I/O**: No database, vector store, network, file system (outside orchestrator process), or other services.
+**Location:** [llm-orchestrator/orchestrator/tools/](mdc:llm-orchestrator/orchestrator/tools/)
+**No gRPC, no backend_tool_client, no network calls.**
 
-**Rule:** If a tool only reads/writes arguments and return values (and optionally uses the LLM inside the orchestrator), it stays local. Do not add `get_backend_tool_client()` or any gRPC call for such tools.
+Tools that operate entirely in-process with no external I/O:
 
-## External: Implement in Tools Service, call via gRPC
+- **Pure computation**: Math, formulas, unit conversions, expression evaluation (e.g. [math_formulas.py](mdc:llm-orchestrator/orchestrator/tools/math_formulas.py), [unit_conversions.py](mdc:llm-orchestrator/orchestrator/tools/unit_conversions.py))
+- **String/structured parsing**: Formatting, transforming strings, parsing structures
+- **LLM-in-process**: Tools that invoke the LLM within the orchestrator for analysis or generation
+- **Session memory**: In-memory clipboard (e.g. [session_memory_tools.py](mdc:llm-orchestrator/orchestrator/tools/session_memory_tools.py))
 
-**Implement in Tools Service** ([backend/services/grpc_tool_service.py](mdc:backend/services/grpc_tool_service.py), exposed by the tools-service container). **Orchestrator** keeps thin wrappers in [llm-orchestrator/orchestrator/tools/](mdc:llm-orchestrator/orchestrator/tools/) that call [backend_tool_client](mdc:llm-orchestrator/orchestrator/backend_tool_client.py).
+**Rule:** If a tool only reads/writes its arguments and return values (and optionally calls the LLM inside the orchestrator), it stays local.
 
-- **Database / persistence**: Document search, conversation cache, user/org data.
-- **Vector store / embeddings**: Semantic search, embeddings (even if triggered from orchestrator).
-- **Network / APIs**: Web search, crawl, weather, email, RSS, external APIs.
-- **File system / backend storage**: Document create/update/delete, file creation, image generation (backend-side).
-- **Other services**: Any call that leaves the orchestrator process (including to backend or other containers).
+### Zone 2: Tools Service (Backend gRPC — Bastion's own infrastructure)
 
-**Rule:** If a tool touches anything outside the orchestrator process (DB, network, backend storage, other services), its **implementation** lives in the Tools Service gRPC handlers; the orchestrator only has a small wrapper that calls `get_backend_tool_client()` and maps args/return values.
+**Implementation:** [backend/services/grpc_tool_service.py](mdc:backend/services/grpc_tool_service.py) (exposed by the tools-service container)
+**Orchestrator wrapper:** Thin gRPC wrappers in [llm-orchestrator/orchestrator/tools/](mdc:llm-orchestrator/orchestrator/tools/) that call [backend_tool_client](mdc:llm-orchestrator/orchestrator/backend_tool_client.py)
 
-## Quick decision
+Tools that touch **Bastion's own** database, vector store, file system, or backend services:
 
-| Tool does… | Location |
-|------------|----------|
-| Only in-memory/string work (math, parse, format, LLM-in-process) | LLM Orchestrator only |
-| Database, vector store, web, email, files, other services | Tools Service (impl) + orchestrator (gRPC wrapper) |
+- **Database / persistence**: Document CRUD, folder operations, user data, org-mode operations
+- **Vector store / embeddings**: Semantic search, vectorization, similarity
+- **File system / backend storage**: Document create/update/delete, file creation, image generation
+- **Knowledge graph**: Neo4j entity and relationship operations
+- **Data workspace**: SQL queries against user data tables, schema operations, bulk import/export, cross-workspace joins — all Data Workspace tools belong here since they operate on Bastion-managed PostgreSQL databases
+- **Internal search**: Document search, segment search, conversation cache
+
+**Rule:** If a tool touches Bastion's own infrastructure (PostgreSQL, Qdrant, Neo4j, backend file storage), its **implementation** lives in the Tools Service gRPC handlers. The orchestrator only has a small wrapper that calls `get_backend_tool_client()` and maps args/return values.
+
+### Zone 3: Connections Service (Third-party connections: messaging, email, data sources, external APIs)
+
+**Location:** [connections-service/](mdc:connections-service/) (standalone gRPC service)
+**Providers:** [connections-service/providers/](mdc:connections-service/providers/)
+**Connector execution:** [connections-service/service/connector_executor.py](mdc:connections-service/service/connector_executor.py)
+
+Tools that communicate with **external platforms or third-party APIs** on behalf of the user:
+
+- **Messaging providers**: Telegram, Discord, Slack, Mattermost, Signal, Matrix
+- **Email providers**: Microsoft Graph, IMAP/SMTP
+- **Data source connectors**: REST API calls to user-configured third-party APIs (Agent Factory data sources); execution runs in connections-service via `ExecuteConnectorEndpoint` gRPC; backend resolves credentials and passes definition/credentials over gRPC
+- **Notification delivery**: Sending messages through user's configured channels
+- **Inbound message handling**: Receiving and routing messages from external platforms
+
+**Rule:** Any outbound HTTP call to a third-party API on behalf of the user should go through the connections-service. If a tool sends or receives messages through an external messaging platform, or calls a third-party provider API that the user has authenticated via OAuth/API key in their external connections, it belongs in the connections-service. The backend (or orchestrator via backend) calls it via the connections-service gRPC interface.
+
+**Why separate from Tools Service?** The connections-service manages long-lived bot connections (Telegram polling, Discord gateway, etc.) that must stay alive independent of request/response cycles. It is the single gateway for all third-party connections (messaging, email, data source connector execution), isolating third-party credentials and outbound API traffic from the main backend.
+
+### Zone 4: Plugins (Agent Factory — dynamically loaded integrations)
+
+**Location:** [llm-orchestrator/orchestrator/plugins/integrations/](mdc:llm-orchestrator/orchestrator/plugins/integrations/)
+**Base class:** [llm-orchestrator/orchestrator/plugins/base_plugin.py](mdc:llm-orchestrator/orchestrator/plugins/base_plugin.py)
+
+Tools for **third-party SaaS integrations** used by Agent Factory custom agents:
+
+- **Project management**: Trello, Jira, Asana, Linear
+- **Knowledge bases**: Notion, Confluence
+- **Calendars**: CalDAV (Google Calendar, Nextcloud, iCloud)
+- **Spreadsheets**: Google Sheets, Airtable
+- **Code platforms**: GitHub, GitLab
+- **Any future integration** added via the plugin system
+
+**Rule:** If a tool wraps a third-party SaaS REST/GraphQL API that users configure per-agent via Agent Factory, it's a plugin. Plugins are self-contained — they define their own tool functions, I/O contracts, and connection requirements. They register with the Action I/O Registry on load.
+
+**Why separate from Connections Service?** Connections-service handles always-on messaging providers (bots that listen). Plugins handle request/response API integrations that only run when an agent invokes them. Different lifecycle, different credential patterns.
+
+## Quick Decision Table
+
+| Tool does… | Zone | Location |
+|------------|------|----------|
+| Only in-memory/string work (math, parse, format, LLM-in-process) | 1: Orchestrator | `orchestrator/tools/` |
+| Reads/writes Bastion's DB, vector store, files, or graph | 2: Tools Service | `backend/services/grpc_tool_service.py` + orchestrator wrapper |
+| Sends/receives messages via Telegram, Discord, Slack, email; executes data source connector HTTP calls to third-party APIs | 3: Connections Service | `connections-service/providers/` + `connections-service/service/connector_executor.py` |
+| Calls a third-party SaaS API (Trello, Notion, CalDAV, GitHub) | 4: Plugin | `orchestrator/plugins/integrations/` |
+
+## Domain Co-location Within Each Zone
+
+Within each zone, tools should be **co-located with their domain**:
+
+### Zone 2 (Tools Service) — group by data domain
+```
+backend/services/
+├── grpc_tool_service.py          # gRPC handler (routes to domain services)
+├── document_service.py           # File/document CRUD tools live here
+├── folder_service.py             # Folder operation tools live here
+├── vector_search_service.py      # Vector/embedding tools live here
+├── knowledge_graph_service.py    # Graph tools live here
+└── data_workspace_service.py     # Data workspace tools live here
+```
+
+### Zone 1 (Orchestrator) — group by tool category
+```
+orchestrator/tools/
+├── math_tools.py                 # Math, formulas, conversions
+├── text_transform_tools.py       # Text manipulation
+├── session_memory_tools.py       # In-memory clipboard
+├── image_query_analyzer.py       # LLM-based image query analysis
+├── notification_tools.py         # Notification dispatch (calls Zone 3)
+├── task_management_tools.py      # Todo wrappers (calls Zone 2)
+└── file_operation_tools.py       # File op wrappers (calls Zone 2)
+```
+
+### Zone 3 (Connections Service) — group by provider; connector execution
+```
+connections-service/providers/
+├── base_messaging_provider.py    # Provider interface
+├── telegram_provider.py          # Telegram bot
+├── discord_provider.py           # Discord bot
+├── slack_provider.py             # Slack bot (future)
+└── microsoft_provider.py         # Microsoft Graph (email)
+connections-service/service/
+└── connector_executor.py         # Data source connector HTTP execution (REST API calls to third-party APIs)
+```
+
+### Zone 4 (Plugins) — one file per integration
+```
+orchestrator/plugins/integrations/
+├── trello_plugin.py
+├── notion_plugin.py
+├── slack_plugin.py               # Slack API (not the bot — that's Zone 3)
+├── caldav_plugin.py
+└── github_plugin.py              # (future)
+```
+
+## Edge Cases and Ambiguity
+
+### Slack: Zone 3 or Zone 4?
+- **Zone 3 (Connections Service):** The always-on Slack bot that listens for messages and routes them to the orchestrator (like Telegram/Discord today)
+- **Zone 4 (Plugin):** Agent Factory tools that call the Slack API on-demand (send_slack_message, read_channel, list_channels as part of a playbook)
+- **Both can coexist.** The bot (Zone 3) handles inbound. The plugin (Zone 4) handles outbound agent actions.
+
+### Notification tools: Zone 1 or Zone 3?
+- The `send_channel_message` tool lives in **Zone 1** as a thin orchestrator wrapper, but it **delegates** to Zone 3 (connections-service) for actual delivery. The orchestrator wrapper handles the routing logic (which channel to use, fallback to in-app).
+
+### Email: Zone 2 or Zone 3?
+- **Zone 3 (Connections Service):** The Microsoft Graph / IMAP provider that syncs and sends email
+- **Zone 2 (Tools Service):** Email search and caching in Bastion's own database (after sync)
+
+### Data source connectors: Zone 2 or Zone 3?
+- **Zone 3 (Connections Service):** The actual HTTP execution to the third-party API (REST call to the data source's base_url + endpoint) runs in connections-service via `connector_executor.execute_endpoint()`. Backend loads definition and credentials from DB, resolves OAuth tokens via `external_connections_service`, and passes everything to connections-service over gRPC (`ExecuteConnectorEndpoint`).
+- **Zone 2 (Tools Service):** Backend gRPC handler `ExecuteConnector` and REST endpoints load connector definition and credentials from DB and call the connections-service client; they do not perform the outbound HTTP call themselves.
+
+### When in doubt: ASK
+
+**If you are unsure which zone a tool belongs in, STOP and ask the user.** Present the options:
+
+```
+This tool [description] could live in:
+  - Zone 2 (Tools Service) if it primarily touches Bastion's own data
+  - Zone 3 (Connections Service) if it primarily talks to an external provider
+  - Zone 4 (Plugin) if it's a third-party SaaS integration for Agent Factory
+
+Which feels right for this use case?
+```
+
+**Do not guess.** Misplaced tools create coupling that is expensive to fix later.
+
+## Anti-patterns
+
+```python
+# ❌ WRONG: Third-party API call in Tools Service
+# grpc_tool_service.py
+async def handle_trello_create_card(request):
+    # Trello is a third-party SaaS — this belongs in a Plugin (Zone 4)
+    ...
+
+# ❌ WRONG: Database query in orchestrator tool
+# orchestrator/tools/some_tool.py
+async def search_documents(query):
+    conn = await asyncpg.connect(...)  # Direct DB access in orchestrator!
+    ...
+
+# ❌ WRONG: Telegram send in Tools Service
+# grpc_tool_service.py
+async def send_telegram_message(message):
+    # Telegram is a messaging provider — this belongs in Connections Service (Zone 3)
+    ...
+
+# ❌ WRONG: Pure math in Tools Service
+# grpc_tool_service.py
+async def calculate_expression(expr):
+    # No external I/O — this belongs in orchestrator (Zone 1)
+    ...
+
+# ✅ CORRECT: Each tool in its proper zone
+# Zone 1: orchestrator/tools/math_tools.py
+async def calculate_expression(expr): ...
+
+# Zone 2: backend/services/grpc_tool_service.py (wraps document_service)
+async def search_documents(query): ...
+
+# Zone 3: connections-service/providers/telegram_provider.py
+async def send_message(chat_id, text): ...
+
+# Zone 4: orchestrator/plugins/integrations/trello_plugin.py
+async def create_card(name, board_id, list_name): ...
+```
 
 ## References
 
-- Tool catalog and usage: [agent-tools-reference.mdc](mdc:.cursor/rules/agent-tools-reference.mdc)
-- LangGraph patterns: [langgraph-best-practices.mdc](mdc:.cursor/rules/langgraph-best-practices.mdc) (Tool Registry and Access Control)
+- Tool catalog and I/O contracts: [AGENT_FACTORY_TOOLS.md](mdc:docs/AGENT_FACTORY_TOOLS.md)
+- Agent tools reference: [agent-tools-reference.mdc](mdc:.cursor/rules/agent-tools-reference.mdc)
+- LangGraph patterns: [langgraph-best-practices.mdc](mdc:.cursor/rules/langgraph-best-practices.mdc)
+- Plugin architecture: [AGENT_FACTORY_TECHNICAL_GUIDE.md § 12](mdc:docs/AGENT_FACTORY_TECHNICAL_GUIDE.md)

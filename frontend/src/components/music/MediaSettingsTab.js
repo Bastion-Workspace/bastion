@@ -187,21 +187,7 @@ const MediaSettingsTab = () => {
   };
 
   const handleSave = () => {
-    if (serviceType === 'deezer') {
-      if (!password) {
-        setTestResult({ success: false, message: 'Please enter Deezer access token' });
-        return;
-      }
-      // For Deezer, password is the access token, server_url is fixed, username is not used
-      saveMutation.mutate({
-        server_url: 'https://api.deezer.com', // Fixed API URL
-        username: '', // Not used for Deezer
-        password: password,
-        auth_type: 'token',
-        service_type: 'deezer',
-        service_name: serviceName || undefined,
-      });
-    } else if (serviceType === 'audiobookshelf') {
+    if (serviceType === 'audiobookshelf') {
       if (!password) {
         setTestResult({ success: false, message: 'Please enter API token' });
         return;
@@ -327,7 +313,6 @@ const MediaSettingsTab = () => {
 
   const getServiceLabel = (type) => {
     if (type === 'audiobookshelf') return 'Audiobookshelf';
-    if (type === 'deezer') return 'Deezer';
     return 'SubSonic';
   };
 
@@ -388,7 +373,7 @@ const MediaSettingsTab = () => {
                       <Chip
                         label={getServiceLabel(source.service_type)}
                         size="small"
-                        color={source.service_type === 'audiobookshelf' ? 'primary' : source.service_type === 'deezer' ? 'secondary' : 'default'}
+                        color={source.service_type === 'audiobookshelf' ? 'primary' : 'default'}
                         sx={{ mt: 0.5 }}
                       />
                     </Box>
@@ -490,7 +475,7 @@ const MediaSettingsTab = () => {
                   value={serviceType}
                   onChange={(e) => {
                     setServiceType(e.target.value);
-                    if (e.target.value === 'audiobookshelf' || e.target.value === 'deezer') {
+                    if (e.target.value === 'audiobookshelf') {
                       setAuthType('token');
                     }
                   }}
@@ -499,7 +484,6 @@ const MediaSettingsTab = () => {
                 >
                   <MenuItem value="subsonic">SubSonic (Music)</MenuItem>
                   <MenuItem value="audiobookshelf">Audiobookshelf (Audiobooks & Podcasts)</MenuItem>
-                  <MenuItem value="deezer">Deezer (Streaming Service)</MenuItem>
                 </Select>
               </FormControl>
             </Grid>
@@ -521,9 +505,8 @@ const MediaSettingsTab = () => {
                 label="Server URL"
                 value={serverUrl}
                 onChange={(e) => setServerUrl(e.target.value)}
-                placeholder={serviceType === 'audiobookshelf' ? 'https://audiobookshelf.example.com' : serviceType === 'deezer' ? 'https://api.deezer.com' : 'https://music.example.com'}
-                helperText={serviceType === 'deezer' ? 'Deezer API URL (usually https://api.deezer.com)' : `Full URL to your ${getServiceLabel(serviceType)} server`}
-                disabled={serviceType === 'deezer'}
+                placeholder={serviceType === 'audiobookshelf' ? 'https://audiobookshelf.example.com' : 'https://music.example.com'}
+                helperText={`Full URL to your ${getServiceLabel(serviceType)} server`}
               />
             </Grid>
 
@@ -538,25 +521,6 @@ const MediaSettingsTab = () => {
                   helperText="Your Audiobookshelf API token (found in Settings → Users)"
                 />
               </Grid>
-            ) : serviceType === 'deezer' ? (
-              <>
-                <Grid item xs={12}>
-                  <TextField
-                    fullWidth
-                    type="password"
-                    label="Deezer Access Token"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    helperText="Your Deezer access token (ARL token or OAuth token). Get it from developers.deezer.com or extract ARL from browser cookies."
-                    placeholder="Enter your Deezer access token"
-                  />
-                </Grid>
-                <Grid item xs={12}>
-                  <Alert severity="info" sx={{ fontSize: '0.875rem' }}>
-                    For Deezer, you can use either an OAuth access token from developers.deezer.com or an ARL token extracted from your browser cookies.
-                  </Alert>
-                </Grid>
-              </>
             ) : (
               <>
                 <Grid item xs={12} sm={6}>

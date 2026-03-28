@@ -147,7 +147,7 @@ class RSSService:
             raise
 
     async def update_feed_metadata(self, feed_id: str, feed_data: RSSFeedCreate, user_id: str = None, is_admin: bool = False) -> RSSFeed:
-        """Update RSS feed metadata (name, category, tags, check_interval)"""
+        """Update RSS feed metadata (name, category, tags, check_interval, optional is_active)."""
         max_retries = 3
         for attempt in range(max_retries):
             try:
@@ -155,25 +155,49 @@ class RSSService:
                 
                 # Convert tags list to JSON string for database storage
                 tags_json = json.dumps(feed_data.tags) if feed_data.tags else '[]'
+
+                active_val = feed_data.is_active
+                if active_val is not None:
+                    existing = await self.get_feed(feed_id)
+                    if existing and existing.user_id is None and not is_admin:
+                        active_val = None
                 
                 if is_admin:
-                    # Admin users can update any feed
-                    row_data = await fetch_one("""
-                        UPDATE rss_feeds 
-                        SET feed_name = $2, category = $3, tags = $4, check_interval = $5, updated_at = NOW()
-                        WHERE feed_id = $1
-                        RETURNING *
-                    """, feed_id, feed_data.feed_name, feed_data.category, 
-                         tags_json, feed_data.check_interval)
+                    if active_val is None:
+                        row_data = await fetch_one("""
+                            UPDATE rss_feeds 
+                            SET feed_name = $2, category = $3, tags = $4, check_interval = $5, updated_at = NOW()
+                            WHERE feed_id = $1
+                            RETURNING *
+                        """, feed_id, feed_data.feed_name, feed_data.category, 
+                             tags_json, feed_data.check_interval)
+                    else:
+                        row_data = await fetch_one("""
+                            UPDATE rss_feeds 
+                            SET feed_name = $2, category = $3, tags = $4, check_interval = $5,
+                                is_active = $6, updated_at = NOW()
+                            WHERE feed_id = $1
+                            RETURNING *
+                        """, feed_id, feed_data.feed_name, feed_data.category, 
+                             tags_json, feed_data.check_interval, active_val)
                 else:
-                    # Regular users can only update their own feeds or global feeds
-                    row_data = await fetch_one("""
-                        UPDATE rss_feeds 
-                        SET feed_name = $2, category = $3, tags = $4, check_interval = $5, updated_at = NOW()
-                        WHERE feed_id = $1 AND (user_id = $6 OR user_id IS NULL)
-                        RETURNING *
-                    """, feed_id, feed_data.feed_name, feed_data.category, 
-                         tags_json, feed_data.check_interval, user_id)
+                    if active_val is None:
+                        row_data = await fetch_one("""
+                            UPDATE rss_feeds 
+                            SET feed_name = $2, category = $3, tags = $4, check_interval = $5, updated_at = NOW()
+                            WHERE feed_id = $1 AND (user_id = $6 OR user_id IS NULL)
+                            RETURNING *
+                        """, feed_id, feed_data.feed_name, feed_data.category, 
+                             tags_json, feed_data.check_interval, user_id)
+                    else:
+                        row_data = await fetch_one("""
+                            UPDATE rss_feeds 
+                            SET feed_name = $2, category = $3, tags = $4, check_interval = $5,
+                                is_active = $6, updated_at = NOW()
+                            WHERE feed_id = $1 AND (user_id = $7 OR user_id IS NULL)
+                            RETURNING *
+                        """, feed_id, feed_data.feed_name, feed_data.category, 
+                             tags_json, feed_data.check_interval, active_val, user_id)
                 
                 if not row_data:
                     raise ValueError(f"Feed {feed_id} not found or access denied")
@@ -295,6 +319,7 @@ class RSSService:
                     query = """
                         SELECT * FROM rss_feeds 
                         WHERE user_id = $1 
+                        AND COALESCE(is_active, true) = true
                         AND (last_check IS NULL OR 
                              last_check + (check_interval || ' seconds')::interval < NOW())
                             AND (is_polling IS NULL OR is_polling = false)
@@ -306,7 +331,8 @@ class RSSService:
                     # Get all feeds that need polling (for global polling) with concurrency control
                     query = """
                         SELECT * FROM rss_feeds 
-                        WHERE (last_check IS NULL OR 
+                        WHERE COALESCE(is_active, true) = true
+                        AND (last_check IS NULL OR 
                                last_check + (check_interval || ' seconds')::interval < NOW())
                             AND (is_polling IS NULL OR is_polling = false)
                         ORDER BY last_check ASC NULLS FIRST
@@ -408,6 +434,32 @@ class RSSService:
         
         return False
     
+    async def toggle_feed_active(
+        self, feed_id: str, user_id: str, is_active: bool, is_admin: bool = False
+    ) -> bool:
+        """Set rss_feeds.is_active. User feeds: owner only. Global feeds: admin only."""
+        try:
+            feed = await self.get_feed(feed_id)
+            if not feed:
+                return False
+            if feed.user_id is not None and feed.user_id != user_id:
+                return False
+            if feed.user_id is None and not is_admin:
+                return False
+            result = await execute(
+                """
+                UPDATE rss_feeds
+                SET is_active = $2, updated_at = NOW()
+                WHERE feed_id = $1
+                """,
+                feed_id,
+                is_active,
+            )
+            return result == "UPDATE 1"
+        except Exception as e:
+            logger.error("RSS SERVICE: toggle_feed_active failed: %s", e)
+            return False
+
     async def delete_feed(self, feed_id: str, user_id: str, is_admin: bool = False) -> bool:
         """Delete RSS feed (only if user owns it or is admin)"""
         try:
@@ -532,7 +584,155 @@ class RSSService:
         except Exception as e:
             logger.error(f"❌ RSS SERVICE ERROR: Failed to get feed articles: {e}")
             return []
-    
+
+    def _row_dict_to_article(self, row_dict: Dict[str, Any]) -> RSSArticle:
+        d = dict(row_dict)
+        if "images" in d and isinstance(d["images"], str):
+            try:
+                d["images"] = json.loads(d["images"])
+            except json.JSONDecodeError:
+                d["images"] = []
+        if d.get("is_starred") is None:
+            d["is_starred"] = False
+        return RSSArticle(**d)
+
+    async def get_articles_by_greader_ids(
+        self, greader_ids: List[int], user_id: str
+    ) -> List[RSSArticle]:
+        """Batch-fetch articles by greader_id for Google Reader API clients."""
+        if not greader_ids:
+            return []
+        try:
+            rows = await fetch_all(
+                """
+                SELECT * FROM rss_articles
+                WHERE greader_id = ANY($1::bigint[])
+                  AND (user_id = $2 OR user_id IS NULL)
+                ORDER BY published_date DESC NULLS LAST, created_at DESC
+                """,
+                greader_ids,
+                user_id,
+            )
+            return [self._row_dict_to_article(dict(r)) for r in rows]
+        except Exception as e:
+            logger.error(f"RSS SERVICE: get_articles_by_greader_ids failed: {e}")
+            return []
+
+    async def get_article_by_greader_id(
+        self, greader_id: int, user_id: str
+    ) -> Optional[RSSArticle]:
+        try:
+            row = await fetch_one(
+                """
+                SELECT * FROM rss_articles
+                WHERE greader_id = $1 AND (user_id = $2 OR user_id IS NULL)
+                """,
+                greader_id,
+                user_id,
+            )
+            if not row:
+                return None
+            return self._row_dict_to_article(dict(row))
+        except Exception as e:
+            logger.error(f"RSS SERVICE: get_article_by_greader_id failed: {e}")
+            return None
+
+    async def get_articles_paginated(
+        self,
+        user_id: str,
+        *,
+        feed_id: Optional[str] = None,
+        starred_only: bool = False,
+        limit: int = 20,
+        offset: int = 0,
+        older_than_ts: Optional[int] = None,
+        exclude_read: bool = False,
+        include_only_read: bool = False,
+    ) -> List[RSSArticle]:
+        """Paginated article list for GReader streams (newest first)."""
+        try:
+            conds = ["(user_id = $1 OR user_id IS NULL)"]
+            params: List[Any] = [user_id]
+            n = 2
+            if feed_id is not None:
+                conds.append(f"feed_id = ${n}")
+                params.append(feed_id)
+                n += 1
+            if starred_only:
+                conds.append("is_starred IS TRUE")
+            if include_only_read:
+                conds.append("(is_read IS TRUE)")
+            if exclude_read:
+                conds.append("(is_read IS NOT TRUE)")
+            if older_than_ts is not None:
+                conds.append(
+                    f"EXTRACT(EPOCH FROM COALESCE(published_date, created_at))::bigint < ${n}"
+                )
+                params.append(older_than_ts)
+                n += 1
+            lim_ph = f"${n}"
+            off_ph = f"${n + 1}"
+            params.extend([limit, offset])
+            sql = f"""
+                SELECT * FROM rss_articles
+                WHERE {' AND '.join(conds)}
+                ORDER BY published_date DESC NULLS LAST, created_at DESC
+                LIMIT {lim_ph} OFFSET {off_ph}
+            """
+            rows = await fetch_all(sql, *params)
+            return [self._row_dict_to_article(dict(r)) for r in rows]
+        except Exception as e:
+            logger.error(f"RSS SERVICE: get_articles_paginated failed: {e}")
+            return []
+
+    async def get_starred_articles(
+        self, user_id: str, limit: int = 250, offset: int = 0
+    ) -> List[RSSArticle]:
+        """Articles the user has starred."""
+        return await self.get_articles_paginated(
+            user_id,
+            feed_id=None,
+            starred_only=True,
+            limit=limit,
+            offset=offset,
+            older_than_ts=None,
+            exclude_read=False,
+        )
+
+    async def search_articles(
+        self, user_id: str, query: str, limit: int = 20
+    ) -> List[RSSArticle]:
+        """Search articles by query (title, description, full_content). Returns articles visible to user."""
+        if not query or not query.strip():
+            return []
+        try:
+            # Escape LIKE wildcards so user query is treated literally
+            q = query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            pattern_arg = f"%{q}%"
+            rows = await fetch_all("""
+                SELECT a.* FROM rss_articles a
+                WHERE (a.user_id = $1 OR a.user_id IS NULL)
+                AND (
+                    a.title ILIKE $2
+                    OR a.description ILIKE $2
+                    OR (a.full_content IS NOT NULL AND a.full_content ILIKE $2)
+                )
+                ORDER BY a.published_date DESC NULLS LAST, a.created_at DESC
+                LIMIT $3
+            """, user_id, pattern_arg, limit)
+            articles = []
+            for row_dict in rows:
+                if "images" in row_dict and isinstance(row_dict["images"], str):
+                    try:
+                        row_dict["images"] = json.loads(row_dict["images"])
+                    except json.JSONDecodeError:
+                        row_dict["images"] = []
+                articles.append(RSSArticle(**row_dict))
+            return articles
+        except Exception as e:
+            logger.error(f"RSS SERVICE: search_articles failed: {e}")
+            return []
+
     async def is_duplicate_article(self, article: RSSArticle) -> bool:
         """Check if article is a duplicate based on content hash"""
         max_retries = 3
@@ -576,6 +776,155 @@ class RSSService:
         except Exception as e:
             logger.error(f"❌ RSS SERVICE ERROR: Failed to mark article read: {e}")
             return False
+
+    async def mark_article_unread(self, article_id: str, user_id: str) -> bool:
+        """Mark article as unread"""
+        try:
+            await execute(
+                """
+                UPDATE rss_articles
+                SET is_read = false, updated_at = NOW()
+                WHERE article_id = $1 AND (user_id = $2 OR user_id IS NULL)
+                """,
+                article_id,
+                user_id,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"RSS SERVICE: Failed to mark article unread: {e}")
+            return False
+
+    async def set_article_starred(
+        self, article_id: str, user_id: str, starred: bool
+    ) -> bool:
+        """Set starred flag (idempotent)."""
+        try:
+            await execute(
+                """
+                UPDATE rss_articles
+                SET is_starred = $2, updated_at = NOW()
+                WHERE article_id = $1 AND (user_id = $3 OR user_id IS NULL)
+                """,
+                article_id,
+                starred,
+                user_id,
+            )
+            return True
+        except Exception as e:
+            logger.error(f"RSS SERVICE: set_article_starred failed: {e}")
+            return False
+
+    async def toggle_article_starred(self, article_id: str, user_id: str) -> Optional[bool]:
+        """Toggle is_starred. Returns new starred state, or None if article not found or forbidden."""
+        try:
+            row = await fetch_one(
+                """
+                SELECT is_starred FROM rss_articles
+                WHERE article_id = $1 AND (user_id = $2 OR user_id IS NULL)
+                """,
+                article_id,
+                user_id,
+            )
+            if not row:
+                return None
+            cur = row.get("is_starred")
+            if cur is None:
+                cur = False
+            new_val = not bool(cur)
+            await execute(
+                """
+                UPDATE rss_articles
+                SET is_starred = $2, updated_at = NOW()
+                WHERE article_id = $1 AND (user_id = $3 OR user_id IS NULL)
+                """,
+                article_id,
+                new_val,
+                user_id,
+            )
+            return new_val
+        except Exception as e:
+            logger.error(f"RSS SERVICE: Failed to toggle article star: {e}")
+            return None
+
+    async def mark_all_feed_read(
+        self, feed_id: str, user_id: str, before_epoch: Optional[int] = None
+    ) -> int:
+        """Mark articles in a feed as read. If before_epoch set, only rows at or before that UNIX time."""
+        try:
+            rows = await fetch_all(
+                """
+                UPDATE rss_articles
+                SET is_read = true, updated_at = NOW()
+                WHERE feed_id = $1 AND (user_id = $2 OR user_id IS NULL)
+                  AND (is_read IS NOT TRUE)
+                  AND (
+                    $3::bigint IS NULL
+                    OR EXTRACT(EPOCH FROM COALESCE(published_date, created_at))::bigint <= $3::bigint
+                  )
+                RETURNING article_id
+                """,
+                feed_id,
+                user_id,
+                before_epoch,
+            )
+            return len(rows)
+        except Exception as e:
+            logger.error(f"RSS SERVICE: Failed to mark all feed read: {e}")
+            return 0
+
+    async def mark_all_user_articles_read(self, user_id: str) -> int:
+        """Mark all unread articles visible to user as read (GReader reading-list)."""
+        try:
+            rows = await fetch_all(
+                """
+                UPDATE rss_articles
+                SET is_read = true, updated_at = NOW()
+                WHERE (user_id = $1 OR user_id IS NULL)
+                  AND (is_read IS NOT TRUE)
+                RETURNING article_id
+                """,
+                user_id,
+            )
+            return len(rows)
+        except Exception as e:
+            logger.error(f"RSS SERVICE: Failed to mark all user articles read: {e}")
+            return 0
+
+    async def delete_all_read_articles(self, feed_id: str, user_id: str) -> int:
+        """Delete read, non-imported, non-starred articles in a feed. Returns number deleted."""
+        try:
+            rows = await fetch_all(
+                """
+                SELECT article_id FROM rss_articles
+                WHERE feed_id = $1 AND (user_id = $2 OR user_id IS NULL)
+                  AND is_read IS TRUE
+                  AND is_processed IS NOT TRUE
+                  AND is_starred IS NOT TRUE
+                """,
+                feed_id,
+                user_id,
+            )
+            if not rows:
+                return 0
+            for r in rows:
+                aid = r["article_id"] if isinstance(r, dict) else r[0]
+                await execute("DELETE FROM news_articles WHERE id = $1", aid)
+            del_rows = await fetch_all(
+                """
+                DELETE FROM rss_articles
+                WHERE feed_id = $1 AND (user_id = $2 OR user_id IS NULL)
+                  AND is_read IS TRUE
+                  AND is_processed IS NOT TRUE
+                  AND is_starred IS NOT TRUE
+                RETURNING article_id
+                """,
+                feed_id,
+                user_id,
+            )
+            return len(del_rows)
+        except Exception as e:
+            logger.error(f"RSS SERVICE: Failed to delete all read articles: {e}")
+            return 0
 
     async def mark_article_processed(self, article_id: str) -> bool:
         """Mark article as processed (imported)"""
@@ -721,8 +1070,9 @@ class RSSService:
             # **BULLY!** Using DatabaseManager for unread count!
             rows = await fetch_all("""
                 SELECT feed_id, COUNT(*) as unread_count
-                FROM rss_articles 
-                WHERE is_read = false AND (user_id = $1 OR user_id IS NULL)
+                FROM rss_articles
+                WHERE (is_read IS NOT TRUE)
+                  AND (user_id = $1 OR user_id IS NULL)
                 GROUP BY feed_id
             """, user_id)
             

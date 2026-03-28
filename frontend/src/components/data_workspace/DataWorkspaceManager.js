@@ -22,13 +22,17 @@ import {
   Dashboard as DashboardIcon,
   Storage as StorageIcon,
   MoreVert as MoreVertIcon,
-  Delete as DeleteIcon
+  Delete as DeleteIcon,
+  Edit as EditIcon,
+  Code as CodeIcon
 } from '@mui/icons-material';
 
 import dataWorkspaceService from '../../services/dataWorkspaceService';
 import DatabaseList from './DatabaseList';
 import TableCreationWizard from './TableCreationWizard';
+import TableSchemaEditDialog from './TableSchemaEditDialog';
 import DataTableView from './DataTableView';
+import RunSqlDialog from './RunSqlDialog';
 
 const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) => {
   const [workspace, setWorkspace] = useState(null);
@@ -47,6 +51,11 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
   // Table menu state
   const [tableMenuAnchor, setTableMenuAnchor] = useState(null);
   const [tableForMenu, setTableForMenu] = useState(null);
+  const [showEditSchemaDialog, setShowEditSchemaDialog] = useState(false);
+  const [tableForEdit, setTableForEdit] = useState(null);
+  const [showRunSqlDialog, setShowRunSqlDialog] = useState(false);
+  const [currentRows, setCurrentRows] = useState([]);
+  const [currentTotalRows, setCurrentTotalRows] = useState(0);
 
   useEffect(() => {
     if (workspaceId) {
@@ -54,6 +63,51 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
       loadDatabases();
     }
   }, [workspaceId]);
+
+  useEffect(() => {
+    return () => {
+      try {
+        localStorage.removeItem('data_workspace_ctx_cache');
+      } catch (e) {
+        // ignore
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!selectedTable || !tableSchema) {
+      try {
+        localStorage.removeItem('data_workspace_ctx_cache');
+      } catch (e) {
+        // ignore
+      }
+      return;
+    }
+    if (!workspace || !selectedDatabase) return;
+    const columns = tableSchema.columns || (Array.isArray(tableSchema) ? tableSchema : []);
+    if (columns.length === 0) return;
+    try {
+      const cache = {
+        workspace_id: workspaceId,
+        workspace_name: workspace.name || '',
+        database_id: selectedDatabase.database_id,
+        database_name: selectedDatabase.name || '',
+        table_id: selectedTable.table_id,
+        table_name: selectedTable.name || '',
+        row_count: selectedTable.row_count ?? currentTotalRows,
+        schema: columns.map((col) => ({
+          name: col.name,
+          type: col.type || 'TEXT',
+          description: col.description || ''
+        })),
+        visible_rows: currentRows,
+        visible_row_count: currentRows.length
+      };
+      localStorage.setItem('data_workspace_ctx_cache', JSON.stringify(cache));
+    } catch (e) {
+      // ignore
+    }
+  }, [workspaceId, workspace, selectedDatabase, selectedTable, tableSchema, currentRows, currentTotalRows]);
 
   const loadWorkspace = async () => {
     try {
@@ -141,6 +195,40 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
   const handleTableMenuClose = () => {
     setTableMenuAnchor(null);
     setTableForMenu(null);
+  };
+
+  const handleEditTableSchema = () => {
+    if (!tableForMenu) return;
+    setTableForEdit(tableForMenu);
+    setShowEditSchemaDialog(true);
+    handleTableMenuClose();
+  };
+
+  const handleEditSchemaDialogClose = () => {
+    setShowEditSchemaDialog(false);
+    setTableForEdit(null);
+  };
+
+  const handleEditSchemaSaved = async () => {
+    if (selectedDatabase) {
+      try {
+        const tablesData = await dataWorkspaceService.listTables(selectedDatabase.database_id);
+        setTables(tablesData);
+        if (tableForEdit && selectedTable?.table_id === tableForEdit.table_id) {
+          const updated = tablesData.find((t) => t.table_id === tableForEdit.table_id);
+          if (updated) {
+            setSelectedTable(updated);
+            const schema = typeof updated.table_schema_json === 'string'
+              ? JSON.parse(updated.table_schema_json)
+              : updated.table_schema_json;
+            setTableSchema(schema || {});
+          }
+        }
+      } catch (err) {
+        console.error('Failed to reload tables after edit:', err);
+      }
+    }
+    loadDatabases();
   };
 
   const handleDeleteTable = async () => {
@@ -265,13 +353,22 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
                   Tables in {selectedDatabase.name}
                 </Typography>
               </Box>
-              <Button
-                variant="contained"
-                startIcon={<AddIcon />}
-                onClick={() => setShowTableWizard(true)}
-              >
-                Create Table
-              </Button>
+              <Box sx={{ display: 'flex', gap: 1 }}>
+                <Button
+                  variant="outlined"
+                  startIcon={<CodeIcon />}
+                  onClick={() => setShowRunSqlDialog(true)}
+                >
+                  Run SQL
+                </Button>
+                <Button
+                  variant="contained"
+                  startIcon={<AddIcon />}
+                  onClick={() => setShowTableWizard(true)}
+                >
+                  Create Table
+                </Button>
+              </Box>
             </Box>
 
             {selectedTable && tableSchema ? (
@@ -282,8 +379,13 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
                 <Paper sx={{ height: 'calc(100vh - 300px)' }}>
                   <DataTableView
                     tableId={selectedTable.table_id}
+                    databaseId={selectedTable.database_id}
                     schema={tableSchema}
                     onDataChange={() => {}}
+                    onRowsLoaded={(rows, total) => {
+                      setCurrentRows(rows || []);
+                      setCurrentTotalRows(total ?? 0);
+                    }}
                   />
                 </Paper>
               </Box>
@@ -359,6 +461,10 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
         open={Boolean(tableMenuAnchor)}
         onClose={handleTableMenuClose}
       >
+        <MenuItem onClick={handleEditTableSchema}>
+          <EditIcon sx={{ mr: 1 }} fontSize="small" />
+          Edit columns
+        </MenuItem>
         <MenuItem 
           onClick={handleDeleteTable}
           sx={{ color: 'error.main' }}
@@ -374,6 +480,27 @@ const DataWorkspaceManager = ({ workspaceId, fullScreen, onToggleFullScreen }) =
         onClose={() => setShowTableWizard(false)}
         databaseId={selectedDatabase?.database_id}
         onTableCreated={handleTableCreated}
+      />
+
+      {/* Table schema edit dialog */}
+      <TableSchemaEditDialog
+        open={showEditSchemaDialog}
+        onClose={handleEditSchemaDialogClose}
+        table={tableForEdit}
+        onSaved={handleEditSchemaSaved}
+      />
+
+      {/* Run SQL dialog */}
+      <RunSqlDialog
+        open={showRunSqlDialog}
+        onClose={() => setShowRunSqlDialog(false)}
+        workspaceId={workspaceId}
+        onSuccess={() => {
+          if (selectedDatabase) {
+            dataWorkspaceService.listTables(selectedDatabase.database_id).then(setTables).catch(() => {});
+          }
+          loadDatabases();
+        }}
       />
     </Box>
   );
