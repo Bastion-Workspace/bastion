@@ -78,7 +78,6 @@ import orchestrator.tools.agent_goal_tools  # noqa: F401 - register_action at lo
 import orchestrator.tools.agent_task_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.agent_governance_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.agent_memory_tools  # noqa: F401 - register_agent_memory_actions at load
-import orchestrator.tools.research_escalation_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.team_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.local_proxy_tools  # noqa: F401 - register_action at load
 
@@ -321,9 +320,7 @@ import orchestrator.tools.reference_file_loader  # noqa: F401 - register_action 
 import orchestrator.tools.file_analysis_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.file_editing_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.document_creation_tools  # noqa: F401 - register_action at load
-import orchestrator.tools.project_content_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.lesson_tools  # noqa: F401 - register_action at load
-import orchestrator.tools.dynamic_tool_analyzer  # noqa: F401 - register_action at load
 import orchestrator.tools.knowledge_graph_tools  # noqa: F401 - register_action at load
 import orchestrator.tools.skill_acquisition_tools  # noqa: F401 - register_action at load
 

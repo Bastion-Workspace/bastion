@@ -12,6 +12,8 @@ from models.conversation_models import (
     UpdateConversationRequest,
     ReactionRequest,
     ReactionResponse,
+    BranchFromMessageRequest,
+    SwitchBranchRequest,
 )
 from utils.auth_middleware import get_current_user, validate_conversation_access
 from models.api_models import AuthenticatedUserResponse
@@ -781,6 +783,8 @@ async def get_conversation_messages(
     skip: int = 0,
     limit: int = 100,
     skip_checkpoint: bool = False,
+    include_tree: bool = False,
+    most_recent: bool = False,
     current_user: AuthenticatedUserResponse = Depends(get_current_user),
 ):
     """
@@ -809,31 +813,39 @@ async def get_conversation_messages(
         messages = []
         messages_from_checkpoint = False  # Track if we got messages from checkpoint
         messages_from_database = False  # Track if we got messages from database
-        
+        db_total_count = 0
+        db_has_more = False
+        db_current_node_message_id = None
+
         # PRIORITY 1: Read from conversation database (primary source for orchestrator conversations)
         try:
             from services.conversation_service import ConversationService
             conversation_service = ConversationService()
             conversation_service.set_current_user(current_user.user_id)
-            
+
             db_messages_result = await conversation_service.get_conversation_messages(
                 conversation_id=conversation_id,
                 user_id=current_user.user_id,
                 skip=skip,
-                limit=limit
+                limit=limit,
+                most_recent=most_recent,
+                include_tree=include_tree,
             )
             
             # ConversationService returns dict with "messages" key
             logger.info(f"🔍 get_conversation_messages result keys: {list(db_messages_result.keys()) if db_messages_result else 'None'}")
             if db_messages_result and "messages" in db_messages_result:
                 db_messages = db_messages_result.get("messages", [])
+                db_total_count = db_messages_result.get("total_count", len(db_messages))
+                db_has_more = db_messages_result.get("has_more", False)
+                db_current_node_message_id = db_messages_result.get("current_node_message_id")
                 logger.info(f"🔍 get_conversation_messages returned {len(db_messages)} messages")
                 if db_messages:
                     logger.info(f"✅ Retrieved {len(db_messages)} messages from conversation database (primary source)")
                     
                     # Convert database messages to API format
                     for msg in db_messages:
-                        metadata_json = msg.get("metadata_json", {})
+                        metadata_json = msg.get("metadata_json") or msg.get("metadata") or {}
                         
                         # Extract editor_operations and manuscript_edit from metadata for top-level access
                         editor_operations = metadata_json.get("editor_operations", []) if isinstance(metadata_json, dict) else []
@@ -851,7 +863,9 @@ async def get_conversation_messages(
                             "metadata_json": metadata_json,  # Keep for backward compatibility
                             "metadata": metadata_json,  # Frontend expects this name
                             "citations": metadata_json.get("citations", []) if isinstance(metadata_json, dict) else [],
-                            "edit_history": []
+                            "edit_history": [],
+                            "parent_message_id": msg.get("parent_message_id"),
+                            "branch_id": msg.get("branch_id"),
                         }
                         
                         # Add editor_operations and manuscript_edit as top-level fields if present
@@ -875,7 +889,11 @@ async def get_conversation_messages(
             logger.warning(f"⚠️ Failed to load messages from conversation database: {db_error}")
         
         # PRIORITY 2: Fallback to LangGraph checkpoints (for legacy conversations). Skip when skip_checkpoint=True (new conversation).
-        if not messages_from_database and not (skip_checkpoint and len(messages) == 0):
+        if (
+            not messages_from_database
+            and not (skip_checkpoint and len(messages) == 0)
+            and not include_tree
+        ):
             logger.info(f"📚 Falling back to LangGraph checkpoints for conversation {conversation_id}")
             try:
                 from services.langgraph_postgres_checkpointer import get_postgres_checkpointer
@@ -998,9 +1016,13 @@ async def get_conversation_messages(
                 else:
                     logger.warning(f"⚠️ Failed to read from LangGraph checkpoint: {checkpoint_error}")
         
-        total_count = len(messages)
-        has_more = False  # Since we're getting all messages from checkpoint or database
-        
+        if messages_from_database:
+            total_count = db_total_count or len(messages)
+            has_more = db_has_more
+        else:
+            total_count = len(messages)
+            has_more = False
+
         # Determine source for logging
         if messages_from_checkpoint and total_count > 0:
             source = "checkpoint"
@@ -1008,12 +1030,13 @@ async def get_conversation_messages(
             source = "database"
         else:
             source = "none"
-        
+
         logger.info(f"✅ Retrieved {total_count} messages for conversation {conversation_id} (source: {source})")
         return MessageListResponse(
-            messages=messages, 
+            messages=messages,
             total_count=total_count,
-            has_more=has_more
+            has_more=has_more,
+            current_node_message_id=db_current_node_message_id if messages_from_database else None,
         )
         
     except Exception as e:
@@ -1046,7 +1069,8 @@ async def add_message_to_conversation(conversation_id: str, request: CreateMessa
             user_id=current_user.user_id,
             role=request.message_type.value,  # Convert enum to string
             content=request.content,
-            metadata=request.metadata
+            metadata=request.metadata,
+            parent_message_id=request.parent_message_id,
         )
         
         logger.info(f"✅ Message added to conversation {conversation_id}")
@@ -1111,6 +1135,95 @@ async def add_message_to_conversation(conversation_id: str, request: CreateMessa
         
     except Exception as e:
         logger.error(f"❌ Failed to add message to conversation: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/conversations/{conversation_id}/messages/{message_id}/branch")
+async def branch_message_from_edit(
+    conversation_id: str,
+    message_id: str,
+    request: BranchFromMessageRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Create a sibling user message (fork) from editing an earlier user message; enables branch-aware resend."""
+    conversation_service = await _get_conversation_service()
+    has_access = await validate_conversation_access(
+        user_id=current_user.user_id,
+        conversation_id=conversation_id,
+        required_permission="comment",
+    )
+    if not has_access:
+        raise HTTPException(status_code=403, detail="You do not have permission to edit this conversation")
+    conversation_service.set_current_user(current_user.user_id)
+    try:
+        return await conversation_service.create_branch(
+            conversation_id=conversation_id,
+            user_id=current_user.user_id,
+            original_message_id=message_id,
+            new_content=request.new_content.strip(),
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error("branch_message_from_edit failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/api/conversations/{conversation_id}/switch-branch")
+async def switch_conversation_branch(
+    conversation_id: str,
+    request: SwitchBranchRequest,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """Set active transcript to the branch containing target_message_id (deepest leaf from that node)."""
+    conversation_service = await _get_conversation_service()
+    has_access = await validate_conversation_access(
+        user_id=current_user.user_id,
+        conversation_id=conversation_id,
+        required_permission="read",
+    )
+    if not has_access:
+        raise HTTPException(status_code=403, detail="You do not have access to this conversation")
+    conversation_service.set_current_user(current_user.user_id)
+    try:
+        return await conversation_service.switch_active_branch(
+            conversation_id=conversation_id,
+            user_id=current_user.user_id,
+            target_message_id=request.target_message_id,
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error("switch_conversation_branch failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/conversations/{conversation_id}/messages/{message_id}/siblings")
+async def get_message_siblings(
+    conversation_id: str,
+    message_id: str,
+    current_user: AuthenticatedUserResponse = Depends(get_current_user),
+):
+    """List sibling messages (same parent) for branch navigation."""
+    conversation_service = await _get_conversation_service()
+    has_access = await validate_conversation_access(
+        user_id=current_user.user_id,
+        conversation_id=conversation_id,
+        required_permission="read",
+    )
+    if not has_access:
+        raise HTTPException(status_code=403, detail="You do not have access to this conversation")
+    conversation_service.set_current_user(current_user.user_id)
+    try:
+        return await conversation_service.get_message_siblings(
+            conversation_id=conversation_id,
+            user_id=current_user.user_id,
+            message_id=message_id,
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        logger.error("get_message_siblings failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 

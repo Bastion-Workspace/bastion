@@ -23,6 +23,7 @@ import {
 import { useQuery } from 'react-query';
 import ExportButton from './ExportButton';
 import { useChatSidebar } from '../../contexts/ChatSidebarContext';
+import { getSiblings } from '../../utils/messageTreeUtils';
 import apiService from '../../services/apiService';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
@@ -42,17 +43,20 @@ const BOTTOM_SCROLL_THRESHOLD_PX = 100;
 
 const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
   const theme = useTheme();
-  const { 
-    messages, 
+  const {
+    messages,
     setMessages,
-    isLoading, 
-    currentConversationId, 
+    isLoading,
+    currentConversationId,
     executingPlans,
     replyToMessage,
     setReplyToMessage,
     sendMessage,
     backgroundJobService,
     activeLineRouting,
+    editAndResendMessage,
+    switchBranch,
+    messageTree,
   } = useChatSidebar();
   const { isAdmin, has } = useCapabilities();
   const { openLightbox } = useImageLightbox();
@@ -69,7 +73,10 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
 
   const { data: messagesData, isLoading: messagesLoading } = useQuery(
     ['conversationMessages', currentConversationId],
-    () => currentConversationId ? apiService.getConversationMessages(currentConversationId) : null,
+    () =>
+      currentConversationId
+        ? apiService.getConversationMessages(currentConversationId, 0, 500, false, true)
+        : null,
     {
       enabled: !!currentConversationId,
       refetchOnWindowFocus: false,
@@ -115,6 +122,25 @@ const ChatMessagesArea = ({ darkMode: darkModeProp }) => {
 
   // Get AI name from settings, fallback to "Alex"
   const aiName = promptSettings?.ai_name || 'Alex';
+
+  const siblingInfoByMessageId = useMemo(() => {
+    const map = {};
+    if (!messageTree?.byId?.size || !messages?.length) return map;
+    messages.forEach((msg) => {
+      const mid = msg.message_id || msg.id;
+      if (!mid) return;
+      const s = getSiblings(messageTree, mid);
+      if (s && s.total > 1) {
+        map[mid] = { index: s.index, total: s.total };
+      }
+    });
+    return map;
+  }, [messages, messageTree]);
+
+  const anyMessageStreaming = useMemo(
+    () => (messages || []).some((m) => m.isStreaming),
+    [messages]
+  );
 
   // ROOSEVELT'S INTELLIGENT AUTO-SCROLL: Only scroll when user is near bottom or new message arrives
   const [shouldAutoScroll, setShouldAutoScroll] = useState(true);
@@ -1119,6 +1145,10 @@ ${message.content}
               savingNoteFor={savingNoteFor}
               isAdmin={isAdmin}
               has={has}
+              onEditAndResend={editAndResendMessage}
+              onSwitchBranch={switchBranch}
+              siblingInfo={siblingInfoByMessageId[message.message_id || message.id]}
+              anyMessageStreaming={anyMessageStreaming}
             />
           );
         })}

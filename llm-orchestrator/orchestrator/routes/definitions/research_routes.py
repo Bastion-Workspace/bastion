@@ -1,5 +1,5 @@
 """
-Research engine route definitions.
+Research-oriented route definitions (dispatch via CustomAgentRunner).
 
 Routes: research (deep), knowledge_builder, security_analysis, site_crawl,
 website_crawler.
@@ -11,12 +11,11 @@ RESEARCH_ROUTES = [
     Route(
         name="research",
         description=(
-            "Multi-round research with web and local search, gap analysis, and synthesis. "
-            "Use for factual and how-to questions: 'how do I', 'how to', 'what is', 'how can I'. "
-            "Searches the user's local document and image collections (comics, photos, artwork). "
-            "Use for 'do we have', 'find me', 'show me' queries about stored content."
+            "Factual and exploratory questions using Agent Factory tools: local document search, "
+            "web search, query enhancement, conversation cache, segments, crawl, and image search. "
+            "Use for how-to and what-is questions, and for 'find me' / 'show me' queries about stored content."
         ),
-        engine=EngineType.RESEARCH,
+        engine=EngineType.CUSTOM_AGENT,
         domains=["general", "research", "information", "management"],
         actions=["query", "analysis"],
         keywords=[
@@ -34,19 +33,36 @@ RESEARCH_ROUTES = [
         ],
         priority=80,
         override_continuity=True,
-        tools=["search_documents_tool", "search_web_tool", "enhance_query_tool", "search_conversation_cache_tool"],
+        tools=[
+            "search_documents_tool",
+            "search_web_tool",
+            "enhance_query_tool",
+            "search_conversation_cache_tool",
+            "search_segments_across_documents_tool",
+            "crawl_web_content_tool",
+            "get_document_content_tool",
+            "get_document_metadata_tool",
+            "search_images_tool",
+        ],
         tool_io_map={
             "search_documents_tool": "search_documents",
             "search_web_tool": "search_web",
             "enhance_query_tool": "enhance_query",
             "search_conversation_cache_tool": "search_conversation_cache",
+            "search_segments_across_documents_tool": "search_segments_across_documents",
+            "crawl_web_content_tool": "crawl_web_content",
+            "get_document_content_tool": "get_document_content",
+            "get_document_metadata_tool": "get_document_metadata",
+            "search_images_tool": "search_images",
         },
-        subgraphs=["research_workflow", "gap_analysis", "web_research", "assessment", "data_formatting", "visualization"],
     ),
     Route(
         name="knowledge_builder",
-        description="Fact-check, verify claims, distill knowledge, and build research documents (not general web lookup; use research for that).",
-        engine=EngineType.RESEARCH,
+        description=(
+            "Fact-check, verify claims, distill knowledge, and build research documents using "
+            "document and web search tools (not general open-ended lookup; use the research route for that)."
+        ),
+        engine=EngineType.CUSTOM_AGENT,
         domains=["research", "knowledge", "information", "truth"],
         actions=["query", "analysis"],
         keywords=[
@@ -62,12 +78,11 @@ RESEARCH_ROUTES = [
             "search_web_tool": "search_web",
             "enhance_query_tool": "enhance_query",
         },
-        subgraphs=["fact_verification", "knowledge_document"],
     ),
     Route(
         name="security_analysis",
         description="Security and vulnerability scanning for URLs and websites.",
-        engine=EngineType.RESEARCH,
+        engine=EngineType.CUSTOM_AGENT,
         domains=["general", "security", "web"],
         actions=["analysis", "query"],
         keywords=[
@@ -78,30 +93,27 @@ RESEARCH_ROUTES = [
         priority=90,
         tools=["search_web_tool", "crawl_web_content_tool"],
         tool_io_map={"search_web_tool": "search_web", "crawl_web_content_tool": "crawl_web_content"},
-        subgraphs=[],
     ),
     Route(
         name="site_crawl",
         description="Crawl a single site or domain and extract content (one-off).",
-        engine=EngineType.RESEARCH,
+        engine=EngineType.CUSTOM_AGENT,
         domains=["research", "web", "information"],
         actions=["query"],
         keywords=["crawl site", "crawl website", "site crawl", "domain crawl", "crawl domain"],
         priority=90,
         tools=["crawl_web_content_tool"],
         tool_io_map={"crawl_web_content_tool": "crawl_web_content"},
-        subgraphs=[],
     ),
     Route(
         name="website_crawler",
         description="Ingest a URL or whole website with recursive crawl (save/process content).",
-        engine=EngineType.RESEARCH,
+        engine=EngineType.CUSTOM_AGENT,
         domains=["general", "web", "management"],
         actions=["management", "query"],
         keywords=["crawl", "capture", "ingest", "scrape", "download website", "url"],
         priority=92,
         tools=["crawl_web_content_tool", "search_web_tool"],
         tool_io_map={"crawl_web_content_tool": "crawl_web_content", "search_web_tool": "search_web"},
-        subgraphs=[],
     ),
 ]

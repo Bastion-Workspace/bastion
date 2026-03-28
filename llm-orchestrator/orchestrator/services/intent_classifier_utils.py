@@ -46,20 +46,15 @@ def infer_action_from_agent(agent_name: str) -> Optional[str]:
         Typical action intent for this agent, or None
     """
     agent_action_map = {
-        "fiction_editing_agent": "generation",
         "story_analysis_agent": "analysis",
         "content_analysis_agent": "analysis",
-        "research_agent": "query",
-        "chat_agent": "observation",
-        "electronics_agent": "generation",
-        "writing_assistant_agent": "generation",
         "series_editing_agent": "generation",
-        "org_content_agent": "query",
         "org_capture_agent": "management",
         "website_crawler_agent": "management",
         "podcast_script_agent": "generation",
         "email_agent": "generation",
         "navigation_agent": "query",
+        "custom_agent": "query",
     }
     return agent_action_map.get(agent_name)
 

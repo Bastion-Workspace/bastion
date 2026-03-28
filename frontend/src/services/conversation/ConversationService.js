@@ -27,11 +27,31 @@ class ConversationService extends ApiServiceBase {
     return this.get(`/api/conversations/${conversationId}`);
   }
 
-  getConversationMessages = async (conversationId, skip = 0, limit = 100, skipCheckpoint = false) => {
-    const params = new URLSearchParams({ skip, limit });
+  getConversationMessages = async (
+    conversationId,
+    skip = 0,
+    limit = 100,
+    skipCheckpoint = false,
+    includeTree = false
+  ) => {
+    const params = new URLSearchParams({ skip: String(skip), limit: String(limit) });
     if (skipCheckpoint) params.set('skip_checkpoint', 'true');
+    if (includeTree) params.set('include_tree', 'true');
     return this.get(`/api/conversations/${conversationId}/messages?${params}`);
   }
+
+  editAndBranch = (conversationId, messageId, newContent) =>
+    this.post(`/api/conversations/${conversationId}/messages/${messageId}/branch`, {
+      new_content: newContent,
+    });
+
+  switchBranch = (conversationId, targetMessageId) =>
+    this.post(`/api/conversations/${conversationId}/switch-branch`, {
+      target_message_id: targetMessageId,
+    });
+
+  getMessageSiblings = (conversationId, messageId) =>
+    this.get(`/api/conversations/${conversationId}/messages/${messageId}/siblings`);
 
   addMessageToConversation = async (conversationId, messageData) => {
     return this.post(`/api/conversations/${conversationId}/messages`, messageData);

@@ -18,7 +18,7 @@ Every agent MUST provide these four fields:
 {
     "response": str,              # Natural language text for chat sidebar
     "task_status": str,            # "complete" | "error" | "incomplete" | "permission_required"
-    "agent_type": str,             # Agent identifier (e.g., "fiction_editing_agent")
+    "agent_type": str,             # Agent identifier (e.g., "custom_agent", route name)
     "timestamp": str               # ISO timestamp (e.g., "2026-01-26T17:42:25.347")
 }
 ```
@@ -51,7 +51,7 @@ from datetime import datetime
 standard_response = AgentResponse(
     response="Added 3 paragraphs to Chapter 5 expanding character motivation.",
     task_status="complete",
-    agent_type="fiction_editing_agent",
+    agent_type="custom_agent",
     timestamp=datetime.now().isoformat(),
     editor_operations=editor_operations,
     manuscript_edit=ManuscriptEditMetadata(
@@ -172,8 +172,10 @@ const imageUrls = structuredImages.length > 0
 
 **Why EITHER/OR (Not Both)?**
 - **Structured images** (when available): Provides title, series, date, tags for rich UI
-- **Markdown fallback** (when unavailable): Backward compatibility for basic image display
-- **Never both**: Prevents duplicate image display (preview block + markdown rendering)
+- **Markdown fallback** (when unavailable): Backward compatibility for basic image display (`extractImageUrls` on `message.content` when `metadata.images` is absent)
+- **Never both**: Prevents duplicate image display (preview block + markdown rendering). Custom Agent final `formatted` text must NOT append `![](url)` lines when `response.images` is already populated; persistence stores `images` in message metadata (`history_metadata` allowlist), and external chat reads the same field for Telegram/Discord/Slack.
+
+**Stack note:** Orchestrator `complete` chunk carries `metadata.images` (JSON). Backend proxy persists sanitized URL-based entries. [`internal_chat_api`](mdc:backend/api/internal_chat_api.py) resolves document file URLs to bytes for outbound providers.
 
 **MANDATORY Pattern for All Image-Emitting Agents:**
 ```python
@@ -303,8 +305,9 @@ return {
 ```
 
 **Image URL Formats Supported:**
-- **API endpoints**: `/api/images/{filename}` (preferred for generated images)
-- **Comics API**: `/api/comics/{series}/{year}/{month}/{filename}` (for comic images)
+- **Document file (preferred for indexed comics and user docs)**: `/api/documents/{document_id}/file` (auth; used by image search enrichment)
+- **API endpoints**: `/api/images/{filename}` (generated images served from workspace)
+- **Comics static path**: `/api/comics/...` (legacy or direct file paths when not wrapped as documents)
 - **Data URIs**: `data:image/{type};base64,{data}` (for embedded base64 images - preferred for search results)
 - **HTTP/HTTPS URLs**: `https://example.com/image.png` (for external images)
 - **Static paths**: `/static/images/{filename}` (converted to `/api/images/` by frontend)
@@ -615,6 +618,6 @@ return {
 
 - **Contract Models**: [`llm-orchestrator/orchestrator/models/agent_response_contract.py`](llm-orchestrator/orchestrator/models/agent_response_contract.py)
 - **Unified Extractors**: [`llm-orchestrator/orchestrator/grpc_service.py`](llm-orchestrator/orchestrator/grpc_service.py) (methods: `_extract_response_unified`, `_extract_editor_operations_unified`, `_extract_manuscript_edit_unified`)
-- **Example Migrations**: See reference_agent, fiction_editing_agent for examples
+- **Example Migrations**: See reference patterns in Agent Factory agent responses
 
 **Remember: A well-structured response ensures every agent knows its role and executes it perfectly!**

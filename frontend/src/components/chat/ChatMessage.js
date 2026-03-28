@@ -11,10 +11,13 @@ import {
   DialogContent,
   DialogActions,
   useTheme,
+  TextField,
 } from '@mui/material';
 import {
   Person,
   Groups,
+  ChevronLeft,
+  ChevronRight,
 } from '@mui/icons-material';
 import ReactMarkdown from 'react-markdown';
 import remarkBreaks from 'remark-breaks';
@@ -194,8 +197,14 @@ const ChatMessage = React.memo(({
   savingNoteFor,
   isAdmin,
   has,
+  onEditAndResend,
+  onSwitchBranch,
+  siblingInfo,
+  anyMessageStreaming,
 }) => {
   const [imageDetailIndex, setImageDetailIndex] = useState(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState('');
 
   // Signal Corps: Render notifications as centered, borderless pills
   if (message.type === 'notification') {
@@ -250,6 +259,26 @@ const ChatMessage = React.memo(({
     );
   }
 
+  const serverMessageId = message.message_id;
+  const canEditUser =
+    message.role === 'user' &&
+    onEditAndResend &&
+    serverMessageId &&
+    !isLoading &&
+    !anyMessageStreaming;
+
+  const startEditingUserMessage = () => {
+    setEditDraft(message.content || '');
+    setIsEditing(true);
+  };
+
+  const submitUserMessageEdit = async () => {
+    const text = editDraft.trim();
+    if (!text || !serverMessageId) return;
+    setIsEditing(false);
+    await onEditAndResend(serverMessageId, text);
+  };
+
   // Regular message rendering
   return (
     <Box
@@ -260,6 +289,38 @@ const ChatMessage = React.memo(({
         alignItems: message.role === 'user' ? 'flex-end' : 'flex-start',
       }}
     >
+      {siblingInfo &&
+        siblingInfo.total > 1 &&
+        onSwitchBranch && (
+          <Box
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 0.25,
+              mb: 0.5,
+              opacity: 0.9,
+              alignSelf: message.role === 'user' ? 'flex-end' : 'flex-start',
+            }}
+          >
+            <IconButton
+              size="small"
+              aria-label="Previous branch"
+              onClick={() => onSwitchBranch(serverMessageId || message.id, -1)}
+            >
+              <ChevronLeft fontSize="small" />
+            </IconButton>
+            <Typography variant="caption" color="text.secondary" sx={{ minWidth: 36, textAlign: 'center' }}>
+              {siblingInfo.index + 1} / {siblingInfo.total}
+            </Typography>
+            <IconButton
+              size="small"
+              aria-label="Next branch"
+              onClick={() => onSwitchBranch(serverMessageId || message.id, 1)}
+            >
+              <ChevronRight fontSize="small" />
+            </IconButton>
+          </Box>
+        )}
       <Paper
         elevation={1}
         onContextMenu={(e) => handleContextMenu(e, message)}
@@ -387,16 +448,78 @@ const ChatMessage = React.memo(({
           }}
         >
           {message.role === 'user' ? (
-            <Typography 
-              variant="body2" 
-              sx={{ 
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                color: message.isError ? 'error.main' : 'text.primary',
-              }}
-            >
-              {message.content}
-            </Typography>
+            <>
+              {isEditing ? (
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, width: '100%' }}>
+                  <TextField
+                    multiline
+                    minRows={2}
+                    maxRows={16}
+                    fullWidth
+                    value={editDraft}
+                    onChange={(e) => setEditDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter') return;
+                      if (e.ctrlKey || e.metaKey || e.shiftKey) return;
+                      e.preventDefault();
+                      void submitUserMessageEdit();
+                    }}
+                    size="small"
+                    variant="outlined"
+                    autoFocus
+                  />
+                  <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
+                    <Button size="small" onClick={() => setIsEditing(false)}>
+                      Cancel
+                    </Button>
+                    <Button
+                      size="small"
+                      variant="contained"
+                      disabled={!editDraft.trim()}
+                      onClick={() => void submitUserMessageEdit()}
+                    >
+                      Submit
+                    </Button>
+                  </Box>
+                </Box>
+              ) : (
+                <Typography
+                  variant="body2"
+                  component="div"
+                  role={canEditUser ? 'button' : undefined}
+                  tabIndex={canEditUser ? 0 : undefined}
+                  title={canEditUser ? 'Click to edit' : undefined}
+                  onClick={canEditUser ? () => startEditingUserMessage() : undefined}
+                  onKeyDown={
+                    canEditUser
+                      ? (e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            startEditingUserMessage();
+                          }
+                        }
+                      : undefined
+                  }
+                  sx={{
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    color: message.isError ? 'error.main' : 'text.primary',
+                    ...(canEditUser && {
+                      cursor: 'pointer',
+                      borderRadius: 0.5,
+                      outlineOffset: 2,
+                      '&:hover': {
+                        textDecoration: 'underline',
+                        textDecorationColor: 'currentColor',
+                        textUnderlineOffset: '0.2em',
+                      },
+                    }),
+                  }}
+                >
+                  {message.content}
+                </Typography>
+              )}
+            </>
           ) : (
             <Box sx={{ 
               color: message.isError ? 'error.main' : 'text.primary',
@@ -1001,7 +1124,12 @@ const ChatMessage = React.memo(({
     (prevProps.message.metadata?.agent_display_name || null) === (nextProps.message.metadata?.agent_display_name || null) &&
     prevProps.isLoading === nextProps.isLoading &&
     prevProps.copiedMessageId === nextProps.copiedMessageId &&
-    prevProps.savingNoteFor === nextProps.savingNoteFor
+    prevProps.savingNoteFor === nextProps.savingNoteFor &&
+    prevProps.anyMessageStreaming === nextProps.anyMessageStreaming &&
+    prevProps.onEditAndResend === nextProps.onEditAndResend &&
+    prevProps.onSwitchBranch === nextProps.onSwitchBranch &&
+    prevProps.siblingInfo?.index === nextProps.siblingInfo?.index &&
+    prevProps.siblingInfo?.total === nextProps.siblingInfo?.total
   );
 });
 

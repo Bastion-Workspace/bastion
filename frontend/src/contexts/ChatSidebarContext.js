@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import { useQuery, useMutation, useQueryClient } from 'react-query';
 import { useLocation } from 'react-router-dom';
 import apiService from '../services/apiService';
@@ -7,6 +7,7 @@ import tabNotificationManager from '../utils/tabNotification';
 import browserNotificationManager from '../utils/browserNotification';
 import { documentDiffStore } from '../services/documentDiffStore';
 import { createAgentStatusWebSocket } from '../utils/agentStatusTypes';
+import { buildMessageTree, getActivePath, getNextSibling } from '../utils/messageTreeUtils';
 
 // Format agent type to display name
 const formatAgentName = (agentType) => {
@@ -54,6 +55,10 @@ export const ChatSidebarProvider = ({ children }) => {
     }
   });
   const [messages, setMessages] = useState([]);
+  /** Full message tree (all branches) when loaded with include_tree */
+  const [allMessages, setAllMessages] = useState([]);
+  /** Active leaf message_id from server */
+  const [currentNodeId, setCurrentNodeId] = useState(null);
   const [query, setQuery] = useState('');
   const [replyToMessage, setReplyToMessage] = useState(null); // Message being replied to
   const [selectedModel, setSelectedModel] = useState(() => {
@@ -68,6 +73,27 @@ export const ChatSidebarProvider = ({ children }) => {
   /** When set, chat follow-ups route to this agent line (CEO) until @auto */
   const [activeLineRouting, setActiveLineRouting] = useState(null);
   const [sessionId] = useState(() => `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`);
+
+  const messageTree = useMemo(() => buildMessageTree(allMessages), [allMessages]);
+
+  const normalizeServerMessage = useCallback((message) => ({
+    id: message.message_id || message.id,
+    message_id: message.message_id,
+    role: message.message_type || message.role,
+    type: message.message_type || message.role,
+    content: message.content,
+    timestamp: message.created_at || message.timestamp,
+    created_at: message.created_at,
+    sequence_number: message.sequence_number,
+    parent_message_id: message.parent_message_id,
+    branch_id: message.branch_id,
+    citations: message.citations || [],
+    metadata: message.metadata_json || message.metadata || {},
+    editor_operations: (message.metadata_json || message.metadata || {})?.editor_operations || message.editor_operations || [],
+    editor_document_id: (message.metadata_json || message.metadata || {})?.editor_document_id ?? message.editor_document_id,
+    editor_filename: (message.metadata_json || message.metadata || {})?.editor_filename ?? message.editor_filename,
+    ...message,
+  }), []);
   // LangGraph is the only system - no toggles needed
   const useLangGraphSystem = true; // Always use LangGraph
   const messagesConversationIdRef = React.useRef(null); // Track which conversation the current messages belong to
@@ -497,7 +523,13 @@ export const ChatSidebarProvider = ({ children }) => {
   const { data: messagesData, isLoading: messagesLoading, refetch: refetchMessages } = useQuery(
     ['conversationMessages', currentConversationId],
     () => currentConversationId
-      ? apiService.getConversationMessages(currentConversationId, 0, 100, lastCreatedConversationIdRef.current === currentConversationId)
+      ? apiService.getConversationMessages(
+          currentConversationId,
+          0,
+          500,
+          lastCreatedConversationIdRef.current === currentConversationId,
+          true
+        )
       : null,
     {
       enabled: !!currentConversationId,
@@ -510,66 +542,62 @@ export const ChatSidebarProvider = ({ children }) => {
           hasMore: data?.has_more || false
         });
         if (data?.messages) {
-          // Normalize message format for consistent frontend handling
-          const normalizedMessages = data.messages.map(message => ({
-            id: message.message_id || message.id,
-            message_id: message.message_id,
-            role: message.message_type || message.role, // ✅ Fix: API returns message_type, frontend expects role
-            type: message.message_type || message.role, // Add type field for components that expect it
-            content: message.content,
-            timestamp: message.created_at || message.timestamp,
-            created_at: message.created_at,
-            sequence_number: message.sequence_number,
-            citations: message.citations || [],
-            metadata: message.metadata_json || message.metadata || {},
-            // ✅ CRITICAL FIX: Extract editor_operations from metadata to top level
-            editor_operations: (message.metadata_json || message.metadata || {})?.editor_operations || message.editor_operations || [],
-            editor_document_id: (message.metadata_json || message.metadata || {})?.editor_document_id ?? message.editor_document_id,
-            editor_filename: (message.metadata_json || message.metadata || {})?.editor_filename ?? message.editor_filename,
-            // Preserve any other fields
-            ...message
-          }));
-          
-          // CRITICAL FIX: Always load messages when conversation changes, only prevent overwrite for same conversation
-          setMessages(prevMessages => {
-            // Check if we're switching to a different conversation (or initial load)
-            const isConversationSwitch = messagesConversationIdRef.current !== currentConversationId;
-            
-            // If switching conversations or initial load, always load database messages
-            if (isConversationSwitch) {
-              console.log('✅ Loading messages for conversation:', {
-                previousConversationId: messagesConversationIdRef.current,
-                newConversationId: currentConversationId,
-                messageCount: normalizedMessages.length,
-                isInitialLoad: messagesConversationIdRef.current === null
-              });
-              messagesConversationIdRef.current = currentConversationId;
-              return normalizedMessages;
-            }
-            
-            // Same conversation: only prevent overwrite if we have truly unsaved messages (pending/streaming, not system)
-            const hasUnsavedMessages = prevMessages.some(msg => 
-              msg.isPending || msg.isStreaming
+          const normalizedMessages = data.messages.map(normalizeServerMessage);
+          setAllMessages(normalizedMessages);
+          const nodeId =
+            data.current_node_message_id ||
+            data.currentNodeMessageId ||
+            null;
+          setCurrentNodeId(nodeId);
+          const tree = buildMessageTree(normalizedMessages);
+          let pathMsgs = nodeId ? getActivePath(tree, nodeId) : [];
+          if (nodeId && pathMsgs.length === 0) {
+            const orphan = normalizedMessages.find(
+              (m) => (m.message_id || m.id) === nodeId
             );
-            
-            // Only prevent overwrite if we have unsaved messages AND database has fewer messages
-            // This protects against losing messages during active streaming/pending operations
-            if (hasUnsavedMessages && normalizedMessages.length < prevMessages.length) {
-              console.log('🔄 Keeping unsaved messages to prevent loss during active conversation:', {
-                localCount: prevMessages.length,
-                dbCount: normalizedMessages.length,
-                hasUnsaved: hasUnsavedMessages
-              });
+            if (orphan) {
+              pathMsgs = [orphan];
+            }
+          }
+          const pathForDisplay =
+            pathMsgs.length > 0
+              ? pathMsgs.map((m) => normalizeServerMessage(m))
+              : normalizedMessages;
+
+          const appendStreamingTail = (base, prevMessages) => {
+            const tail = prevMessages.filter(
+              (msg) =>
+                (msg.isStreaming || msg.isPending) &&
+                !base.some(
+                  (p) =>
+                    (p.message_id || p.id) === (msg.message_id || msg.id)
+                )
+            );
+            return tail.length ? [...base, ...tail] : base;
+          };
+
+          setMessages((prevMessages) => {
+            const isConversationSwitch = messagesConversationIdRef.current !== currentConversationId;
+
+            if (isConversationSwitch) {
+              messagesConversationIdRef.current = currentConversationId;
+              return appendStreamingTail(pathForDisplay, prevMessages);
+            }
+
+            const hasUnsavedMessages = prevMessages.some(
+              (msg) => msg.isPending || msg.isStreaming
+            );
+            const serverActivePathReady = Boolean(nodeId && pathMsgs.length > 0);
+
+            if (serverActivePathReady) {
+              return appendStreamingTail(pathForDisplay, prevMessages);
+            }
+
+            if (hasUnsavedMessages && pathForDisplay.length < prevMessages.length) {
               return prevMessages;
             }
-            
-            // For same conversation with no unsaved messages, or when database has more messages, use database
-            console.log('✅ Loading messages from database:', {
-              messageCount: normalizedMessages.length,
-              conversationId: currentConversationId,
-              isSameConversation: !isConversationSwitch
-            });
-            return normalizedMessages;
+
+            return pathForDisplay;
           });
         }
       },
@@ -618,6 +646,8 @@ export const ChatSidebarProvider = ({ children }) => {
         lastCreatedConversationIdRef.current = id;
         setCurrentConversationId(id);
         setMessages([]);
+        setAllMessages([]);
+        setCurrentNodeId(null);
         messagesConversationIdRef.current = null;
         setQuery('');
         queryClient.invalidateQueries(['conversations']);
@@ -782,6 +812,8 @@ export const ChatSidebarProvider = ({ children }) => {
     
     // Clear current state to prevent cross-conversation contamination
     setMessages([]);
+    setAllMessages([]);
+    setCurrentNodeId(null);
     setQuery('');
     // Activity state is now automatically isolated by conversationId
     // No need to manually clear - each conversation has its own state
@@ -975,7 +1007,8 @@ export const ChatSidebarProvider = ({ children }) => {
   // 🌊 ROOSEVELT'S UNIVERSAL STREAMING POLICY: All queries deserve real-time responses!
 
   // Handle streaming response from orchestrator
-  const handleStreamingResponse = async (query, conversationId, sessionId) => {
+  const handleStreamingResponse = async (query, conversationId, sessionId, streamOptions = {}) => {
+    const { isBranchResend, branchMessageId } = streamOptions;
     console.log('🌊 Starting streaming response for:', query);
     
     try {
@@ -1154,7 +1187,9 @@ export const ChatSidebarProvider = ({ children }) => {
           editor_preference: editorPreference,
           active_data_workspace: activeDataWorkspacePayload,
           data_workspace_preference: dataWorkspacePreference,
-          user_chat_model: selectedModel || undefined
+          user_chat_model: selectedModel || undefined,
+          is_branch_resend: !!isBranchResend,
+          branch_message_id: branchMessageId || undefined,
         })
       });
 
@@ -1495,8 +1530,62 @@ export const ChatSidebarProvider = ({ children }) => {
     }
   };
 
+  const editAndResendMessage = async (messageId, newContent) => {
+    const text = (newContent || '').trim();
+    if (!currentConversationId || !text || !messageId) return;
+    updateCurrentActivityState({ isLoading: true });
+    try {
+      const result = await apiService.editAndBranch(currentConversationId, messageId, text);
+      const bid = result?.message?.message_id;
+      await refetchMessages();
+      if (bid) {
+        await handleStreamingResponse(text, currentConversationId, sessionId, {
+          isBranchResend: true,
+          branchMessageId: bid,
+        });
+      }
+    } catch (error) {
+      console.error('editAndResendMessage failed:', error);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: Date.now(),
+          role: 'system',
+          type: 'system',
+          content: `Could not start branch: ${error.message}`,
+          isError: true,
+          timestamp: new Date().toISOString(),
+        },
+      ]);
+    } finally {
+      updateCurrentActivityState({ isLoading: false });
+    }
+  };
+
+  const switchBranch = async (messageId, direction) => {
+    if (!currentConversationId) return;
+    const nextId = getNextSibling(messageTree, messageId, direction);
+    if (!nextId) return;
+    try {
+      const res = await apiService.switchBranch(currentConversationId, nextId);
+      setCurrentNodeId(res.current_node_message_id);
+      if (res.active_path && res.active_path.length) {
+        setMessages(res.active_path.map(normalizeServerMessage));
+      } else {
+        const tree = buildMessageTree(allMessages);
+        const path = getActivePath(tree, res.current_node_message_id);
+        setMessages(path.map(normalizeServerMessage));
+      }
+      await refetchMessages();
+    } catch (error) {
+      console.error('switchBranch failed:', error);
+    }
+  };
+
   const clearChat = () => {
     setMessages([]);
+    setAllMessages([]);
+    setCurrentNodeId(null);
     messagesConversationIdRef.current = null; // Reset ref when clearing chat
     setQuery('');
     // Activity state is conversation-scoped, so clearing conversation clears its state
@@ -1538,6 +1627,9 @@ export const ChatSidebarProvider = ({ children }) => {
     setIsResizing,
     currentConversationId,
     messages,
+    allMessages,
+    currentNodeId,
+    messageTree,
     setMessages,
     query,
     setQuery,
@@ -1557,6 +1649,8 @@ export const ChatSidebarProvider = ({ children }) => {
     createNewConversation,
     sendMessage,
     clearChat,
+    editAndResendMessage,
+    switchBranch,
 
     cancelCurrentJob, // Add cancellation function
 

@@ -786,7 +786,14 @@ class GRPCContextGatherer:
 
             # === CONVERSATION HISTORY + ATTACHMENTS (load messages once when not in state) ===
             messages_data: Optional[Dict[str, Any]] = None
-            if not (state and "messages" in state):
+            if request_context.get("active_path_messages") is not None:
+                messages_data = {"messages": list(request_context["active_path_messages"])}
+                logger.info(
+                    "CONTEXT: Using active_path_messages override (%s messages) for conversation %s",
+                    len(messages_data["messages"]),
+                    conversation_id,
+                )
+            elif not (state and "messages" in state):
                 try:
                     from services.conversation_service import ConversationService
                     conversation_service = ConversationService()
@@ -1589,11 +1596,16 @@ class GRPCContextGatherer:
         """Add checkpoint info for conversation branching"""
         try:
             base_checkpoint_id = request_context.get("base_checkpoint_id")
-            
+
             if base_checkpoint_id:
                 grpc_request.base_checkpoint_id = base_checkpoint_id
                 logger.info(f"✅ CONTEXT: Added checkpoint branching (checkpoint={base_checkpoint_id})")
-            
+
+            branch_suffix = request_context.get("branch_thread_suffix")
+            if branch_suffix:
+                grpc_request.metadata["branch_thread_suffix"] = str(branch_suffix)
+                logger.info("CONTEXT: Added branch_thread_suffix for isolated LangGraph checkpoint")
+
         except Exception as e:
             logger.warning(f"⚠️ CONTEXT: Failed to add checkpoint info: {e}")
 

@@ -1,8 +1,7 @@
 """
 Tool Discovery Service - Semantic tool discovery using vector search
 
-This module provides semantic discovery of tools based on query intent,
-complementing the keyword-based detection in dynamic_tool_analyzer.
+This module provides semantic discovery of tools based on query intent.
 """
 
 import logging

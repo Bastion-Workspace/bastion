@@ -1,7 +1,7 @@
 """
 Unified Dispatcher - Single entry point for route-based dispatch.
 
-All requests flow through this: discover route -> pick engine -> run -> yield ChatChunk stream.
+All requests flow through this: discover route -> CustomAgentRunner -> yield ChatChunk stream.
 """
 
 import json
@@ -12,7 +12,6 @@ from typing import Any, AsyncIterator, Dict, List, Optional
 from protos import orchestrator_pb2
 
 from orchestrator.routes import get_route_registry, load_all_routes
-from orchestrator.routes.route_schema import EngineType
 
 logger = logging.getLogger(__name__)
 
@@ -28,25 +27,9 @@ def _ensure_routes_loaded() -> None:
 
 class UnifiedDispatcher:
     """
-    Dispatches requests to the appropriate engine based on discovered skill.
+    Dispatches requests to CustomAgentRunner for the resolved route (default or custom profile).
     Yields ChatChunk stream (status, content, complete, diagram, chart, editor_operation as needed).
     """
-
-    def __init__(self) -> None:
-        self._research_engine = None
-        self._conversational_engine = None
-
-    def _get_conversational_engine(self):
-        if self._conversational_engine is None:
-            from orchestrator.engines.conversational_engine import ConversationalEngine
-            self._conversational_engine = ConversationalEngine()
-        return self._conversational_engine
-
-    def _get_research_engine(self):
-        if self._research_engine is None:
-            from orchestrator.engines.research_engine import ResearchEngine
-            self._research_engine = ResearchEngine()
-        return self._research_engine
 
     async def dispatch_custom_agent(
         self,
@@ -323,159 +306,25 @@ class UnifiedDispatcher:
 
         agent_label = f"{skill_name}_agent" if not skill_name.endswith("_agent") else skill_name
 
-        if route.engine == EngineType.RESEARCH:
-            yield orchestrator_pb2.ChatChunk(
-                type="status",
-                message=f"Research: {route.description[:50]}...",
-                timestamp=datetime.now().isoformat(),
-                agent_name=agent_label,
-            )
-            engine = self._get_research_engine()
-            try:
-                result = await engine.process(
-                    query=query,
-                    metadata=metadata,
-                    messages=messages,
-                    skill_name=skill_name,
-                    cancellation_token=cancellation_token,
-                )
-            except Exception as e:
-                logger.exception("Research engine failed: %s", e)
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=f"Error: {e}",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name=agent_label,
-                )
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message="Complete",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system",
-                )
-                return
-            # FullResearchAgent returns dict with "response", "images", citations, etc. (AgentResponse contract)
-            response_text = result.get("response", "")
-            if isinstance(response_text, dict):
-                response_text = response_text.get("response", response_text.get("message", "")) or ""
-            else:
-                response_text = str(response_text) if response_text else ""
-            yield orchestrator_pb2.ChatChunk(
-                type="content",
-                message=response_text or "Done.",
-                timestamp=datetime.now().isoformat(),
-                agent_name=agent_label,
-            )
-            # Include structured images and other metadata in complete chunk (frontend expects metadata.images)
-            images = result.get("images") or result.get("structured_images")
-            chunk_metadata = {}
-            if images:
-                chunk_metadata["images"] = json.dumps(images)
-                logger.info("Research dispatch: including %d image(s) in complete metadata", len(images))
-            for key in ("citations", "sources", "static_visualization_data", "static_format", "chart_result"):
-                val = result.get(key)
-                if val is not None:
-                    chunk_metadata[key] = json.dumps(val) if not isinstance(val, str) else val
-            prev_tools = (result.get("shared_memory") or {}).get("previous_tools_used") or []
-            if prev_tools:
-                from orchestrator.utils.action_io_registry import get_categories_for_tools
-                chunk_metadata["tools_used_categories"] = json.dumps(get_categories_for_tools(prev_tools))
-            yield orchestrator_pb2.ChatChunk(
-                type="complete",
-                message="Complete",
-                timestamp=datetime.now().isoformat(),
-                agent_name="system",
-                metadata=chunk_metadata if chunk_metadata else None,
-            )
+        from orchestrator.routes.definitions import resolve_custom_skill_profile_id
+
+        uid = metadata.get("user_id") or "system"
+        pid = resolve_custom_skill_profile_id(uid, skill_name)
+        if not pid:
+            pid = metadata.get("default_agent_profile_id")
+        if pid:
+            async for c in self.dispatch_custom_agent(pid, query, metadata, messages, cancellation_token):
+                yield c
             return
-
-        if route.engine == EngineType.CONVERSATIONAL:
-            yield orchestrator_pb2.ChatChunk(
-                type="status",
-                message=f"Chat: {route.description[:50]}...",
-                timestamp=datetime.now().isoformat(),
-                agent_name=agent_label,
-            )
-            engine = self._get_conversational_engine()
-            try:
-                result = await engine.process(
-                    query=query,
-                    metadata=metadata,
-                    messages=messages,
-                    skill_name=skill_name,
-                    cancellation_token=cancellation_token,
-                )
-            except Exception as e:
-                logger.exception("Conversational engine failed: %s", e)
-                yield orchestrator_pb2.ChatChunk(
-                    type="content",
-                    message=f"Error: {e}",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name=agent_label,
-                )
-                yield orchestrator_pb2.ChatChunk(
-                    type="complete",
-                    message="Complete",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name="system",
-                )
-                return
-            result_status = result.get("task_status") or (result.get("response", {}) or {}).get("task_status", "")
-            if result_status == "rejected":
-                yield orchestrator_pb2.ChatChunk(
-                    type="rejected",
-                    message="Route rejected this query",
-                    timestamp=datetime.now().isoformat(),
-                    agent_name=agent_label,
-                )
-                return
-            # ChatAgent returns result with "response" key (AgentResponse dict or handoff data)
-            response = result.get("response", "")
-            if isinstance(response, dict):
-                response_text = response.get("response", response.get("message", "")) or ""
-            else:
-                response_text = str(response) if response else ""
-            yield orchestrator_pb2.ChatChunk(
-                type="content",
-                message=response_text or "Done.",
-                timestamp=datetime.now().isoformat(),
-                agent_name=agent_label,
-            )
-            # Include images and other metadata when chat handed off to research (same as RESEARCH path)
-            images = result.get("images") or result.get("structured_images")
-            chunk_metadata = {}
-            if images:
-                chunk_metadata["images"] = json.dumps(images)
-                logger.info("Chat dispatch: including %d image(s) in complete metadata (handoff)", len(images))
-            for key in ("citations", "sources", "static_visualization_data", "static_format", "chart_result"):
-                val = result.get(key)
-                if val is not None:
-                    chunk_metadata[key] = json.dumps(val) if not isinstance(val, str) else val
-            yield orchestrator_pb2.ChatChunk(
-                type="complete",
-                message="Complete",
-                timestamp=datetime.now().isoformat(),
-                agent_name="system",
-                metadata=chunk_metadata if chunk_metadata else None,
-            )
-            return
-
-        if route.engine == EngineType.CUSTOM_AGENT:
-            from orchestrator.routes.definitions import resolve_custom_skill_profile_id
-            uid = metadata.get("user_id") or "system"
-            pid = resolve_custom_skill_profile_id(uid, skill_name)
-            if not pid:
-                pid = metadata.get("default_agent_profile_id")
-            if pid:
-                async for c in self.dispatch_custom_agent(pid, query, metadata, messages, cancellation_token):
-                    yield c
-                return
-            logger.warning("UnifiedDispatcher: CUSTOM_AGENT route %s has no profile_id for user %s", skill_name, uid)
-
-        logger.warning("UnifiedDispatcher: engine %s not yet implemented, route=%s", route.engine, skill_name)
+        logger.warning(
+            "UnifiedDispatcher: route %s has no agent_profile_id for user %s (engine=%s)",
+            skill_name,
+            uid,
+            route.engine,
+        )
         yield orchestrator_pb2.ChatChunk(
             type="content",
-            message="This capability is not yet available via route dispatch.",
+            message="No agent profile is available for this route. Set a default chat agent in settings or select an agent.",
             timestamp=datetime.now().isoformat(),
             agent_name=agent_label,
         )

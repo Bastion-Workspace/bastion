@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.55.0] - 2026-03-28
+- Update: Bump version to 0.55.0 across application and Docker
+- Refactor: Post-purge dead code cleanup — removed unused orchestrator utils/models/services, `project_content_tools`, `response_sanitizer` extraction from deleted writing subgraph utilities; dropped unused `Route.subgraphs` / `Route.context_loader` and stub `routes/loaders`
+- Refactor: Removed dead `general_project_nodes` package and `general_project_models.py` (no `GeneralProjectAgent`; editor `general_project` route remains Agent Factory-only)
+- Refactor: Removed dead `ElectronicsAgent`, `electronics_nodes`, diagramming subgraph, and `electronics_models` / `diagramming_models` exports (nothing dispatched to them; editor `electronics` route remains Agent Factory); `apply_operations_directly` allowlist no longer references `electronics_agent`
+- Breaking: Removed built-in `FullResearchAgent`, `escalate_to_research`, and research-only LangGraph subgraphs; default built-in playbook uses document/web tools directly; migration `113_builtin_playbook_remove_full_research_agent.sql` updates playbook and seeds optional deep-research template
+- Refactor: Removed orphaned `FictionEditingAgent`, editor/writing LangGraph subgraphs (outline, rules, style, character, article, podcast, proofreading, fiction flat graph, proposal subgraph package), and `fiction_utilities.py`
+- Breaking: Orchestrator routing — removed ConversationalEngine, ResearchEngine, ChatAgent, WritingAssistantAgent, and ProposalGenerationAgent; all skill routes dispatch via CustomAgentRunner (default or built-in profile); checkpoint continuity preload uses CustomAgentRunner; `EngineType` is custom_agent only
+- Fix: Custom agent image search and generation — persist structured `metadata.images` (URL-based only) so chat gallery survives refetch; strip data-URI screenshots before DB save; no duplicate inline markdown images (gallery only)
+- Fix: Chat sidebar message list respects active branch path after edit-and-resend (refetch no longer keeps the old full thread when streaming or tree walk edge cases)
+- Feature: Chat edit-and-resend with branch navigation — message tree (`parent_message_id`), per-branch LangGraph checkpoints, API branch/switch endpoints, and fork navigator in the UI
 - Fix: PDF export headings rendered at body size due to missing space in heading ID injection (`<h1id="...">` → `<h1 id="...">`)
 - Fix: PDF export — watermark no longer emits a second `body {}` rule; `position: relative` merges into typography `body`; headings use `white-space: normal` and `overflow-wrap: break-word`; watermark stacking `isolation: isolate`
 - Feature: ElevenLabs TTS — optional synthesis `model_id` (e.g. Flash) via gRPC, voice settings (BYOK + admin server), and allowlisted REST resolution
@@ -220,7 +232,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix: Agent Factory agents with email connection tools (e.g. email:N:send_email) now automatically get list_emails, search_emails, list_email_folders, read_email, and search_contacts so those tools are available without adding them to each profile
 - Fix: Local screenshot tool — image from local proxy is no longer truncated or dropped; pipeline executor intercepts image_data_uri, sends a short placeholder to the LLM, and attaches the screenshot to the agent response so it appears in chat
 - Fix: Default playbook skill discovery — tools-service runs a delayed startup sync to populate the skills vector collection (so email and other built-in skills are found when auto_discover_skills runs); improved logging when lazy sync embeds 0 skills — tools-service runs a delayed startup sync to populate the skills vector collection (so email and other built-in skills are found when auto_discover_skills runs); improved logging when lazy sync embeds 0 skills
-- Feature: Default AF ReAct agent — built-in Bastion Assistant profile and playbook (single llm_agent step with auto_discover_skills, escalate_to_research); visible in Agent Factory UI, permanently locked; routing uses default agent when no custom agent or editor pin; editor gating unchanged
+- Feature: Default AF ReAct agent — built-in Bastion Assistant profile and playbook (single llm_agent step with auto_discover_skills and research-oriented tools); visible in Agent Factory UI, permanently locked; routing uses default agent when no custom agent or editor pin; editor gating unchanged
 - Feature: Seed all Python dict skills as built-in Agent Factory skills — 41 built-in skills (20 automation, 5 research, 13 editor, 3 procedural) seeded at startup; vectorized and searchable; retired slugs org-todo-management, email-composition, multi-source-research merged into task-management, email, research; tags and evidence_metadata stored for execution hints
 - Update: Fact extraction tuned for universally applicable facts — prompt emphasizes cross-conversation usefulness; excludes topic-specific/situational context (e.g. home specs, one-off project details); max 2 facts per run, trigger every 20 messages
 - Fix: Sticky custom agent chat history lookback — context_window_size now uses agent profile chat_history_lookback when sticky routing applies (was falling back to 6 after first @mention)

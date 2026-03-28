@@ -13,6 +13,7 @@ Standards for defining skills and tools used by Custom Agents and the pipeline e
 - **Typed parameters and docstrings**: Tool functions MUST have type-annotated parameters and a docstring. The pipeline executor infers the LLM-facing argument schema from the function signature and docstring.
 - **`user_id` is engine-injected**: Tools that need the current user MUST accept a `user_id` parameter (default `"system"`). The executor excludes `user_id` from the schema sent to the LLM and injects it at execution time. Do not document `user_id` as something the LLM should pass.
 - **Tool names**: Use `snake_case` (e.g. `add_org_inbox_item_tool`). The executor normalizes names for model compatibility (some models strip underscores).
+- **Image-producing tools**: Any tool that returns images for the user MUST include an **`images`** list on the return dict (each entry with **`url`** and optional **`metadata`** for titles/captions), plus **`formatted`**. See [tool-io-contracts.mdc](mdc:.cursor/rules/tool-io-contracts.mdc) § Image-returning tools and [agent-response-contract.mdc](mdc:.cursor/rules/agent-response-contract.mdc) § Image Agents. Do not rely on markdown image lines alone for web chat or Telegram/Discord/Slack delivery.
 
 ## Skill System Prompts
 
@@ -23,7 +24,7 @@ Standards for defining skills and tools used by Custom Agents and the pipeline e
 ## When to Use Simple Playbooks vs Dedicated Agents
 
 - **Use a Custom Agent playbook** (system prompt + tool steps or llm_agent step) for: one-shot or single-round tool use, simple prompt + tool binding, no complex pre/post-processing.
-- **Use a dedicated agent** (EditorEngine, ResearchEngine) when the skill needs: multi-round tool calling with domain-specific logic, editor-gated document workflows, research synthesis, or custom response formatting.
+- **Use a richer Agent Factory playbook** (multiple steps, `llm_agent` with tools, `deep_agent`, or composed workflows) when the skill needs: multi-round tool calling with domain-specific logic, editor-gated document workflows, multi-step research or synthesis, or custom response formatting.
 
 ## References
 

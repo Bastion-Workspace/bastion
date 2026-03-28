@@ -27,8 +27,6 @@ EDITOR_ROUTES = [
             "get_document_content_tool": "get_document_content",
             "search_segments_across_documents_tool": "search_segments_across_documents",
         },
-        subgraphs=["context_preparation", "validation", "generation", "resolution"],
-        context_loader="orchestrator.routes.loaders.fiction_context_loader",
         supports_hitl=True,
     ),
     Route(
@@ -42,7 +40,6 @@ EDITOR_ROUTES = [
         context_boost=20,
         keywords=["outline", "structure", "act", "plot points", "build an outline"],
         priority=88,
-        subgraphs=["outline_editing"],
     ),
     Route(
         name="nonfiction_outline_editing",
@@ -66,7 +63,6 @@ EDITOR_ROUTES = [
             "restructure",
         ],
         priority=88,
-        subgraphs=["nonfiction_outline"],
     ),
     Route(
         name="character_development",
@@ -79,7 +75,6 @@ EDITOR_ROUTES = [
         context_boost=20,
         keywords=["character", "character sheet", "protagonist", "antagonist"],
         priority=88,
-        subgraphs=["character_development"],
     ),
     Route(
         name="rules_editing",
@@ -92,7 +87,6 @@ EDITOR_ROUTES = [
         context_boost=20,
         keywords=["rules", "worldbuilding", "canon", "magic system", "lore"],
         priority=88,
-        subgraphs=["rules_editing"],
     ),
     Route(
         name="style_editing",
@@ -105,7 +99,6 @@ EDITOR_ROUTES = [
         context_boost=20,
         keywords=["style", "voice", "style guide"],
         priority=88,
-        subgraphs=["style_editing"],
     ),
     Route(
         name="series_editing",
@@ -118,7 +111,6 @@ EDITOR_ROUTES = [
         context_boost=20,
         keywords=["series", "synopsis", "book status", "series continuity", "future books"],
         priority=88,
-        subgraphs=[],
     ),
     Route(
         name="electronics",
@@ -131,7 +123,6 @@ EDITOR_ROUTES = [
         context_boost=20,
         keywords=["electronics", "circuit", "arduino", "esp32", "raspberry pi", "microcontroller", "sensor", "resistor", "voltage", "pcb", "schematic", "firmware", "embedded"],
         priority=85,
-        subgraphs=[],
     ),
     Route(
         name="general_project",
@@ -144,7 +135,6 @@ EDITOR_ROUTES = [
         context_boost=15,
         keywords=["project plan", "scope", "timeline", "requirements", "tasks", "project", "planning", "design", "specification"],
         priority=80,
-        subgraphs=[],
     ),
     Route(
         name="podcast_script",
@@ -157,7 +147,6 @@ EDITOR_ROUTES = [
         context_boost=20,
         keywords=["podcast", "script", "episode", "show notes"],
         priority=85,
-        subgraphs=["podcast_script"],
     ),
     Route(
         name="proofreading",
@@ -169,7 +158,6 @@ EDITOR_ROUTES = [
         context_boost=15,
         keywords=["proofread", "grammar", "spelling", "typos", "fix errors"],
         priority=75,
-        subgraphs=["proofreading"],
     ),
     Route(
         name="article_writing",
@@ -197,7 +185,6 @@ EDITOR_ROUTES = [
             "fill gaps",
         ],
         priority=88,
-        subgraphs=["article_writing"],
     ),
     Route(
         name="content_analysis",
@@ -219,6 +206,5 @@ EDITOR_ROUTES = [
             "strengths", "weaknesses", "what's missing",
         ],
         priority=82,
-        subgraphs=["article_writing"],
     ),
 ]

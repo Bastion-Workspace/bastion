@@ -20,6 +20,33 @@ from utils.citation_utils import citations_to_json, citations_from_json
 
 logger = logging.getLogger(__name__)
 
+
+def _conversation_message_row_to_dict(row: Any) -> Dict[str, Any]:
+    """Map a conversation_messages row to API-shaped dict."""
+    parsed_metadata = json.loads(row["metadata_json"] or "{}")
+    return {
+        "message_id": row["message_id"],
+        "conversation_id": row["conversation_id"],
+        "message_type": row["message_type"],
+        "role": row["message_type"],
+        "content": row["content"],
+        "content_hash": row.get("content_hash"),
+        "model_used": row.get("model_used"),
+        "query_time": row.get("query_time"),
+        "token_count": row.get("token_count"),
+        "sequence_number": row["sequence_number"],
+        "created_at": row["created_at"].isoformat(),
+        "updated_at": row["updated_at"].isoformat(),
+        "metadata_json": parsed_metadata,
+        "metadata": parsed_metadata,
+        "citations": json.loads(row["citations"] or "[]") if "citations" in row else [],
+        "parent_message_id": row.get("parent_message_id"),
+        "branch_id": row.get("branch_id"),
+        "is_edited": row.get("is_edited", False),
+        "edit_history": [],
+    }
+
+
 class ConversationLifecycleManager:
     """Manages the complete lifecycle of conversations with single source of truth"""
     
@@ -202,7 +229,9 @@ class ConversationLifecycleManager:
     async def add_message(self, conversation_id: str, user_id: str, role: str, 
                          content: str, message_type: str = "text", 
                          metadata: Dict[str, Any] = None, 
-                         mode_transition: str = None) -> Dict[str, Any]:
+                         mode_transition: str = None,
+                         parent_message_id: Optional[str] = None,
+                         message_branch_id: Optional[str] = None) -> Dict[str, Any]:
         """Add a message and update conversation lifecycle"""
         pool = await self._get_db_pool()
         async with pool.acquire() as conn:
@@ -216,118 +245,160 @@ class ConversationLifecycleManager:
             if not conversation_exists:
                 raise ValueError(f"Conversation {conversation_id} could not be created or accessed")
             
-            # Get current conversation (should exist now, in same transaction)
-            conversation = await conn.fetchrow(
-                "SELECT * FROM conversations WHERE conversation_id = $1",
-                conversation_id
+            return await self._add_message_in_connection(
+                conn,
+                conversation_id,
+                user_id,
+                role,
+                content,
+                metadata,
+                mode_transition,
+                parent_message_id,
+                message_branch_id,
             )
-            if not conversation:
-                raise ValueError(f"Conversation {conversation_id} not found after ensure")
-            
-            # Parse existing metadata
-            conv_metadata = json.loads(conversation['metadata_json'] or "{}")
-            lifecycle = conv_metadata.get("lifecycle", {})
-            execution_stats = conv_metadata.get("execution_stats", {})
-            
-            # Update lifecycle metadata
-            current_time = datetime.now(timezone.utc)
-            lifecycle["last_activity"] = current_time.isoformat()
-            lifecycle["total_messages"] = lifecycle.get("total_messages", 0) + 1
-            
-            if role == "user":
-                lifecycle["total_user_messages"] = lifecycle.get("total_user_messages", 0) + 1
-            elif role == "assistant":
-                lifecycle["total_assistant_messages"] = lifecycle.get("total_assistant_messages", 0) + 1
-            
-            # Handle mode transitions
-            if mode_transition and mode_transition != lifecycle.get("current_mode"):
-                lifecycle["mode_transitions"].append({
-                    "from_mode": lifecycle.get("current_mode"),
-                    "to_mode": mode_transition,
-                    "timestamp": current_time.isoformat(),
-                    "triggered_by_message": content[:100]  # First 100 chars
-                })
-                lifecycle["current_mode"] = mode_transition
-            
-            # Update execution stats based on message content/type
-            if metadata:
-                if metadata.get("is_research_plan"):
-                    execution_stats["research_plans_generated"] = execution_stats.get("research_plans_generated", 0) + 1
-                if metadata.get("execution_mode") == "execute":
-                    execution_stats["research_plans_executed"] = execution_stats.get("research_plans_executed", 0) + 1
-                if metadata.get("web_search_performed"):
-                    execution_stats["web_searches_performed"] = execution_stats.get("web_searches_performed", 0) + 1
-                if metadata.get("documents_ingested"):
-                    execution_stats["documents_ingested"] = execution_stats.get("documents_ingested", 0) + metadata["documents_ingested"]
-                if metadata.get("processing_time"):
-                    execution_stats["total_processing_time"] = execution_stats.get("total_processing_time", 0) + metadata["processing_time"]
-            
-            # Update conversation metadata
-            conv_metadata["lifecycle"] = lifecycle
-            conv_metadata["execution_stats"] = execution_stats
-            
-            # Update conversation; any new message marks the thread for session-level memory analysis
-            await conn.execute("""
-                UPDATE conversations
-                SET metadata_json = $1, updated_at = $2, message_sequence = message_sequence + 1,
-                    needs_session_summary = TRUE
-                WHERE conversation_id = $3
-            """, json.dumps(conv_metadata), current_time, conversation_id)
-            
-            # Get the new sequence number
-            sequence_result = await conn.fetchval(
-                "SELECT message_sequence FROM conversations WHERE conversation_id = $1",
-                conversation_id
+
+    async def _add_message_in_connection(
+        self,
+        conn: asyncpg.Connection,
+        conversation_id: str,
+        user_id: str,
+        role: str,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        mode_transition: Optional[str] = None,
+        parent_message_id: Optional[str] = None,
+        message_branch_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Insert one message row and bump lifecycle (caller must set RLS and ensure conversation exists)."""
+        # Get current conversation (should exist now, in same transaction)
+        conversation = await conn.fetchrow(
+            "SELECT * FROM conversations WHERE conversation_id = $1",
+            conversation_id
+        )
+        if not conversation:
+            raise ValueError(f"Conversation {conversation_id} not found after ensure")
+
+        effective_parent = parent_message_id
+        if effective_parent is None:
+            effective_parent = conversation.get("current_node_message_id")
+
+        # Parse existing metadata
+        conv_metadata = json.loads(conversation['metadata_json'] or "{}")
+        lifecycle = conv_metadata.get("lifecycle", {})
+        execution_stats = conv_metadata.get("execution_stats", {})
+        
+        # Update lifecycle metadata
+        current_time = datetime.now(timezone.utc)
+        lifecycle["last_activity"] = current_time.isoformat()
+        lifecycle["total_messages"] = lifecycle.get("total_messages", 0) + 1
+
+        if role == "user":
+            lifecycle["total_user_messages"] = lifecycle.get("total_user_messages", 0) + 1
+        elif role == "assistant":
+            lifecycle["total_assistant_messages"] = lifecycle.get("total_assistant_messages", 0) + 1
+
+        # Handle mode transitions
+        if mode_transition and mode_transition != lifecycle.get("current_mode"):
+            lifecycle["mode_transitions"].append({
+                "from_mode": lifecycle.get("current_mode"),
+                "to_mode": mode_transition,
+                "timestamp": current_time.isoformat(),
+                "triggered_by_message": content[:100]  # First 100 chars
+            })
+            lifecycle["current_mode"] = mode_transition
+
+        # Update execution stats based on message content/type
+        if metadata:
+            if metadata.get("is_research_plan"):
+                execution_stats["research_plans_generated"] = execution_stats.get("research_plans_generated", 0) + 1
+            if metadata.get("execution_mode") == "execute":
+                execution_stats["research_plans_executed"] = execution_stats.get("research_plans_executed", 0) + 1
+            if metadata.get("web_search_performed"):
+                execution_stats["web_searches_performed"] = execution_stats.get("web_searches_performed", 0) + 1
+            if metadata.get("documents_ingested"):
+                execution_stats["documents_ingested"] = execution_stats.get("documents_ingested", 0) + metadata["documents_ingested"]
+            if metadata.get("processing_time"):
+                execution_stats["total_processing_time"] = execution_stats.get("total_processing_time", 0) + metadata["processing_time"]
+
+        # Update conversation metadata
+        conv_metadata["lifecycle"] = lifecycle
+        conv_metadata["execution_stats"] = execution_stats
+
+        # Update conversation; any new message marks the thread for session-level memory analysis
+        await conn.execute("""
+            UPDATE conversations
+            SET metadata_json = $1, updated_at = $2, message_sequence = message_sequence + 1,
+                needs_session_summary = TRUE
+            WHERE conversation_id = $3
+        """, json.dumps(conv_metadata), current_time, conversation_id)
+
+        # Get the new sequence number
+        sequence_result = await conn.fetchval(
+            "SELECT message_sequence FROM conversations WHERE conversation_id = $1",
+            conversation_id
+        )
+
+        # Title generation is now handled by the orchestrator for better context
+        # Only generate fallback title here for non-orchestrator flows
+        # Check if this is from orchestrator (metadata flag or orchestrator_system flag)
+        is_orchestrator_flow = (
+            metadata and (
+                metadata.get("orchestrator_system") or
+                metadata.get("orchestrator_handles_title") or
+                metadata.get("skip_title_generation")
             )
-            
-            # Title generation is now handled by the orchestrator for better context
-            # Only generate fallback title here for non-orchestrator flows
-            # Check if this is from orchestrator (metadata flag or orchestrator_system flag)
-            is_orchestrator_flow = (
-                metadata and (
-                    metadata.get("orchestrator_system") or 
-                    metadata.get("orchestrator_handles_title") or
-                    metadata.get("skip_title_generation")
-                )
+        )
+
+        # Generate simple fallback title only for non-orchestrator flows
+        if not is_orchestrator_flow:
+            if not conversation['title'] or conversation['title'] == "New Conversation":
+                if role == "user":
+                    # Check if this is the first user message (no previous user messages)
+                    user_message_count = await conn.fetchval("""
+                        SELECT COUNT(*) FROM conversation_messages
+                        WHERE conversation_id = $1 AND message_type = 'user'
+                    """, conversation_id)
+
+                    # Only generate fallback title for the very first user message
+                    if user_message_count == 0:
+                        # Simple fallback title (orchestrator will generate better one)
+                        title = content[:100] + ("..." if len(content) > 100 else "")
+                        await conn.execute(
+                            "UPDATE conversations SET title = $1 WHERE conversation_id = $2",
+                            title, conversation_id
+                        )
+                        logger.debug(f"Generated fallback title for conversation {conversation_id}: {title}")
+                    else:
+                        # Not the first message, just update with simple title if still "New Conversation"
+                        title = content[:100] + ("..." if len(content) > 100 else "")
+                        await conn.execute(
+                            "UPDATE conversations SET title = $1 WHERE conversation_id = $2",
+                            title, conversation_id
+                        )
+
+        # Add the message
+        message_id = str(uuid.uuid4())
+        message = await conn.fetchrow("""
+            INSERT INTO conversation_messages (
+                message_id, conversation_id, message_type, content, sequence_number,
+                created_at, metadata_json, parent_message_id, branch_id
             )
-            
-            # Generate simple fallback title only for non-orchestrator flows
-            if not is_orchestrator_flow:
-                if not conversation['title'] or conversation['title'] == "New Conversation":
-                    if role == "user":
-                        # Check if this is the first user message (no previous user messages)
-                        user_message_count = await conn.fetchval("""
-                            SELECT COUNT(*) FROM conversation_messages 
-                            WHERE conversation_id = $1 AND message_type = 'user'
-                        """, conversation_id)
-                        
-                        # Only generate fallback title for the very first user message
-                        if user_message_count == 0:
-                            # Simple fallback title (orchestrator will generate better one)
-                            title = content[:100] + ("..." if len(content) > 100 else "")
-                            await conn.execute(
-                                "UPDATE conversations SET title = $1 WHERE conversation_id = $2",
-                                title, conversation_id
-                            )
-                            logger.debug(f"Generated fallback title for conversation {conversation_id}: {title}")
-                        else:
-                            # Not the first message, just update with simple title if still "New Conversation"
-                            title = content[:100] + ("..." if len(content) > 100 else "")
-                            await conn.execute(
-                                "UPDATE conversations SET title = $1 WHERE conversation_id = $2",
-                                title, conversation_id
-                            )
-            
-            # Add the message
-            message_id = str(uuid.uuid4())
-            message = await conn.fetchrow("""
-                INSERT INTO conversation_messages (message_id, conversation_id, message_type, content, sequence_number, created_at, metadata_json)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                RETURNING message_id, conversation_id, message_type, content, sequence_number, created_at, metadata_json
-            """, message_id, conversation_id, role, content, sequence_result, current_time, json.dumps(metadata or {}))
-            
-            logger.info(f"✅ Added message to conversation {conversation_id} (sequence: {sequence_result}, mode: {lifecycle['current_mode']})")
-            return dict(message)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            RETURNING message_id, conversation_id, message_type, content, sequence_number,
+                created_at, metadata_json, parent_message_id, branch_id
+        """, message_id, conversation_id, role, content, sequence_result, current_time,
+            json.dumps(metadata or {}), effective_parent, message_branch_id)
+
+        await conn.execute(
+            "UPDATE conversations SET current_node_message_id = $1 WHERE conversation_id = $2",
+            message_id, conversation_id,
+        )
+
+        logger.info(
+            "Added message to conversation %s (sequence: %s, mode: %s)",
+            conversation_id, sequence_result, lifecycle["current_mode"],
+        )
+        return dict(message)
     
     async def update_conversation_metadata(self, conversation_id: str, 
                                          updates: Dict[str, Any]) -> bool:
@@ -431,7 +502,8 @@ class ConversationLifecycleManager:
                 "updated_at": conversation['updated_at'],
                 "lifecycle": lifecycle,
                 "execution_stats": conv_metadata.get("execution_stats", {}),
-                "user_context": conv_metadata.get("user_context", {})
+                "user_context": conv_metadata.get("user_context", {}),
+                "current_node_message_id": conversation.get("current_node_message_id"),
             }
     
     async def list_conversations_with_lifecycle(self, user_id: str, 
@@ -534,9 +606,17 @@ class ConversationService:
             logger.error(f"❌ Failed to create conversation: {e}")
             raise
     
-    async def add_message(self, conversation_id: str, user_id: str, role: str, 
-                         content: str, metadata: Dict[str, Any] = None, 
-                         mode_transition: str = None) -> Dict[str, Any]:
+    async def add_message(
+        self,
+        conversation_id: str,
+        user_id: str,
+        role: str,
+        content: str,
+        metadata: Dict[str, Any] = None,
+        mode_transition: str = None,
+        parent_message_id: Optional[str] = None,
+        message_branch_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Add a message with lifecycle tracking"""
         try:
             message = await self.lifecycle_manager.add_message(
@@ -545,9 +625,12 @@ class ConversationService:
                 role=role,
                 content=content,
                 metadata=metadata,
-                mode_transition=mode_transition
+                mode_transition=mode_transition,
+                parent_message_id=parent_message_id,
+                message_branch_id=message_branch_id,
             )
-            
+
+            meta = json.loads(message["metadata_json"] or "{}")
             return {
                 "message_id": message["message_id"],
                 "conversation_id": message["conversation_id"],
@@ -555,11 +638,343 @@ class ConversationService:
                 "content": message["content"],
                 "sequence_number": message["sequence_number"],
                 "created_at": message["created_at"].isoformat(),
-                "metadata": json.loads(message["metadata_json"] or "{}")
+                "metadata": meta,
+                "parent_message_id": message.get("parent_message_id"),
+                "branch_id": message.get("branch_id"),
             }
         except Exception as e:
             logger.error(f"❌ Failed to add message: {e}")
             raise
+
+    async def create_branch(
+        self,
+        conversation_id: str,
+        user_id: str,
+        original_message_id: str,
+        new_content: str,
+    ) -> Dict[str, Any]:
+        """Fork: new user message as sibling of original; new branch row for checkpoint suffix."""
+        pool = await self.lifecycle_manager._get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, false)", user_id
+            )
+            conv = await conn.fetchrow(
+                "SELECT * FROM conversations WHERE conversation_id = $1",
+                conversation_id,
+            )
+            if not conv or conv["user_id"] != user_id:
+                raise ValueError("Conversation not found or access denied")
+
+            async with conn.transaction():
+                orig = await conn.fetchrow(
+                    """
+                    SELECT * FROM conversation_messages
+                    WHERE message_id = $1 AND conversation_id = $2
+                    """,
+                    original_message_id,
+                    conversation_id,
+                )
+                if not orig or orig["message_type"] != "user":
+                    raise ValueError("Original message not found or not a user message")
+
+                new_branch_id = str(uuid.uuid4())
+                thread_suffix = str(uuid.uuid4())
+                parent_branch_id = orig.get("branch_id")
+
+                await conn.execute(
+                    """
+                    INSERT INTO conversation_branches (
+                        branch_id, conversation_id, parent_branch_id,
+                        forked_from_message_id, thread_id_suffix
+                    ) VALUES ($1, $2, $3, $4, $5)
+                    """,
+                    new_branch_id,
+                    conversation_id,
+                    parent_branch_id,
+                    original_message_id,
+                    thread_suffix,
+                )
+
+                meta = {
+                    "orchestrator_system": True,
+                    "streaming": True,
+                    "forked_from_message_id": original_message_id,
+                    "branch_edit_resend": True,
+                }
+                msg = await self.lifecycle_manager._add_message_in_connection(
+                    conn,
+                    conversation_id,
+                    user_id,
+                    "user",
+                    new_content,
+                    meta,
+                    None,
+                    orig.get("parent_message_id"),
+                    new_branch_id,
+                )
+
+                await conn.execute(
+                    """
+                    UPDATE conversation_branches
+                    SET first_message_id = $1
+                    WHERE branch_id = $2
+                    """,
+                    msg["message_id"],
+                    new_branch_id,
+                )
+
+            active = await self.get_active_path_messages(conversation_id, user_id)
+            return {
+                "message": {
+                    "message_id": msg["message_id"],
+                    "conversation_id": msg["conversation_id"],
+                    "role": msg["message_type"],
+                    "content": msg["content"],
+                    "sequence_number": msg["sequence_number"],
+                    "created_at": msg["created_at"].isoformat(),
+                    "metadata": json.loads(msg["metadata_json"] or "{}"),
+                    "parent_message_id": msg.get("parent_message_id"),
+                    "branch_id": msg.get("branch_id"),
+                },
+                "branch_id": new_branch_id,
+                "thread_id_suffix": thread_suffix,
+                "active_path_messages": active,
+            }
+
+    async def get_active_path_messages(
+        self, conversation_id: str, user_id: str
+    ) -> List[Dict[str, Any]]:
+        """Messages from root to current leaf (for orchestrator conversation_history)."""
+        data = await self.get_conversation_messages(
+            conversation_id=conversation_id,
+            user_id=user_id,
+            limit=10000,
+            most_recent=False,
+            include_tree=False,
+        )
+        return data.get("messages") or []
+
+    async def get_message_siblings(
+        self, conversation_id: str, user_id: str, message_id: str
+    ) -> Dict[str, Any]:
+        """All messages sharing the same parent_message_id, ordered by created_at."""
+        lifecycle_info = await self.lifecycle_manager.get_conversation_lifecycle(
+            conversation_id, user_id
+        )
+        if not lifecycle_info or lifecycle_info.get("user_context", {}).get("user_id") != user_id:
+            raise ValueError("Conversation not found or access denied")
+
+        pool = await self.lifecycle_manager._get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, false)", user_id
+            )
+            row = await conn.fetchrow(
+                """
+                SELECT parent_message_id FROM conversation_messages
+                WHERE message_id = $1 AND conversation_id = $2
+                """,
+                message_id,
+                conversation_id,
+            )
+            if not row:
+                raise ValueError("Message not found")
+
+            parent_id = row["parent_message_id"]
+            siblings = await conn.fetch(
+                """
+                SELECT * FROM conversation_messages
+                WHERE conversation_id = $1
+                  AND parent_message_id IS NOT DISTINCT FROM $2::varchar
+                ORDER BY created_at ASC, sequence_number ASC
+                """,
+                conversation_id,
+                parent_id,
+            )
+            sibs = [_conversation_message_row_to_dict(r) for r in siblings]
+            idx = next(
+                (i for i, m in enumerate(sibs) if m["message_id"] == message_id),
+                0,
+            )
+            return {
+                "siblings": sibs,
+                "current_index": idx,
+                "total": len(sibs),
+            }
+
+    async def switch_active_branch(
+        self, conversation_id: str, user_id: str, target_message_id: str
+    ) -> Dict[str, Any]:
+        """Set current leaf to deepest descendant of target (max sequence_number per level)."""
+        lifecycle_info = await self.lifecycle_manager.get_conversation_lifecycle(
+            conversation_id, user_id
+        )
+        if not lifecycle_info or lifecycle_info.get("user_context", {}).get("user_id") != user_id:
+            raise ValueError("Conversation not found or access denied")
+
+        pool = await self.lifecycle_manager._get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, false)", user_id
+            )
+            target = await conn.fetchrow(
+                """
+                SELECT message_id FROM conversation_messages
+                WHERE message_id = $1 AND conversation_id = $2
+                """,
+                target_message_id,
+                conversation_id,
+            )
+            if not target:
+                raise ValueError("Target message not found")
+
+            all_rows = await conn.fetch(
+                """
+                SELECT message_id, parent_message_id, sequence_number
+                FROM conversation_messages
+                WHERE conversation_id = $1
+                """,
+                conversation_id,
+            )
+            by_parent: Dict[Optional[str], List[Any]] = {}
+            for r in all_rows:
+                p = r["parent_message_id"]
+                by_parent.setdefault(p, []).append(r)
+
+            for key in list(by_parent.keys()):
+                by_parent[key].sort(key=lambda x: x["sequence_number"], reverse=True)
+
+            cur = target_message_id
+            while True:
+                children = by_parent.get(cur) or []
+                if not children:
+                    break
+                cur = children[0]["message_id"]
+
+            await conn.execute(
+                """
+                UPDATE conversations
+                SET current_node_message_id = $1, updated_at = NOW()
+                WHERE conversation_id = $2
+                """,
+                cur,
+                conversation_id,
+            )
+
+        path = await self.get_active_path_messages(conversation_id, user_id)
+        return {
+            "current_node_message_id": cur,
+            "active_path": path,
+        }
+
+    async def get_branch_thread_id(
+        self, conversation_id: str, user_id: str
+    ) -> Dict[str, Optional[str]]:
+        """Resolve LangGraph thread_id for the active path (branch suffix from deepest branch on path)."""
+        lifecycle_info = await self.lifecycle_manager.get_conversation_lifecycle(
+            conversation_id, user_id
+        )
+        if not lifecycle_info or lifecycle_info.get("user_context", {}).get("user_id") != user_id:
+            raise ValueError("Conversation not found or access denied")
+
+        pool = await self.lifecycle_manager._get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, false)", user_id
+            )
+            conv = await conn.fetchrow(
+                """
+                SELECT current_node_message_id FROM conversations
+                WHERE conversation_id = $1
+                """,
+                conversation_id,
+            )
+            cur_id = conv["current_node_message_id"] if conv else None
+            if not cur_id:
+                return {
+                    "full_thread_id": f"{user_id}:{conversation_id}",
+                    "thread_id_suffix": None,
+                    "branch_uuid": None,
+                }
+
+            rows = await conn.fetch(
+                """
+                SELECT message_id, parent_message_id, branch_id
+                FROM conversation_messages
+                WHERE conversation_id = $1
+                """,
+                conversation_id,
+            )
+            by_id = {r["message_id"]: r for r in rows}
+
+            path_ids: List[str] = []
+            c = cur_id
+            while c:
+                path_ids.append(c)
+                row = by_id.get(c)
+                c = row["parent_message_id"] if row else None
+            path_ids.reverse()
+
+            branch_uuid: Optional[str] = None
+            for mid in path_ids:
+                row = by_id.get(mid)
+                bid = row["branch_id"] if row else None
+                if bid:
+                    branch_uuid = bid
+
+            if not branch_uuid:
+                return {
+                    "full_thread_id": f"{user_id}:{conversation_id}",
+                    "thread_id_suffix": None,
+                    "branch_uuid": None,
+                }
+
+            br = await conn.fetchrow(
+                """
+                SELECT thread_id_suffix FROM conversation_branches
+                WHERE branch_id = $1 AND conversation_id = $2
+                """,
+                branch_uuid,
+                conversation_id,
+            )
+        suffix = br["thread_id_suffix"] if br else None
+        if not suffix:
+            return {
+                "full_thread_id": f"{user_id}:{conversation_id}",
+                "thread_id_suffix": None,
+                "branch_uuid": branch_uuid,
+            }
+        full_tid = f"{user_id}:{conversation_id}:branch_{suffix}"
+        return {
+            "full_thread_id": full_tid,
+            "thread_id_suffix": suffix,
+            "branch_uuid": branch_uuid,
+        }
+
+    async def get_message_by_id(
+        self, conversation_id: str, user_id: str, message_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Load a single message row if it belongs to the conversation and user."""
+        lifecycle_info = await self.lifecycle_manager.get_conversation_lifecycle(
+            conversation_id, user_id
+        )
+        if not lifecycle_info or lifecycle_info.get("user_context", {}).get("user_id") != user_id:
+            return None
+        pool = await self.lifecycle_manager._get_db_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, false)", user_id
+            )
+            row = await conn.fetchrow(
+                """
+                SELECT * FROM conversation_messages
+                WHERE message_id = $1 AND conversation_id = $2
+                """,
+                message_id,
+                conversation_id,
+            )
+            return dict(row) if row else None
     
     async def get_conversation(self, conversation_id: str, user_id: str) -> Dict[str, Any]:
         """Get conversation with complete lifecycle information"""
@@ -586,6 +1001,7 @@ class ConversationService:
         skip: int = 0,
         limit: int = 100,
         most_recent: bool = False,
+        include_tree: bool = False,
     ) -> Dict[str, Any]:
         """
         Get conversation messages with lifecycle verification.
@@ -593,6 +1009,12 @@ class ConversationService:
         When most_recent is True, returns the newest ``limit`` messages in chronological order
         (skip is ignored). When False, uses ascending order with skip/limit for pagination
         (oldest-first window).
+
+        When include_tree is True, returns all messages in the conversation (all branches) ordered
+        by sequence_number, plus current_node_message_id.
+
+        When include_tree is False and current_node_message_id is set, returns only the active
+        path from root to the current leaf (branch-aware transcript).
         """
         try:
             # First verify conversation ownership and get lifecycle info
@@ -615,7 +1037,44 @@ class ConversationService:
                 rls_context = await conn.fetchval("SELECT current_setting('app.current_user_id', true)")
                 logger.info(f"🔍 Verified RLS context: {rls_context}")
 
-                if most_recent:
+                conv_row = await conn.fetchrow(
+                    "SELECT current_node_message_id FROM conversations WHERE conversation_id = $1",
+                    conversation_id,
+                )
+                current_node_message_id = (
+                    conv_row["current_node_message_id"] if conv_row else None
+                )
+
+                if include_tree:
+                    messages = await conn.fetch(
+                        """
+                        SELECT * FROM conversation_messages
+                        WHERE conversation_id = $1
+                        ORDER BY sequence_number ASC
+                        """,
+                        conversation_id,
+                    )
+                elif current_node_message_id:
+                    messages = await conn.fetch(
+                        """
+                        WITH RECURSIVE ancestors AS (
+                            SELECT cm.* FROM conversation_messages cm
+                            WHERE cm.message_id = $1 AND cm.conversation_id = $2
+                            UNION ALL
+                            SELECT cm.* FROM conversation_messages cm
+                            INNER JOIN ancestors a ON cm.message_id = a.parent_message_id
+                        )
+                        SELECT * FROM ancestors ORDER BY sequence_number ASC
+                        """,
+                        current_node_message_id,
+                        conversation_id,
+                    )
+                    logger.info(
+                        "Loaded %s messages on active path for conversation %s",
+                        len(messages),
+                        conversation_id,
+                    )
+                elif most_recent:
                     messages = await conn.fetch(
                         """
                         SELECT * FROM (
@@ -651,21 +1110,26 @@ class ConversationService:
                         conversation_id,
                     )
                 else:
-                    # First check if conversation exists
                     conversation_exists = await conn.fetchval(
                         "SELECT COUNT(*) FROM conversations WHERE conversation_id = $1",
                         conversation_id,
                     )
-                    logger.info(f"🔍 Conversation {conversation_id} exists check: {conversation_exists} rows")
+                    logger.info(
+                        "Conversation %s exists check: %s rows",
+                        conversation_id,
+                        conversation_exists,
+                    )
 
-                    # Check message count before query (without JOIN to avoid RLS on conversations table)
                     message_count_before = await conn.fetchval(
                         "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = $1",
                         conversation_id,
                     )
-                    logger.info(f"🔍 Message count for conversation {conversation_id}: {message_count_before} messages")
+                    logger.info(
+                        "Message count for conversation %s: %s messages",
+                        conversation_id,
+                        message_count_before,
+                    )
 
-                    # Try query without JOIN first to see if RLS is blocking
                     messages_direct = await conn.fetch(
                         """
                         SELECT * FROM conversation_messages
@@ -691,55 +1155,45 @@ class ConversationService:
                         skip,
                     )
 
-                    logger.info(f"🔍 Direct query (no JOIN) returned {len(messages_direct)} messages")
+                    logger.info(
+                        "Direct query (no JOIN) returned %s messages",
+                        len(messages_direct),
+                    )
 
                     logger.info(
-                        "🔍 JOIN query returned %s messages from database for conversation %s (most_recent=%s)",
+                        "JOIN query returned %s messages from database for conversation %s (most_recent=%s)",
                         len(messages),
                         conversation_id,
                         most_recent,
                     )
                     if len(messages) == 0 and message_count_before > 0:
                         logger.warning(
-                            f"⚠️ Query returned 0 messages but message_count shows {message_count_before} - possible RLS issue"
+                            "Query returned 0 messages but message_count shows %s - possible RLS issue",
+                            message_count_before,
                         )
                     if len(messages_direct) > 0 and len(messages) == 0:
                         logger.warning(
-                            "⚠️ Direct query found %s messages but JOIN query found 0 - RLS blocking on conversations table",
+                            "Direct query found %s messages but JOIN query found 0 - RLS on conversations",
                             len(messages_direct),
                         )
                         messages = messages_direct
-                
-                message_list = []
-                for row in messages:
-                    parsed_metadata = json.loads(row["metadata_json"] or "{}")
-                    message_list.append({
-                        "message_id": row["message_id"],
-                        "conversation_id": row["conversation_id"],
-                        "message_type": row["message_type"],  # ✅ API model expects message_type
-                        "role": row["message_type"],  # ✅ Frontend expects role (backward compatibility)
-                        "content": row["content"],
-                        "content_hash": row.get("content_hash"),
-                        "model_used": row.get("model_used"),
-                        "query_time": row.get("query_time"),
-                        "token_count": row.get("token_count"),
-                        "sequence_number": row["sequence_number"],
-                        "created_at": row["created_at"].isoformat(),
-                        "updated_at": row["updated_at"].isoformat(),  # ✅ Fixed: Added missing updated_at
-                        "metadata_json": parsed_metadata,  # Keep for backward compatibility
-                        "metadata": parsed_metadata,  # Frontend expects this name
-                        "citations": json.loads(row["citations"] or "[]") if "citations" in row else [],
-                        "parent_message_id": row.get("parent_message_id"),
-                        "is_edited": row.get("is_edited", False),
-                        "edit_history": []  # ✅ Fixed: Add default empty edit history
-                    })
-                
-                # Check if there are more messages
+
+                message_list = [_conversation_message_row_to_dict(row) for row in messages]
+
                 total_count = await conn.fetchval(
                     "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = $1",
-                    conversation_id
+                    conversation_id,
                 )
-                
+
+                if include_tree or current_node_message_id:
+                    return {
+                        "messages": message_list,
+                        "has_more": False,
+                        "total_count": total_count,
+                        "lifecycle": lifecycle_info,
+                        "current_node_message_id": current_node_message_id,
+                    }
+
                 if most_recent:
                     has_more = total_count > limit
                 else:
@@ -749,7 +1203,8 @@ class ConversationService:
                     "messages": message_list,
                     "has_more": has_more,
                     "total_count": total_count,
-                    "lifecycle": lifecycle_info
+                    "lifecycle": lifecycle_info,
+                    "current_node_message_id": current_node_message_id,
                 }
         except Exception as e:
             logger.error(f"❌ Failed to get conversation messages: {e}")

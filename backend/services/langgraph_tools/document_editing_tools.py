@@ -669,7 +669,7 @@ async def apply_operations_directly(
     """
     Apply operations directly to a document file without creating a proposal.
     
-    **SECURITY**: Only allowed for specific agents (electronics_agent) editing referenced files.
+    **SECURITY**: Only allowed for specific trusted agent names (see ALLOWED_AGENTS).
     This is a restricted operation - use with caution!
     
     Args:
@@ -682,7 +682,7 @@ async def apply_operations_directly(
         Dict with success, document_id, applied_count, and message
     """
     # Security check: Only allow specific agents
-    ALLOWED_AGENTS = ["electronics_agent", "project_content_manager"]
+    ALLOWED_AGENTS = ["project_content_manager"]
     if agent_name not in ALLOWED_AGENTS:
         return {
             "success": False,

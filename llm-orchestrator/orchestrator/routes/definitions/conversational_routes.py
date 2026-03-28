@@ -1,5 +1,5 @@
 """
-Conversational engine route definitions.
+General and story-analysis route definitions (dispatch via CustomAgentRunner).
 
 Routes: general chat (fallback), story analysis.
 """
@@ -10,7 +10,7 @@ CONVERSATIONAL_ROUTES = [
     Route(
         name="chat",
         description="General conversation, Q&A, and fallback when no specialized route matches.",
-        engine=EngineType.CONVERSATIONAL,
+        engine=EngineType.CUSTOM_AGENT,
         domains=["general"],
         actions=["observation", "query"],
         keywords=[],
@@ -21,7 +21,7 @@ CONVERSATIONAL_ROUTES = [
     Route(
         name="story_analysis",
         description="Discuss and critique fiction concepts and theory (not for reviewing specific chapters/content in an open file - use fiction_editing for that). Analyze story structure, discuss writing techniques, provide general writing advice. Does not edit or assess specific manuscript content.",
-        engine=EngineType.CONVERSATIONAL,
+        engine=EngineType.CUSTOM_AGENT,
         domains=["fiction", "writing", "story"],
         actions=["analysis"],
         context_boost=10,

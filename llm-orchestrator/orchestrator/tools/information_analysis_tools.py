@@ -9,8 +9,6 @@ from typing import Dict, Any, List, Optional
 
 from pydantic import BaseModel, Field
 
-from orchestrator.utils.action_io_registry import register_action
-
 logger = logging.getLogger(__name__)
 
 

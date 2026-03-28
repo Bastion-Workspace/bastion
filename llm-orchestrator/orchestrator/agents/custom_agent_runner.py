@@ -1073,8 +1073,6 @@ class CustomAgentRunner(BaseAgent):
                 continue
             if isinstance(value, dict) and value.get("formatted"):
                 parts.append(value["formatted"])
-                if value.get("images_markdown"):
-                    parts.append(value["images_markdown"])
             elif isinstance(value, str):
                 parts.append(value)
         formatted = "\n\n".join(parts) if parts else "Pipeline completed (no formatted output)."

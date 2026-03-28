@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from orchestrator.utils.message_sanitizer import strip_tool_actions_prefix
-from orchestrator.utils.writing_subgraph_utilities import sanitize_ai_response_for_history
+from orchestrator.utils.response_sanitizer import sanitize_ai_response_for_history
 
 logger = logging.getLogger(__name__)
 

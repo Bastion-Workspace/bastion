@@ -111,19 +111,19 @@ class BaseAgent:
         metadata = metadata or {}
         user_id = metadata.get("user_id", "system")
         conversation_id = metadata.get("conversation_id")
-        
-        # Use normalized thread_id format matching backend: {user_id}:{conversation_id}
-        # This ensures the backend can read messages from orchestrator checkpoints
+        branch_suffix = metadata.get("branch_thread_suffix")
+
+        # Use normalized thread_id format matching backend: {user_id}:{conversation_id}[:branch_{suffix}]
         if conversation_id:
-            # Normalize thread_id to match backend format
             if ":" in conversation_id and conversation_id.startswith(f"{user_id}:"):
-                thread_id = conversation_id  # Already normalized
+                thread_id = conversation_id
             else:
                 thread_id = f"{user_id}:{conversation_id}"
+            if branch_suffix:
+                thread_id = f"{thread_id}:branch_{branch_suffix}"
         else:
-            # Fallback for conversations without ID
             thread_id = f"thread_{user_id}"
-        
+
         return {
             "configurable": {
                 "thread_id": thread_id

@@ -56,6 +56,8 @@ class ConversationMessage(BaseModel):
     citations: List[Dict[str, Any]] = Field(default_factory=list)
     metadata_json: Dict[str, Any] = Field(default_factory=dict)
     parent_message_id: Optional[str] = None
+    branch_id: Optional[str] = None
+    sequence_number: Optional[int] = None
     is_edited: bool = False
     edit_history: List[Dict[str, Any]] = Field(default_factory=list)
     attachments: List[AttachmentMetadata] = Field(default_factory=list)
@@ -150,6 +152,14 @@ class CreateMessageRequest(BaseModel):
 
 class UpdateMessageRequest(BaseModel):
     content: str
+
+
+class BranchFromMessageRequest(BaseModel):
+    new_content: str
+
+
+class SwitchBranchRequest(BaseModel):
+    target_message_id: str
 
 
 class CreateFolderRequest(BaseModel):
@@ -267,6 +277,7 @@ class MessageListResponse(BaseModel):
     messages: List[ConversationMessage]
     total_count: int
     has_more: bool
+    current_node_message_id: Optional[str] = None
 
 
 class MessageResponse(BaseModel):

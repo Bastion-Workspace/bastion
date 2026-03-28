@@ -146,7 +146,7 @@ def _route_from_intent(self, state: Dict[str, Any]) -> str:
 
 ### Editor Operations Reference (CRITICAL)
 
-**For ALL agents that use editor operations** (fiction_editing_agent, outline_editing_agent, character_development_agent, rules_editing_agent, etc.), see [editor-operations-reference.mdc](mdc:.cursor/rules/editor-operations-reference.mdc) for complete documentation of available operations.
+**For ALL agents that use editor operations** (Agent Factory custom agents with manuscript editing, legacy domain names in routes, etc.), see [editor-operations-reference.mdc](mdc:.cursor/rules/editor-operations-reference.mdc) for complete documentation of available operations.
 
 **Available Operations**:
 - `insert_after_heading` - Add content below headers (SAFEST for structured documents)
@@ -168,7 +168,7 @@ def _route_from_intent(self, state: Dict[str, Any]) -> str:
 - ✅ Reinforce structure at both system prompt and generation time
 - ✅ Include explicit warnings about common mistakes
 
-**Applies to:** fiction_editing_agent, outline_editing_agent, rules_editing_agent, character_development_agent, podcast_script_agent (editing mode), substack_agent (editing mode)
+**Applies to:** Agent Factory agents and playbooks that emit `ManuscriptEdit` / editor operations (including skills targeting fiction, outline, rules, character, podcast, substack editing flows)
 
 ### LLM Orchestrator Agent Requirements (CRITICAL)
 
@@ -1115,10 +1115,12 @@ assert result.get("formatted_context") == "TEST_VALUE_SHOULD_SURVIVE", \
        return {}  # Skip file operations
    ```
 
-**Example Implementation (from electronics_agent):**
+**Example Implementation (domain agent / playbook helper node):**
 ```python
-async def _load_referenced_context_node(self, state: ElectronicsState) -> Dict[str, Any]:
+async def _load_referenced_context_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
     """Load referenced files from active editor frontmatter"""
+    metadata = state.get("metadata", {})
+    user_id = state.get("user_id", "system")
     active_editor = metadata.get("shared_memory", {}).get("active_editor", {})
     
     # Load files referenced in frontmatter
@@ -1130,8 +1132,9 @@ async def _load_referenced_context_node(self, state: ElectronicsState) -> Dict[s
     
     return {"referenced_context": result.get("loaded_files", {})}
 
-async def _route_and_save_content_node(self, state: ElectronicsState) -> Dict[str, Any]:
+async def _route_and_save_content_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
     """Save content to files - REQUIRES referenced_context to be loaded first"""
+    active_editor = state.get("metadata", {}).get("shared_memory", {}).get("active_editor", {})
     # Get frontmatter references (from active_editor)
     frontmatter = active_editor.get("frontmatter", {})
     
@@ -1361,8 +1364,8 @@ if success:
 ## File Organization
 
 ### Agent Files
-- Keep agent implementations in [backend/services/langgraph_agents/](mdc:backend/services/langgraph_agents/)
-- Use descriptive names: `research_agent.py`, `chat_agent.py`, `coding_agent.py`
+- New interactive agents belong in [llm-orchestrator/orchestrator/agents/](mdc:llm-orchestrator/orchestrator/agents/) (extend [base_agent.py](mdc:llm-orchestrator/orchestrator/agents/base_agent.py)); [backend/services/langgraph_agents/](mdc:backend/services/langgraph_agents/) is legacy/narrow scope only.
+- Use descriptive names: e.g. `custom_agent_runner.py`, domain-specific modules under `agents/` (one concern per agent file).
 - Split large agents (>500 lines) into focused modules
 
 ### Subgraph Files

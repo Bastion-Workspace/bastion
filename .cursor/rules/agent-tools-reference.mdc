@@ -235,7 +235,7 @@ await propose_document_edit_tool(
     document_id=doc_id,
     edit_type="operations",
     operations=[...],
-    agent_name="electronics_agent",
+    agent_name="project_content_manager",
     summary="Update component specifications",
     user_id=user_id
 )

@@ -2,7 +2,7 @@
 
 ## Universal Pattern for All Editor-Type Agents
 
-All agents that return `ManuscriptEdit` structured output (fiction_editing_agent, outline_editing_agent, rules_editing_agent, character_development_agent, etc.) MUST follow these patterns.
+All agents that return `ManuscriptEdit` structured output (typically Agent Factory `llm_agent` / deep-agent steps with editor tools) MUST follow these patterns.
 
 ## ✅ CORRECT: Valid JSON Example in System Prompt
 

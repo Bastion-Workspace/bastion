@@ -20,7 +20,7 @@ RUN npm install --production=false
 # Vite embeds VITE_* at build time
 ARG VITE_API_URL=
 ARG VITE_APP_NAME=Bastion
-ARG VITE_VERSION=0.50.0
+ARG VITE_VERSION=0.55.0
 ARG VITE_MAP_TILE_URL=
 ARG VITE_PMTILES_URL=/pmtiles/world.pmtiles
 ARG VITE_MAP_DARK_STYLE=

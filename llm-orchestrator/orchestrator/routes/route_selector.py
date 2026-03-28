@@ -88,7 +88,7 @@ def _build_selection_prompt(
     else:
         parts.append(
             "When the user asks a factual or how-to question (e.g. 'how do I', 'how to', 'what is', 'how can I') "
-            "and no editor is active, prefer \"research\" over editor routes (electronics, general_project, etc.). "
+            "and no editor is active, prefer \"research\" over editor-gated routes (project/editor types). "
             "Research looks up information; editor routes need an open document."
         )
 

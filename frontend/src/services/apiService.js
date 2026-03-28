@@ -132,8 +132,20 @@ class ApiService {
     this.conversations.reorderConversations(conversationIds, orderLocked);
   listConversations = (skip, limit) => this.conversations.listConversations(skip, limit);
   getConversation = (conversationId) => this.conversations.getConversation(conversationId);
-  getConversationMessages = (conversationId, skip, limit) => 
-    this.conversations.getConversationMessages(conversationId, skip, limit);
+  getConversationMessages = (conversationId, skip, limit, skipCheckpoint, includeTree) =>
+    this.conversations.getConversationMessages(
+      conversationId,
+      skip,
+      limit,
+      skipCheckpoint,
+      includeTree
+    );
+  editAndBranch = (conversationId, messageId, newContent) =>
+    this.conversations.editAndBranch(conversationId, messageId, newContent);
+  switchBranch = (conversationId, targetMessageId) =>
+    this.conversations.switchBranch(conversationId, targetMessageId);
+  getMessageSiblings = (conversationId, messageId) =>
+    this.conversations.getMessageSiblings(conversationId, messageId);
   addMessageToConversation = (conversationId, messageData) => 
     this.conversations.addMessageToConversation(conversationId, messageData);
   updateConversation = (conversationId, title, updates) => 

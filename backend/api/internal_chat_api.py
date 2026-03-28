@@ -367,7 +367,10 @@ async def external_chat(body: ExternalChatRequest) -> Dict[str, Any]:
                 if chunk.metadata:
                     metadata_received.update(dict(chunk.metadata))
 
-        from utils.history_metadata import filter_history_safe_metadata
+        from utils.history_metadata import (
+            filter_history_safe_metadata,
+            sanitize_images_for_persistence,
+        )
         save_metadata: Dict[str, Any] = {
             "orchestrator_system": True,
             "streaming": False,
@@ -375,7 +378,9 @@ async def external_chat(body: ExternalChatRequest) -> Dict[str, Any]:
             "platform_chat_id": body.platform_chat_id,
             "sender_name": body.sender_name,
         }
-        save_metadata.update(filter_history_safe_metadata(metadata_received))
+        persist_meta = dict(metadata_received)
+        sanitize_images_for_persistence(persist_meta)
+        save_metadata.update(filter_history_safe_metadata(persist_meta))
         await conversation_service.add_message(
             conversation_id=body.conversation_id,
             user_id=body.user_id,

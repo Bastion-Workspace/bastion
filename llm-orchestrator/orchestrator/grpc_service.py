@@ -29,9 +29,9 @@ _conversation_metadata_cache = {}
 
 class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer):
     """
-    gRPC service implementation for LLM Orchestrator
-    
-    Phase 5: Full sophisticated research agent with multi-round workflow!
+    gRPC service implementation for LLM Orchestrator.
+
+    Chat and routed skills run through Agent Factory (CustomAgentRunner + playbooks).
     """
     
     def __init__(self):
@@ -570,15 +570,14 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
             Dict with shared_memory from checkpoint, or empty dict if not found
         """
         try:
-            from orchestrator.engines.unified_dispatch import get_unified_dispatcher
-            chat_agent = get_unified_dispatcher()._get_conversational_engine()._get_agent()
-            if not chat_agent:
-                return {}
-            config = chat_agent._get_checkpoint_config(metadata)
-            workflow = await chat_agent._get_workflow()
-            shared_memory = await chat_agent._load_checkpoint_shared_memory(workflow, config)
+            from orchestrator.agents.custom_agent_runner import CustomAgentRunner
+
+            runner = CustomAgentRunner()
+            config = runner._get_checkpoint_config(metadata)
+            workflow = await runner._get_workflow()
+            shared_memory = await runner._load_checkpoint_shared_memory(workflow, config)
             return shared_memory
-            
+
         except Exception as e:
             logger.debug(f"⚠️ Failed to load checkpoint shared_memory in gRPC service: {e}")
             return {}
@@ -705,7 +704,7 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
         """
         Stream chat responses back to client
         
-        Supports multiple agent types: research, chat, weather, image_generation, rss, org, etc.
+        Dispatches through the unified orchestrator (routes, skills, Agent Factory playbooks).
         Includes cancellation support - detects client disconnect and cancels operations
         """
         # Create cancellation token for this request
@@ -1283,8 +1282,8 @@ class OrchestratorGRPCService(orchestrator_pb2_grpc.OrchestratorServiceServicer)
                 "phase": "6",
                 "service": "llm-orchestrator",
                 "status": "multi_agent_active",
-                "agents": "research,chat,weather,image_generation,rss,org,substack,podcast_script",
-                "features": "multi_round_research,query_expansion,gap_analysis,web_search,caching,conversation,formatting,weather_forecasts,image_generation,rss_management,org_management,article_generation,podcast_script_generation,org_project_capture,cross_document_synthesis"
+                "agents": "custom_agent_factory,weather,image_generation,rss,org,substack,podcast_script",
+                "features": "agent_factory_playbooks,web_search,document_search,caching,conversation,formatting,weather_forecasts,image_generation,rss_management,org_management,article_generation,podcast_script_generation,org_project_capture,cross_document_synthesis"
             }
         )
 

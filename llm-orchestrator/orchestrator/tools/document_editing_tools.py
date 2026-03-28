@@ -319,7 +319,7 @@ async def apply_operations_directly_tool(
     """
     Apply operations directly to a document file without creating a proposal.
     
-    **SECURITY**: Only allowed for specific agents (electronics_agent) editing referenced files.
+    **SECURITY**: Only allowed for trusted agent names enforced by the backend (e.g. project_content_manager).
     This is a restricted operation - use with caution!
     
     Args:

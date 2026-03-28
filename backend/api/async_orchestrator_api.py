@@ -37,6 +37,8 @@ class AsyncOrchestratorRequest(BaseModel):
     locked_agent: Optional[str] = None  # Optional: lock conversation routing to a specific agent
     agent_profile_id: Optional[str] = None  # Agent Factory: route to custom agent when set
     user_chat_model: Optional[str] = None  # Chat sidebar selected model
+    is_branch_resend: bool = False
+    branch_message_id: Optional[str] = None
 
 
 # Deprecated response models removed - no longer needed
@@ -98,7 +100,9 @@ async def stream_orchestrator_response(
                 user_id=current_user.user_id,
                 session_id=request.session_id,
                 request_context=request_context if request_context else None,
-                state=None
+                state=None,
+                is_branch_resend=bool(request.is_branch_resend),
+                branch_message_id=request.branch_message_id,
             ),
             media_type="text/event-stream",
             headers={

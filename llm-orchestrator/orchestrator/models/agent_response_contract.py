@@ -47,7 +47,7 @@ class AgentResponse(BaseModel):
     # Required fields (all agents)
     response: str = Field(description="Natural language response for chat sidebar")
     task_status: TaskStatus = Field(description="Task completion status")
-    agent_type: str = Field(description="Agent identifier (e.g., 'fiction_editing_agent')")
+    agent_type: str = Field(description="Agent or route identifier (e.g., 'custom_agent', 'research')")
     timestamp: str = Field(description="ISO timestamp of response generation")
     
     # Optional: Workspace editing

@@ -708,6 +708,25 @@ class MyInputs(BaseModel):
 
 ---
 
+## Image-returning tools (chat UI and external messaging)
+
+Tools that produce displayable pixels (image search, image generation, screenshots, etc.) MUST return a unified dict that includes:
+
+1. **`formatted`** (required) — Human-readable summary for the LLM / ToolMessage (titles, counts, short text). May include `images_markdown` inside `formatted` for tool-round context only; that is not the primary chat display path.
+2. **`images`** (required when the tool returns visual results) — `List[dict]`, each item with at least:
+   - **`url`** (`str`) — Prefer stable API URLs: `/api/documents/{id}/file`, `/api/images/...`, or `https://...`. Use `data:image/...;base64,...` only when no URL exists (e.g. ephemeral screenshot); persistence strips data URIs from saved message metadata.
+   - **`alt_text`** (`str`, optional)
+   - **`type`** (`str`, optional) — e.g. `search_result`, `generated`, `screenshot`
+   - **`metadata`** (`dict`, optional) — `title`, `date`, `series`, `author`, `content` / `match_reason` for gallery captions and Telegram/Discord captions
+
+**Why:** The pipeline executor merges tool results into the agent response; unified dispatch puts `images` on the gRPC `complete` chunk as JSON. The backend persists allowlisted `metadata.images` on assistant messages. The web chat gallery reads `metadata.images` first. **Do not** duplicate the same URLs as `![](url)` in the final assistant **message body** when structured `images` are present (avoids double render: inline markdown + gallery). External chat ([`internal_chat_api.py`](mdc:backend/api/internal_chat_api.py)) reads the same `images` metadata, resolves `/api/documents/.../file` to bytes, and sends photos to Telegram / Discord / Slack with captions from `metadata`.
+
+**Executor behavior:** [`pipeline_executor.py`](mdc:llm-orchestrator/orchestrator/engines/pipeline_executor.py) collects `result["images"][]` with `url` and normalizes `image_data_uri` into the same list. New tools should follow that shape so Custom Agent playbooks need no extra glue.
+
+See also: [agent-response-contract.mdc](mdc:.cursor/rules/agent-response-contract.mdc) (Image Agents).
+
+---
+
 ## References
 
 - Tool catalog with I/O contracts: [AGENT_FACTORY_TOOLS.md](mdc:docs/AGENT_FACTORY_TOOLS.md)

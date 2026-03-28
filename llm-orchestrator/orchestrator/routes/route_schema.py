@@ -2,8 +2,8 @@
 Route Schema - Declarative route definitions for the tiered routing architecture.
 
 Routes replace per-agent capability declarations with a unified, data-driven registry.
-Tools and subgraphs are validated at load time where possible; gRPC-backed tools
-are allowed for runtime resolution.
+Tool names are validated at load time where possible; gRPC-backed tools are allowed
+for runtime resolution.
 """
 
 from enum import Enum
@@ -13,10 +13,8 @@ from pydantic import BaseModel, Field, field_validator
 
 
 class EngineType(str, Enum):
-    """Execution engine that runs this route."""
+    """Execution engine that runs this route. All routes dispatch via CustomAgentRunner."""
 
-    CONVERSATIONAL = "conversational"
-    RESEARCH = "research"
     CUSTOM_AGENT = "custom_agent"
 
 
@@ -24,8 +22,8 @@ class Route(BaseModel):
     """
     Declarative route definition.
 
-    Replaces per-agent classes for simple routes; complex routes reference
-    subgraphs and optional context loaders.
+    Replaces per-agent classes for simple routes; execution is via CustomAgentRunner
+    and playbooks.
     """
 
     # Identity
@@ -84,17 +82,9 @@ class Route(BaseModel):
         default_factory=dict,
         description="Optional mapping: tool function name to action_io_registry action name. Enables design-time type validation and Workflow Composer introspection.",
     )
-    subgraphs: List[str] = Field(
-        default_factory=list,
-        description="Subgraph builder names for complex routes (e.g. context_preparation, fiction_generation)",
-    )
     system_prompt: Optional[str] = Field(
         default=None,
         description="Route-specific system prompt for simple routes",
-    )
-    context_loader: Optional[str] = Field(
-        default=None,
-        description="Dotted path to context loader function for complex routes (e.g. orchestrator.routes.loaders.fiction_loader)",
     )
 
     # Behavior flags (migrated from AGENT_CAPABILITIES)

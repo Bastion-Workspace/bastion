@@ -58,7 +58,7 @@ async def analyze_image_query(
     """
     try:
         logger.info(f"Analyzing image query with LLM: {query[:100]}")
-        # Lazy import to avoid circular import: tools -> base_agent -> agents -> subgraphs -> image_query_analyzer
+        # Lazy import to avoid circular import via orchestrator.tools package graph
         from orchestrator.agents.base_agent import BaseAgent
         base_agent = BaseAgent("image_query_analyzer")
         

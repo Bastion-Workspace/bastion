@@ -564,5 +564,5 @@ def extract_ref_prefix_paths(
 
 
 # ── Registry ───────────────────────────────────────────────────────────────
-# Not registered: used internally by built-in agents (electronics, general_project)
+# Not registered: used internally by domain tooling and Agent Factory playbooks
 # for context loading before editing. Not exposed in Agent Factory tool list.

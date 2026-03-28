@@ -63,6 +63,8 @@ class OrchesterRequest(BaseModel):
     locked_agent: str = None  # Agent routing lock
     base_checkpoint_id: str = None  # For conversation branching
     agent_profile_id: str = None  # Agent Factory: route to custom agent when set
+    is_branch_resend: bool = False  # User row already created by branch API
+    branch_message_id: str = None  # That user message_id
 
 
 async def stream_from_grpc_orchestrator(
@@ -73,7 +75,9 @@ async def stream_from_grpc_orchestrator(
     agent_type: str = None,
     routing_reason: str = None,
     request_context: Dict[str, Any] = None,
-    state: Dict[str, Any] = None
+    state: Dict[str, Any] = None,
+    is_branch_resend: bool = False,
+    branch_message_id: str = None,
 ) -> AsyncIterator[str]:
     """
     Stream responses from gRPC orchestrator microservice
@@ -111,10 +115,29 @@ async def stream_from_grpc_orchestrator(
         async with grpc.aio.insecure_channel(f'{orchestrator_host}:{orchestrator_port}', options=options) as channel:
             stub = orchestrator_pb2_grpc.OrchestratorServiceStub(channel)
             
+            rc = dict(request_context or {})
+            if (
+                is_branch_resend
+                and branch_message_id
+                and conversation_id
+                and str(conversation_id).strip()
+            ):
+                from services.conversation_service import ConversationService as _CS
+
+                _cs = _CS()
+                _cs.set_current_user(user_id)
+                path = await _cs.get_active_path_messages(conversation_id, user_id)
+                history = path[:-1] if len(path) > 1 else []
+                tid = await _cs.get_branch_thread_id(conversation_id, user_id)
+                if tid.get("thread_id_suffix"):
+                    rc["branch_thread_suffix"] = tid["thread_id_suffix"]
+                rc["active_path_messages"] = history
+                request_context = rc
+
             # Use context gatherer to build comprehensive request
             from services.grpc_context_gatherer import get_context_gatherer
             context_gatherer = get_context_gatherer()
-            
+
             grpc_request = await context_gatherer.build_chat_request(
                 query=query,
                 user_id=user_id,
@@ -123,7 +146,7 @@ async def stream_from_grpc_orchestrator(
                 request_context=request_context,
                 state=state,
                 agent_type=agent_type,
-                routing_reason=routing_reason
+                routing_reason=routing_reason,
             )
             
             logger.info(f"Forwarding to gRPC orchestrator: {query[:100]}")
@@ -141,28 +164,30 @@ async def stream_from_grpc_orchestrator(
             title_updated = False
             
             # Save user message to conversation BEFORE processing (skip only when no conversation_id)
-            # This will also trigger title generation if it's the first message
-            if not skip_persistence:
+            # Branch edit-and-resend persists the user message via POST .../messages/{id}/branch first.
+            if not skip_persistence and not (
+                is_branch_resend and branch_message_id and str(branch_message_id).strip()
+            ):
                 try:
                     from services.conversation_service import ConversationService
                     conversation_service = ConversationService()
                     conversation_service.set_current_user(user_id)
-                    
-                    user_message_result = await conversation_service.add_message(
+
+                    await conversation_service.add_message(
                         conversation_id=conversation_id,
                         user_id=user_id,
                         role="user",
                         content=query,
-                        metadata={"orchestrator_system": True, "streaming": True}
+                        metadata={"orchestrator_system": True, "streaming": True},
                     )
-                    logger.info(f"✅ Saved user message to conversation {conversation_id}")
-                    
+                    logger.info("Saved user message to conversation %s", conversation_id)
+
                     # Check if title was updated (first message triggers title generation)
                     # The add_message method updates the title if it was "New Conversation"
                     # We'll emit a conversation_updated event after streaming completes
                     title_updated = True
                 except Exception as save_error:
-                    logger.warning(f"⚠️ Failed to save user message: {save_error}")
+                    logger.warning("Failed to save user message: %s", save_error)
                     # Continue even if message save fails
             
             # Stream chunks from gRPC service
@@ -281,9 +306,14 @@ async def stream_from_grpc_orchestrator(
                     conversation_service = ConversationService()
                     conversation_service.set_current_user(user_id)
                     
-                    # Build metadata: base fields + allowlisted keys only (no editor/images/charts)
-                    from utils.history_metadata import filter_history_safe_metadata
-                    safe_meta = filter_history_safe_metadata(metadata_received)
+                    # Build metadata: base fields + allowlisted keys (strip data-URI images)
+                    from utils.history_metadata import (
+                        filter_history_safe_metadata,
+                        sanitize_images_for_persistence,
+                    )
+                    persist_metadata = dict(metadata_received)
+                    sanitize_images_for_persistence(persist_metadata)
+                    safe_meta = filter_history_safe_metadata(persist_metadata)
                     metadata = {
                         "orchestrator_system": True,
                         "streaming": True,
@@ -291,13 +321,22 @@ async def stream_from_grpc_orchestrator(
                         "chunk_count": chunk_count,
                         **safe_meta,
                     }
-                    
-                    assistant_message_result = await conversation_service.add_message(
+
+                    message_branch_id = None
+                    if is_branch_resend and branch_message_id and str(branch_message_id).strip():
+                        ref_row = await conversation_service.get_message_by_id(
+                            conversation_id, user_id, branch_message_id
+                        )
+                        if ref_row:
+                            message_branch_id = ref_row.get("branch_id")
+
+                    await conversation_service.add_message(
                         conversation_id=conversation_id,
                         user_id=user_id,
                         role="assistant",
                         content=accumulated_response,
-                        metadata=metadata
+                        metadata=metadata,
+                        message_branch_id=message_branch_id,
                     )
                     logger.info(f"✅ Saved assistant response to conversation {conversation_id} (agent: {agent_name_used or 'unknown'})")
                     
@@ -421,14 +460,14 @@ async def stream_orchestrator_grpc(
             "base_checkpoint_id": request.base_checkpoint_id,
             "agent_profile_id": request.agent_profile_id,
         }
-        
+
         # Remove None values
         request_context = {k: v for k, v in request_context.items() if v is not None}
-        
+
         # NOTE: gRPC orchestrator handles its own state management via LangGraph checkpointing
         # State is automatically retrieved by the gRPC service
         conversation_state = None
-        
+
         return StreamingResponse(
             stream_from_grpc_orchestrator(
                 query=request.query,
@@ -438,7 +477,9 @@ async def stream_orchestrator_grpc(
                 agent_type=request.agent_type,
                 routing_reason=request.routing_reason,
                 request_context=request_context if request_context else None,
-                state=conversation_state
+                state=conversation_state,
+                is_branch_resend=bool(getattr(request, "is_branch_resend", False)),
+                branch_message_id=getattr(request, "branch_message_id", None),
             ),
             media_type="text/event-stream",
             headers={
