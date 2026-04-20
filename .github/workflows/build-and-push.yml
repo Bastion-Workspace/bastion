@@ -23,6 +23,20 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Default Ubuntu runners have ~14 GB free; many sequential docker builds + GHA
+      # cache export (especially mode=max) can fill the disk. Remove preinstalled tooling
+      # we do not need (this job only uses Docker).
+      - name: Free disk space on runner
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
       # GHCR / OCI require lowercase paths; github.repository_owner preserves org casing.
       - name: Set GHCR image prefix (lowercase)
         run: |
@@ -95,7 +109,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-backend:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-backend:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -113,7 +127,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-tools-service:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-tools-service:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -131,7 +145,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-cli-worker:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-cli-worker:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -149,7 +163,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-worker:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-worker:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -167,7 +181,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-beat:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-beat:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -185,7 +199,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-flower:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-flower:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -203,7 +217,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             VITE_VERSION=${{ steps.metadata.outputs.version }}
@@ -220,7 +234,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-webdav:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-webdav:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -238,7 +252,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-llm-orchestrator:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-llm-orchestrator:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -256,7 +270,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-vector-service:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-vector-service:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -274,7 +288,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-data-service:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-data-service:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -292,7 +306,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-image-vision-service:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-image-vision-service:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -310,7 +324,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-connections-service:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-connections-service:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -328,7 +342,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-voice-service:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-voice-service:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -346,7 +360,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-document-service:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-document-service:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -364,7 +378,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-crawl4ai-service:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-crawl4ai-service:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
@@ -382,7 +396,7 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-bbs-server:sha-${{ steps.metadata.outputs.sha }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-bbs-server:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
