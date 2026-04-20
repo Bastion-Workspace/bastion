@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix: `build-local-proxy` Linux CI installs `libpipewire-0.3-dev` so `libspa-sys` (PipeWire) links during `cargo build`.
 - Feature: `build-and-push` workflow can be run manually (`workflow_dispatch`); optional version input or `VERSION` file when not tagging.
 - Fix: `build-and-push` workflow frees runner disk before Docker builds and uses GHA BuildKit cache `mode=min` to reduce disk use during multi-image tag pipelines.
+- Update: BBS RSS article list remembers All vs Unread choice for the rest of the telnet session.
 - Update: BBS RSS article viewer uses html2text with links and images omitted for cleaner terminal text (article `Link:` line unchanged).
 - Feature: RSS article list All/Unread (BBS `[V]` toggle; web RSS viewer segment buttons); BBS wallpaper pane hides the footer bar and exits with Esc (plus q; arrow keys discarded as non-quit).
 - Feature: BBS menu prompts use single-key `[letter]` shortcuts without Enter (multi-digit row numbers still read digits then Enter).

@@ -22,8 +22,9 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # Native GUI (egui/eframe), tray, screenshots (xcap), and notifications pull in
-      # GLib/GTK/XCB via pkg-config; runners do not include these by default.
+      # Native GUI (egui/eframe), tray, screenshots (xcap), PipeWire (libspa-sys /
+      # Wayland paths), and notifications pull in GLib/GTK/XCB via pkg-config;
+      # runners do not include these by default.
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
@@ -38,7 +39,8 @@ jobs:
             libxcb-shape0-dev \
             libxcb-xfixes0-dev \
             libxkbcommon-dev \
-            libdbus-1-dev
+            libdbus-1-dev \
+            libpipewire-0.3-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
