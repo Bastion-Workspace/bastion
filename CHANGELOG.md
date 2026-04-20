@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fix: `build-and-push` workflow sets `IMAGE_PREFIX` to lowercase `github.repository_owner` so GHCR tags validate (e.g. `ghcr.io/bastion-workspace/bastion-backend:0.70.0`).
 - Update: README — drop standalone **Deployment** section; fold operator link into **Technical Architecture** (see `docs/DEPLOYMENT.md`).
 - Update: README — dedicated **Agent Factory** section (building blocks, hybrid skill discovery, concrete examples); **Agent Factory** snapshot + skill rows; remove premature **code-workspace** claims; reframe long-form editing as user-composed agents.
 - Update: README product overview — platform snapshot, supported formats table, and expanded capability sections for operators and evaluators.

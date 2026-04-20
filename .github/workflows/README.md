@@ -53,6 +53,8 @@ The workflow builds and pushes every first-party image referenced by `docker-com
 
 All images are pushed to: `ghcr.io/{GITHUB_ORG}/bastion-{service}:{tag}`
 
+`{GITHUB_ORG}` is `${{ github.repository_owner }}` converted to **lowercase** (GHCR rejects mixed-case repository paths).
+
 Example for backend service with version `0.10.1-dev`:
 - `ghcr.io/{GITHUB_ORG}/bastion-backend:0.10.1-dev`
 - `ghcr.io/{GITHUB_ORG}/bastion-backend:latest-dev`

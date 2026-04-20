@@ -99,7 +99,7 @@ docker compose \
 
 On **`v*`** tags, CI builds and pushes first-party images (see [`.github/workflows/README.md`](../.github/workflows/README.md)).
 
-**Image pattern:** `ghcr.io/<github_org_owner>/bastion-<service>:<tag>`  
+**Image pattern:** `ghcr.io/<github_org_owner_lowercase>/bastion-<service>:<tag>` (GHCR requires a lowercase repository path; GitHub org/user names with capitals are normalized in CI.)  
 Examples: `bastion-backend`, `bastion-document-service`, `bastion-tools-service`, …
 
 **Typical operator pattern:**
