@@ -6,6 +6,8 @@ use crate::policy;
 use async_trait::async_trait;
 use serde_json::json;
 use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
@@ -22,52 +24,61 @@ fn mkdir_policy_capability(config: &AppConfig) -> &'static str {
     }
 }
 
-async fn list_dir_recursive(
-    config: &AppConfig,
-    base_path: &std::path::Path,
-    rel_prefix: &str,
+fn list_dir_recursive<'a>(
+    config: &'a AppConfig,
+    base_path: &'a std::path::Path,
+    rel_prefix: String,
     depth: u32,
     max_depth: u32,
-    entries: &mut Vec<Value>,
-) -> Result<(), String> {
-    if depth > max_depth {
-        return Ok(());
-    }
-    let mut rd = fs::read_dir(base_path).await.map_err(|e| e.to_string())?;
-    while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
-        let meta = entry.metadata().await.map_err(|e| e.to_string())?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let is_dir = meta.is_dir();
-        let size_bytes = if meta.is_file() { meta.len() as usize } else { 0 };
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs());
+    entries: &'a mut Vec<Value>,
+) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+        if depth > max_depth {
+            return Ok(());
+        }
+        let mut rd = fs::read_dir(base_path).await.map_err(|e| e.to_string())?;
+        while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
+            let meta = entry.metadata().await.map_err(|e| e.to_string())?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_dir = meta.is_dir();
+            let size_bytes = if meta.is_file() { meta.len() as usize } else { 0 };
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
 
-        let full_name = if rel_prefix.is_empty() {
-            name.clone()
-        } else {
-            format!("{}/{}", rel_prefix, name)
-        };
+            let full_name = if rel_prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{}/{}", rel_prefix, name)
+            };
 
-        entries.push(json!({
-            "name": full_name,
-            "is_dir": is_dir,
-            "size_bytes": size_bytes,
-            "modified": modified
-        }));
+            entries.push(json!({
+                "name": full_name.clone(),
+                "is_dir": is_dir,
+                "size_bytes": size_bytes,
+                "modified": modified
+            }));
 
-        if is_dir && depth < max_depth {
-            let sub_path = entry.path();
-            let sub_path_str = sub_path.to_string_lossy();
-            if policy::validate_path(config, "list_directory", &sub_path_str).is_ok() {
-                list_dir_recursive(config, &sub_path, &full_name, depth + 1, max_depth, entries)
+            if is_dir && depth < max_depth {
+                let sub_path = entry.path();
+                let sub_path_str = sub_path.to_string_lossy();
+                if policy::validate_path(config, "list_directory", &sub_path_str).is_ok() {
+                    list_dir_recursive(
+                        config,
+                        &sub_path,
+                        full_name,
+                        depth + 1,
+                        max_depth,
+                        entries,
+                    )
                     .await?;
+                }
             }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[async_trait]
@@ -141,7 +152,7 @@ impl Capability for ListDirectoryCapability {
 
         let mut entries = Vec::new();
         let base = std::path::Path::new(path);
-        list_dir_recursive(config, base, "", 1, max_depth, &mut entries).await?;
+        list_dir_recursive(config, base, String::new(), 1, max_depth, &mut entries).await?;
 
         let result = json!({
             "entries": entries,

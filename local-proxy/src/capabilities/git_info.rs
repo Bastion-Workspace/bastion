@@ -119,9 +119,8 @@ impl Capability for GitInfoCapability {
                         continue;
                     }
                     match kind {
-                        Some(git2::BranchType::Local) => local.push(name),
-                        Some(git2::BranchType::Remote) => remote.push(name),
-                        None => {}
+                        git2::BranchType::Local => local.push(name),
+                        git2::BranchType::Remote => remote.push(name),
                     }
                 }
                 local.sort();

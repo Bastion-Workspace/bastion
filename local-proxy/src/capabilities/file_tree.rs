@@ -6,7 +6,9 @@ use crate::policy;
 use async_trait::async_trait;
 use serde_json::json;
 use serde_json::Value;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use tokio::fs;
 
 pub struct FileTreeCapability;
@@ -19,103 +21,105 @@ fn is_hidden(name: &str) -> bool {
     name.starts_with('.')
 }
 
-async fn build_tree(
-    dir: &Path,
-    root: &Path,
+fn build_tree<'a>(
+    dir: &'a Path,
+    root: &'a Path,
     depth: u32,
     max_depth: u32,
     include_hidden: bool,
-    ignore_patterns: &[String],
-    node_count: &mut usize,
+    ignore_patterns: &'a [String],
+    node_count: &'a mut usize,
     max_nodes: usize,
-    truncated: &mut bool,
-) -> Result<Vec<Value>, String> {
-    if depth > max_depth {
-        return Ok(Vec::new());
-    }
+    truncated: &'a mut bool,
+) -> Pin<Box<dyn Future<Output = Result<Vec<Value>, String>> + Send + 'a>> {
+    Box::pin(async move {
+        if depth > max_depth {
+            return Ok(Vec::new());
+        }
 
-    if *node_count >= max_nodes {
-        *truncated = true;
-        return Ok(Vec::new());
-    }
-
-    let mut out: Vec<Value> = Vec::new();
-    let mut rd = fs::read_dir(dir).await.map_err(|e| e.to_string())?;
-
-    while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
         if *node_count >= max_nodes {
             *truncated = true;
-            break;
+            return Ok(Vec::new());
         }
 
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy().into_owned();
+        let mut out: Vec<Value> = Vec::new();
+        let mut rd = fs::read_dir(dir).await.map_err(|e| e.to_string())?;
 
-        if !include_hidden && is_hidden(&name) {
-            continue;
+        while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
+            if *node_count >= max_nodes {
+                *truncated = true;
+                break;
+            }
+
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy().into_owned();
+
+            if !include_hidden && is_hidden(&name) {
+                continue;
+            }
+            if should_ignore(&name, ignore_patterns) {
+                continue;
+            }
+
+            let meta = entry.metadata().await.map_err(|e| e.to_string())?;
+            let is_dir = meta.is_dir();
+            let size_bytes = if meta.is_file() { meta.len() as u64 } else { 0 };
+            let modified = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs());
+
+            let abs_path: PathBuf = entry.path();
+            let rel_path = abs_path
+                .strip_prefix(root)
+                .unwrap_or(&abs_path)
+                .to_string_lossy()
+                .replace('\\', "/");
+
+            *node_count += 1;
+
+            let children = if is_dir && depth < max_depth && !*truncated {
+                build_tree(
+                    &abs_path,
+                    root,
+                    depth + 1,
+                    max_depth,
+                    include_hidden,
+                    ignore_patterns,
+                    node_count,
+                    max_nodes,
+                    truncated,
+                )
+                .await?
+            } else {
+                Vec::new()
+            };
+
+            out.push(json!({
+                "path": rel_path,
+                "name": name,
+                "is_dir": is_dir,
+                "size_bytes": size_bytes,
+                "modified": modified,
+                "children": children
+            }));
         }
-        if should_ignore(&name, ignore_patterns) {
-            continue;
-        }
 
-        let meta = entry.metadata().await.map_err(|e| e.to_string())?;
-        let is_dir = meta.is_dir();
-        let size_bytes = if meta.is_file() { meta.len() as u64 } else { 0 };
-        let modified = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs());
+        // Sort: dirs first, then by name for stability
+        out.sort_by(|a, b| {
+            let ad = a.get("is_dir").and_then(|v| v.as_bool()).unwrap_or(false);
+            let bd = b.get("is_dir").and_then(|v| v.as_bool()).unwrap_or(false);
+            if ad != bd {
+                return bd.cmp(&ad);
+            }
+            let an = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let bn = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            an.cmp(bn)
+        });
 
-        let abs_path: PathBuf = entry.path();
-        let rel_path = abs_path
-            .strip_prefix(root)
-            .unwrap_or(&abs_path)
-            .to_string_lossy()
-            .replace('\\', "/");
-
-        *node_count += 1;
-
-        let children = if is_dir && depth < max_depth && !*truncated {
-            build_tree(
-                &abs_path,
-                root,
-                depth + 1,
-                max_depth,
-                include_hidden,
-                ignore_patterns,
-                node_count,
-                max_nodes,
-                truncated,
-            )
-            .await?
-        } else {
-            Vec::new()
-        };
-
-        out.push(json!({
-            "path": rel_path,
-            "name": name,
-            "is_dir": is_dir,
-            "size_bytes": size_bytes,
-            "modified": modified,
-            "children": children
-        }));
-    }
-
-    // Sort: dirs first, then by name for stability
-    out.sort_by(|a, b| {
-        let ad = a.get("is_dir").and_then(|v| v.as_bool()).unwrap_or(false);
-        let bd = b.get("is_dir").and_then(|v| v.as_bool()).unwrap_or(false);
-        if ad != bd {
-            return bd.cmp(&ad);
-        }
-        let an = a.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let bn = b.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        an.cmp(bn)
-    });
-
-    Ok(out)
+        Ok(out)
+    })
 }
 
 fn format_tree(nodes: &[Value], indent: usize, out: &mut String, max_chars: usize, truncated: bool) {

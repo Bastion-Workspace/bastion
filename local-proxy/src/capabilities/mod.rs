@@ -40,7 +40,7 @@ pub use clipboard::{ClipboardReadCapability, ClipboardWriteCapability};
 pub use desktop_notify::DesktopNotifyCapability;
 pub use file_tree::FileTreeCapability;
 pub use filesystem::{
-    ListDirectoryCapability, ReadFileCapability, WriteFileCapability,
+    CreateDirectoryCapability, ListDirectoryCapability, ReadFileCapability, WriteFileCapability,
 };
 pub use git_info::GitInfoCapability;
 pub use open_url::OpenUrlCapability;

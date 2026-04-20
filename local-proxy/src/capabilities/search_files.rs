@@ -6,7 +6,9 @@ use crate::policy;
 use async_trait::async_trait;
 use serde_json::json;
 use serde_json::Value;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use tokio::fs;
 
 pub struct SearchFilesCapability;
@@ -37,108 +39,110 @@ fn is_ignored_dir(name: &str) -> bool {
     )
 }
 
-async fn walk_and_search(
-    root: &Path,
-    dir: &Path,
-    pattern: &regex::Regex,
-    glob: &Option<String>,
+fn walk_and_search<'a>(
+    root: &'a Path,
+    dir: &'a Path,
+    pattern: &'a regex::Regex,
+    glob: &'a Option<String>,
     max_results: usize,
     context_lines: usize,
-    matches_out: &mut Vec<Value>,
-    files_searched: &mut u64,
-    truncated: &mut bool,
+    matches_out: &'a mut Vec<Value>,
+    files_searched: &'a mut u64,
+    truncated: &'a mut bool,
     max_file_bytes: usize,
     include_hidden: bool,
-) -> Result<(), String> {
-    let mut rd = fs::read_dir(dir).await.map_err(|e| e.to_string())?;
-    while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
-        if matches_out.len() >= max_results {
-            *truncated = true;
-            return Ok(());
-        }
-
-        let file_name = entry.file_name();
-        let name = file_name.to_string_lossy().into_owned();
-        if !include_hidden && name.starts_with('.') {
-            continue;
-        }
-
-        let meta = entry.metadata().await.map_err(|e| e.to_string())?;
-        let path: PathBuf = entry.path();
-        if meta.is_dir() {
-            if is_ignored_dir(&name) {
-                continue;
-            }
-            walk_and_search(
-                root,
-                &path,
-                pattern,
-                glob,
-                max_results,
-                context_lines,
-                matches_out,
-                files_searched,
-                truncated,
-                max_file_bytes,
-                include_hidden,
-            )
-            .await?;
-            if *truncated {
-                return Ok(());
-            }
-            continue;
-        }
-
-        if !meta.is_file() {
-            continue;
-        }
-        if !matches_glob(&path, glob) {
-            continue;
-        }
-
-        *files_searched += 1;
-        let size = meta.len() as usize;
-        if size > max_file_bytes {
-            continue;
-        }
-
-        let content = match fs::read_to_string(&path).await {
-            Ok(c) => c,
-            Err(_) => continue, // skip non-text / unreadable files
-        };
-
-        let lines = split_lines(&content);
-        for (idx, line) in lines.iter().enumerate() {
+) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut rd = fs::read_dir(dir).await.map_err(|e| e.to_string())?;
+        while let Some(entry) = rd.next_entry().await.map_err(|e| e.to_string())? {
             if matches_out.len() >= max_results {
                 *truncated = true;
                 return Ok(());
             }
-            if !pattern.is_match(line) {
+
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy().into_owned();
+            if !include_hidden && name.starts_with('.') {
                 continue;
             }
 
-            let start = idx.saturating_sub(context_lines);
-            let end = (idx + 1 + context_lines).min(lines.len());
+            let meta = entry.metadata().await.map_err(|e| e.to_string())?;
+            let path: PathBuf = entry.path();
+            if meta.is_dir() {
+                if is_ignored_dir(&name) {
+                    continue;
+                }
+                walk_and_search(
+                    root,
+                    &path,
+                    pattern,
+                    glob,
+                    max_results,
+                    context_lines,
+                    matches_out,
+                    files_searched,
+                    truncated,
+                    max_file_bytes,
+                    include_hidden,
+                )
+                .await?;
+                if *truncated {
+                    return Ok(());
+                }
+                continue;
+            }
 
-            let before: Vec<String> = lines[start..idx].iter().map(|s| s.to_string()).collect();
-            let after: Vec<String> = lines[(idx + 1)..end].iter().map(|s| s.to_string()).collect();
+            if !meta.is_file() {
+                continue;
+            }
+            if !matches_glob(&path, glob) {
+                continue;
+            }
 
-            let rel_path = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
+            *files_searched += 1;
+            let size = meta.len() as usize;
+            if size > max_file_bytes {
+                continue;
+            }
 
-            matches_out.push(json!({
-                "file": rel_path,
-                "line_number": (idx + 1) as u64,
-                "line_content": (*line).to_string(),
-                "context_before": before,
-                "context_after": after
-            }));
+            let content = match fs::read_to_string(&path).await {
+                Ok(c) => c,
+                Err(_) => continue, // skip non-text / unreadable files
+            };
+
+            let lines = split_lines(&content);
+            for (idx, line) in lines.iter().enumerate() {
+                if matches_out.len() >= max_results {
+                    *truncated = true;
+                    return Ok(());
+                }
+                if !pattern.is_match(line) {
+                    continue;
+                }
+
+                let start = idx.saturating_sub(context_lines);
+                let end = (idx + 1 + context_lines).min(lines.len());
+
+                let before: Vec<String> = lines[start..idx].iter().map(|s| s.to_string()).collect();
+                let after: Vec<String> = lines[(idx + 1)..end].iter().map(|s| s.to_string()).collect();
+
+                let rel_path = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+
+                matches_out.push(json!({
+                    "file": rel_path,
+                    "line_number": (idx + 1) as u64,
+                    "line_content": (*line).to_string(),
+                    "context_before": before,
+                    "context_after": after
+                }));
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 #[async_trait]
