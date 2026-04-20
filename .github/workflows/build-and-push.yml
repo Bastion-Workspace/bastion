@@ -8,6 +8,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_PREFIX: ${{ github.repository_owner }}/bastion
+  BASTION_RUNTIME_UID: "10001"
+  BASTION_RUNTIME_GID: "10001"
 
 jobs:
   build-and-push:
@@ -90,6 +92,98 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
+
+      - name: Build and push tools-service
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./tools-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-tools-service:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-tools-service:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-tools-service:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-tools-service:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
+
+      - name: Build and push cli-worker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./cli-worker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-cli-worker:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-cli-worker:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-cli-worker:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-cli-worker:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
+
+      - name: Build and push celery-worker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./backend/Dockerfile.celery-worker
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-worker:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-worker:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-worker:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-worker:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
+
+      - name: Build and push celery-beat
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./backend/Dockerfile.celery-beat
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-beat:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-beat:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-beat:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-beat:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
+
+      - name: Build and push celery-flower
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./backend/Dockerfile.celery-flower
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-flower:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-flower:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-flower:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-celery-flower:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push frontend
         uses: docker/build-push-action@v5
@@ -106,6 +200,25 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_INLINE_CACHE=1
+            VITE_VERSION=${{ steps.metadata.outputs.version }}
+
+      - name: Build and push frontend-dev
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile.dev
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend-dev:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend-dev:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend-dev:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-frontend-dev:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push webdav
         uses: docker/build-push-action@v5
@@ -122,6 +235,8 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push llm-orchestrator
         uses: docker/build-push-action@v5
@@ -136,6 +251,10 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-llm-orchestrator:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push vector-service
         uses: docker/build-push-action@v5
@@ -150,6 +269,10 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-vector-service:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push data-service
         uses: docker/build-push-action@v5
@@ -164,6 +287,82 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-data-service:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
+
+      - name: Build and push image-vision-service
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./image-vision-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-image-vision-service:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-image-vision-service:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-image-vision-service:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-image-vision-service:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
+
+      - name: Build and push connections-service
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./connections-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-connections-service:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-connections-service:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-connections-service:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-connections-service:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
+
+      - name: Build and push voice-service
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./voice-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-voice-service:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-voice-service:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-voice-service:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-voice-service:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
+
+      - name: Build and push document-service
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./document-service/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-document-service:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-document-service:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-document-service:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-document-service:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Build and push crawl4ai-service
         uses: docker/build-push-action@v5
@@ -178,6 +377,28 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-crawl4ai-service:${{ steps.metadata.outputs.branch }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
+
+      - name: Build and push bbs-server
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./bbs-server/Dockerfile
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-bbs-server:${{ steps.metadata.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-bbs-server:${{ steps.metadata.outputs.latest_tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-bbs-server:sha-${{ steps.metadata.outputs.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-bbs-server:${{ steps.metadata.outputs.branch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+            BASTION_RUNTIME_UID=${{ env.BASTION_RUNTIME_UID }}
+            BASTION_RUNTIME_GID=${{ env.BASTION_RUNTIME_GID }}
 
       - name: Summary
         run: |
@@ -188,12 +409,22 @@ jobs:
           echo "**SHA:** ${{ steps.metadata.outputs.sha }}" >> $GITHUB_STEP_SUMMARY
           echo "**Branch:** ${{ steps.metadata.outputs.branch }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Images Built:" >> $GITHUB_STEP_SUMMARY
+          echo "### Images built (GHCR)" >> $GITHUB_STEP_SUMMARY
           echo "- backend" >> $GITHUB_STEP_SUMMARY
+          echo "- tools-service" >> $GITHUB_STEP_SUMMARY
+          echo "- cli-worker" >> $GITHUB_STEP_SUMMARY
+          echo "- celery-worker" >> $GITHUB_STEP_SUMMARY
+          echo "- celery-beat" >> $GITHUB_STEP_SUMMARY
+          echo "- celery-flower" >> $GITHUB_STEP_SUMMARY
           echo "- frontend" >> $GITHUB_STEP_SUMMARY
+          echo "- frontend-dev" >> $GITHUB_STEP_SUMMARY
           echo "- webdav" >> $GITHUB_STEP_SUMMARY
           echo "- llm-orchestrator" >> $GITHUB_STEP_SUMMARY
           echo "- vector-service" >> $GITHUB_STEP_SUMMARY
           echo "- data-service" >> $GITHUB_STEP_SUMMARY
+          echo "- image-vision-service" >> $GITHUB_STEP_SUMMARY
+          echo "- connections-service" >> $GITHUB_STEP_SUMMARY
+          echo "- voice-service" >> $GITHUB_STEP_SUMMARY
+          echo "- document-service" >> $GITHUB_STEP_SUMMARY
           echo "- crawl4ai-service" >> $GITHUB_STEP_SUMMARY
-
+          echo "- bbs-server" >> $GITHUB_STEP_SUMMARY

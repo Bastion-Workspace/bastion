@@ -28,14 +28,26 @@ When a tag is pushed, each image receives multiple tags for flexibility:
 
 ## Images Built
 
-The workflow builds and pushes 6 Docker images:
+The workflow builds and pushes every first-party image referenced by `docker-compose.yml` (pull-only services such as Postgres are not built here):
 
 1. `bastion-backend` - Backend API service
-2. `bastion-frontend` - Frontend web UI
-3. `bastion-webdav` - WebDAV server for OrgMode sync
-4. `bastion-llm-orchestrator` - LLM orchestrator service
-5. `bastion-vector-service` - Vector embedding service
-6. `bastion-data-service` - Data workspace service
+2. `bastion-tools-service` - gRPC tools service
+3. `bastion-cli-worker` - CLI / codegen sidecar for the orchestrator
+4. `bastion-celery-worker` - Celery worker (orchestrator, agents, RSS, default queues)
+5. `bastion-celery-beat` - Celery beat scheduler
+6. `bastion-celery-flower` - Celery Flower UI
+7. `bastion-frontend` - Production static web UI (nginx)
+8. `bastion-frontend-dev` - Vite dev server image (HMR profile)
+9. `bastion-webdav` - WebDAV server for OrgMode sync
+10. `bastion-llm-orchestrator` - LLM orchestrator service
+11. `bastion-vector-service` - Vector embedding service
+12. `bastion-data-service` - Data workspace service
+13. `bastion-image-vision-service` - Image vision / face pipeline
+14. `bastion-connections-service` - External connections (OAuth, messaging, connectors)
+15. `bastion-voice-service` - STT/TTS gRPC service
+16. `bastion-document-service` - Document library and processing
+17. `bastion-crawl4ai-service` - Crawl4AI microservice
+18. `bastion-bbs-server` - Optional BBS (telnet/SSH)
 
 ## Image Naming Convention
 
@@ -70,7 +82,7 @@ Example for backend service with version `0.10.1-dev`:
    ```
 
 The GitHub Actions workflow will automatically:
-- Build all 6 images
+- Build all listed images
 - Tag them with `0.10.1-dev`, `latest-dev`, SHA, and `dev`
 - Push to GitHub Container Registry
 
@@ -121,7 +133,7 @@ Images are pushed to GitHub Container Registry (ghcr.io). By default, images are
 
 - **First build**: Takes longer as there's no cache
 - **Subsequent builds**: Faster due to BuildKit cache stored in GitHub Actions cache
-- **Parallel builds**: All 6 images build sequentially (can be optimized to parallel if needed)
+- **Parallel builds**: Images build sequentially in one job (can be split into a matrix for speed if needed)
 
 ## Troubleshooting
 
