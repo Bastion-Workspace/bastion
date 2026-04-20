@@ -19,6 +19,7 @@ pub enum ConnectionStatus {
 #[derive(Debug, Clone)]
 pub struct InvocationRecord {
     pub tool: String,
+    #[allow(dead_code)]
     pub request_id: String,
     pub success: bool,
     pub at: SystemTime,

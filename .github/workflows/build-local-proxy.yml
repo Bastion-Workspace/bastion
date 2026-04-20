@@ -23,8 +23,8 @@ jobs:
         uses: actions/checkout@v4
 
       # Native GUI (egui/eframe), tray, screenshots (xcap), PipeWire (libspa-sys /
-      # Wayland paths), and notifications pull in GLib/GTK/XCB via pkg-config;
-      # runners do not include these by default.
+      # Wayland paths), GBM/EGL (glutin), libxdo (tray/muda), and notifications pull
+      # in GLib/GTK/XCB via pkg-config; runners do not include these by default.
       - name: Install Linux build dependencies
         run: |
           sudo apt-get update
@@ -40,7 +40,9 @@ jobs:
             libxcb-xfixes0-dev \
             libxkbcommon-dev \
             libdbus-1-dev \
-            libpipewire-0.3-dev
+            libpipewire-0.3-dev \
+            libgbm-dev \
+            libxdo-dev
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

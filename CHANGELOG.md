@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Fix: `build-local-proxy` Linux CI installs `libpipewire-0.3-dev` so `libspa-sys` (PipeWire) links during `cargo build`.
+- Fix: `build-local-proxy` Linux CI installs `libgbm-dev` and `libxdo-dev` so the release link step finds `-lgbm` and `-lxdo` (egui/glutin and tray stack).
 - Fix: `local-proxy` — export `CreateDirectoryCapability`, match `git2::BranchType` in `git_info`, and box recursive async helpers (`list_dir_recursive`, `build_tree`, `walk_and_search`) for stable Linux CI builds.
 - Feature: `build-and-push` workflow can be run manually (`workflow_dispatch`); optional version input or `VERSION` file when not tagging.
 - Fix: `build-and-push` workflow frees runner disk before Docker builds and uses GHA BuildKit cache `mode=min` to reduce disk use during multi-image tag pipelines.

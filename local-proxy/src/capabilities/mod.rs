@@ -39,6 +39,8 @@ pub const CAPABILITIES_UI: &[(&str, &str)] = &[
 pub use clipboard::{ClipboardReadCapability, ClipboardWriteCapability};
 pub use desktop_notify::DesktopNotifyCapability;
 pub use file_tree::FileTreeCapability;
+// Re-exports for API consumers; registry uses `filesystem::` paths for some types.
+#[allow(unused_imports)]
 pub use filesystem::{
     CreateDirectoryCapability, ListDirectoryCapability, ReadFileCapability, WriteFileCapability,
 };
